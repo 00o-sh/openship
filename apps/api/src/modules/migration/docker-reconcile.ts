@@ -44,6 +44,11 @@ export interface DiscoveredService {
   containerName?: string;
   running: boolean;
   image?: string;
+  /** Content-addressable image ID (sha256:…) from the container inspect. Stable
+   *  even when the `image` tag has drifted/been pruned — so it's the reliable
+   *  ref for sizing, presence checks, and `docker save` (the tag can fail to
+   *  resolve for a locally-built compose image). */
+  imageId?: string;
   /** compose build context (set → adoption builds this Dockerfile). */
   build?: string;
   dockerfile?: string;
@@ -327,6 +332,7 @@ export function toDiscoveredService(
     containerName: detail.name,
     running: detail.state === "running",
     image,
+    imageId: detail.imageId,
     build: declared?.build,
     dockerfile: declared?.dockerfile,
     ports,

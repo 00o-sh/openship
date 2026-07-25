@@ -41,6 +41,33 @@ function notifyAutoDeployFailed(project: Project, err: unknown): void {
   });
 }
 
+/** Best-effort webhook_delivery feed row for a GitHub push outcome. Never throws
+ *  (observability must not break the deploy). `p` null = a forwarded/unmanaged row. */
+function recordPushDelivery(
+  p: Project | null,
+  input: BranchDeploymentTrigger,
+  outcome: string,
+  opts?: { organizationId?: string | null; actionRef?: string | null; error?: string | null },
+): void {
+  void repos.webhookDelivery
+    .record({
+      organizationId: p?.organizationId ?? opts?.organizationId ?? undefined,
+      projectId: p?.id ?? undefined,
+      source: "github",
+      event: input.event,
+      authResult: "ok",
+      outcome,
+      actionRef: opts?.actionRef ?? undefined,
+      error: opts?.error ?? undefined,
+      summary: {
+        repo: `${input.owner}/${input.repo}`,
+        branch: input.branch,
+        commit: input.commitSha ?? undefined,
+      },
+    })
+    .catch(() => {});
+}
+
 export async function handlePush(payload: GitHubPushPayload): Promise<WebhookHandlerResult> {
   const owner = payload.repository?.owner?.login;
   const repo = payload.repository?.name;
@@ -260,6 +287,10 @@ async function triggerBranchDeployments(
         console.log(
           `[GitHub Webhook] ${input.event} for ${input.owner}/${input.repo}#${input.branch} - forwarded to Openship Cloud (${fwd.cloudProjectId})`,
         );
+        recordPushDelivery(null, input, "forwarded", {
+          organizationId: fwd.organizationId,
+          actionRef: fwd.cloudProjectId,
+        });
         return {
           success: true,
           event: input.event,
@@ -270,6 +301,7 @@ async function triggerBranchDeployments(
     console.log(
       `[GitHub Webhook] ${input.event} for ${input.owner}/${input.repo}#${input.branch} - no matching LOCAL auto-deploy project (cloud projects deploy via the SaaS)`,
     );
+    recordPushDelivery(null, input, "ignored");
     return { success: true, event: input.event, message: "No local auto-deploy projects matched" };
   }
 
@@ -290,22 +322,22 @@ async function triggerBranchDeployments(
   let succeeded = 0;
   let skipped = 0;
   let failed = 0;
-  for (const r of results) {
+  results.forEach((r, i) => {
+    const p = autoDeployProjects[i];
     if (r.status === "fulfilled") {
-      if (
-        r.value &&
-        typeof r.value === "object" &&
-        "skipped" in r.value &&
-        (r.value as { skipped: boolean }).skipped
-      ) {
+      const v = r.value as { deployment?: { id?: string }; skipped?: boolean } | undefined;
+      if (v?.skipped) {
         skipped++;
+        recordPushDelivery(p, input, "skipped");
       } else {
         succeeded++;
+        recordPushDelivery(p, input, "dispatched", { actionRef: v?.deployment?.id });
       }
     } else {
       failed++;
+      recordPushDelivery(p, input, "failed", { error: String(r.reason) });
     }
-  }
+  });
 
   if (failed > 0) {
     const errors = results
@@ -338,7 +370,7 @@ async function triggerBranchDeployments(
 async function forwardPushToCloud(
   input: BranchDeploymentTrigger,
   defaultBranch?: string | null,
-): Promise<{ forwarded: boolean; cloudProjectId?: string }> {
+): Promise<{ forwarded: boolean; cloudProjectId?: string; organizationId?: string }> {
   let organizationId: string | undefined;
   let cloudProjectId: string | undefined;
 
@@ -408,7 +440,7 @@ async function forwardPushToCloud(
     }),
   }).catch(() => null);
 
-  return { forwarded: !!res && res.ok, cloudProjectId };
+  return { forwarded: !!res && res.ok, cloudProjectId, organizationId };
 }
 
 function projectWebhookBranch(project: Project, defaultBranch?: string | null): string | null {

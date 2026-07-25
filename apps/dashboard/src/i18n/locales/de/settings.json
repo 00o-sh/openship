@@ -472,7 +472,8 @@
       "description": "Wähle aus, welche Ereignisse an welchen Kanal gehen. Jede Zelle ist ein Abonnement.",
       "empty": "Füge zuerst einen Kanal hinzu, um Ereignisse zu abonnieren.",
       "eventHeader": "Ereignis",
-      "cellAria": "{category} über {channel}"
+      "cellAria": "{category} über {channel}",
+      "notifyMe": "Benachrichtigen"
     },
     "orgDefaults": {
       "title": "Organisationsstandards",

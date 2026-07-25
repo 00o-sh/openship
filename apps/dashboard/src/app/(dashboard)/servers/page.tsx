@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import { BlurIp } from "@/components/BlurIp";
 import {
   Server,
   Plus,
@@ -260,7 +261,7 @@ export default function ServersPage() {
                           )}
                         </p>
                         <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
-                          {server.isLocal ? t.servers.list.currentHost : server.host}
+                          {server.isLocal ? t.servers.list.currentHost : <BlurIp>{server.host}</BlurIp>}
                         </p>
                       </div>
 

@@ -21,6 +21,7 @@ import {
   Layers,
   ExternalLink,
   DatabaseBackup,
+  Webhook,
   Plus,
 } from "lucide-react";
 
@@ -34,6 +35,7 @@ const TAB_ICONS: Record<
   domains: Globe,
   deployments: Rocket,
   source: GitBranch,
+  webhooks: Webhook,
   runtime: Wrench,
   settings: Wrench,
   logs: ScrollText,
@@ -70,6 +72,7 @@ export const ProjectSidebar = () => {
     domainsData,
     selectedDomain,
     setSelectedDomain,
+    setPendingDomainAction,
   } = useProjectSettings();
   const { t } = useI18n();
   const { selfHosted } = usePlatform();
@@ -187,7 +190,10 @@ export const ProjectSidebar = () => {
                 </span>
                 <button
                   type="button"
-                  onClick={() => handleTabChange("domains")}
+                  onClick={() => {
+                    setPendingDomainAction("add");
+                    handleTabChange("domains");
+                  }}
                   className="inline-flex shrink-0 items-center gap-1 text-sm font-medium text-primary transition-opacity hover:opacity-80"
                 >
                   <Plus className="size-3.5" />

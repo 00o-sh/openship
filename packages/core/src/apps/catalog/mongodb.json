@@ -1,5 +1,6 @@
 {
   "available": true,
+  "verified": true,
   "id": "mongodb",
   "name": "MongoDB",
   "description": "MongoDB document database with the Mongo Express web admin UI.",
@@ -103,30 +104,50 @@
   "connection": {
     "title": "Connect to MongoDB",
     "description": "Open the Mongo Express admin in a browser, or point a driver at the database URL.",
+    "guide": {
+      "intro": "Your project gets the MongoDB connection, ready to use.",
+      "useHint": "Read `process.env.MONGODB_URI` in your code — it's set the next time your project deploys. Nothing else to do.",
+      "defaultMode": "internal"
+    },
     "outputs": [
       {
         "id": "admin",
         "label": "Mongo Express",
         "source": "publicUrl:mongo-express",
+        "envKey": "MONGO_EXPRESS_URL",
         "help": "Sign in with the username + password below."
       },
       {
         "id": "adminUser",
         "label": "Admin username",
-        "source": "env:mongo-express:ME_CONFIG_BASICAUTH_USERNAME"
+        "source": "env:mongo-express:ME_CONFIG_BASICAUTH_USERNAME",
+        "envKey": "MONGO_ADMIN_USER",
+        "width": "half"
       },
       {
         "id": "adminPassword",
         "label": "Admin password",
         "source": "env:mongo-express:ME_CONFIG_BASICAUTH_PASSWORD",
-        "secret": true
+        "secret": true,
+        "envKey": "MONGO_ADMIN_PASSWORD",
+        "width": "half"
       },
       {
         "id": "dbUrl",
         "label": "Database URL",
         "source": "template:mongodb://root:{{env:mongo:MONGO_INITDB_ROOT_PASSWORD}}@{{host}}:27017/",
+        "sourceLabel": "Public",
+        "variants": [
+          {
+            "id": "internal",
+            "label": "Internal",
+            "source": "template:mongodb://root:{{env:mongo:MONGO_INITDB_ROOT_PASSWORD}}@mongo:27017/"
+          }
+        ],
         "secret": true,
-        "help": "Direct MongoDB connection (root user). Published on port 27017."
+        "envKey": "MONGODB_URI",
+        "recommended": true,
+        "help": "Direct MongoDB connection (root user). Published on port 27017. Switch to Internal for apps on the same project network."
       }
     ]
   },

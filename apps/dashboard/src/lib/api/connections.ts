@@ -35,6 +35,16 @@ export const connectionsApi = {
       body,
     ),
 
+  /** Wire several outputs from one source app into `projectId` atomically. */
+  bundle: (
+    projectId: string,
+    body: { sourceProjectId: string; items: { outputId: string; envKey: string }[]; mode?: ConnectionMode },
+  ) =>
+    api.post<{ data: { connections: ProjectConnection[]; requiresRedeploy: true } }>(
+      `${endpoints.projects.connections(projectId)}/bundle`,
+      body,
+    ),
+
   /** Remove a connection + its injected env var. */
   remove: (projectId: string, linkId: string) =>
     api.delete<{ data: { requiresRedeploy: true } }>(

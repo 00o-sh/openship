@@ -17,6 +17,8 @@ import { resolveDeploymentPlatform } from "../../lib/deployment-runtime";
 import { deployComposeServices } from "../deployments/compose/deploy.service";
 import type { DeploymentConfigSnapshot } from "../deployments/build.service";
 import { buildServiceRouteDomains, serviceCustomHostnames } from "../../lib/routing-domains";
+import { resolveServicePublicEndpoints } from "../../lib/public-endpoints";
+import { assertFreeEndpointsAllowed } from "../../lib/free-domain-guard";
 import { ensurePendingServiceDomain, removeServiceDomain, reuseServerCertForDomain } from "../domains/domain.service";
 import { buildUpstreamUrl, resolveRouteStrategy } from "../../lib/upstream-url";
 import {
@@ -343,6 +345,24 @@ export async function updateService(
     patch.customDomain = normalized.customDomain ?? undefined;
     patch.domainType = normalized.domainType;
     patch.publicEndpoints = normalized.publicEndpoints;
+
+    // Atomic gate: a free (*.opsh.io) route only resolves behind the Openship
+    // Cloud edge. Refuse before the DB write so a disconnected instance can't
+    // persist a dead "Pending" route. resolveServicePublicEndpoints is the same
+    // resolver the deploy loop uses, so the gate sees the exact routes to apply.
+    await assertFreeEndpointsAllowed(
+      ctx.organizationId,
+      resolveServicePublicEndpoints({
+        exposed: patch.exposed,
+        exposedPort: patch.exposedPort,
+        ports: svc.ports,
+        domain: patch.domain,
+        customDomain: patch.customDomain,
+        domainType: patch.domainType,
+        publicEndpoints: patch.publicEndpoints,
+      }),
+      "managed-compose-domains",
+    );
   }
 
   await repos.service.update(serviceId, patch);

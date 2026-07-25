@@ -79,6 +79,9 @@
     "preferences": "Voreinstellungen"
   },
   "pages": {
+    "apps": {
+      "moreApps": "+{count} weitere"
+    },
     "projects": {
       "title": "Projekte",
       "description": "Stellen Sie Ihre Anwendungen mühelos bereit und verwalten Sie sie",

@@ -8,6 +8,7 @@ import { param, assertNotCloud } from "../../lib/controller-helpers";
 import { getRequestContext } from "../../lib/request-context";
 import { permission } from "../../lib/permission";
 import { audit, auditContextFrom } from "../../lib/audit";
+import { notification } from "../../lib/notification-dispatcher";
 import { streamSSE } from "../../lib/sse";
 import * as domainService from "./domain.service";
 import { maybeProxyCloudProject } from "../../lib/cloud/project-router";
@@ -87,6 +88,24 @@ export async function verify(c: Context) {
       txtVerified: result.txtVerified,
     },
   });
+
+  // Notify on failure. This is the non-streaming path used by the daily
+  // re-verify cron + programmatic callers — the async case where a failure is
+  // worth surfacing to the team. (The interactive `verifyStream` modal doesn't
+  // notify: the person clicking is already watching the live result.)
+  if (!result.verified) {
+    notification.emit({
+      organizationId: ctx.organizationId,
+      eventType: "domain.verification_failed",
+      resourceType: "domain",
+      resourceId: id,
+      payload: {
+        message: result.message ?? "Domain verification failed",
+        cnameVerified: result.cnameVerified,
+        txtVerified: result.txtVerified,
+      },
+    });
+  }
 
   // Failed verification returns 422 so the dashboard's React Query / fetch
   // wrapper can use the standard error path while still reading

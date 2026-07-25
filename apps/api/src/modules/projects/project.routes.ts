@@ -21,6 +21,7 @@ import * as folder from "./folder/folder.controller";
 import * as transfer from "./transfer.controller";
 import * as routeRules from "../route-rules/route-rule.controller";
 import * as ensureEdgeCtrl from "../domains/ensure-edge.controller";
+import * as incomingWebhooks from "../incoming-webhooks/incoming.controller";
 import {
   CreateProjectBody,
   EnsureProjectBody,
@@ -220,6 +221,15 @@ r.get("/:id/branches", { tag: "project:read", mcp: { description: "List the link
 r.post("/:id/auto-deploy", { tag: "project:write", mcp: { description: "Enable/disable auto-deploy on push." } }, cloudProjectProxy, ctrl.setAutoDeploy);
 r.post("/:id/webhook-domain", { tag: "project:write" }, cloudProjectProxy, ctrl.setWebhookDomain);
 r.post("/:id/branch", { tag: "project:write", mcp: { description: "Set the project's deploy branch." } }, cloudProjectProxy, ctrl.setBranch);
+
+/* ─── Incoming webhooks (generic per-project trigger hooks) ─────────────── */
+r.get("/:id/incoming-webhooks", { tag: "project:read", mcp: { description: "List a project's incoming webhooks (dynamic trigger URLs)." } }, cloudProjectProxy, incomingWebhooks.list);
+r.post("/:id/incoming-webhooks", { tag: "project:write", mcp: { description: "Create an incoming webhook that fires a deploy or job when its URL is called." } }, cloudProjectProxy, incomingWebhooks.create);
+r.patch("/:id/incoming-webhooks/:hookId", { tag: "project:write", mcp: { description: "Update an incoming webhook (name/enabled/action/auth)." } }, cloudProjectProxy, incomingWebhooks.update);
+r.post("/:id/incoming-webhooks/:hookId/rotate", { tag: "project:write", mcp: { description: "Rotate an incoming webhook's token / HMAC secret." } }, cloudProjectProxy, incomingWebhooks.rotate);
+r.delete("/:id/incoming-webhooks/:hookId", { tag: "project:write", mcp: { description: "Delete an incoming webhook." } }, cloudProjectProxy, incomingWebhooks.remove);
+r.get("/:id/incoming-webhooks/:hookId/deliveries", { tag: "project:read", mcp: { description: "List one incoming webhook's recent deliveries (paginated)." } }, cloudProjectProxy, incomingWebhooks.hookDeliveries);
+r.get("/:id/webhook-deliveries", { tag: "project:read", mcp: { description: "List a project's webhook delivery feed — GitHub pushes + custom hooks (paginated)." } }, cloudProjectProxy, incomingWebhooks.deliveries);
 
 /* ─── Resources ────────────────────────────────────────────────────────── */
 r.get("/:id/resources", { tag: "project:read", mcp: { description: "Get the project's CPU/RAM/disk resource config." } }, cloudProjectProxy, ctrl.getResources);

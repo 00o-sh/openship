@@ -4,7 +4,43 @@ import {
   sanitizeSubpaths,
   sanitizeVolumeStrategies,
   sanitizeServiceEnv,
+  sanitizeCustomPaths,
 } from "./migration-input";
+
+describe("sanitizeCustomPaths", () => {
+  it("keeps well-formed absolute source→dest pairs, trimmed", () => {
+    expect(
+      sanitizeCustomPaths([
+        { source: " /a/data ", dest: " /b/data " },
+        { source: "/x", dest: "/y" },
+      ]),
+    ).toEqual([
+      { source: "/a/data", dest: "/b/data" },
+      { source: "/x", dest: "/y" },
+    ]);
+  });
+  it("drops non-absolute, traversal, and malformed entries", () => {
+    expect(
+      sanitizeCustomPaths([
+        { source: "rel/path", dest: "/ok" },
+        { source: "/ok", dest: "rel" },
+        { source: "/a/../etc", dest: "/b" },
+        { source: "/a", dest: "/b/../c" },
+        { source: "/a" },
+        "nope",
+        null,
+      ]),
+    ).toBeUndefined();
+  });
+  it("returns undefined for a non-array / empty", () => {
+    expect(sanitizeCustomPaths(undefined)).toBeUndefined();
+    expect(sanitizeCustomPaths([])).toBeUndefined();
+  });
+  it("caps at 50 entries", () => {
+    const many = Array.from({ length: 60 }, (_, i) => ({ source: `/s${i}`, dest: `/d${i}` }));
+    expect(sanitizeCustomPaths(many)).toHaveLength(50);
+  });
+});
 
 describe("sanitizeGitSource", () => {
   it("accepts a well-formed GitHub source and trims", () => {

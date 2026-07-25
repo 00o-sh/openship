@@ -9,6 +9,7 @@ import { param } from "../../lib/controller-helpers";
 import {
   listConnections,
   createConnection,
+  connectBundle,
   deleteConnection,
   type ConnectionMode,
 } from "./project-connection.service";
@@ -43,6 +44,38 @@ export async function create(c: Context) {
     return c.json({ data: result });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to create connection";
+    return c.json({ error: message }, 400);
+  }
+}
+
+/** POST /api/projects/:id/connections/bundle — wire several outputs from one
+ *  source app atomically (all-or-nothing). Used by the app-install auto-wire. */
+export async function createBundle(c: Context) {
+  const ctx = getRequestContext(c);
+  type Body = {
+    sourceProjectId?: string;
+    items?: { outputId?: string; envKey?: string }[];
+    mode?: ConnectionMode;
+  };
+  const body = await c.req.json<Body>().catch((): Body => ({}));
+  const items = (body.items ?? []).filter(
+    (i): i is { outputId: string; envKey: string } => !!i.outputId && !!i.envKey,
+  );
+  if (!body.sourceProjectId || items.length === 0) {
+    return c.json(
+      { error: "sourceProjectId and at least one { outputId, envKey } item are required" },
+      400,
+    );
+  }
+  try {
+    const result = await connectBundle(ctx, param(c, "id"), {
+      sourceProjectId: body.sourceProjectId,
+      items,
+      mode: body.mode,
+    });
+    return c.json({ data: result });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to connect bundle";
     return c.json({ error: message }, 400);
   }
 }

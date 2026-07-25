@@ -262,6 +262,16 @@ const TABLES: ReadonlyArray<TableSpec> = [
     ],
     hasOrganizationId: false,
   },
+  {
+    sqlName: "incoming_webhook",
+    table: schema.incomingWebhook,
+    scopes: [
+      { in: "instance", via: "all-rows" },
+      { in: "organization", via: "fk", column: "projectId" },
+      { in: "project", via: "fk", column: "projectId" },
+    ],
+    hasOrganizationId: true,
+  },
 
   // Backups
   {
@@ -356,7 +366,7 @@ const TABLES: ReadonlyArray<TableSpec> = [
 // demand, so shipping them across a migration adds risk without value:
 // build_session, deployment_check_run, orphaned_resource, terminal_sessions,
 // service_terminal_sessions, verification, github_install_state,
-// github_webhook_event, oblien_webhook_event, cloud_handoff_code, and all
+// webhook_delivery, oblien_webhook_event, cloud_handoff_code, and all
 // billing_* / credit_pack / stripe_* (CLOUD_MODE-only, absent on self-hosted).
 
 // Restore order = TABLES order (parents before children). Truncate uses reverse.
@@ -399,6 +409,8 @@ export const ENCRYPTED_COLUMNS: ReadonlyArray<EncryptedColumnSpec> = [
   { table: "project", column: "webhookSecret" },
   { table: "cloud_webhook_binding", column: "webhookSecret" },
   { table: "webhook_source", column: "secret" },
+  { table: "incoming_webhook", column: "tokenEncrypted" },
+  { table: "incoming_webhook", column: "hmacSecretEncrypted" },
   { table: "env_var", column: "value" },
   { table: "backup_destination", column: "accessKeyIdEnc" },
   { table: "backup_destination", column: "secretAccessKeyEnc" },

@@ -129,6 +129,11 @@
     "repoCountSingular": "{count} 件のリポジトリ",
     "repoCountPlural": "{count} 件のリポジトリ",
     "matching": "\"{query}\" に一致",
+    "pagination": {
+      "previous": "前へ",
+      "next": "次へ",
+      "pageOf": "{total} ページ中 {page} ページ"
+    },
     "time": {
       "justNow": "たった今",
       "minutesAgo": "{n} 分前",

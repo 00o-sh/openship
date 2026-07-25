@@ -558,7 +558,8 @@
       "description": "Pick which events go to which channel. Each cell is one subscription.",
       "empty": "Add a channel first to subscribe to events.",
       "eventHeader": "Event",
-      "cellAria": "{category} via {channel}"
+      "cellAria": "{category} via {channel}",
+      "notifyMe": "Notify me"
     },
     "orgDefaults": {
       "title": "Organization defaults",

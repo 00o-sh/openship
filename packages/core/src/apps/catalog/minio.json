@@ -1,5 +1,6 @@
 {
   "available": true,
+  "verified": true,
   "id": "minio",
   "name": "MinIO",
   "description": "S3-compatible object storage with a web console — point any S3 client (aws-cli, SDKs) at it.",

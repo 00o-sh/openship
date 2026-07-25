@@ -122,4 +122,29 @@ describe("resolveBuildGitToken — server build, fall-through when server has no
     ).rejects.toThrow("GITHUB_REMOTE_TOKEN_REQUIRED");
     expect(requireTokenFor).toHaveBeenCalledWith(ctx, "remote", expect.anything());
   });
+
+  it("passes a per-server DEPLOY-KEY ssh credential through verbatim", async () => {
+    const ssh = { keyKind: "deploy-key" as const, privateKey: "DK", knownHosts: "KH" };
+    resolveServerGitCredential.mockResolvedValue({ ssh });
+    const res = await resolveBuildGitToken({ ...base, buildStrategy: "server", serverId: "s1" });
+    expect(res).toEqual({ ssh });
+    expect(tokenFor).not.toHaveBeenCalled();
+  });
+
+  it("api-host fallback carries a tokenFor('local') token when no local gh exists", async () => {
+    // No shippable remote token, no local gh identity — resolveLocalCredential
+    // still resolves a LOCAL token via tokenFor('local'), flagged apiHostFallback
+    // so the caller never ships it off-host.
+    getLocalGhToken.mockResolvedValue(null);
+    tokenFor.mockImplementation((_c: unknown, purpose: string) =>
+      Promise.resolve(purpose === "local" ? { token: "localpat" } : null),
+    );
+    const res = await resolveBuildGitToken({
+      ...base,
+      buildStrategy: "server",
+      serverId: "s1",
+      allowApiHostFallback: true,
+    });
+    expect(res).toEqual({ token: "localpat", apiHostFallback: true });
+  });
 });

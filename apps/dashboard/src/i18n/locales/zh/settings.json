@@ -472,7 +472,8 @@
       "description": "选择哪些事件发送到哪个渠道。每个单元格对应一个订阅。",
       "empty": "请先添加一个渠道以订阅事件。",
       "eventHeader": "事件",
-      "cellAria": "通过 {channel} 接收 {category}"
+      "cellAria": "通过 {channel} 接收 {category}",
+      "notifyMe": "通知我"
     },
     "orgDefaults": {
       "title": "组织默认设置",

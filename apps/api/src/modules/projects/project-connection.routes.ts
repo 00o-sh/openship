@@ -36,6 +36,16 @@ r.post(
   ctrl.create,
 );
 
+r.post(
+  "/bundle",
+  {
+    tag: "project:write",
+    mcp: { description: "Wire several outputs from one source app into this project atomically (all-or-nothing)." },
+  },
+  cloudProjectProxy,
+  ctrl.createBundle,
+);
+
 r.delete(
   "/:linkId",
   {

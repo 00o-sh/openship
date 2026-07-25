@@ -218,7 +218,13 @@
       "savedTitle": "Guardado",
       "saveFailed": "Falha ao guardar as variáveis de ambiente",
       "saveFailedTitle": "Falha ao guardar"
-    }
+    },
+    "linkedBadge": "Vinculado",
+    "linkedManaged": "via {app}",
+    "linkedTitle": "Integração vinculada",
+    "linkedBody": "Este valor vem da conexão do {app}. Gerencie-o por esse app — alterações aqui não são mantidas.",
+    "unlink": "Remover conexão",
+    "close": "Fechar"
   },
   "gitInfo": {
     "repository": "Repositório",

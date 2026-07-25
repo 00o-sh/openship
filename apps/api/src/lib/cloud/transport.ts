@@ -101,6 +101,10 @@ export async function cloudFetch(
  * Resolving it more than one way (e.g. a link-agnostic owner lookup for the
  * status check vs the cloud-linked owner for fetches) risks a split-brain
  * where the UI reports "connected" while deploys act as a different owner.
+ *
+ * NOTE: this resolves the owner whose settings row merely HAS a cloud token —
+ * it is token-RETRIEVAL only, not a connection gate. "Is this org connected?"
+ * is `isCloudConnectedForOrg` (session.ts), which live-validates the token.
  */
 export async function resolveOrgCloudUserId(organizationId: string): Promise<string | null> {
   const linked = await repos.settings

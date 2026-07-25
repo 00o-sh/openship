@@ -1,5 +1,6 @@
 {
   "available": true,
+  "verified": true,
   "id": "qdrant",
   "name": "Qdrant",
   "description": "High-performance vector database for AI search, RAG, and embeddings — with the built-in Qdrant Web UI for browsing collections and running queries.",

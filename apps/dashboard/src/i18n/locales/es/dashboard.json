@@ -79,6 +79,9 @@
     "preferences": "Preferencias"
   },
   "pages": {
+    "apps": {
+      "moreApps": "+{count} más"
+    },
     "projects": {
       "title": "Proyectos",
       "description": "Despliega y gestiona tus aplicaciones con facilidad",

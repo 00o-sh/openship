@@ -1,5 +1,6 @@
 {
   "available": true,
+  "verified": true,
   "id": "n8n",
   "name": "n8n",
   "description": "Workflow automation — connect apps and APIs with a visual editor.",

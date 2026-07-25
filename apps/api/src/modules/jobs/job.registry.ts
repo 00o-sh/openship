@@ -37,7 +37,7 @@ export interface SystemJobDef {
   available?: () => boolean;
 }
 
-const WEBHOOK_EVENT_RETENTION_DAYS = 7;
+const WEBHOOK_EVENT_RETENTION_DAYS = 30;
 const JOB_RUN_RETENTION_DAYS = 30;
 
 export const SYSTEM_JOB_DEFS: SystemJobDef[] = [
@@ -82,7 +82,7 @@ export const SYSTEM_JOB_DEFS: SystemJobDef[] = [
     defaultCron: "47 3 * * *",
     run: async () => {
       const cutoff = new Date(Date.now() - WEBHOOK_EVENT_RETENTION_DAYS * 24 * 60 * 60 * 1000);
-      const deleted = await repos.githubWebhookEvent.pruneOlderThan(cutoff);
+      const deleted = await repos.webhookDelivery.pruneOlderThan(cutoff);
       return { deleted };
     },
   },

@@ -2,6 +2,7 @@
 
 import { Server, Globe, Network, User, KeyRound } from "lucide-react";
 import { useI18n } from "@/components/i18n-provider";
+import { BlurIp } from "@/components/BlurIp";
 
 interface ConnectionServer {
   sshHost: string;
@@ -24,7 +25,7 @@ export function ServerConnectionCard({ server }: { server: ConnectionServer }) {
       <div className="space-y-3">
         <Row icon={<Globe className="size-4 text-muted-foreground" />} label={d.host}>
           <span className="text-sm font-medium text-foreground font-mono truncate ms-3 max-w-[140px]">
-            {server.sshHost}
+            <BlurIp>{server.sshHost}</BlurIp>
           </span>
         </Row>
         <Row icon={<Network className="size-4 text-muted-foreground" />} label={d.port}>

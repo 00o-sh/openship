@@ -226,7 +226,12 @@
       "applyingTitle": "Wird angewendet",
       "applyFailed": "Umgebung konnte nicht auf den laufenden Dienst angewendet werden",
       "applyFailedTitle": "Anwenden fehlgeschlagen"
-    }
+    },
+    "linkedBadge": "Verknüpft",
+    "linkedManaged": "über {app}",
+    "linkedTitle": "Verknüpfte Integration",
+    "linkedBody": "Dieser Wert stammt aus der {app}-Verbindung. Verwalte ihn in dieser App — hier vorgenommene Änderungen bleiben nicht erhalten.",
+    "unlink": "Verbindung entfernen"
   },
   "gitInfo": {
     "repository": "Repository",

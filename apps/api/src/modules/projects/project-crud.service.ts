@@ -45,6 +45,8 @@ import {
   type ProjectRouteState,
 } from "../domains/project-route.service";
 import { applyProjectRouting } from "../domains/routing-apply.service";
+import { normalizeStoredPublicEndpoints } from "../../lib/public-endpoints";
+import { assertFreeEndpointsAllowed } from "../../lib/free-domain-guard";
 import type {
   TCreateProjectBody,
   TCreateProjectEnvironmentBody,
@@ -984,6 +986,18 @@ export async function updateProject(
     update.slug !== undefined ||
     update.port !== undefined
   ) {
+    // Atomic gate: when the caller explicitly sets endpoints (the domain
+    // add/edit), a free (*.opsh.io) route only resolves behind the Openship
+    // Cloud edge — refuse before any write so a disconnected instance can't
+    // persist a dead route. Same check as the service-route path. Skipped for
+    // incidental slug/port re-syncs (data.publicEndpoints undefined).
+    if (data.publicEndpoints !== undefined) {
+      await assertFreeEndpointsAllowed(
+        organizationId,
+        normalizeStoredPublicEndpoints(data.publicEndpoints),
+      );
+    }
+
     // Snapshot the live hostnames before the sync so re-application can tear
     // down any the edit drops.
     const beforeState = await resolveProjectRouteState(p).catch(() => null);

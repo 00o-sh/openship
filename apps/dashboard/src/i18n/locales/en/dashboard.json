@@ -95,6 +95,7 @@
       "popular": "Popular apps",
       "alsoDeploy": "You can also deploy",
       "browseAll": "Browse all apps",
+      "moreApps": "+{count} more",
       "catalogTitle": "Install an app",
       "catalogDescription": "One-click managed services. Pick one to install it as an app.",
       "catalogSearchPlaceholder": "Search apps…",

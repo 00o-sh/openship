@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Check, Copy, Eye, EyeOff, Loader2, Link2, MonitorSmartphone, PlugZap } from "lucide-react";
+import { resolveLocalized } from "@repo/core";
 import { appsApi, type AppConnectionOutput, type AppConnectionView } from "@/lib/api/apps";
 import { systemApi } from "@/lib/api";
 import { usePlatform } from "@/context/PlatformContext";
@@ -48,7 +49,7 @@ export function ConnectionCard({
   const [linkOpen, setLinkOpen] = useState(false);
   const { deployMode } = usePlatform();
   const { showToast } = useToast();
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   // Forwarding to localhost only makes sense from a desktop dashboard managing a
   // REMOTE server (a local app is already localhost; a VPS is already public).
   const canForward = deployMode === "desktop" && deployTarget === "server" && !!serverId;
@@ -110,15 +111,17 @@ export function ConnectionCard({
       {view?.description && (
         <p className="mb-4 text-xs leading-relaxed text-muted-foreground">{view.description}</p>
       )}
-      <div className="space-y-3">
+      {/* Columns: `half`-width outputs pair on one line, `full` spans the row. */}
+      <div className="grid grid-cols-2 gap-3">
         {(view?.outputs ?? []).map((o) => (
-          <OutputRow
-            key={o.id}
-            output={o}
-            value={o.value}
-            loading={loading}
-            onForward={canForward && portOf(o.value) ? () => forward(o.value) : undefined}
-          />
+          <div key={o.id} className={o.width === "half" ? "col-span-1 min-w-0" : "col-span-2 min-w-0"}>
+            <OutputRow
+              output={o}
+              loading={loading}
+              locale={locale}
+              onForward={canForward ? forward : undefined}
+            />
+          </div>
         ))}
       </div>
 
@@ -129,6 +132,7 @@ export function ConnectionCard({
           sourceProjectId={projectId}
           sourceAppTemplateId={appTemplateId}
           outputs={injectable}
+          guide={view?.guide}
         />
       )}
     </div>
@@ -137,19 +141,37 @@ export function ConnectionCard({
 
 function OutputRow({
   output,
-  value,
   loading,
   onForward,
+  locale,
 }: {
   output: AppConnectionOutput;
-  value: string;
   loading: boolean;
-  onForward?: () => void | Promise<void>;
+  onForward?: (value: string) => void | Promise<void>;
+  locale?: string;
 }) {
+  // A multi-value output renders a switch over [primary, …variants]; the selected
+  // entry drives the shown/masked value + reveal + copy + forward. No variants →
+  // a single value (options=null), rendered exactly as before.
+  const options =
+    output.variants && output.variants.length > 0
+      ? [
+          { id: "__primary", label: resolveLocalized(output.sourceLabel, locale) || "Default", value: output.value },
+          ...output.variants.map((v) => ({
+            id: v.id,
+            label: resolveLocalized(v.label, locale) || v.id,
+            value: v.value,
+          })),
+        ]
+      : null;
+  const [sel, setSel] = useState(0);
+  const value = options ? (options[sel]?.value ?? "") : output.value;
+
   const [revealed, setRevealed] = useState(false);
   const [copied, setCopied] = useState(false);
   const [forwarding, setForwarding] = useState(false);
   const masked = !!output.secret && !revealed;
+  const canForwardThis = !!onForward && portOf(value) != null;
 
   const copy = async () => {
     if (!value) return;
@@ -162,7 +184,7 @@ function OutputRow({
     if (!onForward) return;
     setForwarding(true);
     try {
-      await onForward();
+      await onForward(value);
     } finally {
       setForwarding(false);
     }
@@ -170,9 +192,30 @@ function OutputRow({
 
   return (
     <div>
-      <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-        {output.label}
-      </label>
+      <div className="flex items-center justify-between gap-2">
+        <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+          {output.label}
+        </label>
+        {options && (
+          <div className="inline-flex shrink-0 rounded-lg border border-border/50 p-0.5">
+            {options.map((opt, i) => (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => {
+                  setSel(i);
+                  setCopied(false);
+                }}
+                className={`rounded-md px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                  i === sel ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
       <div className="mt-1 flex items-center gap-1 rounded-xl border border-border/50 bg-background px-3 py-2">
         {loading ? (
           <span className="flex flex-1 items-center gap-2 text-sm text-muted-foreground">
@@ -195,7 +238,7 @@ function OutputRow({
             {revealed ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
           </button>
         )}
-        {onForward && value && (
+        {canForwardThis && value && (
           <button
             type="button"
             onClick={doForward}

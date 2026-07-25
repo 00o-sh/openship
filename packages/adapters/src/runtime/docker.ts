@@ -40,7 +40,7 @@ import type {
   ProvisionLock,
 } from "../types";
 import type { PortProbeExecutor } from "../system/port-listen";
-import { PassThrough, Writable } from "node:stream";
+import { PassThrough, Writable, type Readable } from "node:stream";
 
 /**
  * Detect "not found" errors from the Docker SDK (dockerode). The daemon
@@ -1224,6 +1224,103 @@ export class DockerRuntime implements RuntimeAdapter {
   }
 
   /**
+   * Build a STATIC app in a Docker sandbox, then extract its doc-root onto a
+   * host directory the edge serves via nginx `root`. Reuses `build()` — so
+   * Docker is auto-ensured (ensureDockerFeature) and the static nginx image is
+   * produced (`generateStaticDockerfile` COPYs the output to the fixed
+   * `/usr/share/nginx/html`) — then extracts those files and discards the image.
+   * Returns the host dir as `imageRef`, matching BareRuntime.build's host-dir
+   * contract so the existing file-backed serve path (deployStatic /
+   * resolveStaticRoot) consumes it unchanged. Never leaves a long-lived
+   * container: the extraction container is created (not started) and removed.
+   */
+  async buildStaticToHost(
+    config: BuildConfig,
+    hostOutDir: string,
+    logger?: BuildLogger,
+  ): Promise<BuildResult> {
+    const log = logger ?? new BuildLogger();
+    const buildResult = await this.build({ ...config, isStatic: true }, log);
+    // Failure / cancel bubbles up unchanged — the pipeline's existing status
+    // checks handle it.
+    if (buildResult.status !== "deploying" || !buildResult.imageRef) {
+      return buildResult;
+    }
+
+    const tag = buildResult.imageRef;
+    const extractStart = Date.now();
+    const DOC_ROOT = "/usr/share/nginx/html";
+    try {
+      const sshExecutor =
+        this.transport.kind === "ssh" ? this.connectionOptions?.executor : null;
+      log.log("Extracting static files from the build sandbox...\n");
+
+      if (sshExecutor) {
+        // Disk-to-disk on the remote host via native docker — avoids streaming a
+        // large tar over the flaky SSH dockerode bridge (same rationale as
+        // saveImage/pullImage). The trailing `/.` copies CONTENTS into hostOutDir
+        // (no leading `html/` dir), so no strip step is needed here.
+        const cid = (await sshExecutor.exec(`docker create ${sq(tag)}`)).trim();
+        try {
+          await sshExecutor.exec(`mkdir -p ${sq(hostOutDir)}`);
+          await sshExecutor.exec(`docker cp ${sq(`${cid}:${DOC_ROOT}/.`)} ${sq(hostOutDir)}`);
+        } finally {
+          await sshExecutor.exec(`docker rm ${sq(cid)}`).catch(() => { /* best effort */ });
+        }
+      } else {
+        // Local socket / TCP: pull the tar via dockerode (portable across a
+        // remote TCP daemon where the local `docker` CLI wouldn't apply) and
+        // extract onto the API process's own FS — which in docker-edge mode is
+        // the shared openship_static volume mounted into this container. The
+        // archive is rooted at `html/`, so strip that one leading component.
+        const { mkdir } = await import("node:fs/promises");
+        const { spawn } = await import("node:child_process");
+        await mkdir(hostOutDir, { recursive: true });
+        const container = await this.docker.createContainer({ Image: tag });
+        try {
+          const tarStream = (await container.getArchive({ path: DOC_ROOT })) as unknown as Readable;
+          await new Promise<void>((resolve, reject) => {
+            const extract = spawn("tar", ["-x", "--strip-components=1", "-C", hostOutDir]);
+            let errBuf = "";
+            extract.stderr.on("data", (d) => (errBuf += d.toString()));
+            extract.on("error", reject);
+            tarStream.on("error", reject);
+            tarStream.pipe(extract.stdin);
+            extract.on("close", (code) =>
+              code === 0
+                ? resolve()
+                : reject(new Error(`static extract failed (tar ${code}): ${errBuf.trim().slice(-500)}`)),
+            );
+          });
+        } finally {
+          await container.remove({ force: true }).catch(() => { /* best effort */ });
+        }
+      }
+
+      log.log(`Static files ready at ${hostOutDir}\n`);
+      return {
+        sessionId: config.sessionId,
+        status: "deploying",
+        imageRef: hostOutDir,
+        durationMs: (buildResult.durationMs ?? 0) + (Date.now() - extractStart),
+      };
+    } catch (err) {
+      const msg = safeErrorMessage(err);
+      log.step("build", "failed", `Static extract failed: ${msg}`);
+      return {
+        sessionId: config.sessionId,
+        status: "failed",
+        durationMs: (buildResult.durationMs ?? 0) + (Date.now() - extractStart),
+        errorMessage: `Static extract failed: ${msg}`,
+      };
+    } finally {
+      // The files now live on the host dir; the transient nginx image is dead
+      // weight. Best-effort cleanup (a lingering image is harmless).
+      await this.removeImage(tag).catch(() => { /* best effort */ });
+    }
+  }
+
+  /**
    * Batch build: clone + prune the shared source ONCE, then build every image
    * from that single tree. For SSH the context is transferred ONCE and each
    * image builds on the remote against it. Eliminates the per-service re-clone
@@ -1541,6 +1638,20 @@ export class DockerRuntime implements RuntimeAdapter {
   }
 
   async destroy(containerId: string): Promise<void> {
+    // An absolute-path id is a static build/release DIRECTORY on the host that
+    // this runtime produced via buildStaticToHost — not a container.
+    // getContainer().remove() would 404-no-op and leak the dir, so rm it via the
+    // same transport buildStaticToHost used (SSH exec, else local fs).
+    if (containerId.startsWith("/")) {
+      const executor = this.transport.kind === "ssh" ? this.connectionOptions?.executor : null;
+      if (executor) {
+        await executor.exec(`rm -rf ${sq(containerId)}`).catch(() => { /* best effort */ });
+      } else {
+        const { rm } = await import("node:fs/promises");
+        await rm(containerId, { recursive: true, force: true }).catch(() => { /* best effort */ });
+      }
+      return;
+    }
     const container = this.docker.getContainer(containerId);
     try {
       await container.remove({ force: true });
@@ -1850,6 +1961,96 @@ export class DockerRuntime implements RuntimeAdapter {
     await new Promise<void>((resolve, reject) => {
       this.docker.modem.followProgress(stream, (err) => (err ? reject(err) : resolve()));
     });
+  }
+
+  /** Is this image tag present on THIS daemon? Distinguishes a locally-built
+   *  image (must be transferred cross-server) from a registry tag (the target
+   *  just pulls it). */
+  async imageExistsLocally(ref: string): Promise<boolean> {
+    const executor = this.transport.kind === "ssh" ? this.connectionOptions?.executor : null;
+    if (executor) {
+      const out = await executor
+        .exec(`docker image inspect ${sq(ref)} >/dev/null 2>&1 && echo yes || true`)
+        .catch(() => "");
+      return out.trim() === "yes";
+    }
+    try {
+      await this.docker.getImage(ref).inspect();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Stream `docker save <ref>` OUT of this daemon as a Readable — the source
+   * half of a cross-server image move. No extra compression: image layers are
+   * already gzip-compressed, so re-compressing burns CPU for ~nothing.
+   *
+   * Over SSH the save runs as a native `docker save` through the raw command
+   * channel (rawExec) — the same reason pullImage/build avoid dockerode over the
+   * tunnel: a streamed dockerode body over the streamlocal bridge is unreliable.
+   * Local socket / TCP use dockerode's image.get() directly.
+   */
+  async saveImage(
+    ref: string,
+  ): Promise<{ stdout: Readable; awaitExit: Promise<{ code: number; stderr: string }> }> {
+    const executor = this.transport.kind === "ssh" ? this.connectionOptions?.executor : null;
+    if (executor?.rawExec) {
+      const { stdout, stderr, onClose } = await executor.rawExec(`docker save ${sq(ref)}`);
+      let stderrBuf = "";
+      stderr.on("data", (c: Buffer) => {
+        stderrBuf += c.toString();
+        if (stderrBuf.length > 16 * 1024) stderrBuf = stderrBuf.slice(-16 * 1024);
+      });
+      stderr.resume();
+      return { stdout, awaitExit: onClose.then((code) => ({ code, stderr: stderrBuf.trim() })) };
+    }
+    const stdout = (await this.docker.getImage(ref).get()) as unknown as Readable;
+    const awaitExit = new Promise<{ code: number; stderr: string }>((resolve, reject) => {
+      stdout.on("end", () => resolve({ code: 0, stderr: "" }));
+      stdout.on("error", reject);
+    });
+    return { stdout, awaitExit };
+  }
+
+  /**
+   * Load an image tar (a `docker save` stream) INTO this daemon — the target
+   * half of a cross-server image move. Over SSH the tar streams into a native
+   * `docker load` stdin (execWithInput); local socket / TCP use dockerode's
+   * loadImage. Throws on a non-zero load.
+   */
+  async loadImage(body: Readable): Promise<void> {
+    const executor = this.transport.kind === "ssh" ? this.connectionOptions?.executor : null;
+    if (executor?.execWithInput) {
+      const { code, stderr } = await executor.execWithInput(`docker load`, body);
+      if (code !== 0) throw new Error(`docker load exited ${code}${stderr ? `: ${stderr.slice(0, 500)}` : ""}`);
+      return;
+    }
+    const stream = await this.docker.loadImage(body);
+    await new Promise<void>((resolve, reject) => {
+      this.docker.modem.followProgress(stream as NodeJS.ReadableStream, (err) =>
+        err ? reject(err) : resolve(),
+      );
+    });
+  }
+
+  /**
+   * Apply a tag to an image (`docker tag <source> <target>`). Used after a
+   * save-by-ID / load: `docker save <id>` loads UNTAGGED, so the target daemon
+   * needs the original tag re-applied — the adopted service's deploy `imageRef`
+   * is that tag. `source` is typically the sha id, `target` the tag. Idempotent.
+   */
+  async tagImage(source: string, target: string): Promise<void> {
+    if (source === target) return;
+    const executor = this.transport.kind === "ssh" ? this.connectionOptions?.executor : null;
+    if (executor) {
+      await executor.exec(`docker tag ${sq(source)} ${sq(target)}`);
+      return;
+    }
+    // dockerode tag wants repo + optional tag split.
+    const [repo, tag] = target.includes(":") ? [target.slice(0, target.lastIndexOf(":")), target.slice(target.lastIndexOf(":") + 1)] : [target, undefined];
+    await this.docker.getImage(source).tag({ repo, ...(tag ? { tag } : {}) });
   }
 
   /** Every named volume on the host. */

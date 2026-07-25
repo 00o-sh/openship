@@ -203,7 +203,9 @@ function buildAdoptedServiceRows(
       // Adopt the running container AS-IS via its current image — we don't have
       // its original build source, so never carry a build context (which would
       // make the deploy rebuild-from-source and fail preflight). Only an
-      // image-less container (rare) falls back to its build context.
+      // image-less container (rare) falls back to its build context. Cross-server,
+      // the image itself is TRANSFERRED as data (docker save|load) so the target
+      // has the exact same image to adopt — no registry, no rebuild.
       image: s.image,
       build: s.image ? undefined : s.build,
       dockerfile: s.image ? undefined : s.dockerfile,
@@ -254,20 +256,12 @@ export async function adoptServerStack(opts: {
     throw new Error("None of the selected services were found on the server.");
   }
 
-  // Cross-server can't move a LOCALLY-BUILT image: it isn't in a registry, so a
-  // different target host has nothing to pull. Registry-image stacks migrate
-  // across servers fine (the target pulls them); built ones must be taken over
-  // IN PLACE (same server, where the built image already exists). Moving built
-  // images across hosts (docker save|load stream) is coming soon.
-  if (!sameServer) {
-    const built = chosen.filter((s) => Boolean(s.build)).map((s) => s.name);
-    if (built.length > 0) {
-      throw new Error(
-        `Cross-server migration can't move locally-built images yet (${built.join(", ")}). ` +
-          `Take these over in place (migrate to the same server), or rebuild them from a registry image. Cross-server for built images is coming soon.`,
-      );
-    }
-  }
+  // Cross-server DOES move locally-built images now: moving_data streams the
+  // running image A→B as data (docker save | docker load), so the target adopts
+  // the exact same image — no registry, no rebuild. Registry-image stacks still
+  // migrate fine (the target pulls). The only unmovable case is a container with
+  // a build config but NO resolvable image (nothing to save) — guarded below and
+  // in the orchestrator's `blocked` check.
 
   // Only a container with NO resolvable image genuinely needs a build source.
   // A container that was originally built from source still RUNS an image on the

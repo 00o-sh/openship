@@ -59,7 +59,9 @@
       "waiting": "En attente des requêtes entrantes…",
       "streamError": "Erreur de flux",
       "connectionLost": "Connexion au flux de journaux perdue",
-      "connectFailed": "Échec de la connexion au flux de journaux"
+      "connectFailed": "Échec de la connexion au flux de journaux",
+      "noDomain": "Ajoutez un domaine pour voir les journaux de requêtes",
+      "noDomainHint": "Les journaux de requêtes HTTP sont collectés par domaine — ajoutez d'abord un domaine à ce projet."
     },
     "terminal": {
       "fallbackName": "Terminal",

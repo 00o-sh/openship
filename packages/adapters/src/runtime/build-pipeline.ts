@@ -127,8 +127,21 @@ export interface BuildEnvironment {
 
 // ─── Pipeline ────────────────────────────────────────────────────────────────
 
+/**
+ * Thrown by a `BuildEnvironment.exec`/`preflight` when the build was cancelled
+ * (its AbortController fired). Lets `runBuildPipeline` report `status:"cancelled"`
+ * instead of a generic `"failed"`, so the caller routes to onCancelled and the
+ * terminal deployment status sticks as "cancelled".
+ */
+export class BuildCancelledError extends Error {
+  constructor(message = "Build cancelled") {
+    super(message);
+    this.name = "BuildCancelledError";
+  }
+}
+
 export interface BuildPipelineResult {
-  status: "deploying" | "failed";
+  status: "deploying" | "failed" | "cancelled";
   /** Which step failed (undefined if success) */
   failedStep?: BuildStep;
   durationMs: number;
@@ -345,6 +358,11 @@ export async function runBuildPipeline(
     return { status: "deploying", durationMs };
   } catch (err) {
     const durationMs = Date.now() - startTime;
+    // A cancel is not a failure — report it distinctly so the caller marks the
+    // deployment "cancelled" (not "failed") and doesn't roll it into onFailure.
+    if (err instanceof BuildCancelledError) {
+      return { status: "cancelled", durationMs, errorMessage: err.message };
+    }
     const errorMessage = safeErrorMessage(err);
 
     return { status: "failed", failedStep: currentStep, durationMs, errorMessage };

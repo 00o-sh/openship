@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
+import { BlurIp } from "@/components/BlurIp";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import {
   ArrowLeft,
@@ -47,7 +48,7 @@ import { RateLimitSettings } from "./_components/rate-limit-settings";
 import { ExposedPortsCard } from "./_components/exposed-ports-card";
 import { PortForwardingCard } from "./_components/port-forwarding-card";
 import { ServerGitHubConnect } from "@/components/github/ServerGitHubConnect";
-import { ServerMigrationWizard } from "@/components/migration/ServerMigrationWizard";
+import { MigrationsTab } from "@/components/migration/MigrationsTab";
 import { ServerConnectionCard } from "./_components/connection-card";
 import { usePlatform } from "@/context/PlatformContext";
 import * as CountryFlags from "country-flag-icons/react/3x2";
@@ -55,7 +56,7 @@ import * as CountryFlags from "country-flag-icons/react/3x2";
 /** ISO-3166-1 alpha-2 → flag component (same source the servers list uses). */
 const FLAGS = CountryFlags as Record<string, React.ComponentType<{ title?: string; className?: string }>>;
 
-type Tab = "overview" | "services" | "components" | "github" | "security" | "ports" | "terminal";
+type Tab = "overview" | "migrations" | "components" | "github" | "security" | "ports" | "terminal";
 type ManualActionMode = "remove" | null;
 
 interface TabDef {
@@ -69,7 +70,7 @@ interface TabDef {
 // its mail-install state at runtime. We don't repeat that UI here.
 const TABS: TabDef[] = [
   { key: "overview",   icon: LayoutGrid },
-  { key: "services",   icon: Boxes },
+  { key: "migrations", icon: Boxes },
   { key: "components", icon: Blocks },
   { key: "github",     icon: GitBranch },
   { key: "security",   icon: Shield },
@@ -598,7 +599,7 @@ export default function ServerDetailPage({
                 className="text-2xl font-medium text-foreground/80 truncate"
                 style={{ letterSpacing: "-0.2px" }}
               >
-                {server.name || server.sshHost}
+                {server.name || <BlurIp>{server.sshHost}</BlurIp>}
               </h1>
               {allHealthy ? (
                 <span className="shrink-0 inline-flex items-center gap-1.5 text-success text-xs font-medium">
@@ -616,7 +617,7 @@ export default function ServerDetailPage({
                 the right-hand connection card, not glued to the IP. */}
             <div className="mt-1 flex items-center gap-2">
               <p className="text-sm text-muted-foreground/70 font-mono">
-                {server.sshUser ?? "root"}@{server.sshHost}
+                {server.sshUser ?? "root"}@<BlurIp>{server.sshHost}</BlurIp>
               </p>
               {(() => {
                 const Flag = server.country ? FLAGS[server.country] : undefined;
@@ -627,13 +628,6 @@ export default function ServerDetailPage({
             </div>
           </div>
           <div className="flex items-center gap-1.5">
-            <button
-              onClick={() => changeTab("services")}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-muted/50 text-foreground text-sm font-medium rounded-xl hover:bg-muted transition-colors"
-            >
-              <Boxes className="size-4" />
-              {t.migration.entry.action}
-            </button>
             <button
               onClick={() => router.push(`/servers/${serverId}?edit=true`)}
               className="inline-flex items-center gap-2 px-4 py-2 bg-muted/50 text-foreground text-sm font-medium rounded-xl hover:bg-muted transition-colors"
@@ -687,8 +681,7 @@ export default function ServerDetailPage({
           />
         )}
 
-        {/* Tabs — full-width above the grid so the bar is identical on every tab
-            (including the single-column Services tab). */}
+        {/* Tabs — full-width above the grid so the bar is identical on every tab. */}
         <div className="flex items-center gap-1 mb-6 border-b border-border/50 overflow-x-auto">
           {TABS.filter((tab) => !tab.desktopOnly || isDesktop).map(({ key, icon: Icon }) => (
             <Link
@@ -715,9 +708,9 @@ export default function ServerDetailPage({
           ))}
         </div>
 
-        {/* Main Grid — the Services tab spans full width (it renders its own
-            right column: connection card → migrate config after a scan). */}
-        <div className={`grid grid-cols-1 gap-6 items-start ${activeTab === "services" ? "" : "lg:grid-cols-[1fr_340px]"}`}>
+        {/* Main Grid — the Migrations tab spans full width (its flow renders its
+            own right column: connection card → migrate config / live progress). */}
+        <div className={`grid grid-cols-1 gap-6 items-start ${activeTab === "migrations" ? "" : "lg:grid-cols-[1fr_340px]"}`}>
           {/* Left column */}
           <div className="min-w-0">
 
@@ -785,23 +778,20 @@ export default function ServerDetailPage({
               />
             )}
 
-            {/* Kept MOUNTED (visibility-toggled) so a scan + selection survive
-                switching tabs — the migrate flow is stateful. */}
+            {/* Migrations — durable run list (rows like a project's deployments)
+                that opens each run's steps + logs IN-PAGE, plus the scan-first
+                migrate flow (both are the reused ServerMigrationWizard). Kept
+                MOUNTED (visibility-toggled) so a scan/flow survives tab switches. */}
             {serverId && (
-              <div className={activeTab === "services" ? "" : "hidden"}>
-                <ServerMigrationWizard
-                  variant="tab"
-                  serverId={serverId}
-                  server={server}
-                  onClose={() => {}}
-                />
+              <div className={activeTab === "migrations" ? "" : "hidden"}>
+                <MigrationsTab serverId={serverId} server={server} />
               </div>
             )}
           </div>
 
-          {/* Right sidebar — connection summary. Hidden on the Services tab, which
-              renders its own right column (connection card → migrate config). */}
-          {activeTab !== "services" && (
+          {/* Right sidebar — connection summary. Hidden on the Migrations tab,
+              whose flow renders its own right column. */}
+          {activeTab !== "migrations" && (
             <div className="space-y-4 lg:sticky lg:top-6 lg:self-start">
               <ServerConnectionCard server={server} />
             </div>

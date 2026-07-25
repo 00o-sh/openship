@@ -188,7 +188,7 @@ export default function AppsPage() {
               {ap.popular}
             </p>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              {FEATURED_APPS.map((a) => {
+              {FEATURED_APPS.slice(0, 5).map((a) => {
                 const enabled = isAppEnabled(a.id);
                 return (
                   <button
@@ -220,6 +220,25 @@ export default function AppsPage() {
                   </button>
                 );
               })}
+              {/* Explore-all tile — collapses the rest of the catalog into one
+                  card next to the last featured app instead of a wall of dimmed
+                  "coming soon" rows. Routes into the full catalog. */}
+              <button
+                type="button"
+                onClick={() => router.push("/apps/new")}
+                className="group flex items-center gap-3 rounded-xl border border-dashed border-border/60 bg-card/40 p-4 text-left transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:bg-card hover:shadow-md"
+              >
+                <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted/60">
+                  <Plus className="size-5 text-muted-foreground transition-colors group-hover:text-foreground" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium text-foreground">{ap.browseAll}</p>
+                  <p className="truncate text-xs text-muted-foreground">
+                    {interpolate(ap.moreApps, { count: String(FEATURED_APPS.length - 5) })}
+                  </p>
+                </div>
+                <ArrowRight className="size-4 shrink-0 text-muted-foreground/40 transition-colors group-hover:text-foreground" />
+              </button>
             </div>
           </div>
         </div>

@@ -79,6 +79,9 @@
     "preferences": "偏好设置"
   },
   "pages": {
+    "apps": {
+      "moreApps": "还有 {count} 个"
+    },
     "projects": {
       "title": "项目",
       "description": "轻松部署和管理你的应用",

@@ -10,6 +10,7 @@ import {
   Network,
   Globe,
   Lock,
+  AlertTriangle,
 } from "lucide-react";
 import {
   getAppTemplate,
@@ -18,12 +19,20 @@ import {
   flattenSettingFields,
   envToSettingValue,
   settingToEnvValue,
+  isFieldVisible,
+  resolveLocalized,
   type AppSettingField,
   type AppEndpoint,
 } from "@repo/core";
-import { appsApi, deployApi, servicesApi } from "@/lib/api";
+import { appsApi, deployApi, servicesApi, projectsApi } from "@/lib/api";
+import { connectionsApi } from "@/lib/api/connections";
 import { getApiErrorMessage } from "@/lib/api/client";
-import { AppSettingsForm, fk, type FormValue } from "@/components/app-settings/AppSettingsForm";
+import {
+  AppSettingsForm,
+  fk,
+  type FormValue,
+  type FormValidity,
+} from "@/components/app-settings/AppSettingsForm";
 import {
   AppDestinationPicker,
   type AppDestination,
@@ -41,6 +50,7 @@ import { usePlatform } from "@/context/PlatformContext";
 import { useCloud } from "@/context/CloudContext";
 import { OptionCard } from "@/app/(dashboard)/(deployment)/deploy/[slug]/components/DeployTargetStep";
 import { AppLogo } from "@/components/AppLogo";
+import { VerifiedBadge } from "@/components/apps/VerifiedBadge";
 import { PageContainer } from "@/components/ui/PageContainer";
 import { encodeProjectSlug } from "@/utils/repoSlug";
 
@@ -82,10 +92,23 @@ function hostPortForEndpoint(
   return ep.port;
 }
 
+/** The output id a source app offers as its primary connectable value — its first
+ *  `provides` bundle ref, else the recommended (or first) connection output.
+ *  Read from the BUNDLED catalog; an overlay-only source app resolves to null
+ *  (the manual "Use in a project" flow remains the fallback). */
+function primaryProvidedOutputId(sourceAppTemplateId: string | undefined): string | null {
+  const tpl = sourceAppTemplateId ? getAppTemplate(sourceAppTemplateId) : undefined;
+  if (!tpl) return null;
+  const provRef = tpl.provides?.[0]?.outputRefs?.[0];
+  if (provRef) return provRef;
+  const outs = tpl.connection?.outputs ?? [];
+  return (outs.find((o) => o.recommended) ?? outs[0])?.id ?? null;
+}
+
 export default function AppInstallPage() {
   const params = useParams();
   const router = useRouter();
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const w = t.projectSettings.appInstall;
   const { showToast } = useToast();
   const { baseDomain, deployMode } = usePlatform();
@@ -134,6 +157,37 @@ export default function AppInstallPage() {
   // The endpoint whose URL headlines the "done" screen (first web endpoint).
   const primaryHttp = useMemo(() => appEndpoints.find((e) => e.kind === "http"), [appEndpoints]);
 
+  // Declared connections this app NEEDS from another project (e.g. a DATABASE_URL
+  // from a database app). Drives an install-time source picker + one-click wire;
+  // inert for apps that declare none. Candidates = same-org app projects matching
+  // the requirement's category.
+  const requires = useMemo(() => template?.requires ?? [], [template]);
+  type Candidate = { id: string; name: string; appTemplateId?: string; category?: string };
+  const [candidates, setCandidates] = useState<Candidate[]>([]);
+  // requirement.id → chosen source project id ("" = none/skip).
+  const [connChoices, setConnChoices] = useState<Record<string, string>>({});
+  useEffect(() => {
+    if (requires.length === 0) return;
+    projectsApi
+      .getHome()
+      .then((res) => {
+        const raw = (res?.projects ?? []) as Array<{ id?: string; name?: string; appTemplateId?: string }>;
+        setCandidates(
+          raw
+            .filter((p) => p.id && p.appTemplateId)
+            .map((p) => ({
+              id: p.id!,
+              name: p.name ?? p.id!,
+              appTemplateId: p.appTemplateId,
+              category: p.appTemplateId ? getAppTemplate(p.appTemplateId)?.category : undefined,
+            })),
+        );
+      })
+      .catch(() => setCandidates([]));
+  }, [requires.length]);
+  const candidatesFor = (category?: string) =>
+    candidates.filter((p) => !category || p.category === category);
+
   const [values, setValues] = useState<Record<string, FormValue>>(() => {
     const seed: Record<string, FormValue> = {};
     for (const f of installFields) seed[fk(f.service, f.key)] = envToSettingValue(f, undefined);
@@ -149,19 +203,26 @@ export default function AppInstallPage() {
   const [expo, setExpo] = useState<Record<string, Expo>>(() => {
     const out: Record<string, Expo> = {};
     for (const e of appEndpoints) {
-      out[endpointKey(e)] =
-        e.kind === "http"
-          ? {
-              kind: "http",
-              // A domain defaults on when Cloud is connected (free subdomain);
-              // otherwise start port-only (a domain still works via Custom).
-              mode: cloudConnected ? "domain" : "port",
-              ep: createPublicEndpoint({ domainType: "free" }),
-            }
-          : { kind: "tcp", mode: "publish" };
+      if (e.kind === "http") {
+        // Author's `defaultMode` wins when valid for http; else a domain defaults
+        // on when Cloud is connected (free subdomain), otherwise port-only.
+        const mode =
+          e.defaultMode === "domain" || e.defaultMode === "port"
+            ? e.defaultMode
+            : cloudConnected
+              ? "domain"
+              : "port";
+        out[endpointKey(e)] = { kind: "http", mode, ep: createPublicEndpoint({ domainType: "free" }) };
+      } else {
+        const mode = e.defaultMode === "internal" || e.defaultMode === "publish" ? e.defaultMode : "publish";
+        out[endpointKey(e)] = { kind: "tcp", mode };
+      }
     }
     return out;
   });
+  // Author can restrict the exposure choices offered per endpoint via `allowedModes`.
+  const modeAllowed = (e: AppEndpoint, mode: NonNullable<AppEndpoint["defaultMode"]>) =>
+    !e.allowedModes || e.allowedModes.includes(mode);
   const setExpoMode = (key: string, mode: Expo["mode"]) =>
     setExpo((p) => (p[key] ? { ...p, [key]: { ...p[key], mode } as Expo } : p));
   const setExpoEp = (key: string, ep: PublicEndpoint) =>
@@ -184,6 +245,9 @@ export default function AppInstallPage() {
   const [liveUrl, setLiveUrl] = useState<string | null>(null);
   const [logs, setLogs] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
+  // Validity of the install-step business fields (required + per-field rules),
+  // reported by AppSettingsForm. Null when there are no install fields.
+  const [formValidity, setFormValidity] = useState<FormValidity | null>(null);
 
   // Unknown / non-installable / flow apps don't belong here.
   useEffect(() => {
@@ -253,10 +317,13 @@ export default function AppInstallPage() {
   const setField = (f: AppSettingField, v: FormValue) =>
     setValues((prev) => ({ ...prev, [fk(f.service, f.key)]: v }));
 
-  /** Business-field changes vs the template defaults → the settings to persist. */
+  /** Business-field changes vs the template defaults → the settings to persist.
+   *  Skips fields hidden by their `showIf` (their value shouldn't be applied). */
   const settingChanges = () => {
+    const valueGet = (service: string, key: string) => values[fk(service, key)];
     const out: { service: string; key: string; value: string }[] = [];
     for (const f of installFields) {
+      if (!isFieldVisible(f, valueGet)) continue;
       const cur = values[fk(f.service, f.key)];
       const def = envToSettingValue(f, undefined);
       if (cur !== def && !(f.secret && cur === "")) {
@@ -319,6 +386,26 @@ export default function AppInstallPage() {
 
   const install = async () => {
     if (busy) return;
+    // Business-field validity gate (required + per-field rules). The form reports
+    // this; block with a clear message rather than shipping an invalid install.
+    if (formValidity && !formValidity.valid) {
+      showToast(
+        formValidity.missingRequiredKeys.length > 0
+          ? "Fill in the required fields before installing."
+          : "Fix the highlighted fields before installing.",
+        "error",
+      );
+      return;
+    }
+    // A non-optional declared connection must have a source chosen.
+    const unmet = requires.filter((r) => !r.optional && !connChoices[r.id]);
+    if (unmet.length > 0) {
+      showToast(
+        `Choose a source for: ${unmet.map((r) => resolveLocalized(r.label, locale)).join(", ")}`,
+        "error",
+      );
+      return;
+    }
     const httpStates = appEndpoints
       .filter((e) => e.kind === "http")
       .map((e) => expo[endpointKey(e)])
@@ -337,7 +424,7 @@ export default function AppInstallPage() {
     // returns false — bail so the user connects first, then re-clicks Install.
     if (
       httpStates.some((s) => s.mode === "domain" && s.ep.domainType === "free") &&
-      !requireCloud({ feature: w.routeFreeLabel })
+      !(await requireCloud("managed-project-domain"))
     ) {
       return;
     }
@@ -365,6 +452,26 @@ export default function AppInstallPage() {
       const changes = settingChanges();
       if (changes.length > 0) await appsApi.updateSettings(pid, changes);
       await applyEndpoints(pid);
+
+      // Wire declared connections BEFORE deploy so the injected env is present.
+      // Best-effort (mirrors domains — never fails the deploy); the required gate
+      // above already ensured a source is chosen for non-optional requirements.
+      for (const req of requires) {
+        const src = connChoices[req.id];
+        if (!src) continue;
+        const cand = candidates.find((p) => p.id === src);
+        const outputId = primaryProvidedOutputId(cand?.appTemplateId);
+        if (!outputId) continue;
+        try {
+          await connectionsApi.bundle(pid, {
+            sourceProjectId: src,
+            items: [{ outputId, envKey: req.envKey }],
+            mode: req.mode,
+          });
+        } catch (err) {
+          showToast(getApiErrorMessage(err, "Couldn't wire a connection"), "error");
+        }
+      }
 
       const dep = await deployApi.buildAccess({
         projectId: pid,
@@ -461,11 +568,25 @@ export default function AppInstallPage() {
           <div className="flex size-12 items-center justify-center rounded-2xl bg-muted/60">
             <AppLogo appId={appId} className="size-7 object-contain" />
           </div>
-          <div>
-            <h1 className="text-xl font-semibold text-foreground">{template.name}</h1>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <h1 className="text-xl font-semibold text-foreground">{template.name}</h1>
+              {template.verified && <VerifiedBadge iconClassName="size-[18px]" />}
+            </div>
             <p className="text-sm text-muted-foreground">{template.description}</p>
           </div>
         </div>
+
+        {/* Unverified (custom) apps: a plain-language trust warning before the form. */}
+        {!template.verified && (
+          <div className="mt-6 flex items-start gap-2.5 rounded-xl border border-warning/40 bg-warning/[0.05] px-4 py-3 text-sm text-warning">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+            <span>
+              <span className="font-semibold">Custom app — not verified.</span> It deploys images you
+              provided, not an official reviewed app. Review the definition and only install apps you trust.
+            </span>
+          </div>
+        )}
 
         {/* Two columns: what the app needs (left) + where it goes & the deploy
             action (right, sticky). Mirrors the deploy wizard's config/sidebar
@@ -503,7 +624,52 @@ export default function AppInstallPage() {
                 filter={isInstallField}
                 flat
                 title={t.projectSettings.appSettings.modeApp}
+                onValidityChange={setFormValidity}
               />
+            )}
+
+            {/* Declared connections — this app needs a value (e.g. DATABASE_URL)
+                from another app you've installed. Pick a source per requirement;
+                wired in one shot after install. Inert when the app declares none. */}
+            {requires.length > 0 && (
+              <div className="rounded-2xl border border-border/50 bg-card p-5">
+                <h3 className="text-sm font-semibold text-foreground">Connect services</h3>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  This app connects to other apps you&apos;ve installed. Pick a source for each.
+                </p>
+                <div className="mt-4 space-y-4">
+                  {requires.map((req) => {
+                    const opts = candidatesFor(req.category);
+                    return (
+                      <div key={req.id}>
+                        <label className="text-sm font-medium text-foreground">
+                          {resolveLocalized(req.label, locale)}
+                          {!req.optional && <span className="ms-0.5 text-danger">*</span>}
+                        </label>
+                        <select
+                          className="mt-2 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:border-ring"
+                          value={connChoices[req.id] ?? ""}
+                          onChange={(e) =>
+                            setConnChoices((p) => ({ ...p, [req.id]: e.target.value }))
+                          }
+                        >
+                          <option value="">{req.optional ? "None" : "Select an app…"}</option>
+                          {opts.map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.name}
+                            </option>
+                          ))}
+                        </select>
+                        {opts.length === 0 && (
+                          <p className="mt-1.5 text-xs text-warning">
+                            No matching app installed yet — install one first, then connect.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
             )}
 
             {/* Exposure — asked per endpoint. Web endpoints get the domain flow
@@ -531,22 +697,26 @@ export default function AppInstallPage() {
 
                         {st.kind === "http" ? (
                           <div className="space-y-2">
-                            <OptionCard
-                              value="port"
-                              selected={st.mode === "port"}
-                              onSelect={() => setExpoMode(key, "port")}
-                              icon={<Network className="size-4" />}
-                              label={w.routePortLabel}
-                              description={w.routePortDesc}
-                            />
-                            <OptionCard
-                              value="domain"
-                              selected={st.mode === "domain"}
-                              onSelect={() => setExpoMode(key, "domain")}
-                              icon={<Globe className="size-4" />}
-                              label={w.routeDomainLabel}
-                              description={w.routeDomainDesc}
-                            />
+                            {modeAllowed(e, "port") && (
+                              <OptionCard
+                                value="port"
+                                selected={st.mode === "port"}
+                                onSelect={() => setExpoMode(key, "port")}
+                                icon={<Network className="size-4" />}
+                                label={w.routePortLabel}
+                                description={w.routePortDesc}
+                              />
+                            )}
+                            {modeAllowed(e, "domain") && (
+                              <OptionCard
+                                value="domain"
+                                selected={st.mode === "domain"}
+                                onSelect={() => setExpoMode(key, "domain")}
+                                icon={<Globe className="size-4" />}
+                                label={w.routeDomainLabel}
+                                description={w.routeDomainDesc}
+                              />
+                            )}
                             {/* Free-vs-custom + the domain/slug input live here only. */}
                             {st.mode === "domain" && (
                               <div className="mt-3">
@@ -574,22 +744,26 @@ export default function AppInstallPage() {
                           </div>
                         ) : (
                           <div className="space-y-2">
-                            <OptionCard
-                              value="publish"
-                              selected={st.mode === "publish"}
-                              onSelect={() => setExpoMode(key, "publish")}
-                              icon={<Network className="size-4" />}
-                              label={w.tcpPublishLabel}
-                              description={w.tcpPublishDesc}
-                            />
-                            <OptionCard
-                              value="internal"
-                              selected={st.mode === "internal"}
-                              onSelect={() => setExpoMode(key, "internal")}
-                              icon={<Lock className="size-4" />}
-                              label={w.tcpInternalLabel}
-                              description={w.tcpInternalDesc}
-                            />
+                            {modeAllowed(e, "publish") && (
+                              <OptionCard
+                                value="publish"
+                                selected={st.mode === "publish"}
+                                onSelect={() => setExpoMode(key, "publish")}
+                                icon={<Network className="size-4" />}
+                                label={w.tcpPublishLabel}
+                                description={w.tcpPublishDesc}
+                              />
+                            )}
+                            {modeAllowed(e, "internal") && (
+                              <OptionCard
+                                value="internal"
+                                selected={st.mode === "internal"}
+                                onSelect={() => setExpoMode(key, "internal")}
+                                icon={<Lock className="size-4" />}
+                                label={w.tcpInternalLabel}
+                                description={w.tcpInternalDesc}
+                              />
+                            )}
                             {st.mode === "publish" && (
                               <p className="mt-2 text-xs text-warning">
                                 {interpolate(w.tcpFirewallNote, { port: String(e.port) })}
@@ -626,7 +800,7 @@ export default function AppInstallPage() {
               <button
                 type="button"
                 onClick={install}
-                disabled={busy}
+                disabled={busy || (formValidity ? !formValidity.valid : false)}
                 className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
               >
                 {busy ? (

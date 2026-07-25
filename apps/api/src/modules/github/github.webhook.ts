@@ -163,13 +163,20 @@ export const githubWebhookProvider: WebhookProvider = {
     }
 
     // Idempotency: claim the delivery id so an at-least-once redelivery is dropped
-    // (persistent — survives restarts/replicas). Missing id or claim error → process.
+    // (persistent — survives restarts/replicas). The claim row is the ANCHOR
+    // (source='github', project-less); per-project feed rows are recorded later
+    // by the push handler. Missing id or claim error → process (fail-open; the
+    // commit-sha guard in triggerDeployment is the backstop).
     const deliveryId = headers["x-github-delivery"];
+    let anchorId = "";
     if (deliveryId) {
-      const claimed = await repos.githubWebhookEvent.claim(deliveryId, event).catch(() => true);
-      if (!claimed) {
+      const claim = await repos.webhookDelivery
+        .claimGithub({ deliveryId, event, outcome: "received" })
+        .catch(() => ({ claimed: true, id: "" }));
+      if (!claim.claimed) {
         return { success: true, event, message: "Duplicate delivery ignored" };
       }
+      anchorId = claim.id;
     }
 
     let result: WebhookHandlerResult;
@@ -190,8 +197,8 @@ export const githubWebhookProvider: WebhookProvider = {
         result = { success: true, event, message: `Event '${event}' not handled` };
     }
 
-    if (deliveryId) {
-      await repos.githubWebhookEvent.markProcessed(deliveryId).catch(() => {});
+    if (anchorId) {
+      await repos.webhookDelivery.markProcessed(anchorId, { outcome: "received" }).catch(() => {});
     }
     return result;
   },

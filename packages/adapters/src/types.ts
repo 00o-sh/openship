@@ -567,6 +567,20 @@ export interface CommandExecutor {
   }>;
 
   /**
+   * Run a command with `body` piped to its stdin, half-closing stdin at EOF so
+   * a stdin-draining command (`docker load`, `tar -x`) exits cleanly. Resolves
+   * with the remote exit code + captured stderr. The streaming counterpart to
+   * rawExec (stdout) — lets a Readable move INTO a remote command byte-for-byte
+   * without staging to a temp file first.
+   *
+   * Only available on SshExecutor — local executors do not implement this.
+   */
+  execWithInput?(
+    command: string,
+    body: Readable,
+  ): Promise<{ code: number; stderr: string }>;
+
+  /**
    * Open a Unix domain socket tunnel to the target machine.
    *
    * SshExecutor: opens an SSH streamlocal channel on the persistent connection.

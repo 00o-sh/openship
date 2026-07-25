@@ -32,7 +32,6 @@ import {
   dockerMigrationApi,
   deployApi,
   githubApi,
-  servicesApi,
   getApiErrorMessage,
   type DiscoveredStack,
   type DiscoveredGroup,
@@ -41,6 +40,11 @@ import {
   type OpenshipProjectGroup,
   type MigrationRun,
   type MigrationStatus,
+  type TransferProgress,
+  type MigrationPreview,
+  type CustomPath,
+  type PendingItem,
+  type ConflictAction,
 } from "@/lib/api";
 import { useGitHub } from "@/context/GitHubContext";
 import { RepositoryList } from "@/app/(dashboard)/library/components/RepositoryList";
@@ -89,6 +93,18 @@ const STANDALONE = "__standalone__";
 const groupKey = (g: DiscoveredGroup) => g.project ?? STANDALONE;
 
 const RUN_PHASES: MigrationStatus[] = ["adopting", "moving_data", "deploying", "verifying"];
+
+/** Transfer-mode select values: "" = Settings default (→ direct cross-server),
+ *  "stream" = relay via control host. auto/direct/rsync kept for back-compat. */
+type TransferModeSel = "" | "auto" | "stream" | "direct" | "rsync";
+
+/** Human byte size (decimal, matches du/rsync byte counts). */
+function formatBytes(n: number): string {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(2)} GB`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)} MB`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(0)} KB`;
+  return `${n} B`;
+}
 
 /** A project-level git repo linked to a migrated project. Records the source so
  *  the project can redeploy / push auto-deploy later — the running image is
@@ -173,6 +189,36 @@ const rowsToEnv = (rows: Array<{ key: string; value: string }>) => {
   return env;
 };
 
+/** Map the wizard's per-service endpoints → the server route spec sent to
+ *  migrate() (published SERVER-SIDE post-verify). Only the first endpoint with a
+ *  resolved domain is taken per service. */
+function toServerRoutes(
+  routes: Record<string, PublicEndpoint[]> | undefined,
+):
+  | Record<
+      string,
+      { exposedPort?: string; domainType: "free" | "custom"; domain?: string; customDomain?: string }
+    >
+  | undefined {
+  if (!routes) return undefined;
+  const out: Record<
+    string,
+    { exposedPort?: string; domainType: "free" | "custom"; domain?: string; customDomain?: string }
+  > = {};
+  for (const [name, endpoints] of Object.entries(routes)) {
+    const ep = endpoints[0];
+    if (!ep) continue;
+    const domain = (ep.domainType === "custom" ? ep.customDomain : ep.domain)?.trim().toLowerCase();
+    if (!domain) continue;
+    out[name] = {
+      domainType: ep.domainType === "custom" ? "custom" : "free",
+      ...(ep.domainType === "custom" ? { customDomain: domain } : { domain }),
+      ...(ep.port ? { exposedPort: String(ep.port) } : {}),
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /**
  * Migrate existing Docker deployment(s) into Openship: pick a server → inspect →
  * organise the discovered stack into one or more PROJECTS (tabs) → migrate.
@@ -185,16 +231,24 @@ export function ServerMigrationWizard({
   serverId,
   variant = "modal",
   server,
+  initialRunId,
+  onBack,
 }: {
   isOpen?: boolean;
   onClose: () => void;
   serverId?: string;
   /** "modal" (Library, default) wraps in a Modal; "tab" renders an inline
-   *  two-column layout for the server-detail Services tab (left = discovered
+   *  two-column layout for the server-detail Migrations tab (left = discovered
    *  containers, right = the connection card until a scan swaps in the config). */
   variant?: "modal" | "tab";
   /** Connection summary for the tab's right column before a scan (server detail). */
   server?: { sshHost: string; sshPort?: number | null; sshUser?: string | null; sshAuthMethod?: string | null } | null;
+  /** Open directly on an existing run's progress/steps/logs (any status,
+   *  incl. terminal) — the Migrations list opens a row straight into this. */
+  initialRunId?: string;
+  /** Tab variant: renders a compact inline "← Back" (to the runs list) in the
+   *  header rows, so it never adds a full row that pushes the layout down. */
+  onBack?: () => void;
 }) {
   const { t } = useI18n();
   const m = t.migration;
@@ -204,7 +258,7 @@ export function ServerMigrationWizard({
   // Wizard step for the adopt/migrate flow: select services → link source →
   // domains/routes → migrate. Only gates the `adoptable && stack` screen; the
   // re-import, flat-docker, and progress branches are step-agnostic.
-  const [step, setStep] = useState<"select" | "source" | "domains">("select");
+  const [step, setStep] = useState<"select" | "source" | "domains" | "plan">("select");
 
   // Each step's content is a very different height; without resetting scroll a
   // step change (esp. Next from a scrolled-down list) leaves the viewport parked
@@ -226,7 +280,16 @@ export function ServerMigrationWizard({
   const [error, setError] = useState<string | null>(null);
   const [killOriginals, setKillOriginals] = useState(false);
   // "" = use the user's Settings default (send nothing); else per-run override.
-  const [transferMode, setTransferMode] = useState<"" | "auto" | "stream" | "direct" | "rsync">("");
+  const [transferMode, setTransferMode] = useState<TransferModeSel>("");
+  // On-the-wire rsync compression (direct cross-server) — opt-in.
+  const [compress, setCompress] = useState(false);
+  // User-added extra paths to move (source host path → target host path).
+  const [customPaths, setCustomPaths] = useState<CustomPath[]>([]);
+  // serviceName → target-volume conflict resolution chosen at the plan step.
+  const [conflictResolution, setConflictResolution] = useState<Record<string, ConflictAction>>({});
+  // The transfer plan must be loaded before Migrate (it's what the move acts
+  // on). Set by TransferPlanSummary once the scan resolves; gates the plan step.
+  const [planReady, setPlanReady] = useState(false);
 
   // Project id whose repo compose is currently being parsed (step 2 spinner).
   const [parsingRepo, setParsingRepo] = useState<string | null>(null);
@@ -247,19 +310,22 @@ export function ServerMigrationWizard({
   const [migrationId, setMigrationId] = useState<string | null>(null);
   const [confirmToken, setConfirmToken] = useState<string | null>(null);
   const [run, setRun] = useState<MigrationRun | null>(null);
+  const [progress, setProgress] = useState<TransferProgress | null>(null);
   // Per-service status peek (the failure rows). Full logs are shown by the
   // embedded DeploymentTerminal (its own build-session stream), not here.
   const [deploy, setDeploy] = useState<{
     services?: Array<{ name: string; status: string; error?: string }>;
   } | null>(null);
   const [cutoverBusy, setCutoverBusy] = useState(false);
-  // Projects whose routes we've already applied — guards the completion effect
-  // from re-firing on poll ticks.
-  const publishedRef = useRef<Set<string>>(new Set());
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  // Transfer-plan previews cached by request key, so navigating Back/Next
+  // doesn't re-hit the server (the scan `du`s volumes — expensive). Cleared on
+  // reset(); a changed key (new services / custom paths) fetches fresh.
+  const planCacheRef = useRef<Map<string, MigrationPreview>>(new Map());
 
   const reset = () => {
     setStep("select");
-    publishedRef.current = new Set();
     setStack(null);
     setError(null);
     setProjects([]);
@@ -268,6 +334,10 @@ export function ServerMigrationWizard({
     setScanning(false);
     setKillOriginals(false);
     setTransferMode("");
+    setCompress(false);
+    setCustomPaths([]);
+    setConflictResolution({});
+    planCacheRef.current.clear();
     setQueue(null);
     setQueueIndex(0);
     setCompleted([]);
@@ -275,13 +345,50 @@ export function ServerMigrationWizard({
     setMigrationId(null);
     setConfirmToken(null);
     setRun(null);
+    setProgress(null);
     setCutoverBusy(false);
+    setConfirmingDelete(false);
+    setDeleteBusy(false);
   };
 
   const close = () => {
     reset();
     if (!serverId) setSelectedId(null);
     onClose();
+  };
+
+  // The run-panel "Cancel": abort the server pipeline (kills the transfer +
+  // rolls back) when the run is still active, then drop the client UI. On a
+  // terminal/failed run it's just "Close".
+  const cancelRun = () => {
+    const active = run && !["succeeded", "failed", "rolled_back"].includes(run.status);
+    if (migrationId && active) void dockerMigrationApi.cancel(migrationId).catch(() => {});
+    close();
+  };
+
+  // Delete a terminal run's record (project + data untouched); returns to the
+  // list via close(). Two-step inline confirm to avoid an accidental wipe.
+  const deleteRun = async () => {
+    if (!migrationId) return;
+    setDeleteBusy(true);
+    try {
+      await dockerMigrationApi.remove(migrationId);
+      close();
+    } catch {
+      setDeleteBusy(false);
+      setConfirmingDelete(false);
+    }
+  };
+
+  // Failed → "Edit & retry": drop back into a fresh flow on the SAME server
+  // with the prior custom paths restored, re-scan, and let the user adjust
+  // (services / env / paths) before re-running. The failed run's record stays.
+  const editRetry = () => {
+    const snap = run?.inputSnapshot as { customPaths?: CustomPath[] } | null | undefined;
+    const paths = Array.isArray(snap?.customPaths) ? snap!.customPaths! : [];
+    reset();
+    setCustomPaths(paths);
+    void handleScan();
   };
 
   const pickServer = (s: ServerOption | null) => {
@@ -523,11 +630,23 @@ export function ServerMigrationWizard({
   );
   const hasReimport = orphanedOpenship.length > 0;
   const sameServer = selectedId === targetId;
-  // Cross-server can't move a locally-built image (not in a registry) — the API
-  // blocks it with the exact service names. Surface the caveat up front when a
-  // built service exists and a different target is picked.
-  const crossServerBuiltSoon = !sameServer && Boolean(stack?.services.some((s) => Boolean(s.build)));
+  // Cross-server now MOVES locally-built images as data (docker save|load) — no
+  // registry, no rebuild. Surface an info note up front (the image stream can be
+  // large/slow) when a built service exists and a different target is picked.
+  const crossServerBuiltInfo = !sameServer && Boolean(stack?.services.some((s) => Boolean(s.build)));
   const migratable = projects.filter((p) => p.services.size > 0 && p.name.trim().length > 0);
+  // Union of all migratable service names (uid→name), for the transfer-plan scan.
+  const planServiceNames = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          migratable.flatMap((p) =>
+            (stack?.services ?? []).filter((s) => p.services.has(svcUid(s))).map((s) => s.name),
+          ),
+        ),
+      ),
+    [migratable, stack],
+  );
   const canMigrate =
     Boolean(selectedId) && Boolean(targetId) && migratable.length > 0 && !starting && !queue;
 
@@ -547,6 +666,13 @@ export function ServerMigrationWizard({
           ? item.volumeStrategies
           : undefined,
         transferMode: transferMode || undefined,
+        transferCompression: compress ? "zstd" : undefined,
+        customPaths: customPaths.length ? customPaths : undefined,
+        // Publish domains SERVER-SIDE (was a client-only effect, lost when the
+        // wizard unmounted or a run was opened from the list). Map each
+        // service's chosen endpoint → the server route spec.
+        routesByServiceName: toServerRoutes(item.routesByServiceName),
+        conflictResolution: Object.keys(conflictResolution).length ? conflictResolution : undefined,
         gitSource: item.gitSource,
         serviceSubpaths: item.serviceSubpaths,
         serviceEnv: item.serviceEnv,
@@ -647,12 +773,9 @@ export function ServerMigrationWizard({
   // Advance the queue when the current project's migration succeeds.
   useEffect(() => {
     if (!queue || run?.status !== "succeeded") return;
-    // Record the chosen routes on the just-verified project (reload-free, no
-    // redeploy) so kept/added domains land on its Domains tab automatically.
-    const doneRoutes = queue[queueIndex]?.routesByServiceName;
-    if (run.projectId && doneRoutes && Object.keys(doneRoutes).length > 0) {
-      void applyRoutes(run.projectId, doneRoutes);
-    }
+    // Routes/domains are published SERVER-SIDE now (see toServerRoutes in the
+    // migrate payload), so they land even if this effect never runs (wizard
+    // unmounted / run opened from the list). Here we only advance the queue.
     setCompleted((prev) => [...prev, { name: queue[queueIndex]?.name ?? "", projectId: run.projectId }]);
     const nextIndex = queueIndex + 1;
     if (nextIndex < queue.length) {
@@ -705,43 +828,6 @@ export function ServerMigrationWizard({
     }
   };
 
-  // Record the routes chosen in the wizard onto the migrated project the moment
-  // it verifies — RELOAD-FREE (expose the service + set its domain; the backend's
-  // updateService applies the edge vhost to the live container IP via
-  // reconcileProjectRoutes, so NO redeploy and NO container recreation — critical
-  // for the attach-live path). Best-effort per route: a routing hiccup never fails
-  // the migration, and the domain still shows in the project's Domains tab (its
-  // service row is now exposed). Installing OpenResty when the box has none (a
-  // foreign proxy still holds 80/443) is finished from that Domains tab. Once per
-  // project (publishedRef).
-  const applyRoutes = async (pid: string, routes: Record<string, PublicEndpoint[]>) => {
-    if (publishedRef.current.has(pid)) return;
-    publishedRef.current.add(pid);
-    try {
-      const { services } = await servicesApi.list(pid);
-      const byName = new Map((services ?? []).map((s) => [s.name, s]));
-      for (const [name, endpoints] of Object.entries(routes)) {
-        const svc = byName.get(name);
-        const ep = endpoints[0];
-        if (!svc || !ep) continue;
-        const domainValue = (ep.domainType === "custom" ? ep.customDomain : ep.domain)
-          .trim()
-          .toLowerCase();
-        if (!domainValue) continue;
-        await servicesApi
-          .update(pid, svc.id, {
-            exposed: true,
-            exposedPort: ep.port || undefined,
-            domainType: ep.domainType,
-            ...(ep.domainType === "custom" ? { customDomain: domainValue } : { domain: domainValue }),
-          })
-          .catch(() => {}); // best-effort — domains never fail a migration
-      }
-    } catch {
-      /* best-effort */
-    }
-  };
-
   // On a deploy/verify failure the run row only carries a one-line reason. The
   // real stepper, full logs, and per-service failure detail live on the target
   // deployment's build screen — deep-link to it so "just failed" isn't a
@@ -753,6 +839,52 @@ export function ServerMigrationWizard({
     router.push(`/build/${depId}`);
   };
 
+  // Open directly on a specific run (a row clicked in the Migrations list) —
+  // seed the same state the progress view + poll need, for ANY status incl.
+  // terminal. Wins over the in-flight re-attach below (guarded by initialRunId).
+  // The token (for a cutover) rides the active-run endpoint when this run is live.
+  useEffect(() => {
+    if (!initialRunId || migrationId === initialRunId) return;
+    setQueue([{ name: "", serviceNames: [], volumeStrategies: {} }]);
+    setQueueIndex(0);
+    setCompleted([]);
+    setMigrationId(initialRunId);
+    setRun(null);
+    setConfirmToken(null);
+    if (serverId) {
+      void dockerMigrationApi
+        .getActive(serverId)
+        .then((a) => setConfirmToken(a.confirmationToken))
+        .catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialRunId]);
+
+  // Re-attach after a CLIENT reload: the run is server-side, so if one is in
+  // flight for this server, re-find it and re-seed the state the progress
+  // screen + poll need (queue placeholder flips `inProgress`; confirmToken is
+  // required for the cutover buttons and is never persisted client-side).
+  useEffect(() => {
+    if (!serverId || queue || initialRunId) return; // `queue`/`initialRunId` ⇒ already targeting a run
+    let live = true;
+    void dockerMigrationApi
+      .getActive(serverId)
+      .then((res) => {
+        if (!live || !res.run) return;
+        setQueue([{ name: res.run.projectName ?? "", serviceNames: [], volumeStrategies: {} }]);
+        setQueueIndex(0);
+        setCompleted([]);
+        setMigrationId(res.run.id);
+        setConfirmToken(res.confirmationToken);
+        setRun(res.run);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverId]);
+
   // Poll the current run while a migration is in flight; stop once terminal.
   useEffect(() => {
     if (!migrationId) return;
@@ -761,7 +893,10 @@ export function ServerMigrationWizard({
     const tick = async () => {
       try {
         const res = await dockerMigrationApi.getMigration(migrationId);
-        if (live) setRun(res.run);
+        if (live) {
+          setRun(res.run);
+          setProgress(res.progress ?? null);
+        }
       } catch {
         /* transient — keep polling */
       }
@@ -847,6 +982,19 @@ export function ServerMigrationWizard({
     </label>
   );
 
+  // Compact inline "← Back to migrations" (tab variant only) — sits in the
+  // existing header rows beside flatToggle so it never adds a pushing-down row.
+  const backBtn = onBack ? (
+    <button
+      type="button"
+      onClick={onBack}
+      className="inline-flex shrink-0 items-center gap-1.5 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+    >
+      <ArrowLeft className="size-4" />
+      {m.tab.back}
+    </button>
+  ) : null;
+
   // Compact header lives inside the modal shell only; the page route renders its
   // own Jobs-style header above the wizard.
   const modalHeader = (
@@ -882,6 +1030,7 @@ export function ServerMigrationWizard({
                 completed={completed}
                 deployServices={deploy?.services}
                 hasDomains={anyDomainAssigned}
+                progress={progress}
               />
             </div>
             <div className="shrink-0 flex items-center justify-between gap-4 px-6 py-4 border-t border-border/60">
@@ -958,7 +1107,7 @@ export function ServerMigrationWizard({
                     )}
                     <button
                       type="button"
-                      onClick={close}
+                      onClick={cancelRun}
                       className="px-4 py-2.5 rounded-xl border border-border text-sm font-medium text-foreground hover:bg-muted transition-colors"
                     >
                       {failed ? m.wizard.close : m.wizard.cancel}
@@ -987,14 +1136,14 @@ export function ServerMigrationWizard({
                   return (
                     <div
                       key={p.id}
-                      className={`group inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-sm transition-colors cursor-pointer ${
+                      className={`group inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm transition-colors cursor-pointer ${
                         on
-                          ? "border-primary/50 bg-primary/10 text-foreground"
-                          : "border-border/60 text-muted-foreground hover:bg-muted/40"
+                          ? "bg-muted text-foreground shadow-sm"
+                          : "text-muted-foreground hover:bg-muted/40"
                       }`}
                       onClick={() => setActiveId(p.id)}
                     >
-                      <Layers className={`size-3.5 ${on ? "text-primary" : ""}`} />
+                      <Layers className={`size-3.5 ${on ? "text-foreground" : "text-muted-foreground"}`} />
                       <span className="font-medium truncate max-w-[160px]">
                         {p.name || m.wizard.projectName}
                       </span>
@@ -1149,6 +1298,25 @@ export function ServerMigrationWizard({
                       </div>
                     </div>
                   )}
+                  {step === "plan" && (
+                    <div className="h-full min-h-0 flex-1 overflow-y-auto pe-1">
+                      <TransferPlanSummary
+                        sourceId={selectedId}
+                        targetId={targetId}
+                        serviceNames={planServiceNames}
+                        transferMode={transferMode}
+                        setTransferMode={setTransferMode}
+                        compress={compress}
+                        setCompress={setCompress}
+                        customPaths={customPaths}
+                        setCustomPaths={setCustomPaths}
+                        conflictResolution={conflictResolution}
+                        setConflictResolution={setConflictResolution}
+                        cache={planCacheRef}
+                        onReady={setPlanReady}
+                      />
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1215,8 +1383,8 @@ export function ServerMigrationWizard({
                       </button>
                     </div>
                   </>
-                ) : (
-                  /* Step 3 footer: move settings + Back + Migrate */
+                ) : step === "domains" ? (
+                  /* Step 3 footer: move settings + Back + (Next cross / Migrate same) */
                   <>
                     <div className="flex items-center gap-3 flex-1 min-w-0 flex-wrap">
                       <div className="flex items-center gap-2 shrink-0">
@@ -1235,27 +1403,13 @@ export function ServerMigrationWizard({
                         />
                         {m.wizard.killOriginals}
                       </label>
-                      <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                        {m.wizard.transfer.label}
-                        <select
-                          value={transferMode}
-                          onChange={(e) => setTransferMode(e.target.value as typeof transferMode)}
-                          className="rounded-md border border-border bg-card px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/30"
-                        >
-                          <option value="">{m.wizard.transfer.default}</option>
-                          <option value="auto">{m.wizard.transfer.auto}</option>
-                          <option value="stream">{m.wizard.transfer.stream}</option>
-                          <option value="direct">{m.wizard.transfer.direct}</option>
-                          <option value="rsync">{m.wizard.transfer.rsync}</option>
-                        </select>
-                      </label>
                       <span
                         className={`text-xs ${sameServer ? "text-muted-foreground" : "text-warning"}`}
                       >
                         {sameServer ? m.wizard.sameServer : m.run.downtimeNote}
                       </span>
-                      {crossServerBuiltSoon && (
-                        <span className="text-xs text-warning/90 w-full">{m.wizard.crossServerBuiltSoon}</span>
+                      {crossServerBuiltInfo && (
+                        <span className="text-xs text-muted-foreground w-full">{m.wizard.crossServerBuiltInfo}</span>
                       )}
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
@@ -1267,10 +1421,50 @@ export function ServerMigrationWizard({
                         <ArrowLeft className="size-4" />
                         {m.wizard.steps.back}
                       </button>
+                      {sameServer ? (
+                        <button
+                          type="button"
+                          onClick={handleMigrate}
+                          disabled={!canMigrate}
+                          className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-all hover:shadow-lg hover:shadow-primary/25 hover:-translate-y-0.5 disabled:hover:shadow-none disabled:hover:translate-y-0 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          {starting ? <Loader2 className="size-4 animate-spin" /> : <ArrowRight className="size-4" />}
+                          {migratable.length > 1
+                            ? interpolate(m.wizard.migrateN, { n: String(migratable.length) })
+                            : m.wizard.migrate}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setStep("plan")}
+                          disabled={!canMigrate}
+                          className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-all hover:shadow-lg hover:shadow-primary/25 hover:-translate-y-0.5 disabled:hover:shadow-none disabled:hover:translate-y-0 disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          {m.wizard.steps.next}
+                          <ArrowRight className="size-4" />
+                        </button>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  /* Plan footer: Back → Configure + Migrate. */
+                  <>
+                    <span className="text-xs text-muted-foreground min-w-0 flex-1">
+                      {sameServer ? m.wizard.sameServer : m.run.downtimeNote}
+                    </span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setStep("domains")}
+                        className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-border text-sm font-medium text-foreground hover:bg-muted transition-colors"
+                      >
+                        <ArrowLeft className="size-4" />
+                        {m.wizard.steps.back}
+                      </button>
                       <button
                         type="button"
                         onClick={handleMigrate}
-                        disabled={!canMigrate}
+                        disabled={!canMigrate || !planReady}
                         className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-all hover:shadow-lg hover:shadow-primary/25 hover:-translate-y-0.5 disabled:hover:shadow-none disabled:hover:translate-y-0 disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         {starting ? <Loader2 className="size-4 animate-spin" /> : <ArrowRight className="size-4" />}
@@ -1334,46 +1528,68 @@ export function ServerMigrationWizard({
       const runText = m.run as Record<string, string>;
       const runStatus = run?.status ?? "queued";
       const awaiting = runStatus === "awaiting_cutover";
-      const running = !failed && !allDone && !awaiting;
-      const railErr = run?.errorMessage || error;
-      const railLabel = allDone
+      const partial = runStatus === "partial";
+      // A run opened from the list can already be terminal-success; treat that
+      // as done so the rail shows the result, not a spinner.
+      const done = allDone || runStatus === "succeeded";
+      const running = !failed && !done && !awaiting && !partial;
+      const terminal = failed || runStatus === "succeeded"; // deletable record
+      const railLabel = done
         ? queueTotal > 1
           ? interpolate(m.run.allSucceeded, { n: String(queueTotal) })
           : m.run.succeeded
         : awaiting
           ? m.run.awaiting_cutover
-          : runText[runStatus] ?? m.run.queued;
+          : partial
+            ? m.run.partial
+            : runText[runStatus] ?? m.run.queued;
 
       return (
         <div ref={stepTopRef} className="grid grid-cols-1 gap-6 items-start lg:grid-cols-[minmax(0,1fr)_340px]">
-          <div className="rounded-2xl border border-border/50 bg-card p-6">
-            <MigrationProgress
-              run={run}
-              error={error}
-              queueName={queue?.[queueIndex]?.name ?? ""}
-              queueIndex={queueIndex}
-              queueTotal={queueTotal}
-              completed={completed}
-              deployServices={deploy?.services}
-              hasDomains={anyDomainAssigned}
-            />
+          <div className="space-y-6">
+            <div className="rounded-2xl border border-border/50 bg-card p-6">
+              <MigrationProgress
+                run={run}
+                error={error}
+                queueName={queue?.[queueIndex]?.name ?? ""}
+                queueIndex={queueIndex}
+                queueTotal={queueTotal}
+                completed={completed}
+                deployServices={deploy?.services}
+                hasDomains={anyDomainAssigned}
+                progress={progress}
+              />
+            </div>
+            {/* Partial run → resolve the paths that didn't move (edit / skip),
+                then Resume to finish. Lives in the wide LEFT column. */}
+            {partial && migrationId && (
+              <PartialResolution
+                runId={migrationId}
+                pending={(run?.pendingItems ?? []) as PendingItem[]}
+              />
+            )}
           </div>
 
           <div className="rounded-2xl border border-border/50 bg-card p-5 space-y-4 lg:sticky lg:top-4">
+            {backBtn && <div className="flex">{backBtn}</div>}
             <div className="flex flex-col items-center gap-3 text-center">
               <span
                 className={`inline-flex size-12 items-center justify-center rounded-2xl ${
                   failed
                     ? "bg-destructive/10 text-destructive"
-                    : allDone || awaiting
+                    : done || awaiting
                       ? "bg-success-bg text-success"
-                      : "bg-primary/10 text-primary"
+                      : partial
+                        ? "bg-warning-bg text-warning"
+                        : "bg-primary/10 text-primary"
                 }`}
               >
                 {failed ? (
                   <AlertCircle className="size-6" />
-                ) : allDone || awaiting ? (
+                ) : done || awaiting ? (
                   <CheckCircle2 className="size-6" />
+                ) : partial ? (
+                  <AlertCircle className="size-6" />
                 ) : (
                   <Loader2 className="size-6 animate-spin" />
                 )}
@@ -1392,11 +1608,8 @@ export function ServerMigrationWizard({
               </div>
             </div>
 
-            {failed && railErr && (
-              <div className="rounded-xl bg-destructive/10 px-3 py-2.5 text-xs leading-relaxed text-destructive">
-                {railErr}
-              </div>
-            )}
+            {/* The error text already shows in the LEFT card's failure banner
+                (above the session log) — don't duplicate it here in the rail. */}
             {awaiting && (
               <p className="text-xs leading-relaxed text-muted-foreground">{m.cutover.warning}</p>
             )}
@@ -1407,7 +1620,10 @@ export function ServerMigrationWizard({
                   <button type="button" onClick={() => handleCutover(true)} disabled={cutoverBusy} className="inline-flex w-full items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-destructive text-destructive-foreground text-sm font-semibold hover:bg-destructive/90 transition-colors disabled:opacity-40">{cutoverBusy ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}{m.cutover.stopRemove}</button>
                   <button type="button" onClick={() => handleCutover(false)} disabled={cutoverBusy} className="w-full px-4 py-2.5 rounded-xl border border-border text-sm font-medium text-foreground hover:bg-muted transition-colors disabled:opacity-40">{m.cutover.keep}</button>
                 </>
-              ) : allDone ? (
+              ) : partial ? (
+                // Resolve UI (edit/skip + Resume) is in the wide LEFT column.
+                <p className="text-xs leading-relaxed text-muted-foreground">{m.tab.pendingTitle} →</p>
+              ) : done ? (
                 <>
                   {!anyDomainAssigned && (
                     <button type="button" onClick={openDomains} className="inline-flex w-full items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-colors"><ArrowRight className="size-4" />{m.run.addDomains}</button>
@@ -1420,10 +1636,30 @@ export function ServerMigrationWizard({
                   {failed && run?.deploymentId && (
                     <button type="button" onClick={openDeployLogs} className="w-full px-4 py-2.5 rounded-xl border border-border text-sm font-medium text-foreground hover:bg-muted transition-colors">{m.run.viewDeployLogs}</button>
                   )}
-                  <button type="button" onClick={close} className="w-full px-4 py-2.5 rounded-xl border border-border text-sm font-medium text-foreground hover:bg-muted transition-colors">{failed ? m.wizard.close : m.wizard.cancel}</button>
+                  {failed && run?.inputSnapshot && (
+                    <button type="button" onClick={editRetry} className="inline-flex w-full items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-colors"><RefreshCw className="size-4" />{m.tab.editRetry}</button>
+                  )}
+                  <button type="button" onClick={cancelRun} className="w-full px-4 py-2.5 rounded-xl border border-border text-sm font-medium text-foreground hover:bg-muted transition-colors">{failed ? m.wizard.close : m.wizard.cancel}</button>
                 </>
               )}
             </div>
+
+            {/* Delete this run's record (terminal only; project + data untouched). */}
+            {terminal && (
+              <div className="border-t border-border/50 pt-3">
+                {confirmingDelete ? (
+                  <div className="space-y-2">
+                    <p className="text-xs leading-relaxed text-muted-foreground">{m.tab.confirmDelete}</p>
+                    <div className="flex gap-2">
+                      <button type="button" onClick={() => setConfirmingDelete(false)} disabled={deleteBusy} className="flex-1 px-3 py-2 rounded-xl border border-border text-sm font-medium text-foreground hover:bg-muted transition-colors disabled:opacity-40">{m.tab.close}</button>
+                      <button type="button" onClick={() => void deleteRun()} disabled={deleteBusy} className="flex-1 inline-flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-destructive text-destructive-foreground text-sm font-semibold hover:bg-destructive/90 transition-colors disabled:opacity-40">{deleteBusy ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}{m.tab.delete}</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button type="button" onClick={() => setConfirmingDelete(true)} className="inline-flex w-full items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-danger-border text-sm font-medium text-danger hover:bg-danger-bg transition-colors"><Trash2 className="size-4" />{m.tab.delete}</button>
+                )}
+              </div>
+            )}
           </div>
         </div>
       );
@@ -1447,18 +1683,8 @@ export function ServerMigrationWizard({
             <input type="checkbox" checked={killOriginals} onChange={(e) => setKillOriginals(e.target.checked)} className="size-4 rounded border-border" />
             {m.wizard.killOriginals}
           </label>
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            {m.wizard.transfer.label}
-            <select value={transferMode} onChange={(e) => setTransferMode(e.target.value as typeof transferMode)} className="rounded-md border border-border bg-card px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/30">
-              <option value="">{m.wizard.transfer.default}</option>
-              <option value="auto">{m.wizard.transfer.auto}</option>
-              <option value="stream">{m.wizard.transfer.stream}</option>
-              <option value="direct">{m.wizard.transfer.direct}</option>
-              <option value="rsync">{m.wizard.transfer.rsync}</option>
-            </select>
-          </label>
           <span className={`block text-xs ${sameServer ? "text-muted-foreground" : "text-warning"}`}>{sameServer ? m.wizard.sameServer : m.run.downtimeNote}</span>
-          {crossServerBuiltSoon && <span className="block text-xs text-warning/90">{m.wizard.crossServerBuiltSoon}</span>}
+          {crossServerBuiltInfo && <span className="block text-xs text-muted-foreground">{m.wizard.crossServerBuiltInfo}</span>}
         </div>
       );
 
@@ -1523,11 +1749,11 @@ export function ServerMigrationWizard({
                 </div>
               </div>
             </div>
-          ) : (
+          ) : step === "domains" ? (
             /* Configure — 2-grid of service cards on the left (like Select), the
                target card + finalize button reused in the right rail. */
             <div className="grid grid-cols-1 gap-6 items-start lg:grid-cols-[minmax(0,1fr)_340px]">
-              <div className="grid min-w-0 grid-cols-1 gap-3.5 items-start xl:grid-cols-2">
+              <div className="grid min-w-0 grid-cols-1 gap-3.5 items-stretch xl:grid-cols-2">
                 {picked.map((sv) => (
                   <ServiceConfigCard
                     key={svcUid(sv)}
@@ -1551,7 +1777,50 @@ export function ServerMigrationWizard({
                     <ArrowLeft className="size-4" />
                     {m.wizard.steps.back}
                   </button>
-                  <button type="button" onClick={handleMigrate} disabled={!canMigrate} className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                  {sameServer ? (
+                    <button type="button" onClick={handleMigrate} disabled={!canMigrate} className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                      {starting ? <Loader2 className="size-4 animate-spin" /> : <ArrowRight className="size-4" />}
+                      {migratable.length > 1 ? interpolate(m.wizard.migrateN, { n: String(migratable.length) }) : m.wizard.migrate}
+                    </button>
+                  ) : (
+                    <button type="button" onClick={() => setStep("plan")} disabled={!canMigrate} className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                      {m.wizard.steps.next}
+                      <ArrowRight className="size-4" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {step === "plan" && (
+            /* Transfer plan — the details get the main column; target + actions
+               stay in the right rail (cross-server only). */
+            <div className="grid grid-cols-1 gap-6 items-start lg:grid-cols-[minmax(0,1fr)_340px]">
+              <div className="min-w-0">
+                <TransferPlanSummary
+                  sourceId={selectedId}
+                  targetId={targetId}
+                  serviceNames={planServiceNames}
+                  transferMode={transferMode}
+                  setTransferMode={setTransferMode}
+                  compress={compress}
+                  setCompress={setCompress}
+                  customPaths={customPaths}
+                  setCustomPaths={setCustomPaths}
+                  conflictResolution={conflictResolution}
+                  setConflictResolution={setConflictResolution}
+                  cache={planCacheRef}
+                  onReady={setPlanReady}
+                />
+              </div>
+              <div className="lg:sticky lg:top-6 space-y-4">
+                {targetCard}
+                <div className="flex items-center justify-between gap-3">
+                  <button type="button" onClick={() => setStep("domains")} className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-border text-sm font-medium text-foreground hover:bg-muted transition-colors">
+                    <ArrowLeft className="size-4" />
+                    {m.wizard.steps.back}
+                  </button>
+                  <button type="button" onClick={handleMigrate} disabled={!canMigrate || !planReady} className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                     {starting ? <Loader2 className="size-4 animate-spin" /> : <ArrowRight className="size-4" />}
                     {migratable.length > 1 ? interpolate(m.wizard.migrateN, { n: String(migratable.length) }) : m.wizard.migrate}
                   </button>
@@ -1572,6 +1841,7 @@ export function ServerMigrationWizard({
               it once a scan has results. */}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+              {backBtn}
               {adoptable && stack && (
                 <>
               {projects.map((p) => {
@@ -1579,8 +1849,8 @@ export function ServerMigrationWizard({
                 return (
                   <div
                     key={p.id}
-                    className={`group inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-sm transition-colors cursor-pointer ${
-                      on ? "border-primary/50 bg-primary/10 text-foreground" : "border-border/60 text-muted-foreground hover:bg-muted/40"
+                    className={`group inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm transition-colors cursor-pointer ${
+                      on ? " bg-primary/10 text-foreground" : "text-muted-foreground hover:bg-muted/40"
                     }`}
                     onClick={() => setActiveId(p.id)}
                   >
@@ -1660,6 +1930,7 @@ export function ServerMigrationWizard({
                 completed={completed}
                 deployServices={deploy?.services}
                 hasDomains={anyDomainAssigned}
+                progress={progress}
               />
               <div className="flex flex-wrap items-center justify-end gap-2">
                 {run?.status === "awaiting_cutover" ? (
@@ -1703,7 +1974,7 @@ export function ServerMigrationWizard({
                         {m.run.viewDeployLogs}
                       </button>
                     )}
-                    <button type="button" onClick={close}
+                    <button type="button" onClick={cancelRun}
                       className="px-4 py-2.5 rounded-xl border border-border text-sm font-medium text-foreground hover:bg-muted transition-colors">
                       {failed ? m.wizard.close : m.wizard.cancel}
                     </button>
@@ -1773,26 +2044,30 @@ export function ServerMigrationWizard({
                         <input type="checkbox" checked={killOriginals} onChange={(e) => setKillOriginals(e.target.checked)} className="size-4 rounded border-border" />
                         {m.wizard.killOriginals}
                       </label>
-                      <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                        {m.wizard.transfer.label}
-                        <select
-                          value={transferMode}
-                          onChange={(e) => setTransferMode(e.target.value as typeof transferMode)}
-                          className="rounded-md border border-border bg-card px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/30"
-                        >
-                          <option value="">{m.wizard.transfer.default}</option>
-                          <option value="auto">{m.wizard.transfer.auto}</option>
-                          <option value="stream">{m.wizard.transfer.stream}</option>
-                          <option value="direct">{m.wizard.transfer.direct}</option>
-                          <option value="rsync">{m.wizard.transfer.rsync}</option>
-                        </select>
-                      </label>
                       <span className={`block text-xs ${sameServer ? "text-muted-foreground" : "text-warning"}`}>
                         {sameServer ? m.wizard.sameServer : m.run.downtimeNote}
                       </span>
-                      {crossServerBuiltSoon && <span className="block text-xs text-warning/90">{m.wizard.crossServerBuiltSoon}</span>}
+                      {crossServerBuiltInfo && <span className="block text-xs text-muted-foreground">{m.wizard.crossServerBuiltInfo}</span>}
                     </div>
                   </div>
+                )}
+
+                {step === "plan" && (
+                  <TransferPlanSummary
+                    sourceId={selectedId}
+                    targetId={targetId}
+                    serviceNames={planServiceNames}
+                    transferMode={transferMode}
+                    setTransferMode={setTransferMode}
+                    compress={compress}
+                    setCompress={setCompress}
+                    customPaths={customPaths}
+                    setCustomPaths={setCustomPaths}
+                    conflictResolution={conflictResolution}
+                    setConflictResolution={setConflictResolution}
+                    cache={planCacheRef}
+                    onReady={setPlanReady}
+                  />
                 )}
               </div>
 
@@ -1823,14 +2098,35 @@ export function ServerMigrationWizard({
                       <ArrowRight className="size-4" />
                     </button>
                   </>
-                ) : (
+                ) : step === "domains" ? (
                   <>
                     <button type="button" onClick={() => setStep("source")}
                       className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-border text-sm font-medium text-foreground hover:bg-muted transition-colors">
                       <ArrowLeft className="size-4" />
                       {m.wizard.steps.back}
                     </button>
-                    <button type="button" onClick={handleMigrate} disabled={!canMigrate}
+                    {sameServer ? (
+                      <button type="button" onClick={handleMigrate} disabled={!canMigrate}
+                        className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                        {starting ? <Loader2 className="size-4 animate-spin" /> : <ArrowRight className="size-4" />}
+                        {migratable.length > 1 ? interpolate(m.wizard.migrateN, { n: String(migratable.length) }) : m.wizard.migrate}
+                      </button>
+                    ) : (
+                      <button type="button" onClick={() => setStep("plan")} disabled={!canMigrate}
+                        className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                        {m.wizard.steps.next}
+                        <ArrowRight className="size-4" />
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <button type="button" onClick={() => setStep("domains")}
+                      className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-border text-sm font-medium text-foreground hover:bg-muted transition-colors">
+                      <ArrowLeft className="size-4" />
+                      {m.wizard.steps.back}
+                    </button>
+                    <button type="button" onClick={handleMigrate} disabled={!canMigrate || !planReady}
                       className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                       {starting ? <Loader2 className="size-4 animate-spin" /> : <ArrowRight className="size-4" />}
                       {migratable.length > 1 ? interpolate(m.wizard.migrateN, { n: String(migratable.length) }) : m.wizard.migrate}
@@ -2168,10 +2464,8 @@ function ServiceGroup({
     <section className="space-y-2.5">
       <div className="flex items-center justify-between gap-3 px-0.5">
         <div className="flex items-center gap-2 min-w-0">
-          {isCompose ? (
+          {isCompose && (
             <Layers className="size-4 text-muted-foreground shrink-0" />
-          ) : (
-            <Container className="size-4 text-muted-foreground shrink-0" />
           )}
           <span className="text-sm font-semibold text-foreground truncate">
             {isCompose ? group.project : m.standaloneGroup}
@@ -2257,7 +2551,7 @@ function ServiceRow({
             ? "cursor-default border-primary/30 bg-primary/[0.05]"
             : checked
               ? "cursor-pointer border-primary/40 bg-primary/[0.05]"
-              : "cursor-pointer border-border/50 bg-card hover:border-border hover:bg-muted/20"
+              : "cursor-pointer border-border bg-card hover:border-foreground/25 hover:bg-muted/20"
       }`}
     >
       <span
@@ -2279,7 +2573,7 @@ function ServiceRow({
           {service.ports.map((p, i) => (
             <span
               key={`${p}-${i}`}
-              className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-xs text-muted-foreground"
+              className="rounded bg-muted/60 px-1.5 py-0.5 text-xs text-muted-foreground"
             >
               {p}
             </span>
@@ -2292,7 +2586,7 @@ function ServiceRow({
         </div>
 
         <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[13px] text-muted-foreground">
-          {source && <span className="font-mono max-w-full truncate text-muted-foreground/90">{source}</span>}
+          {source && <span className="max-w-full truncate text-muted-foreground/90">{source}</span>}
           {service.dependsOn.length > 0 && (
             <span>· {m.dependsOn} {service.dependsOn.join(", ")}</span>
           )}
@@ -2549,7 +2843,7 @@ function ServiceMapPanel({
                 >
                   {c.name}
                   {c.build ? (
-                    <span className="font-mono text-[10px] text-muted-foreground">{c.build}</span>
+                    <span className="text-[10px] text-muted-foreground">{c.build}</span>
                   ) : null}
                 </span>
               ))}
@@ -2571,7 +2865,7 @@ function ServiceMapPanel({
                       </span>
                     </div>
                     {(sv.image || sv.build) && (
-                      <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground/80" title={sv.image || sv.build}>
+                      <p className="mt-1 truncate text-[11px] text-muted-foreground/80" title={sv.image || sv.build}>
                         {sv.image || `${t.migration.discover.build}: ${sv.build}`}
                       </p>
                     )}
@@ -2687,7 +2981,7 @@ function ServiceConfigCard({
         {service.ports.map((p, i) => (
           <span
             key={`${p}-${i}`}
-            className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"
+            className="rounded bg-muted/60 px-1.5 py-0.5 text-[11px] text-muted-foreground"
           >
             {p}
           </span>
@@ -2771,7 +3065,7 @@ function ServiceConfigCard({
         <div className="flex items-center justify-between gap-3 rounded-lg border border-border/50 bg-card/40 px-3 py-2">
           <div className="min-w-0">
             <p className="text-[13px] font-medium text-foreground">{d.volumesTitle}</p>
-            <p className="truncate font-mono text-[11px] text-muted-foreground">{volumeNames.join(", ")}</p>
+            <p className="truncate text-[11px] text-muted-foreground">{volumeNames.join(", ")}</p>
           </div>
           {sameServer ? (
             <div className="flex shrink-0 rounded-lg border border-border/60 p-0.5 text-[11px] font-medium">
@@ -2857,7 +3151,301 @@ function ServiceConfigCard({
   );
 }
 
-function MigrationProgress({
+/**
+ * Cross-server transfer plan shown on the Configure step: scans the source and
+ * renders the total payload size + per-volume/image/bind breakdown, plus the
+ * transfer options (Direct vs Relay, Compress). This is the "how many GB +
+ * details before you commit" step. Same-server renders nothing (nothing moves).
+ */
+function TransferPlanSummary({
+  sourceId,
+  targetId,
+  serviceNames,
+  transferMode,
+  setTransferMode,
+  compress,
+  setCompress,
+  customPaths,
+  setCustomPaths,
+  conflictResolution,
+  setConflictResolution,
+  cache,
+  onReady,
+}: {
+  sourceId: string | null;
+  targetId: string | null;
+  serviceNames: string[];
+  transferMode: TransferModeSel;
+  setTransferMode: (v: TransferModeSel) => void;
+  compress: boolean;
+  setCompress: (v: boolean) => void;
+  customPaths: CustomPath[];
+  setCustomPaths: (v: CustomPath[]) => void;
+  /** serviceName → conflict resolution (override/clone/keep), chosen here. */
+  conflictResolution: Record<string, ConflictAction>;
+  setConflictResolution: (v: Record<string, ConflictAction>) => void;
+  /** Preview cache (by request key) so Back/Next doesn't re-hit the server. */
+  cache: { current: Map<string, MigrationPreview> };
+  /** Fires true once the plan is loaded AND every volume conflict is resolved
+   *  (both mandatory before Migrate); false while loading / on error / unresolved. */
+  onReady?: (ready: boolean) => void;
+}) {
+  const { t } = useI18n();
+  const m = t.migration;
+  const plan = m.wizard.plan as Record<string, string>;
+
+  // Re-size when the service set OR the custom paths change (each is a discrete
+  // add/remove action, so no keystroke spam).
+  const key = `${sourceId}|${targetId}|${[...serviceNames].sort().join(",")}|${customPaths
+    .map((c) => `${c.source}>${c.dest}`)
+    .join(",")}`;
+
+  const [preview, setPreview] = useState<MigrationPreview | null>(() => cache.current.get(key) ?? null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [newSrc, setNewSrc] = useState("");
+  const [newDst, setNewDst] = useState("");
+
+  useEffect(() => {
+    if (!sourceId || !targetId || serviceNames.length === 0) return;
+    const cached = cache.current.get(key);
+    if (cached) {
+      setPreview(cached);
+      setErr(null);
+      setLoading(false);
+      return; // readiness handled by the effect below (factors conflicts)
+    }
+    let live = true;
+    setLoading(true);
+    setErr(null);
+    onReady?.(false);
+    dockerMigrationApi
+      .preview({ sourceServerId: sourceId, targetServerId: targetId, serviceNames, customPaths })
+      .then((res) => {
+        if (!live) return;
+        cache.current.set(key, res.preview);
+        setPreview(res.preview);
+      })
+      .catch((e) => live && (setErr(getApiErrorMessage(e, m.scanFailed)), onReady?.(false)))
+      .finally(() => live && setLoading(false));
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  // Migrate is gated until the plan is loaded AND every conflicting service has
+  // a resolution — so nothing destructive starts with an unresolved conflict.
+  const conflicts = preview?.conflicts ?? [];
+  useEffect(() => {
+    if (!preview) return;
+    onReady?.(conflicts.every((c) => Boolean(conflictResolution[c.serviceName])));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preview, conflictResolution]);
+
+  const addPath = () => {
+    const source = newSrc.trim();
+    const dest = newDst.trim();
+    if (!source.startsWith("/") || !dest.startsWith("/")) return;
+    setCustomPaths([...customPaths, { source, dest }]);
+    setNewSrc("");
+    setNewDst("");
+  };
+
+  const p = preview?.plan;
+  const ssl = preview?.sslByDomain ?? [];
+  const canAdd = newSrc.trim().startsWith("/") && newDst.trim().startsWith("/");
+  const inputClass =
+    "min-w-0 flex-1 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-primary/25";
+  return (
+    <div className="space-y-5 rounded-2xl border border-border/50 bg-card p-5">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-sm font-semibold text-foreground">{plan.title}</span>
+        {loading && <Loader2 className="size-4 animate-spin text-muted-foreground" />}
+      </div>
+
+      {/* Target-volume conflicts — must be resolved (override/clone/keep) before
+          Migrate. Gates onReady above; nothing destructive starts unresolved. */}
+      {conflicts.length > 0 && (
+        <div className="space-y-3 rounded-xl border border-warning-border bg-warning-bg/40 p-3">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="size-4 shrink-0 text-warning" />
+            <span className="text-sm font-medium text-foreground">{plan.conflictTitle}</span>
+          </div>
+          <p className="text-xs leading-relaxed text-muted-foreground">{plan.conflictDesc}</p>
+          {conflicts.map((c) => {
+            const sel = conflictResolution[c.serviceName];
+            const opt = (action: ConflictAction, label: string, hint: string) => (
+              <button
+                key={action}
+                type="button"
+                onClick={() => setConflictResolution({ ...conflictResolution, [c.serviceName]: action })}
+                className={`flex-1 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
+                  sel === action ? "border-primary bg-primary/10" : "border-border hover:bg-muted/40"
+                }`}
+              >
+                <span className="block text-xs font-medium text-foreground">{label}</span>
+                <span className="block text-[10px] leading-tight text-muted-foreground">{hint}</span>
+              </button>
+            );
+            return (
+              <div key={c.serviceName} className="space-y-1.5">
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="font-medium text-foreground">{c.serviceName}</span>
+                  <span className="min-w-0 truncate text-muted-foreground" title={c.volumes.join(", ")}>
+                    {c.volumes.join(", ")}
+                  </span>
+                </div>
+                <div className="flex gap-2">
+                  {opt("override", plan.conflictOverride, plan.conflictOverrideHint)}
+                  {opt("clone", plan.conflictClone, plan.conflictCloneHint)}
+                  {opt("keep", plan.conflictKeep, plan.conflictKeepHint)}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {err ? (
+        <p className="text-sm text-danger">{err}</p>
+      ) : p ? (
+        <div className="space-y-2.5">
+          <p className="tabular-nums text-foreground">
+            <span className="text-lg font-semibold">
+              {p.partial ? "≥ " : ""}
+              {formatBytes(p.totalBytes)}
+            </span>
+            <span className="ml-1.5 text-sm font-normal text-muted-foreground">{plan.total}</span>
+          </p>
+          {p.items.length > 0 && (
+            <ul className="max-h-56 space-y-1.5 overflow-auto">
+              {p.items.map((it) => (
+                <li
+                  key={`${it.kind}:${it.ref}`}
+                  className="flex items-center justify-between gap-3 text-sm"
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] uppercase tracking-wide text-muted-foreground">
+                      {plan[it.kind] ?? it.kind}
+                    </span>
+                    {it.exists === false && <AlertCircle className="size-3.5 shrink-0 text-warning" />}
+                    <span className="truncate text-muted-foreground" title={it.ref}>
+                      {it.ref}
+                    </span>
+                  </span>
+                  <span className={`shrink-0 tabular-nums ${it.exists === false ? "text-warning" : "text-foreground"}`}>
+                    {it.exists === false
+                      ? plan.missing
+                      : it.bytes == null
+                        ? plan.unknown
+                        : formatBytes(it.bytes)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : (
+        !loading && <p className="text-sm text-muted-foreground">{plan.empty}</p>
+      )}
+
+      {/* SSL checks — which kept domains carry their cert vs re-issue via ACME. */}
+      {ssl.length > 0 && (
+        <div className="space-y-2 border-t border-border/50 pt-4">
+          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            {plan.sslTitle}
+          </span>
+          {ssl.map((s) => (
+            <div key={s.domain} className="flex items-center gap-2 text-sm">
+              {s.hasCert ? (
+                <Check className="size-4 shrink-0 text-success" />
+              ) : (
+                <span className="inline-block size-2 shrink-0 rounded-full bg-warning" />
+              )}
+              <span className="truncate text-foreground" title={s.domain}>
+                {s.domain}
+              </span>
+              <span className={s.hasCert ? "text-success" : "text-warning"}>
+                — {s.hasCert ? plan.sslReuse : plan.sslIssue}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Custom paths — arbitrary source → dest files/folders to move. */}
+      <div className="space-y-2 border-t border-border/50 pt-4">
+        <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          {plan.pathsTitle}
+        </span>
+        {customPaths.map((c, i) => (
+          <div key={`${c.source}>${c.dest}`} className="flex items-center gap-2 text-sm">
+            <span className="min-w-0 flex-1 truncate text-muted-foreground" title={`${c.source} → ${c.dest}`}>
+              {c.source} <span className="text-muted-foreground/50">→</span> {c.dest}
+            </span>
+            <button
+              type="button"
+              onClick={() => setCustomPaths(customPaths.filter((_, j) => j !== i))}
+              className="shrink-0 rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-muted hover:text-danger"
+              aria-label={plan.pathRemove}
+            >
+              ×
+            </button>
+          </div>
+        ))}
+        <div className="flex items-center gap-2">
+          <input
+            value={newSrc}
+            onChange={(e) => setNewSrc(e.target.value)}
+            placeholder={plan.pathSrcPlaceholder}
+            className={inputClass}
+          />
+          <span className="shrink-0 text-muted-foreground/50">→</span>
+          <input
+            value={newDst}
+            onChange={(e) => setNewDst(e.target.value)}
+            placeholder={plan.pathDestPlaceholder}
+            className={inputClass}
+          />
+          <button
+            type="button"
+            onClick={addPath}
+            disabled={!canAdd}
+            className="shrink-0 rounded-lg border border-border px-4 py-2 text-sm font-medium text-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {plan.pathAdd}
+          </button>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-3 border-t border-border/50 pt-4">
+        <label className="flex items-center gap-2 text-sm text-muted-foreground">
+          {m.wizard.transfer.label}
+          <select
+            value={transferMode}
+            onChange={(e) => setTransferMode(e.target.value as TransferModeSel)}
+            className="rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/25"
+          >
+            <option value="">{m.wizard.transfer.default}</option>
+            <option value="stream">{m.wizard.transfer.stream}</option>
+          </select>
+        </label>
+        <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
+          <input
+            type="checkbox"
+            checked={compress}
+            onChange={(e) => setCompress(e.target.checked)}
+            className="size-4 rounded border-border/60 bg-card text-primary focus:ring-2 focus:ring-primary/30"
+          />
+          {plan.compress}
+        </label>
+      </div>
+    </div>
+  );
+}
+
+export function MigrationProgress({
   run,
   error,
   queueName,
@@ -2866,6 +3454,7 @@ function MigrationProgress({
   completed,
   deployServices,
   hasDomains,
+  progress,
 }: {
   run: MigrationRun | null;
   error: string | null;
@@ -2877,6 +3466,8 @@ function MigrationProgress({
   /** True when at least one migrated service got a domain — suppresses the
    *  "not public yet, add a domain" hint (the stack is already reachable). */
   hasDomains?: boolean;
+  /** Live data-move progress (bytes streamed) during moving_data. */
+  progress?: TransferProgress | null;
 }) {
   const { t } = useI18n();
   const m = t.migration;
@@ -2983,10 +3574,48 @@ function MigrationProgress({
                 <span className={state === "pending" ? "text-muted-foreground" : "text-foreground"}>
                   {runText[p]}
                 </span>
+                {p === "moving_data" && state === "active" && progress && progress.movedBytes > 0 && (
+                  <span className="text-xs tabular-nums text-muted-foreground">
+                    {progress.totalBytes && progress.totalBytes > 0
+                      ? ` · ${Math.min(100, Math.round((progress.movedBytes / progress.totalBytes) * 100))}%`
+                      : ` · ${formatBytes(progress.movedBytes)}`}
+                  </span>
+                )}
               </li>
             );
           })}
         </ol>
+      )}
+
+      {/* Live transfer bar — the byte-level progress of the data move. */}
+      {status === "moving_data" && progress && progress.movedBytes > 0 && (
+        <div className="space-y-1.5 rounded-xl border border-border/50 bg-muted/20 p-3">
+          <div className="flex items-center justify-between gap-3 text-xs">
+            <span className="truncate text-muted-foreground">
+              {progress.kind === "image" ? m.run.movingImage : m.run.movingVolume}
+            </span>
+            <span className="shrink-0 tabular-nums text-foreground">
+              {progress.totalBytes && progress.totalBytes > 0
+                ? `${formatBytes(progress.movedBytes)} / ${formatBytes(progress.totalBytes)}`
+                : formatBytes(progress.movedBytes)}
+            </span>
+          </div>
+          {progress.totalBytes && progress.totalBytes > 0 ? (
+            <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+              <div
+                className="h-full rounded-full bg-primary transition-[width] duration-500 ease-out"
+                style={{
+                  width: `${Math.min(100, Math.round((progress.movedBytes / progress.totalBytes) * 100))}%`,
+                }}
+              />
+            </div>
+          ) : (
+            // Unknown total (relay path) → indeterminate sweep.
+            <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+              <div className="h-full w-1/3 animate-pulse rounded-full bg-primary/60" />
+            </div>
+          )}
+        </div>
       )}
 
       {run?.deploymentId &&
@@ -3005,7 +3634,7 @@ function MigrationProgress({
                           bad ? "bg-danger" : good ? "bg-success" : "bg-muted-foreground"
                         }`}
                       />
-                      <span className="font-mono text-foreground">{s.name}</span>
+                      <span className="text-foreground">{s.name}</span>
                       <span className="text-muted-foreground">{s.status}</span>
                       {s.error && <span className="min-w-0 flex-1 truncate text-danger">— {s.error}</span>}
                     </div>
@@ -3043,6 +3672,108 @@ function MigrationProgress({
           <span>{error}</span>
         </div>
       )}
+
+      {/* Durable orchestration log — the "what happened" for debugging, shown for
+          any run with output (live or after the fact). */}
+      {run?.logs && (
+        <div>
+          <p className="mb-1.5 text-xs font-medium text-muted-foreground">{m.tab.sessionLog}</p>
+          <div className="max-h-56 overflow-y-auto rounded-xl bg-[#0b0b0c] px-4 py-3 font-mono text-[12px] leading-relaxed text-neutral-200">
+            {run.logs.split("\n").map((line, i) => (
+              <div key={i} className="whitespace-pre-wrap break-all">
+                {line}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A `partial` run's resolution panel: the paths that didn't move, each with an
+ * optional new-source override input + a skip toggle, and a Resume button. On
+ * resume the run flips out of `partial` (→ moving_data) and the parent's poll
+ * takes over showing progress; when everything's resolved it finishes normally.
+ */
+function PartialResolution({ runId, pending }: { runId: string; pending: PendingItem[] }) {
+  const { t } = useI18n();
+  const tab = t.migration.tab;
+  const plan = t.migration.wizard.plan as Record<string, string>;
+  const [overrides, setOverrides] = useState<Record<string, string>>({});
+  const [skipped, setSkipped] = useState<Record<string, boolean>>({});
+  const [busy, setBusy] = useState(false);
+
+  if (pending.length === 0) return null;
+
+  const resume = async () => {
+    setBusy(true);
+    const cleanOverrides: Record<string, string> = {};
+    for (const [k, v] of Object.entries(overrides)) if (v.trim()) cleanOverrides[k] = v.trim();
+    const skip = Object.keys(skipped).filter((k) => skipped[k]);
+    try {
+      await dockerMigrationApi.resume(runId, { overrides: cleanOverrides, skip });
+      // Status flips server-side; the parent progress poll picks it up.
+    } catch {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4 rounded-2xl border border-border/50 bg-card p-5">
+      <div className="flex items-center gap-2">
+        <AlertCircle className="size-4 text-warning" />
+        <h4 className="text-sm font-semibold text-foreground">{tab.pendingTitle}</h4>
+      </div>
+      <ul className="space-y-3">
+        {pending.map((p) => {
+          const isSkip = Boolean(skipped[p.key]);
+          return (
+            <li
+              key={p.key}
+              className={`space-y-2 rounded-xl border border-border/50 p-3 ${isSkip ? "opacity-50" : ""}`}
+            >
+              <div className="flex items-center gap-2 text-sm">
+                <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] uppercase tracking-wide text-muted-foreground">
+                  {plan[p.kind] ?? p.kind}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-foreground" title={p.source}>
+                  {p.source}
+                </span>
+                <span className="shrink-0 text-[11px] text-warning">
+                  {p.reason === "missing" ? tab.pendingMissing : tab.pendingError}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  value={overrides[p.key] ?? ""}
+                  disabled={isSkip}
+                  onChange={(e) => setOverrides((o) => ({ ...o, [p.key]: e.target.value }))}
+                  placeholder={tab.overridePlaceholder}
+                  className="min-w-0 flex-1 rounded-lg border border-border bg-card px-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-primary/25 disabled:opacity-50"
+                />
+                <button
+                  type="button"
+                  onClick={() => setSkipped((s) => ({ ...s, [p.key]: !s[p.key] }))}
+                  className="shrink-0 rounded-lg border border-border px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted"
+                >
+                  {isSkip ? tab.undoSkip : tab.skip}
+                </button>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      <button
+        type="button"
+        onClick={() => void resume()}
+        disabled={busy}
+        className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-40"
+      >
+        {busy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+        {busy ? tab.resuming : tab.resume}
+      </button>
     </div>
   );
 }

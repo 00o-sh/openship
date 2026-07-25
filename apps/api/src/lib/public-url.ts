@@ -207,6 +207,15 @@ export function sharedWebhookUrl(): string {
 }
 
 /**
+ * The delivery URL for a generic per-project incoming webhook — where the
+ * external caller POSTs to fire the hook's action. Public URL when configured
+ * so the URL shown to the user is actually reachable.
+ */
+export function incomingWebhookUrl(id: string): string {
+  return `${resolveApiPublicUrl()}/api/webhooks/incoming/${id}`;
+}
+
+/**
  * The domain-strategy webhook callback URL: delivered directly to a project's
  * own verified domain via the `/_openship/hooks/` OpenResty location (proxied to
  * the loopback API). Used when a project sets an explicit `webhookDomain`.

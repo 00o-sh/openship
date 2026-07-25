@@ -150,6 +150,7 @@
       "popular": "Applications populaires",
       "alsoDeploy": "Vous pouvez aussi déployer",
       "browseAll": "Parcourir toutes les applications",
+      "moreApps": "+{count} de plus",
       "catalogTitle": "Installer une application",
       "catalogDescription": "Services gérés en un clic. Choisissez-en une pour l'installer comme application.",
       "catalogSearchPlaceholder": "Rechercher des applications…",

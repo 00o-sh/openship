@@ -129,6 +129,11 @@
     "repoCountSingular": "مستودع واحد",
     "repoCountPlural": "{count} مستودع",
     "matching": "المطابقة لـ \"{query}\"",
+    "pagination": {
+      "previous": "السابق",
+      "next": "التالي",
+      "pageOf": "صفحة {page} من {total}"
+    },
     "time": {
       "justNow": "الآن",
       "minutesAgo": "منذ {n} دقيقة",

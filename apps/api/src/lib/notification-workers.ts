@@ -268,10 +268,14 @@ async function sendDiscord(
   const webhookUrl = decrypt(config.webhookUrl);
 
   const { title, body } = renderMessage(delivery);
+  // Guard the embed timestamp: a missing/invalid createdAt (e.g. a synthetic test
+  // delivery) makes `new Date(...).toISOString()` throw "Invalid time value" — the
+  // reported Discord "invalid time" error. Fall back to now.
+  const at = delivery.createdAt ? new Date(delivery.createdAt) : new Date();
   const discordPayload = buildDiscordMessage({
     title,
     body,
-    timestamp: new Date(delivery.createdAt).toISOString(),
+    timestamp: (Number.isNaN(at.getTime()) ? new Date() : at).toISOString(),
   });
 
   const controller = new AbortController();
@@ -405,6 +409,7 @@ export async function sendTestToChannel(channel: NotificationChannel): Promise<v
   const testDelivery = {
     id: "test",
     category: "test",
+    createdAt: new Date(),
     payload: {
       message: "Openship test notification — this channel is configured correctly.",
     },

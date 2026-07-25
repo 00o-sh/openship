@@ -17,7 +17,7 @@ import {
   ConflictError,
   type AppConfigField,
 } from "@repo/core";
-import { getRuntimeCatalog, getRuntimeTemplate } from "./catalog-source";
+import { getRuntimeCatalog, getTemplateForOrg, listOrgCustomApps } from "./catalog-source";
 import { repos } from "@repo/db";
 import type { RequestContext } from "../../lib/request-context";
 import { createProject } from "../projects/project-crud.service";
@@ -57,8 +57,9 @@ function signHs256Jwt(secret: string, role: string): string {
  * returned as form inputs — `generate:"secret"` fields are filled server-side and
  * never surfaced.
  */
-export function getAppCatalog() {
-  return getRuntimeCatalog().map((t) => ({
+export async function getAppCatalog(ctx: RequestContext) {
+  const custom = await listOrgCustomApps(ctx.organizationId);
+  return [...getRuntimeCatalog(), ...custom].map((t) => ({
     id: t.id,
     name: t.name,
     description: t.description,
@@ -69,8 +70,16 @@ export function getAppCatalog() {
     flowHref: t.flowHref,
     // How the installed app is managed (schema settings / custom href / none).
     management: getAppManagement(t),
+    // Verified trust mark (official open-source image + reviewed pipeline).
+    verified: !!t.verified,
+    // A per-org user-uploaded app — always unverified; dashboard shows the warning.
+    custom: !!t.custom,
     // Not installable this version → dashboard dims it + blocks the click.
     comingSoon: !t.available,
+    // Needs a newer Openship than this instance → dashboard shows a guided
+    // "Requires Openship ≥ X" state; install is refused server-side too.
+    requiresUpdate: t.requiresUpdate,
+    updateAvailable: t.updateAvailable,
     // Exposable endpoints (http/tcp) — parity with the in-package template the
     // wizard reads directly; lets API consumers see what an install exposes.
     endpoints: getAppEndpoints(t),
@@ -102,8 +111,20 @@ export async function installApp(
   ctx: RequestContext,
   input: InstallAppInput,
 ): Promise<InstallAppResult> {
-  const template = getRuntimeTemplate(input.templateId);
+  const template = await getTemplateForOrg(ctx.organizationId, input.templateId);
   if (!template) throw new Error("unknown-app-template");
+
+  // Version gate: an app needing a newer Openship isn't installable here. Refuse
+  // with a guided message (mirrors the dashboard's "Requires Openship ≥ X" card)
+  // so a direct API call can't bypass it.
+  if (template.requiresUpdate) {
+    const v = template.requiresUpdate.minVersion;
+    throw new Error(
+      v
+        ? `This app requires Openship ${v} or newer. Update your instance to install it.`
+        : `This app requires a newer version of Openship. Update your instance to install it.`,
+    );
+  }
 
   // Server-side gate: a "coming soon" app is dimmed in the UI, but also refuse
   // it here so a direct API call can't install a not-yet-enabled app.
@@ -203,6 +224,15 @@ export async function installApp(
     filesByService.set(f.service, list);
   }
 
+  // `secretEnv` declares which of a service's env keys are secrets — stored
+  // encrypted, never written as plaintext compose env. Wired here (the field was
+  // previously inert): a listed key sourced from `environment` is re-routed into
+  // the encrypted vars, and a configField whose key is listed is forced secret.
+  const secretKeysByService = new Map<string, ReadonlySet<string>>(
+    (template.services ?? []).map((s) => [s.name, new Set(s.secretEnv ?? [])] as const),
+  );
+  const varsByService = new Map<string, { key: string; value: string; isSecret: boolean }[]>();
+
   // Seed the compose service rows.
   for (const svc of template.services ?? []) {
     // Multi-port apps (e.g. Convex: 3210 API + 3211 HTTP actions) declare one
@@ -226,14 +256,27 @@ export async function installApp(
           })
         : undefined;
 
+    // Split env: keys listed in this service's `secretEnv` go to the encrypted
+    // vars path below; the rest stay as plaintext compose env.
+    const svcSecretKeys = secretKeysByService.get(svc.name) ?? new Set<string>();
+    const plainEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries(svc.environment ?? {})) {
+      const val = inlineConfig(v);
+      if (svcSecretKeys.has(k)) {
+        const list = varsByService.get(svc.name) ?? [];
+        list.push({ key: k, value: val, isSecret: true });
+        varsByService.set(svc.name, list);
+      } else {
+        plainEnv[k] = val;
+      }
+    }
+
     await createService(ctx, project.id, {
       name: svc.name,
       image: svc.image,
       ports: svc.ports ? [...svc.ports] : [],
       dependsOn: svc.dependsOn ? [...svc.dependsOn] : [],
-      environment: Object.fromEntries(
-        Object.entries(svc.environment ?? {}).map(([k, v]) => [k, inlineConfig(v)]),
-      ),
+      environment: plainEnv,
       volumes: svc.volumes ? [...svc.volumes] : [],
       command: svc.command,
       restart: svc.restart,
@@ -250,13 +293,17 @@ export async function installApp(
     });
   }
 
-  // Write config/secret env per service (values encrypted when `secret`).
-  const varsByService = new Map<string, { key: string; value: string; isSecret: boolean }[]>();
+  // Write config/secret env per service. A value is encrypted when the field is
+  // `secret` OR its key is listed in the service's `secretEnv`.
   for (const field of template.configFields ?? []) {
     const value = resolved.get(field.key) ?? "";
     if (!value) continue;
     const list = varsByService.get(field.service) ?? [];
-    list.push({ key: field.key, value, isSecret: !!field.secret });
+    list.push({
+      key: field.key,
+      value,
+      isSecret: !!field.secret || !!secretKeysByService.get(field.service)?.has(field.key),
+    });
     varsByService.set(field.service, list);
   }
   if (varsByService.size > 0) {

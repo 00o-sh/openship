@@ -14,7 +14,8 @@
  * function ever sees a token.
  *
  * Token priority (single source of truth — see github.token.ts):
- *   - purpose: "local"  → project > user-pat > gh CLI > App > OAuth
+ *   - purpose: "local"  → gh CLI > App > project > user-pat > OAuth
+ *     (auto-resolved credentials first; gh is opt-in-gated for multi-user)
  *   - purpose: "remote" → project > user-pat > App > REFUSE (no gh CLI)
  */
 

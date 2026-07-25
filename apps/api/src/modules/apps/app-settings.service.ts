@@ -18,8 +18,10 @@ import {
   ValidationError,
   type AppManagement,
   type AppSettingGroup,
+  type AppConnectionGuide,
+  type LocalizedString,
 } from "@repo/core";
-import { getRuntimeTemplate } from "./catalog-source";
+import { getTemplateForOrg } from "./catalog-source";
 import { repos, type Project, type Service } from "@repo/db";
 import type { RequestContext } from "../../lib/request-context";
 import { assertResourceInOrg } from "../../lib/controller-helpers";
@@ -64,7 +66,9 @@ export async function getAppProjectSettings(
   projectId: string,
 ): Promise<AppSettingsView> {
   const project = await loadAppProject(ctx, projectId);
-  const template = project.appTemplateId ? getRuntimeTemplate(project.appTemplateId) : undefined;
+  const template = project.appTemplateId
+    ? await getTemplateForOrg(project.organizationId, project.appTemplateId)
+    : undefined;
   const groups = template ? [...getAppSettings(template)] : [];
   const management = template ? getAppManagement(template) : null;
 
@@ -98,7 +102,9 @@ export async function updateAppProjectSettings(
   changes: AppSettingChange[],
 ): Promise<{ count: number; requiresRedeploy: boolean }> {
   const project = await loadAppProject(ctx, projectId);
-  const template = project.appTemplateId ? getRuntimeTemplate(project.appTemplateId) : undefined;
+  const template = project.appTemplateId
+    ? await getTemplateForOrg(project.organizationId, project.appTemplateId)
+    : undefined;
   if (!template) throw new ValidationError("This app has no configurable settings.");
 
   const fields = flattenSettingFields(getAppSettings(template));
@@ -114,10 +120,15 @@ export async function updateAppProjectSettings(
     value: typeof c.value === "string" ? c.value : c.value == null ? "" : String(c.value),
   }));
 
-  // Validate everything (+ reject unknown keys) before touching storage.
+  // Validate everything (+ reject unknown keys) before touching storage. Mirror
+  // the install-wizard `required` gate for the explicit-empty case (a secret's
+  // blank means "leave unchanged", so it's exempt).
   for (const c of normalized) {
     const field = fieldOf(c.service, c.key);
     if (!field) throw new ValidationError(`Unknown setting: ${c.service}.${c.key}`);
+    if (field.required && !field.secret && c.value === "") {
+      throw new ValidationError(`${field.label} is required.`);
+    }
     const err = validateSetting(field, c.value);
     if (err) throw new ValidationError(err);
   }
@@ -170,14 +181,30 @@ export interface AppConnectionOutput {
   /** Render masked with a reveal toggle. The real value is still sent (this is a
    *  deliberate, template-curated credentials surface for an authorized member). */
   secret: boolean;
-  /** Resolved value; "" when it can't be resolved yet (renders as "—"). */
+  /** Resolved PRIMARY value; "" when it can't be resolved yet (renders as "—"). */
   value: string;
+  /** Catalog-recommended target env-var name for the "Use in a project" handover
+   *  (so the client doesn't guess). Undefined → the client falls back. */
+  envKey?: string;
+  /** Part of the recommended one-click bundle — pre-checked in the handover. */
+  recommended?: boolean;
+  /** Label for the primary value in the switch (default "Default"); with `variants`. */
+  sourceLabel?: LocalizedString;
+  /** Resolved alternative forms of the value — the card shows a switch over
+   *  `[primary, …variants]`. Omitted when the output declares none. */
+  variants?: { id: string; label: LocalizedString; value: string }[];
+  /** Layout hint: "half" pairs with the next half-width output on one line. */
+  width?: "full" | "half";
 }
 
 export interface AppConnectionView {
   title?: string;
   description?: string;
   outputs: AppConnectionOutput[];
+  /** Opinionated handover guidance (localizable) — see AppConnectionGuide. Copy
+   *  fields are passed through as-authored (string OR locale-map); the dashboard
+   *  resolves them against the active locale via `resolveLocalized`. */
+  guide?: AppConnectionGuide;
 }
 
 /**
@@ -222,7 +249,9 @@ export async function getAppConnectionView(
   projectId: string,
 ): Promise<AppConnectionView> {
   const project = await loadAppProject(ctx, projectId);
-  const template = project.appTemplateId ? getRuntimeTemplate(project.appTemplateId) : undefined;
+  const template = project.appTemplateId
+    ? await getTemplateForOrg(project.organizationId, project.appTemplateId)
+    : undefined;
   const connection = template ? getAppConnection(template) : null;
   if (!connection) return { outputs: [] };
 
@@ -232,13 +261,17 @@ export async function getAppConnectionView(
   // Fetch each referenced service's env once, decrypting every value (all rows
   // are encrypt()-ed at rest regardless of the secret flag).
   const needed = new Set<string>();
-  for (const o of connection.outputs) {
-    const m = /^env:([^:]+):/.exec(o.source);
+  const scanSource = (source: string) => {
+    const m = /^env:([^:]+):/.exec(source);
     if (m) needed.add(m[1]);
     // template: sources may reference `{{env:<svc>:<KEY>}}` too — fetch those.
-    if (o.source.startsWith("template:")) {
-      for (const mm of o.source.matchAll(/\{\{\s*env:([^:}]+):[^}]+\}\}/g)) needed.add(mm[1]);
+    if (source.startsWith("template:")) {
+      for (const mm of source.matchAll(/\{\{\s*env:([^:}]+):[^}]+\}\}/g)) needed.add(mm[1]);
     }
+  };
+  for (const o of connection.outputs) {
+    scanSource(o.source);
+    for (const v of o.variants ?? []) scanSource(v.source);
   }
   const envByService = new Map<string, Record<string, string>>();
   for (const name of needed) {
@@ -260,22 +293,22 @@ export async function getAppConnectionView(
   }
 
   // Server host for the port-only URL fallback — resolved lazily (only if a
-  // publicUrl output has no assigned domain).
+  // publicUrl source has no assigned domain), and shared across every source in
+  // this view (primary + variants) so it's fetched at most once.
   let serverHost: string | null | undefined;
 
-  const outputs: AppConnectionOutput[] = [];
-  for (const o of connection.outputs) {
-    let value = "";
-    const em = /^env:([^:]+):(.+)$/.exec(o.source);
-    const pm = /^publicUrl:([^:]+)(?::(\d+))?$/.exec(o.source);
-    if (em) {
-      value = envByService.get(em[1])?.[em[2]] ?? "";
-    } else if (o.source.startsWith("template:")) {
+  /** Resolve ONE source string (`env:…` / `template:…` / `publicUrl:…`) → value,
+   *  "" when a piece can't resolve. Used for the primary source AND each variant. */
+  const resolveSource = async (source: string): Promise<string> => {
+    const em = /^env:([^:]+):(.+)$/.exec(source);
+    const pm = /^publicUrl:([^:]+)(?::(\d+))?$/.exec(source);
+    if (em) return envByService.get(em[1])?.[em[2]] ?? "";
+    if (source.startsWith("template:")) {
       // A composed string (e.g. a `postgresql://…` connection URL): substitute
       // `{{env:<svc>:<KEY>}}` and `{{host}}` (the port-only reachable host).
       // Blank the whole value if any placeholder can't resolve — a URL with a
       // missing password/host is worse than "—".
-      let tpl = o.source.slice("template:".length);
+      let tpl = source.slice("template:".length);
       let ok = true;
       tpl = tpl.replace(/\{\{\s*env:([^:}]+):([^}]+?)\s*\}\}/g, (_m, svc, key) => {
         const v = envByService.get(svc)?.[key] ?? "";
@@ -287,25 +320,54 @@ export async function getAppConnectionView(
         if (!serverHost) ok = false;
         tpl = tpl.replaceAll("{{host}}", serverHost ?? "");
       }
-      value = ok ? tpl : "";
-    } else if (pm) {
+      return ok ? tpl : "";
+    }
+    if (pm) {
       const svc = byName.get(pm[1]);
       if (svc) {
         const port = pm[2] ? Number(pm[2]) : undefined;
         const urls = resolveServiceEndpointUrls(project, svc);
         const domainUrl = port !== undefined ? urls.find((u) => u.port === port)?.url : urls[0]?.url;
-        if (domainUrl) {
-          value = domainUrl;
-        } else {
-          if (serverHost === undefined) serverHost = await resolvePortOnlyHost(project);
-          const hostPorts = servicePublishedHostPorts(svc);
-          const chosen = port !== undefined && hostPorts.includes(port) ? port : hostPorts[0];
-          if (serverHost && chosen !== undefined) value = `http://${serverHost}:${chosen}`;
-        }
+        if (domainUrl) return domainUrl;
+        if (serverHost === undefined) serverHost = await resolvePortOnlyHost(project);
+        const hostPorts = servicePublishedHostPorts(svc);
+        const chosen = port !== undefined && hostPorts.includes(port) ? port : hostPorts[0];
+        if (serverHost && chosen !== undefined) return `http://${serverHost}:${chosen}`;
       }
     }
-    outputs.push({ id: o.id, label: o.label, help: o.help, secret: !!o.secret, value });
+    return "";
+  };
+
+  const outputs: AppConnectionOutput[] = [];
+  for (const o of connection.outputs) {
+    const value = await resolveSource(o.source);
+    // Resolve variants sequentially so they share the lazily-fetched serverHost
+    // (concurrent resolution would race on it — harmless but wasteful).
+    let variants: { id: string; label: LocalizedString; value: string }[] | undefined;
+    if (o.variants && o.variants.length > 0) {
+      variants = [];
+      for (const v of o.variants) {
+        variants.push({ id: v.id, label: v.label, value: await resolveSource(v.source) });
+      }
+    }
+    outputs.push({
+      id: o.id,
+      label: o.label,
+      help: o.help,
+      secret: !!o.secret,
+      value,
+      envKey: o.envKey,
+      recommended: o.recommended,
+      sourceLabel: o.sourceLabel,
+      variants,
+      width: o.width,
+    });
   }
 
-  return { title: connection.title, description: connection.description, outputs };
+  return {
+    title: connection.title,
+    description: connection.description,
+    outputs,
+    guide: connection.guide,
+  };
 }

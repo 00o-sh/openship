@@ -472,7 +472,8 @@
       "description": "Elige qué eventos van a qué canal. Cada celda es una suscripción.",
       "empty": "Añade primero un canal para suscribirte a eventos.",
       "eventHeader": "Evento",
-      "cellAria": "{category} vía {channel}"
+      "cellAria": "{category} vía {channel}",
+      "notifyMe": "Notificarme"
     },
     "orgDefaults": {
       "title": "Valores predeterminados de la organización",

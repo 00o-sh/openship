@@ -1,5 +1,6 @@
 {
   "available": true,
+  "verified": true,
   "id": "supabase",
   "name": "Supabase",
   "description": "Full self-hosted Supabase — Postgres, Auth, REST, Realtime, Storage, and Studio behind one API gateway.",
@@ -371,11 +372,17 @@
   "connection": {
     "title": "Connect to Supabase",
     "description": "Point the Supabase client SDKs or Studio at this deployment. The service role key bypasses row-level security — keep it secret.",
+    "guide": {
+      "intro": "Your project gets the Supabase database connection, ready to use.",
+      "useHint": "Read `process.env.DATABASE_URL` in your code — it's set the next time your project deploys. Nothing else to do.",
+      "defaultMode": "internal"
+    },
     "outputs": [
       {
         "id": "url",
         "label": "Project URL",
-        "source": "publicUrl:kong"
+        "source": "publicUrl:kong",
+        "envKey": "SUPABASE_URL"
       },
       {
         "id": "studio",
@@ -397,13 +404,15 @@
       {
         "id": "anonKey",
         "label": "Anon (public) key",
-        "source": "env:kong:ANON_KEY"
+        "source": "env:kong:ANON_KEY",
+        "envKey": "SUPABASE_ANON_KEY"
       },
       {
         "id": "serviceKey",
         "label": "Service role key",
         "source": "env:kong:SERVICE_ROLE_KEY",
         "secret": true,
+        "envKey": "SUPABASE_SERVICE_ROLE_KEY",
         "help": "Full-access key — never expose it to browsers."
       },
       {
@@ -411,13 +420,16 @@
         "label": "Database URL",
         "source": "template:postgresql://postgres:{{env:db:POSTGRES_PASSWORD}}@{{host}}:5432/postgres",
         "secret": true,
+        "envKey": "DATABASE_URL",
+        "recommended": true,
         "help": "Direct Postgres connection (superuser) for psql / ORMs. Published on port 5432."
       },
       {
         "id": "dbPassword",
         "label": "Database password",
         "source": "env:db:POSTGRES_PASSWORD",
-        "secret": true
+        "secret": true,
+        "envKey": "POSTGRES_PASSWORD"
       }
     ]
   },

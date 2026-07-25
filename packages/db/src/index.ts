@@ -12,6 +12,11 @@ export {
 // ─── Schema (table definitions) ──────────────────────────────────────────────
 export * as schema from "./schema";
 export type { ComposeServiceSpec, ServicePublicEndpoint } from "./schema/service";
+export type {
+  IncomingWebhookActionType,
+  IncomingWebhookActionConfig,
+  IncomingWebhookAuthMode,
+} from "./schema/incoming-webhook";
 
 // ─── Dump / restore (team-mode migration + project transfer) ─────────────────
 export {
@@ -144,6 +149,9 @@ export {
   createUpdateStatusRepo,
   type UpdateStatus,
   type NewUpdateStatus,
+  type IncomingWebhook,
+  type NewIncomingWebhook,
+  type WebhookDelivery,
 } from "./repos";
 
 // ─── Drizzle operators (re-exported for convenience) ─────────────────────────

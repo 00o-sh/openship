@@ -52,7 +52,7 @@ import {
   executeCleanup,
   type CleanupManifest,
 } from "../projects/project-cleanup.service";
-import { runPreflightChecks, type PreflightResult } from "./preflight";
+import { runPreflightChecks, PREFLIGHT_ERROR_CODES, type PreflightResult } from "./preflight";
 import {
   isMultiServiceProject,
   listProjectComposeServices,
@@ -77,10 +77,21 @@ function throwPreflightFailure(preflight: PreflightResult): never {
       failedChecks.map((check) => check.code).filter((code): code is string => Boolean(code)),
     ),
   );
+  // A github-credential failure is ACTIONABLE — the dashboard maps these codes
+  // to the DeployCredentialModal (install App / add token / connect server /
+  // build local). Surface one even when other checks also failed, so the user
+  // gets the modal instead of a generic "checks failed" toast.
+  const CREDENTIAL_CODES: string[] = [
+    PREFLIGHT_ERROR_CODES.GITHUB_CLI_REMOTE_BUILD_REJECTED,
+    PREFLIGHT_ERROR_CODES.GITHUB_REMOTE_TOKEN_REQUIRED,
+    PREFLIGHT_ERROR_CODES.GITHUB_APP_INSTALLATION_REQUIRED,
+  ];
+  const credentialCode = CREDENTIAL_CODES.find((c) => codes.includes(c));
   const errorCode =
-    codes.length === 1 && failedChecks.every((check) => check.code === codes[0])
+    credentialCode ??
+    (codes.length === 1 && failedChecks.every((check) => check.code === codes[0])
       ? codes[0]
-      : "PRE_DEPLOY_CHECKS_FAILED";
+      : "PRE_DEPLOY_CHECKS_FAILED");
 
   throw new AppError(`Pre-deploy checks failed: ${failures}`, 403, errorCode);
 }

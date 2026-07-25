@@ -325,7 +325,12 @@
       "applyingTitle": "Uygulanıyor",
       "applyFailed": "Ortam değişkenleri çalışan servise uygulanamadı",
       "applyFailedTitle": "Uygulama başarısız oldu"
-    }
+    },
+    "linkedBadge": "Bağlı",
+    "linkedManaged": "{app} üzerinden",
+    "linkedTitle": "Bağlı entegrasyon",
+    "linkedBody": "Bu değer {app} bağlantısından gelir. Bunu o uygulamadan yönetin — buradaki değişiklikler kalıcı olmaz.",
+    "unlink": "Bağlantıyı kaldır"
   },
   "gitInfo": {
     "repository": "Depo",

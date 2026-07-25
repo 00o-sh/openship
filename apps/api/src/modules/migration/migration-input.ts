@@ -47,6 +47,81 @@ export function sanitizeServiceEnv(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/** Keep only well-formed {source, dest} custom-path entries: both must be
+ *  absolute paths (start with "/"), no "..", trimmed. Caps at 50 to bound the
+ *  move. Returns undefined when nothing valid. */
+export function sanitizeCustomPaths(
+  input: unknown,
+): Array<{ source: string; dest: string }> | undefined {
+  if (!Array.isArray(input)) return undefined;
+  const out: Array<{ source: string; dest: string }> = [];
+  for (const entry of input) {
+    if (!entry || typeof entry !== "object") continue;
+    const e = entry as { source?: unknown; dest?: unknown };
+    const source = typeof e.source === "string" ? e.source.trim() : "";
+    const dest = typeof e.dest === "string" ? e.dest.trim() : "";
+    if (!source.startsWith("/") || !dest.startsWith("/")) continue;
+    if (source.includes("..") || dest.includes("..")) continue;
+    out.push({ source, dest });
+    if (out.length >= 50) break;
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/** serviceName → conflict resolution ∈ override|clone|keep. Caps at 100. */
+export function sanitizeConflictResolution(
+  input: Record<string, unknown> | undefined,
+): Record<string, "override" | "clone" | "keep"> | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const out: Record<string, "override" | "clone" | "keep"> = {};
+  for (const [name, v] of Object.entries(input)) {
+    if (v === "override" || v === "clone" || v === "keep") out[name] = v;
+    if (Object.keys(out).length >= 100) break;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** Keep only well-formed per-service route specs (serviceName → domain/route),
+ *  published server-side post-verify. Caps at 100 services. */
+export function sanitizeRoutes(
+  input: Record<string, unknown> | undefined,
+):
+  | Record<
+      string,
+      { exposedPort?: string; domainType: "free" | "custom"; domain?: string; customDomain?: string }
+    >
+  | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const out: Record<
+    string,
+    { exposedPort?: string; domainType: "free" | "custom"; domain?: string; customDomain?: string }
+  > = {};
+  for (const [name, raw] of Object.entries(input)) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const r = raw as {
+      exposedPort?: unknown;
+      domainType?: unknown;
+      domain?: unknown;
+      customDomain?: unknown;
+    };
+    const domainType = r.domainType === "custom" ? "custom" : "free";
+    const domain = typeof r.domain === "string" ? r.domain.trim().toLowerCase() : undefined;
+    const customDomain =
+      typeof r.customDomain === "string" ? r.customDomain.trim().toLowerCase() : undefined;
+    const value = domainType === "custom" ? customDomain : domain;
+    if (!value) continue; // nothing to publish without a domain
+    out[name] = {
+      domainType,
+      ...(domainType === "custom" ? { customDomain: value } : { domain: value }),
+      ...(r.exposedPort != null && String(r.exposedPort).trim()
+        ? { exposedPort: String(r.exposedPort).trim() }
+        : {}),
+    };
+    if (Object.keys(out).length >= 100) break;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** Validate the optional project-level git source (v1: GitHub only). */
 export function sanitizeGitSource(
   input: unknown,

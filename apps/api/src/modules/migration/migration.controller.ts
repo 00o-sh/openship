@@ -25,6 +25,9 @@ import {
   sanitizeSubpaths,
   sanitizeGitSource,
   sanitizeServiceEnv,
+  sanitizeCustomPaths,
+  sanitizeRoutes,
+  sanitizeConflictResolution,
 } from "./migration-input";
 import {
   getTransferPrefs,
@@ -252,6 +255,7 @@ export async function previewMigration(c: Context) {
     sourceServerId?: string;
     targetServerId?: string;
     serviceNames?: string[];
+    customPaths?: unknown;
   }>();
   const sourceServerId = body.sourceServerId;
   const targetServerId = body.targetServerId || body.sourceServerId;
@@ -271,6 +275,7 @@ export async function previewMigration(c: Context) {
       targetServerId,
       serviceNames: body.serviceNames,
       organizationId: guard.organizationId,
+      customPaths: sanitizeCustomPaths(body.customPaths),
     });
     return c.json({ success: true, preview });
   } catch (err) {
@@ -299,6 +304,9 @@ export async function startMigration(c: Context) {
     gitSource?: unknown;
     serviceSubpaths?: Record<string, unknown>;
     serviceEnv?: Record<string, unknown>;
+    customPaths?: unknown;
+    routesByServiceName?: Record<string, unknown>;
+    conflictResolution?: Record<string, unknown>;
     flatDocker?: boolean;
   }>();
   const sourceServerId = body.sourceServerId;
@@ -339,6 +347,9 @@ export async function startMigration(c: Context) {
       gitSource: sanitizeGitSource(body.gitSource),
       serviceSubpaths: sanitizeSubpaths(body.serviceSubpaths),
       serviceEnv: sanitizeServiceEnv(body.serviceEnv),
+      customPaths: sanitizeCustomPaths(body.customPaths),
+      routesByServiceName: sanitizeRoutes(body.routesByServiceName),
+      conflictResolution: sanitizeConflictResolution(body.conflictResolution),
       flatDocker: body.flatDocker === true,
     });
     return c.json({ success: true, ...result });
@@ -354,7 +365,35 @@ export async function getMigration(c: Context) {
   if (!run || run.organizationId !== ctx.organizationId) {
     return c.json({ error: "Migration not found" }, 404);
   }
-  return c.json({ success: true, run });
+  // Prefer the in-memory log tail while the run is live (fresher than the
+  // throttled DB copy); fall back to the persisted logs once terminal.
+  const liveLogs = migrationOrchestrator.getLiveLogs(run.id);
+  return c.json({
+    success: true,
+    run: liveLogs ? { ...run, logs: liveLogs } : run,
+    progress: migrationOrchestrator.getProgress(run.id),
+  });
+}
+
+/**
+ * GET /migration/runs?serverId=…
+ *
+ * Recent migration runs touching this server (source or target), newest first
+ * — the server detail "Migrations" tab lists these like a project's deployments.
+ */
+export async function getMigrationRuns(c: Context) {
+  const ctx = getRequestContext(c);
+  const serverId = c.req.query("serverId");
+  if (!serverId) return c.json({ error: "serverId is required" }, 400);
+  const runs = await repos.dockerMigrationRun.listForServer(ctx.organizationId, serverId, {
+    limit: 50,
+  });
+  // Summary rows only: the 256 KiB session log, the input snapshot, and the
+  // cutover token belong to the per-run detail fetch, not a 50-row list.
+  const lite = runs.map(
+    ({ logs: _logs, confirmationToken: _t, inputSnapshot: _in, ...rest }) => rest,
+  );
+  return c.json({ success: true, runs: lite });
 }
 
 /** GET /migration/migrations/:id/stream — SSE progress. */
@@ -405,4 +444,80 @@ export async function confirmCutover(c: Context) {
   );
   if (!result.ok) return c.json({ error: result.error }, result.status as 400);
   return c.json({ success: true });
+}
+
+/**
+ * POST /migration/migrations/:id/cancel
+ *
+ * Abort an in-flight migration: flags the run + kills the transfer on both
+ * boxes; the pipeline rolls back (source restarted, target torn down). Not
+ * valid once parked at awaiting_cutover (use cutover) or terminal.
+ */
+export async function cancelMigration(c: Context) {
+  const ctx = getRequestContext(c);
+  const result = await migrationOrchestrator.cancel(param(c, "id"), ctx.organizationId);
+  if (!result.ok) return c.json({ error: result.error }, result.status as 400);
+  return c.json({ success: true });
+}
+
+/**
+ * POST /migration/migrations/:id/resume  { overrides?, skip? }
+ *
+ * Resume a `partial` run: re-transfer the pending paths (per-item source
+ * overrides), skip the chosen ones, then finish to cutover when nothing remains.
+ */
+export async function resumeMigration(c: Context) {
+  const ctx = getRequestContext(c);
+  const body = await c.req
+    .json<{ overrides?: Record<string, string>; skip?: string[] }>()
+    .catch(() => ({}) as { overrides?: Record<string, string>; skip?: string[] });
+  const overrides =
+    body.overrides && typeof body.overrides === "object" ? body.overrides : {};
+  const skip = Array.isArray(body.skip) ? body.skip.filter((s) => typeof s === "string") : [];
+  const result = await migrationOrchestrator.resume(ctx, param(c, "id"), ctx.organizationId, {
+    overrides,
+    skip,
+  });
+  if (!result.ok) return c.json({ error: result.error }, result.status as 400);
+  return c.json({ success: true });
+}
+
+/**
+ * DELETE /migration/migrations/:id
+ *
+ * Remove a migration run's record (history cleanup, e.g. a failed/rolled-back
+ * run). Only terminal runs — deleting an in-flight one would orphan the running
+ * pipeline. Deletes ONLY the run record: the adopted project + any moved data
+ * are untouched.
+ */
+export async function deleteMigration(c: Context) {
+  const ctx = getRequestContext(c);
+  const id = param(c, "id");
+  const run = await repos.dockerMigrationRun.findById(id);
+  if (!run || run.organizationId !== ctx.organizationId) {
+    return c.json({ error: "Migration not found" }, 404);
+  }
+  if (!TERMINAL_MIGRATION.includes(run.status)) {
+    return c.json({ error: "Cancel the migration before deleting its record." }, 409);
+  }
+  await repos.dockerMigrationRun.remove(id);
+  return c.json({ success: true });
+}
+
+/**
+ * GET /migration/active?serverId=…
+ *
+ * The in-flight migration involving this server (source or target), so a
+ * client that reloaded mid-migration can re-attach and resume polling. Returns
+ * the run + its confirmationToken (needed for the cutover step, never persisted
+ * client-side), or null.
+ */
+export async function getActiveMigration(c: Context) {
+  const ctx = getRequestContext(c);
+  const serverId = c.req.query("serverId");
+  if (!serverId) return c.json({ error: "serverId is required" }, 400);
+  const runs = await repos.dockerMigrationRun.findActiveForServer(serverId);
+  // Org-scope: a run for a server outside this org won't match (IDOR guard).
+  const run = runs.find((r) => r.organizationId === ctx.organizationId) ?? null;
+  return c.json({ success: true, run, confirmationToken: run?.confirmationToken ?? null });
 }

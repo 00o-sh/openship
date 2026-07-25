@@ -1,5 +1,6 @@
 {
   "available": true,
+  "verified": true,
   "id": "excalidraw",
   "name": "Excalidraw",
   "description": "Virtual whiteboard for sketches and diagrams. Stateless — drawings save in your browser.",

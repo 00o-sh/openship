@@ -109,16 +109,16 @@ function ChannelMultiSelect({
   };
 
   return (
-    <div ref={ref} className="relative">
+    <div ref={ref} className="relative flex justify-end">
       <button
         type="button"
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
-        className="flex min-w-[9.5rem] items-center justify-between gap-2 rounded-lg border border-border/50 bg-background px-2.5 py-1.5 text-sm text-foreground transition-colors hover:bg-muted/30 disabled:opacity-50"
+        className="inline-flex items-center gap-2 rounded-lg border border-border/50 bg-background px-2.5 py-1.5 text-sm text-foreground transition-colors hover:bg-muted/30 disabled:opacity-50"
       >
         <span className="flex items-center gap-1.5">
           <span className="flex -space-x-1">
-            {value.slice(0, 3).map((k) => (
+            {value.slice(0, 2).map((k) => (
               <span
                 key={k}
                 className="grid size-5 place-items-center rounded-full bg-muted ring-1 ring-background"
@@ -126,8 +126,13 @@ function ChannelMultiSelect({
                 <ChannelLogo kind={k} className="size-3" />
               </span>
             ))}
+            {value.length > 2 && (
+              <span className="grid size-5 place-items-center rounded-full bg-muted text-[9px] font-semibold text-muted-foreground ring-1 ring-background">
+                +{value.length - 2}
+              </span>
+            )}
           </span>
-          <span className="text-muted-foreground">
+          <span className="whitespace-nowrap text-muted-foreground">
             {interpolate(t.settings.notifications.orgDefaults.nChannels, { n: String(value.length) })}
           </span>
         </span>
@@ -247,19 +252,14 @@ export function NotificationsTab() {
   return (
     <div className="space-y-6">
       <ChannelsCard channels={channels} onChange={() => refresh({ silent: true })} />
-      <SubscriptionsCard
+      <EventNotificationsCard
         categories={categories}
         channels={channels}
         subscriptions={subscriptions}
+        defaults={defaults}
+        isAdmin={isAdmin}
         onChange={() => refresh({ silent: true })}
       />
-      {isAdmin && (
-        <OrgDefaultsCard
-          categories={categories}
-          defaults={defaults}
-          onChange={() => refresh({ silent: true })}
-        />
-      )}
     </div>
   );
 }
@@ -582,114 +582,21 @@ function NewChannelForm({
   );
 }
 
-/* ─── Subscriptions card ─────────────────────────────────────────── */
+/* ─── Event notifications card (org defaults + per-user opt-in, one list) ─── */
 
-function SubscriptionsCard({
+function EventNotificationsCard({
   categories,
   channels,
   subscriptions,
+  defaults,
+  isAdmin,
   onChange,
 }: {
   categories: NotificationCategory[];
   channels: NotificationChannel[];
   subscriptions: NotificationSubscription[];
-  onChange: () => Promise<void>;
-}) {
-  const { showToast } = useToast();
-  const { t } = useI18n();
-  const [busyKey, setBusyKey] = useState<string | null>(null);
-
-  // Look-up index: subscriptions[catId][channelId] → enabled?
-  const subIndex = useMemo(() => {
-    const m = new Map<string, boolean>();
-    for (const s of subscriptions) m.set(`${s.category}::${s.channelId}`, s.enabled);
-    return m;
-  }, [subscriptions]);
-
-  const toggle = async (category: string, channelId: string, enabled: boolean) => {
-    const key = `${category}::${channelId}`;
-    setBusyKey(key);
-    try {
-      await notificationsApi.upsertSubscription({ category, channelId, enabled });
-      await onChange();
-    } catch (err) {
-      showToast(getApiErrorMessage(err), "error", t.settings.common.toast.notifications);
-    } finally {
-      setBusyKey(null);
-    }
-  };
-
-  return (
-    <SettingsSection
-      icon={Bell}
-      title={t.settings.notifications.subscriptions.title}
-      description={t.settings.notifications.subscriptions.description}
-    >
-      {channels.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          {t.settings.notifications.subscriptions.empty}
-        </p>
-      ) : (
-        <div className="overflow-x-auto -mx-5">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-start text-xs uppercase tracking-wide text-muted-foreground">
-                <th className="px-5 py-2 font-medium">
-                  {t.settings.notifications.subscriptions.eventHeader}
-                </th>
-                {channels.map((ch) => (
-                  <th key={ch.id} className="px-3 py-2 font-medium text-center min-w-[100px]">
-                    {ch.label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {categories.map((cat) => (
-                <tr key={cat.id} className="border-t border-border/30">
-                  <td className="px-5 py-3 align-top">
-                    <p className="font-medium text-foreground">{cat.label}</p>
-                    <p className="text-xs text-muted-foreground mt-0.5">{cat.description}</p>
-                  </td>
-                  {channels.map((ch) => {
-                    const key = `${cat.id}::${ch.id}`;
-                    const enabled = subIndex.get(key) ?? false;
-                    const isBusy = busyKey === key;
-                    return (
-                      <td key={ch.id} className="px-3 py-3 text-center align-top">
-                        <input
-                          type="checkbox"
-                          disabled={isBusy}
-                          checked={enabled}
-                          onChange={(e) => toggle(cat.id, ch.id, e.target.checked)}
-                          className="size-4 rounded border-border/50 cursor-pointer accent-foreground"
-                          aria-label={interpolate(t.settings.notifications.subscriptions.cellAria, {
-                            category: cat.label,
-                            channel: ch.label,
-                          })}
-                        />
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </SettingsSection>
-  );
-}
-
-/* ─── Org defaults card (admin) ─────────────────────────────────── */
-
-function OrgDefaultsCard({
-  categories,
-  defaults,
-  onChange,
-}: {
-  categories: NotificationCategory[];
   defaults: NotificationDefault[];
+  isAdmin: boolean;
   onChange: () => Promise<void>;
 }) {
   const { showToast } = useToast();
@@ -702,7 +609,29 @@ function OrgDefaultsCard({
     return m;
   }, [defaults]);
 
-  const set = async (category: string, enabled: boolean, kinds: ChannelKind[]) => {
+  // Per-user "Notify me" resolves in two layers:
+  //   • enabledCats — categories the caller has an ENABLED subscription on
+  //     (any of their channels). Explicit opt-in.
+  //   • rowCats     — categories the caller has ANY subscription row for
+  //     (enabled or disabled). "Has made an explicit choice" — used to tell an
+  //     untouched default (checkbox follows the org/category default) apart
+  //     from a deliberate opt-out (a disabled row).
+  // The dispatcher mirrors this: default-enabled categories notify members who
+  // haven't touched them, so an important event (deploy failed, backup failed,
+  // job failed…) shows checked and actually delivers without a manual opt-in.
+  const enabledCats = useMemo(() => {
+    const s = new Set<string>();
+    for (const sub of subscriptions) if (sub.enabled) s.add(sub.category);
+    return s;
+  }, [subscriptions]);
+  const rowCats = useMemo(() => {
+    const s = new Set<string>();
+    for (const sub of subscriptions) s.add(sub.category);
+    return s;
+  }, [subscriptions]);
+
+  // Admin: the org default (channel kinds + on/off) applied when a member joins.
+  const setDefault = async (category: string, enabled: boolean, kinds: ChannelKind[]) => {
     setBusyCat(category);
     try {
       await notificationsApi.upsertDefault({
@@ -718,43 +647,114 @@ function OrgDefaultsCard({
     }
   };
 
+  // Per-user: one checkbox toggles the subscription across ALL the caller's
+  // channels (the backend model is per-channel, so we fan the write out).
+  const setNotifyMe = async (category: string, enabled: boolean) => {
+    setBusyCat(category);
+    try {
+      await Promise.all(
+        channels.map((ch) =>
+          notificationsApi.upsertSubscription({ category, channelId: ch.id, enabled }),
+        ),
+      );
+      await onChange();
+    } catch (err) {
+      showToast(getApiErrorMessage(err), "error", t.settings.common.toast.notifications);
+    } finally {
+      setBusyCat(null);
+    }
+  };
+
+  const noChannels = channels.length === 0;
+
   return (
     <SettingsSection
       icon={Bell}
-      title={t.settings.notifications.orgDefaults.title}
-      description={t.settings.notifications.orgDefaults.description}
+      title={t.settings.notifications.subscriptions.title}
+      description={t.settings.notifications.subscriptions.description}
     >
-      <div className="space-y-2">
-        {categories.map((cat) => {
-          const def = defIndex.get(cat.id);
-          const enabled = def?.defaultEnabled ?? cat.defaultEnabled;
-          const kinds = (def?.defaultChannelKinds?.length ? def.defaultChannelKinds : ["email"]) as ChannelKind[];
-          const isBusy = busyCat === cat.id;
-          return (
-            <div
-              key={cat.id}
-              className={`flex items-center gap-4 py-2 border-b border-border/30 last:border-0 transition-opacity ${isBusy ? "opacity-50" : ""}`}
-            >
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-foreground">{cat.label}</p>
-                <p className="text-xs text-muted-foreground">{cat.description}</p>
-              </div>
-              <ChannelMultiSelect
-                value={kinds}
-                disabled={isBusy}
-                onChange={(next) => set(cat.id, enabled, next)}
-              />
-              <Toggle
-                checked={enabled}
-                disabled={isBusy}
-                onChange={(v: boolean) => set(cat.id, v, kinds)}
-                aria-label={interpolate(t.settings.notifications.orgDefaults.notifyAria, {
-                  category: cat.label,
-                })}
-              />
-            </div>
-          );
-        })}
+      <div className="overflow-x-auto -mx-5">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-start text-xs uppercase tracking-wide text-muted-foreground">
+              {/* EVENT takes all the free width (`w-full`); `pe-8` keeps the
+                  description text off the controls so it reads full-bleed. */}
+              <th className="w-full px-5 py-2.5 pe-8 font-medium">
+                {t.settings.notifications.subscriptions.eventHeader}
+              </th>
+              <th className="px-4 py-2.5 font-medium text-start min-w-[160px]">
+                {t.settings.notifications.channels.title}
+              </th>
+              <th className="px-5 py-2.5 font-medium text-center min-w-[112px]">
+                {t.settings.notifications.orgDefaults.title}
+              </th>
+              <th className="px-5 py-2.5 pe-6 font-medium text-center min-w-[80px]">
+                {t.settings.notifications.subscriptions.notifyMe}
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {categories.map((cat) => {
+              const def = defIndex.get(cat.id);
+              const enabled = def?.defaultEnabled ?? cat.defaultEnabled;
+              const kinds = (def?.defaultChannelKinds?.length
+                ? def.defaultChannelKinds
+                : ["email"]) as ChannelKind[];
+              const isBusy = busyCat === cat.id;
+              // Checked when the user explicitly opted in, OR when they've made
+              // no explicit choice and the category is default-enabled (the
+              // dispatcher delivers to them in that case too).
+              const notifyMe = enabledCats.has(cat.id) || (!rowCats.has(cat.id) && enabled);
+              return (
+                <tr
+                  key={cat.id}
+                  className={`border-t border-border/30 transition-opacity ${isBusy ? "opacity-50" : ""}`}
+                >
+                  <td className="px-5 py-3.5 pe-8 align-top">
+                    <p className="font-medium text-foreground">{cat.label}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{cat.description}</p>
+                  </td>
+                  {/* Org default (admin-only): which channel kinds + on/off for new members. */}
+                  <td className="px-4 py-3.5 align-top">
+                    <ChannelMultiSelect
+                      value={kinds}
+                      disabled={isBusy || !isAdmin}
+                      onChange={(next) => setDefault(cat.id, enabled, next)}
+                    />
+                  </td>
+                  <td className="px-5 py-3.5 align-middle text-center">
+                    <Toggle
+                      checked={enabled}
+                      disabled={isBusy || !isAdmin}
+                      onChange={(v: boolean) => setDefault(cat.id, v, kinds)}
+                      aria-label={interpolate(t.settings.notifications.orgDefaults.notifyAria, {
+                        category: cat.label,
+                      })}
+                    />
+                  </td>
+                  {/* Per-user opt-in — anyone can set their own, across their channels. */}
+                  <td className="px-5 pe-6 py-3.5 align-middle text-center">
+                    <input
+                      type="checkbox"
+                      disabled={isBusy || noChannels}
+                      checked={notifyMe}
+                      onChange={(e) => setNotifyMe(cat.id, e.target.checked)}
+                      className="size-4 rounded border-border/50 cursor-pointer accent-foreground disabled:opacity-40 disabled:cursor-not-allowed"
+                      aria-label={interpolate(t.settings.notifications.orgDefaults.notifyAria, {
+                        category: cat.label,
+                      })}
+                    />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {noChannels && (
+          <p className="px-5 pt-3 text-sm text-muted-foreground">
+            {t.settings.notifications.subscriptions.empty}
+          </p>
+        )}
       </div>
     </SettingsSection>
   );

@@ -1420,8 +1420,6 @@ export default function HomeContent() {
                 { name: 'mail.openship.com',  mailboxes: 412, when: 'live',       live: true,  pct: 62 },
                 { name: 'acme.io',            mailboxes: 83,  when: '1 hr ago',   live: true,  pct: 18 },
                 { name: 'team.acme.io',       mailboxes: 45,  when: '8 min ago',  live: true,  pct: 12 },
-                { name: 'shop.acme.io',       mailboxes: 12,  when: '3 hr ago',   live: false, pct: 4 },
-                { name: 'staging.dev',        mailboxes: 5,   when: 'yesterday',  live: false, pct: 2 },
               ].map((d, i) => (
                 <div
                   key={d.name}

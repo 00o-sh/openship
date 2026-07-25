@@ -226,7 +226,12 @@
       "applyingTitle": "جارٍ التطبيق",
       "applyFailed": "تعذّر تطبيق البيئة على الخدمة قيد التشغيل",
       "applyFailedTitle": "فشل التطبيق"
-    }
+    },
+    "linkedBadge": "مرتبط",
+    "linkedManaged": "عبر {app}",
+    "linkedTitle": "تكامل مرتبط",
+    "linkedBody": "تأتي هذه القيمة من اتصال {app}. أدِرها من ذلك التطبيق — لن تُحفظ التغييرات هنا.",
+    "unlink": "إزالة الاتصال"
   },
   "gitInfo": {
     "repository": "المستودع",

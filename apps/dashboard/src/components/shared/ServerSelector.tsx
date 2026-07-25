@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import { BlurIp } from "@/components/BlurIp";
 import {
   Server,
   CheckCircle2,
@@ -169,7 +170,7 @@ export default function ServerSelector({
           <div className="flex-1 min-w-0">
             <p className="text-sm font-medium text-foreground truncate">{s.name}</p>
             <p className="text-xs text-muted-foreground">
-              {s.user}@{s.host}:{s.port}
+              {s.user}@<BlurIp>{s.host}</BlurIp>:{s.port}
             </p>
           </div>
           <CheckCircle2 className="size-4 text-success shrink-0" />
@@ -204,7 +205,7 @@ export default function ServerSelector({
                   {selected.name}
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  {selected.user}@{selected.host}:{selected.port}
+                  {selected.user}@<BlurIp>{selected.host}</BlurIp>:{selected.port}
                 </p>
               </div>
             </>
@@ -245,7 +246,7 @@ export default function ServerSelector({
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-foreground truncate">{s.name}</p>
                   <p className="text-xs text-muted-foreground">
-                    {s.user}@{s.host}:{s.port}
+                    {s.user}@<BlurIp>{s.host}</BlurIp>:{s.port}
                   </p>
                 </div>
                 {value === s.id && (

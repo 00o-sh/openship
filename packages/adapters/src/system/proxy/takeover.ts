@@ -12,7 +12,8 @@
  */
 
 import { safeErrorMessage } from "@repo/core";
-import type { CommandExecutor } from "../../types";
+import type { CommandExecutor, ManualCert } from "../../types";
+import type { RoutingProvider, SslProvider } from "../../infra/types";
 import type { EdgeStatus, ImportedSite, SystemLog, SystemLogCallback } from "../types";
 import { freeEdgeTargets, sq, stopTargetsForStatus } from "./detect";
 import { installOpenResty } from "../installer";
@@ -145,57 +146,94 @@ async function rollback(
   }
 }
 
-async function registerSite(
-  nginx: NginxProvider,
+export interface RegisterImportedSitesOptions {
+  onLog: SystemLogCallback;
+  /** Accumulates per-domain problems (unsupported names, TLS-not-ready, errors). */
+  warnings: string[];
+  /**
+   * Inline cert PEMs keyed by the source cert PATH (`site.tls.certPath`), for
+   * callers that read the foreign certs out-of-band. The containerized edge can't
+   * `cat` the HOST filesystem, so `openship up` reads the host PEMs and hands them
+   * here; the host takeover leaves this unset and the certs are read via the
+   * executor as before.
+   */
+  certPems?: Record<string, ManualCert>;
+}
+
+/**
+ * Register a set of sites parsed from a foreign proxy as Openship routes on the
+ * given routing/SSL provider — the executor-generic core shared by the HOST
+ * takeover (`runEdgeTakeover`, NginxProvider on a LocalExecutor) and the
+ * CONTAINER edge (the api's DockerEdgeExecutor provider, via the
+ * `edge/import-sites` endpoint). Reuse both certs (install-if-present) and issue
+ * fresh ones (provision) exactly as before; never throws — every failure is
+ * collected into `opts.warnings`. Returns the domains actually registered.
+ */
+export async function registerImportedSites(
+  routing: RoutingProvider,
+  ssl: SslProvider,
   executor: CommandExecutor,
-  site: ImportedSite,
-  onLog: SystemLogCallback,
-  warnings: string[],
+  sites: ImportedSite[],
+  opts: RegisterImportedSitesOptions,
 ): Promise<string[]> {
   const registered: string[] = [];
-  const domains = site.serverNames.filter((d) => {
-    if (DOMAIN_RE.test(d) && d.length <= 253) return true;
-    warnings.push(`skipped unsupported domain "${d}" (wildcards/regex names aren't migratable)`);
-    return false;
-  });
+  for (const site of sites) {
+    const domains = site.serverNames.filter((d) => {
+      if (DOMAIN_RE.test(d) && d.length <= 253) return true;
+      opts.warnings.push(`skipped unsupported domain "${d}" (wildcards/regex names aren't migratable)`);
+      return false;
+    });
 
-  for (const domain of domains) {
-    try {
-      if (site.target.kind === "proxy") {
-        await nginx.registerRoute({ domain, tls: site.ssl, targetUrl: site.target.url });
-      } else {
-        await nginx.registerRoute({ domain, tls: site.ssl, staticRoot: site.target.root });
-      }
-
-      if (site.ssl) {
-        // Reuse the existing cert only when both paths are safe absolute paths
-        // (they come from parsing the foreign config — never trust them raw in a shell).
-        const reusable = site.tls && isSafePath(site.tls.certPath) && isSafePath(site.tls.keyPath);
-        if (site.tls && !reusable) {
-          warnings.push(`${domain}: existing cert path looks unsafe — issuing a fresh certificate instead`);
-        }
-        if (reusable) {
-          const certPem = await tryExec(executor, `cat ${sq(site.tls!.certPath)} 2>/dev/null`);
-          const keyPem = await tryExec(executor, `cat ${sq(site.tls!.keyPath)} 2>/dev/null`);
-          if (certPem && keyPem) {
-            await nginx.installCert(domain, { certPem, keyPem });
-          } else {
-            const r = await nginx.provisionCert(domain);
-            if (!r.verified) warnings.push(`${domain}: TLS not ready yet (${r.reason ?? "pending"})`);
-          }
+    for (const domain of domains) {
+      try {
+        if (site.target.kind === "proxy") {
+          await routing.registerRoute({ domain, tls: site.ssl, targetUrl: site.target.url });
         } else {
-          const r = await nginx.provisionCert(domain);
-          if (!r.verified) warnings.push(`${domain}: TLS not ready yet (${r.reason ?? "pending"})`);
+          await routing.registerRoute({ domain, tls: site.ssl, staticRoot: site.target.root });
         }
-      }
 
-      onLog(log(`Migrated ${domain} → ${site.target.kind === "proxy" ? site.target.url : site.target.root}`));
-      registered.push(domain);
-    } catch (err) {
-      warnings.push(`${domain}: ${safeErrorMessage(err)}`);
+        if (site.ssl) {
+          const manual = await resolveCert(executor, site, domain, opts);
+          if (manual) {
+            await ssl.installCert(domain, manual);
+          } else {
+            const r = await ssl.provisionCert(domain);
+            if (!r.verified) opts.warnings.push(`${domain}: TLS not ready yet (${r.reason ?? "pending"})`);
+          }
+        }
+
+        opts.onLog(log(`Migrated ${domain} → ${site.target.kind === "proxy" ? site.target.url : site.target.root}`));
+        registered.push(domain);
+      } catch (err) {
+        opts.warnings.push(`${domain}: ${safeErrorMessage(err)}`);
+      }
     }
   }
   return registered;
+}
+
+/**
+ * The cert material for a site, or null to fall back to a fresh certbot cert.
+ * Prefers inline PEMs (already vetted by the caller that read them); otherwise
+ * reads the foreign cert via the executor, but only when BOTH paths are safe
+ * absolute paths (they come from parsing untrusted config — never shell them raw).
+ */
+async function resolveCert(
+  executor: CommandExecutor,
+  site: ImportedSite,
+  domain: string,
+  opts: RegisterImportedSitesOptions,
+): Promise<ManualCert | null> {
+  if (!site.tls) return null;
+  const inline = opts.certPems?.[site.tls.certPath];
+  if (inline) return inline;
+  if (!isSafePath(site.tls.certPath) || !isSafePath(site.tls.keyPath)) {
+    opts.warnings.push(`${domain}: existing cert path looks unsafe — issuing a fresh certificate instead`);
+    return null;
+  }
+  const certPem = await tryExec(executor, `cat ${sq(site.tls.certPath)} 2>/dev/null`);
+  const keyPem = await tryExec(executor, `cat ${sq(site.tls.keyPath)} 2>/dev/null`);
+  return certPem && keyPem ? { certPem, keyPem } : null;
 }
 
 /**
@@ -228,10 +266,7 @@ export async function runEdgeTakeover(
     const paths = await detectOpenRestyPaths(executor);
     const nginx = new NginxProvider({ paths, executor, acmeEmail: opts.acmeEmail });
 
-    const registered: string[] = [];
-    for (const site of opts.sites) {
-      registered.push(...(await registerSite(nginx, executor, site, onLog, warnings)));
-    }
+    const registered = await registerImportedSites(nginx, nginx, executor, opts.sites, { onLog, warnings });
 
     for (const route of opts.extraRoutes ?? []) {
       try {
