@@ -210,7 +210,7 @@ export async function fetchAndExtractRelease(
     // 6. Extract into scratch dir.
     mkdirSync(scratchDir, { recursive: true });
     await runTar(
-      ["-xzf", scratchTarball, "-C", scratchDir, "--no-absolute-names"],
+      ["-xzf", scratchTarball, "-C", scratchDir],
       envOverride,
     );
 
