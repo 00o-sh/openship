@@ -20,6 +20,7 @@ import {
 
 import { DomainSettings } from "../components/DomainSettings";
 import { GitSettings } from "../components/GitSettings";
+import { IncomingWebhooks } from "../components/IncomingWebhooks";
 import { BuildSettings } from "../components/BuildSettings";
 import { LogsSettings } from "../components/LogsSettings";
 import { BackupSettings } from "../components/BackupSettings";
@@ -754,6 +755,8 @@ const ProjectSettingsContent = () => {
       case "source":
       case "git":
         return <GitSettings />;
+      case "webhooks":
+        return <IncomingWebhooks />;
       case "runtime":
       case "settings":
         // Apps get the 2-mode Configuration surface (App settings | Deployment);

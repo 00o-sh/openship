@@ -8,108 +8,65 @@ type Status = "win" | "loss" | "neutral";
 type Cell = { text: string; status: Status };
 type Row = { feature: string; openship: Cell; managed: Cell; selfhost: Cell };
 
+// Only the REAL exclusives — capabilities Openship has that managed clouds and
+// other self-hosted platforms (Coolify / Dokploy / Dokku) don't. The shared
+// essentials (git deploys, TLS, databases, backups, multi-server) are left out
+// on purpose: claiming a win on things everyone has is the fastest way to lose
+// trust. Every row here is verified against those tools.
 const ROWS: Row[] = [
   {
-    feature: "Where the build runs",
-    openship: { text: "Your machine - server stays free",   status: "win" },
-    managed:  { text: "Their build runners",                status: "neutral" },
-    selfhost: { text: "Always on your production server",   status: "loss" },
-  },
-  {
-    feature: "What lives on your VPS",
-    openship: { text: "Only the apps you shipped",          status: "win" },
-    managed:  { text: "Not applicable - managed",           status: "neutral" },
-    selfhost: { text: "Dashboard, build agent, DB, queue",  status: "loss" },
-  },
-  {
-    feature: "Servers",
-    openship: { text: "Many over SSH, shift workloads between them", status: "win" },
-    managed:  { text: "Their infrastructure - not exposed", status: "neutral" },
-    selfhost: { text: "Multi-server on some tools",         status: "neutral" },
-  },
-  {
-    feature: "Import an existing server",
-    openship: { text: "Scan and adopt running containers in place", status: "win" },
+    feature: "Adopt a running server",
+    openship: { text: "Scan and take over existing containers in place", status: "win" },
     managed:  { text: "No - redeploy from source",          status: "loss" },
     selfhost: { text: "No - redeploy each app by hand",     status: "loss" },
   },
   {
-    feature: "Custom domains and SSL",
-    openship: { text: "Unlimited, wildcards, automatic",    status: "win" },
-    managed:  { text: "Limited per plan, sometimes paid",   status: "loss" },
-    selfhost: { text: "Manual NGINX or Caddy",              status: "neutral" },
+    feature: "Move between servers",
+    openship: { text: "Shift a running stack and its data host-to-host", status: "win" },
+    managed:  { text: "Not applicable",                     status: "neutral" },
+    selfhost: { text: "Redeploy, migrate volumes by hand",  status: "loss" },
+  },
+  {
+    feature: "Take over your proxy",
+    openship: { text: "Adopt Traefik / nginx / Caddy on :80/:443, rollback-safe", status: "win" },
+    managed:  { text: "Not applicable",                     status: "neutral" },
+    selfhost: { text: "They own the proxy from install",    status: "loss" },
   },
   {
     feature: "Edge access rules",
-    openship: { text: "Per-route rate-limit, IP + country bans, hotlink - no reload", status: "win" },
-    managed:  { text: "Basic, often plan-gated",            status: "neutral" },
-    selfhost: { text: "Hand-write Traefik or nginx",        status: "neutral" },
+    openship: { text: "Rate-limit, IP + country + user-agent bans, hotlink - no reload, from a UI", status: "win" },
+    managed:  { text: "Basic, plan-gated",                  status: "neutral" },
+    selfhost: { text: "Hand-write Traefik / nginx; no geo", status: "neutral" },
   },
   {
     feature: "Traffic analytics & logs",
-    openship: { text: "Built-in per-route traffic, geo, live request logs", status: "win" },
+    openship: { text: "Per-route traffic, geo, live request logs - built in", status: "win" },
     managed:  { text: "Dashboards, capped by plan",         status: "neutral" },
     selfhost: { text: "Bolt on Grafana or Plausible",       status: "loss" },
   },
   {
-    feature: "Managed databases",
-    openship: { text: "Postgres, Redis, Mongo, MySQL",      status: "win" },
-    managed:  { text: "Bring your own - third-party",       status: "loss" },
-    selfhost: { text: "Run yourself, no managed tooling",   status: "loss" },
+    feature: "Desktop app",
+    openship: { text: "Whole control plane on your laptop, loopback-only, nothing always-on", status: "win" },
+    managed:  { text: "Cloud account, always remote",       status: "neutral" },
+    selfhost: { text: "Browser-only; needs an always-on server", status: "loss" },
   },
   {
-    feature: "Backups",
-    openship: { text: "Scheduled DB + volume, one-click restore", status: "win" },
-    managed:  { text: "Plan-gated, database only",          status: "neutral" },
-    selfhost: { text: "DIY or per-tool",                    status: "neutral" },
+    feature: "Built-in mail server",
+    openship: { text: "Postfix + Dovecot + webmail, trusted-relay sending", status: "win" },
+    managed:  { text: "Not included - bring Sendgrid",      status: "loss" },
+    selfhost: { text: "DIY Postfix, or not offered",        status: "loss" },
+  },
+  {
+    feature: "Cloud + self-host, one plane",
+    openship: { text: "Deploy to your servers or managed cloud, switch anytime", status: "win" },
+    managed:  { text: "Their runtime only",                 status: "loss" },
+    selfhost: { text: "Your boxes only",                    status: "loss" },
   },
   {
     feature: "Audit log",
-    openship: { text: "Built in and free - every change tracked", status: "win" },
+    openship: { text: "Every change tracked, free",         status: "win" },
     managed:  { text: "Higher plans only",                  status: "neutral" },
     selfhost: { text: "Paid add-on or absent",              status: "loss" },
-  },
-  {
-    feature: "Mail server",
-    openship: { text: "Transactional from your domain",     status: "win" },
-    managed:  { text: "Not included - bring Sendgrid",      status: "loss" },
-    selfhost: { text: "Configure Postfix yourself",         status: "loss" },
-  },
-  {
-    feature: "Interfaces",
-    openship: { text: "CLI, web, desktop - same backend",   status: "win" },
-    managed:  { text: "Web only, or thin CLI",              status: "neutral" },
-    selfhost: { text: "Web on the server itself",           status: "neutral" },
-  },
-  {
-    feature: "Local / solo control",
-    openship: { text: "Desktop app, loopback only, nothing always-on", status: "win" },
-    managed:  { text: "Cloud account, always remote",       status: "neutral" },
-    selfhost: { text: "Needs an always-on server",          status: "loss" },
-  },
-  {
-    feature: "Migration path",
-    openship: { text: "Cloud ⇄ self-host, no rebuild",      status: "win" },
-    managed:  { text: "Rewrite to leave",                   status: "loss" },
-    selfhost: { text: "Manual export and re-deploy",        status: "neutral" },
-  },
-  {
-    feature: "Pricing model",
-    openship: { text: "Flat - your compute, your cost",     status: "win" },
-    managed:  { text: "Per-seat + bandwidth + invocations", status: "loss" },
-    selfhost: { text: "Free, but you maintain the OS",      status: "neutral" },
-  },
-  {
-    feature: "Vendor lock-in",
-    openship: { text: "Plain containers, eject any day",    status: "win" },
-    managed:  { text: "Vendor-specific runtime & edge",     status: "loss" },
-    selfhost: { text: "Tied to the tool's install layout",  status: "loss" },
-  },
-  {
-    feature: "Source",
-    openship: { text: "Open source, Apache 2.0, fork-friendly", status: "win" },
-    managed:  { text: "Closed source",                      status: "loss" },
-    selfhost: { text: "Mixed licenses",                     status: "neutral" },
   },
 ];
 
@@ -140,13 +97,13 @@ export function Comparison() {
     <section className="cmp-section">
       <div className="cmp-container">
         <header className="cmp-head">
-          <p className="cmp-eyebrow">Compared to the alternatives</p>
+          <p className="cmp-eyebrow">Beyond the basics</p>
           <h2 className="cmp-title">
-            Different choices,<br />made honestly.
+            What the others<br />can&rsquo;t do.
           </h2>
           <p className="cmp-sub">
-            The right tool depends on what you&rsquo;re building. Here&rsquo;s where Openship sits
-            against managed clouds and other self-hosting tools.
+            Git deploys, TLS, databases, backups &mdash; everyone has those. This is the short list
+            of what you get with Openship that managed clouds and other self-hosted platforms don&rsquo;t.
           </p>
         </header>
 
@@ -158,7 +115,7 @@ export function Comparison() {
             <div className="cmp-cell cmp-cell--feature">Feature</div>
             <div className="cmp-cell cmp-cell--win">Openship</div>
             <div className="cmp-cell">Managed (Vercel, Netlify)</div>
-            <div className="cmp-cell">Self-host (Coolify, Dokku)</div>
+            <div className="cmp-cell">Self-host (Coolify, Dokploy, Dokku)</div>
           </div>
 
           {/* Body */}

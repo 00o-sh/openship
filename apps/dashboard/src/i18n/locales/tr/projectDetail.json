@@ -59,7 +59,9 @@
       "waiting": "Gelen istekler bekleniyor…",
       "streamError": "Canlı akış hatası",
       "connectionLost": "Günlük akışı bağlantısı kesildi",
-      "connectFailed": "Günlük akışına bağlanılamadı"
+      "connectFailed": "Günlük akışına bağlanılamadı",
+      "noDomain": "İstek günlüklerini görmek için bir alan adı ekleyin",
+      "noDomainHint": "HTTP istek günlükleri alan adı başına toplanır — önce bu projeye bir alan adı ekleyin."
     },
     "terminal": {
       "fallbackName": "Terminal",

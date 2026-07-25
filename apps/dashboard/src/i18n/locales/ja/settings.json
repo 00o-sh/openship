@@ -472,7 +472,8 @@
       "description": "どのイベントをどのチャンネルに送るかを選択します。各セルが 1 つのサブスクリプションです。",
       "empty": "イベントをサブスクライブするには、まずチャンネルを追加してください。",
       "eventHeader": "イベント",
-      "cellAria": "{channel} 経由の {category}"
+      "cellAria": "{channel} 経由の {category}",
+      "notifyMe": "通知"
     },
     "orgDefaults": {
       "title": "組織のデフォルト",

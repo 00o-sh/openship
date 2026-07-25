@@ -62,7 +62,12 @@ export type {
 } from "./runtime/types";
 export { assertCapability, isMultiServiceRuntime } from "./runtime/types";
 export { DockerRuntime, type DockerConnectionOptions } from "./runtime/docker";
-export { BareRuntime, type BareRuntimeOptions } from "./runtime/bare";
+export {
+  transferImage,
+  type ImageTransferOptions,
+  type ImageTransferResult,
+} from "./runtime/image-transfer";
+export { BareRuntime, STATIC_RELEASE_BASE, type BareRuntimeOptions } from "./runtime/bare";
 export {
   CloudRuntime,
   type CloudAdminProxy,
@@ -96,6 +101,7 @@ export {
 } from "./runtime/host-port";
 export { type RuntimeMode, type CreateRuntimeOptions, createRuntime } from "./runtime/index";
 export { resolveDockerfileCandidates } from "./runtime/docker-paths";
+export { scopedVolumeName, scopeVolumeBinds } from "./runtime/volume-namespace";
 
 // ─── Infrastructure layer ────────────────────────────────────────────────────
 export type { RoutingProvider, SslProvider } from "./infra/types";
@@ -154,8 +160,10 @@ export { scanImportableSites, canImportProxy, scanOpenshipEdge } from "./system/
 export {
   runEdgeTakeover,
   recoverInterruptedTakeover,
+  registerImportedSites,
   type EdgeTakeoverOptions,
   type EdgeTakeoverResult,
+  type RegisterImportedSitesOptions,
 } from "./system/proxy/takeover";
 // The consolidated reverse-proxy / edge facade (single point for the chain).
 export { detectEdge, importSites, takeoverOnMigrate, foreignProxyOnEdge, ensureEdge } from "./system/proxy";

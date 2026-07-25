@@ -129,6 +129,11 @@
     "repoCountSingular": "{count} 个仓库",
     "repoCountPlural": "{count} 个仓库",
     "matching": "匹配“{query}”",
+    "pagination": {
+      "previous": "上一页",
+      "next": "下一页",
+      "pageOf": "第 {page} 页 / 共 {total} 页"
+    },
     "time": {
       "justNow": "刚刚",
       "minutesAgo": "{n} 分钟前",

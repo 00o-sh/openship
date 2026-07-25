@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ArrowRightLeft,
   Check,
+  ChevronDown,
   Cloud,
   Copy,
   HardDrive,
@@ -46,25 +47,54 @@ function SectionCard({
   icon: Icon,
   iconTone,
   children,
+  collapsible = false,
+  defaultOpen = false,
 }: {
   title: string;
   description: string;
   icon: React.ComponentType<{ className?: string }>;
   iconTone: keyof typeof ICON_TONES;
   children: React.ReactNode;
+  /** Render collapsed behind an expand toggle (header stays visible), matching
+   *  the collapsible settings sections. */
+  collapsible?: boolean;
+  defaultOpen?: boolean;
 }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const expanded = collapsible ? open : true;
+
+  const header = (
+    <>
+      <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${ICON_TONES[iconTone]}`}>
+        <Icon className="size-4" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <h3 className="text-[14px] font-semibold text-foreground">{title}</h3>
+        <p className="mt-0.5 text-[12px] text-muted-foreground">{description}</p>
+      </div>
+      {collapsible && (
+        <ChevronDown
+          className={`mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
+        />
+      )}
+    </>
+  );
+
   return (
     <div className="overflow-hidden rounded-2xl border border-border/50 bg-card">
-      <div className="flex items-start gap-3 border-b border-border/40 px-5 py-4">
-        <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${ICON_TONES[iconTone]}`}>
-          <Icon className="size-4" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <h3 className="text-[14px] font-semibold text-foreground">{title}</h3>
-          <p className="mt-0.5 text-[12px] text-muted-foreground">{description}</p>
-        </div>
-      </div>
-      <div className="space-y-4 px-5 py-4">{children}</div>
+      {collapsible ? (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          className={`flex w-full items-start gap-3 px-5 py-4 text-start ${expanded ? "border-b border-border/40" : ""}`}
+        >
+          {header}
+        </button>
+      ) : (
+        <div className="flex items-start gap-3 border-b border-border/40 px-5 py-4">{header}</div>
+      )}
+      {expanded && <div className="space-y-4 px-5 py-4">{children}</div>}
     </div>
   );
 }
@@ -198,6 +228,7 @@ export const AdvancedSettings = ({ onDeleteProject }: Props) => {
             description={t.projectSettings.advanced.routing.description}
             icon={Waypoints}
             iconTone="primary"
+            collapsible
           >
             <RoutingStrategyCard
               projectId={projectData.id}

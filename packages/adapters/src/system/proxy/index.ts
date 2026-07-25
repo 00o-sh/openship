@@ -26,7 +26,8 @@ export {
   probeEdge,
   stopTargetsForStatus,
 } from "./detect";
-export { runEdgeTakeover, recoverInterruptedTakeover } from "./takeover";
+export { runEdgeTakeover, recoverInterruptedTakeover, registerImportedSites } from "./takeover";
+export type { RegisterImportedSitesOptions } from "./takeover";
 export { scanImportableSites, canImportProxy, scanOpenshipEdge } from "./import";
 export type {
   EdgeClassification,

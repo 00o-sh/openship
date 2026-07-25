@@ -108,12 +108,12 @@
   },
   "detail": {
     "tabs": {
-      "services": "サービス",
+      "migrations": "移行",
       "overview": "概要",
       "components": "コンポーネント",
       "github": "Git",
       "security": "セキュリティ",
-      "ports": "ポート",
+      "ports": "ポート転送",
       "terminal": "ターミナル"
     },
     "healthy": "正常",

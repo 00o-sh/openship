@@ -218,7 +218,13 @@
       "savedTitle": "保存しました",
       "saveFailed": "環境変数の保存に失敗しました",
       "saveFailedTitle": "保存に失敗しました"
-    }
+    },
+    "linkedBadge": "リンク済み",
+    "linkedManaged": "{app} 経由",
+    "linkedTitle": "リンクされた統合",
+    "linkedBody": "この値は {app} の接続から取得されます。そのアプリ側で管理してください — ここでの変更は保存されません。",
+    "unlink": "接続を削除",
+    "close": "閉じる"
   },
   "gitInfo": {
     "repository": "リポジトリ",

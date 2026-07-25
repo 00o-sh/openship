@@ -108,12 +108,12 @@
   },
   "detail": {
     "tabs": {
-      "services": "الخدمات",
+      "migrations": "عمليات الترحيل",
       "overview": "نظرة عامة",
       "components": "المكوّنات",
       "github": "Git",
       "security": "الأمان",
-      "ports": "المنافذ",
+      "ports": "إعادة توجيه المنافذ",
       "terminal": "الطرفية"
     },
     "healthy": "سليم",

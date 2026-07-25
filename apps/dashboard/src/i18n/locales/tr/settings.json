@@ -542,7 +542,8 @@
       "description": "Hangi olayların hangi kanala gideceğini seçin. Her hücre bir aboneliktir.",
       "empty": "Olaylara abone olmak için önce bir kanal ekleyin.",
       "eventHeader": "Olay",
-      "cellAria": "{channel} üzerinden {category}"
+      "cellAria": "{channel} üzerinden {category}",
+      "notifyMe": "Bana bildir"
     },
     "orgDefaults": {
       "title": "Organizasyon varsayılanları",

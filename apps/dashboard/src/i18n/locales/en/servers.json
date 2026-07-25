@@ -124,11 +124,11 @@
   "detail": {
     "tabs": {
       "overview": "Overview",
-      "services": "Services",
+      "migrations": "Migrations",
       "components": "Components",
       "github": "Git auth",
       "security": "Security",
-      "ports": "Ports",
+      "ports": "Port forward",
       "terminal": "Terminal"
     },
     "healthy": "Healthy",

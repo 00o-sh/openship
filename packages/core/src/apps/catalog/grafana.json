@@ -1,5 +1,6 @@
 {
   "available": true,
+  "verified": true,
   "id": "grafana",
   "name": "Grafana",
   "description": "Dashboards and visualization for your metrics and logs. First login is admin / admin.",

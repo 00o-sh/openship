@@ -435,6 +435,48 @@
       "when": 1784881797507,
       "tag": "0061_notification_default_multi_kind",
       "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1784926098651,
+      "tag": "0062_add_incoming_webhook",
+      "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1785012498651,
+      "tag": "0063_add_migration_logs",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1785098898651,
+      "tag": "0064_add_migration_partial",
+      "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "7",
+      "when": 1785185298651,
+      "tag": "0065_custom_app_template",
+      "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1785271698651,
+      "tag": "0066_ensure_migration_partial_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1785358098651,
+      "tag": "0067_webhook_delivery",
+      "breakpoints": true
     }
   ]
 }

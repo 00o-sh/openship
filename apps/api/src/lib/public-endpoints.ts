@@ -1,5 +1,5 @@
 import type { Domain, Project, Service } from "@repo/db";
-import { SYSTEM, resolveServiceHostnameLabel } from "@repo/core";
+import { SYSTEM, resolveServiceHostnameLabel, endpointsNeedCloud } from "@repo/core";
 import { getRoutingBaseDomain } from "./routing-domains";
 import { resolveServicePort, serviceKind } from "./deployable-service";
 import { env } from "../config/env";
@@ -376,7 +376,8 @@ export function syncStoredPublicEndpoints(opts: {
 export function storedPublicEndpointsNeedCloud(
   endpoints?: Array<Pick<StoredPublicEndpoint, "domainType">> | null,
 ): boolean {
-  return (endpoints ?? []).some((endpoint) => endpoint.domainType !== "custom");
+  // Single definition lives in @repo/core; kept as a named alias for callers.
+  return endpointsNeedCloud(endpoints);
 }
 
 /**

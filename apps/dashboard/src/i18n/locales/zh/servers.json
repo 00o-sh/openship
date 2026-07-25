@@ -108,12 +108,12 @@
   },
   "detail": {
     "tabs": {
-      "services": "服务",
+      "migrations": "迁移",
       "overview": "概览",
       "components": "组件",
       "github": "Git",
       "security": "安全",
-      "ports": "端口",
+      "ports": "端口转发",
       "terminal": "终端"
     },
     "healthy": "健康",

@@ -79,6 +79,9 @@
     "preferences": "التفضيلات"
   },
   "pages": {
+    "apps": {
+      "moreApps": "‏+{count} المزيد"
+    },
     "projects": {
       "title": "المشاريع",
       "description": "انشر وأدر تطبيقاتك بسهولة",

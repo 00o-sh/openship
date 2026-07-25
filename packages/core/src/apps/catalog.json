@@ -3,6 +3,7 @@
   "apps": [
     {
       "available": true,
+      "verified": true,
       "id": "mail",
       "name": "Openship Mail",
       "description": "A complete self-hosted mail server — SMTP/IMAP + webmail on your own domain.",
@@ -23,6 +24,7 @@
     },
     {
       "available": true,
+      "verified": true,
       "id": "supabase",
       "name": "Supabase",
       "description": "Full self-hosted Supabase — Postgres, Auth, REST, Realtime, Storage, and Studio behind one API gateway.",
@@ -394,11 +396,17 @@
       "connection": {
         "title": "Connect to Supabase",
         "description": "Point the Supabase client SDKs or Studio at this deployment. The service role key bypasses row-level security — keep it secret.",
+        "guide": {
+          "intro": "Your project gets the Supabase database connection, ready to use.",
+          "useHint": "Read `process.env.DATABASE_URL` in your code — it's set the next time your project deploys. Nothing else to do.",
+          "defaultMode": "internal"
+        },
         "outputs": [
           {
             "id": "url",
             "label": "Project URL",
-            "source": "publicUrl:kong"
+            "source": "publicUrl:kong",
+            "envKey": "SUPABASE_URL"
           },
           {
             "id": "studio",
@@ -420,13 +428,15 @@
           {
             "id": "anonKey",
             "label": "Anon (public) key",
-            "source": "env:kong:ANON_KEY"
+            "source": "env:kong:ANON_KEY",
+            "envKey": "SUPABASE_ANON_KEY"
           },
           {
             "id": "serviceKey",
             "label": "Service role key",
             "source": "env:kong:SERVICE_ROLE_KEY",
             "secret": true,
+            "envKey": "SUPABASE_SERVICE_ROLE_KEY",
             "help": "Full-access key — never expose it to browsers."
           },
           {
@@ -434,13 +444,16 @@
             "label": "Database URL",
             "source": "template:postgresql://postgres:{{env:db:POSTGRES_PASSWORD}}@{{host}}:5432/postgres",
             "secret": true,
+            "envKey": "DATABASE_URL",
+            "recommended": true,
             "help": "Direct Postgres connection (superuser) for psql / ORMs. Published on port 5432."
           },
           {
             "id": "dbPassword",
             "label": "Database password",
             "source": "env:db:POSTGRES_PASSWORD",
-            "secret": true
+            "secret": true,
+            "envKey": "POSTGRES_PASSWORD"
           }
         ]
       },
@@ -483,6 +496,7 @@
     },
     {
       "available": true,
+      "verified": true,
       "id": "mongodb",
       "name": "MongoDB",
       "description": "MongoDB document database with the Mongo Express web admin UI.",
@@ -586,30 +600,50 @@
       "connection": {
         "title": "Connect to MongoDB",
         "description": "Open the Mongo Express admin in a browser, or point a driver at the database URL.",
+        "guide": {
+          "intro": "Your project gets the MongoDB connection, ready to use.",
+          "useHint": "Read `process.env.MONGODB_URI` in your code — it's set the next time your project deploys. Nothing else to do.",
+          "defaultMode": "internal"
+        },
         "outputs": [
           {
             "id": "admin",
             "label": "Mongo Express",
             "source": "publicUrl:mongo-express",
+            "envKey": "MONGO_EXPRESS_URL",
             "help": "Sign in with the username + password below."
           },
           {
             "id": "adminUser",
             "label": "Admin username",
-            "source": "env:mongo-express:ME_CONFIG_BASICAUTH_USERNAME"
+            "source": "env:mongo-express:ME_CONFIG_BASICAUTH_USERNAME",
+            "envKey": "MONGO_ADMIN_USER",
+            "width": "half"
           },
           {
             "id": "adminPassword",
             "label": "Admin password",
             "source": "env:mongo-express:ME_CONFIG_BASICAUTH_PASSWORD",
-            "secret": true
+            "secret": true,
+            "envKey": "MONGO_ADMIN_PASSWORD",
+            "width": "half"
           },
           {
             "id": "dbUrl",
             "label": "Database URL",
             "source": "template:mongodb://root:{{env:mongo:MONGO_INITDB_ROOT_PASSWORD}}@{{host}}:27017/",
+            "sourceLabel": "Public",
+            "variants": [
+              {
+                "id": "internal",
+                "label": "Internal",
+                "source": "template:mongodb://root:{{env:mongo:MONGO_INITDB_ROOT_PASSWORD}}@mongo:27017/"
+              }
+            ],
             "secret": true,
-            "help": "Direct MongoDB connection (root user). Published on port 27017."
+            "envKey": "MONGODB_URI",
+            "recommended": true,
+            "help": "Direct MongoDB connection (root user). Published on port 27017. Switch to Internal for apps on the same project network."
           }
         ]
       },
@@ -630,6 +664,7 @@
     },
     {
       "available": true,
+      "verified": true,
       "id": "convex",
       "name": "Convex",
       "description": "Self-hosted Convex reactive backend + dashboard, with a persistent data volume.",
@@ -791,6 +826,7 @@
     },
     {
       "available": true,
+      "verified": true,
       "id": "n8n",
       "name": "n8n",
       "description": "Workflow automation — connect apps and APIs with a visual editor.",
@@ -1082,6 +1118,7 @@
     },
     {
       "available": true,
+      "verified": true,
       "id": "grafana",
       "name": "Grafana",
       "description": "Dashboards and visualization for your metrics and logs. First login is admin / admin.",
@@ -1344,6 +1381,7 @@
     },
     {
       "available": true,
+      "verified": true,
       "id": "excalidraw",
       "name": "Excalidraw",
       "description": "Virtual whiteboard for sketches and diagrams. Stateless — drawings save in your browser.",
@@ -1388,6 +1426,7 @@
     },
     {
       "available": true,
+      "verified": true,
       "id": "minio",
       "name": "MinIO",
       "description": "S3-compatible object storage with a web console — point any S3 client (aws-cli, SDKs) at it.",
@@ -1495,6 +1534,7 @@
     },
     {
       "available": true,
+      "verified": true,
       "id": "kafka",
       "name": "Apache Kafka",
       "description": "Apache Kafka event-streaming broker (KRaft mode — no ZooKeeper) with the Kafbat Kafka UI web console for topics, messages, and consumer groups.",
@@ -1616,6 +1656,7 @@
     },
     {
       "available": true,
+      "verified": true,
       "id": "qdrant",
       "name": "Qdrant",
       "description": "High-performance vector database for AI search, RAG, and embeddings — with the built-in Qdrant Web UI for browsing collections and running queries.",

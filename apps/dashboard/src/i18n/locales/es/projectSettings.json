@@ -218,7 +218,13 @@
       "savedTitle": "Guardado",
       "saveFailed": "No se pudieron guardar las variables de entorno",
       "saveFailedTitle": "Error al guardar"
-    }
+    },
+    "linkedBadge": "Vinculado",
+    "linkedManaged": "vía {app}",
+    "linkedTitle": "Integración vinculada",
+    "linkedBody": "Este valor proviene de la conexión de {app}. Gestiónalo desde esa app — los cambios aquí no se guardan.",
+    "unlink": "Eliminar conexión",
+    "close": "Cerrar"
   },
   "gitInfo": {
     "repository": "Repositorio",

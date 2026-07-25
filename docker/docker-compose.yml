@@ -88,14 +88,16 @@ services:
       # API_PORT overrides the port (host + container move together).
       - "${OPENSHIP_BIND_ADDR:-0.0.0.0}:${API_PORT:-4000}:${API_PORT:-4000}"
     # Host Docker socket → the API (dockerode) builds + runs deployed apps on the
-    # host daemon. dockerode's local transport targets this exact path. The three
-    # openship_* volumes are SHARED with the `edge` service: the API writes vhosts
-    # + reads/writes certs here; the edge serves them (see OPENSHIP_EDGE_MODE).
+    # host daemon. dockerode's local transport targets this exact path. The four
+    # openship_* volumes are SHARED with the `edge` service: the API WRITES vhosts,
+    # certs, and static doc-roots here; the edge READS/serves them (see
+    # OPENSHIP_EDGE_MODE). openship_static holds static sites' extracted files.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - openship_sites:/usr/local/openresty/nginx/conf/sites-enabled
       - openship_certs:/etc/letsencrypt
       - openship_acme:/var/www/acme
+      - openship_static:/opt/openship/static
     # Reach the HOST over the internal docker bridge (host.docker.internal →
     # host-gateway) for host-OS ops when configured (OPENSHIP_HOST_SSH_*, set up
     # by `openship up`). Harmless when unset. Linux needs the explicit mapping.
@@ -158,6 +160,7 @@ services:
       - openship_sites:/usr/local/openresty/nginx/conf/sites-enabled
       - openship_certs:/etc/letsencrypt
       - openship_acme:/var/www/acme
+      - openship_static:/opt/openship/static
 
 volumes:
   postgres_data:
@@ -165,3 +168,4 @@ volumes:
   openship_sites:
   openship_certs:
   openship_acme:
+  openship_static:

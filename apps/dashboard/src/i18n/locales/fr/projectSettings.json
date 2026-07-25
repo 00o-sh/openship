@@ -226,7 +226,12 @@
     "close": "Fermer",
     "applyTitle": "Appliquer sans recompilation",
     "applyText": "Enregistré. Appliquez-les au service en cours — il redémarre avec le nouvel environnement, sans clonage ni recompilation.",
-    "applyButton": "Appliquer (redémarrage, sans recompilation)"
+    "applyButton": "Appliquer (redémarrage, sans recompilation)",
+    "linkedBadge": "Lié",
+    "linkedManaged": "via {app}",
+    "linkedTitle": "Intégration liée",
+    "linkedBody": "Cette valeur provient de la connexion {app}. Gérez-la depuis cette app — les modifications ici ne sont pas conservées.",
+    "unlink": "Supprimer la connexion"
   },
   "gitInfo": {
     "repository": "Dépôt",

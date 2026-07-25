@@ -1,5 +1,6 @@
 {
   "available": true,
+  "verified": true,
   "id": "convex",
   "name": "Convex",
   "description": "Self-hosted Convex reactive backend + dashboard, with a persistent data volume.",

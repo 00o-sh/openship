@@ -129,6 +129,11 @@
     "repoCountSingular": "{count} Repository",
     "repoCountPlural": "{count} Repositories",
     "matching": "passend zu \"{query}\"",
+    "pagination": {
+      "previous": "Zurück",
+      "next": "Weiter",
+      "pageOf": "Seite {page} von {total}"
+    },
     "time": {
       "justNow": "gerade eben",
       "minutesAgo": "vor {n}m",

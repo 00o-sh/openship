@@ -11,7 +11,7 @@
 
 import { repos } from "@repo/db";
 import { ValidationError } from "@repo/core";
-import { getRuntimeTemplate } from "../apps/catalog-source";
+import { getTemplateForOrg } from "../apps/catalog-source";
 import type { RequestContext } from "../../lib/request-context";
 import { assertResourceInOrg } from "../../lib/controller-helpers";
 import { permission } from "../../lib/permission";
@@ -132,7 +132,10 @@ export async function createConnection(
     // Rewrite host → the source app's internal service alias (needs an app
     // template with a matching endpoint — i.e. a services-type DB app on its own
     // `openship-<slug>` network). If it can't, internal isn't viable here.
-    const internal = toInternalUrl(value, getRuntimeTemplate(source.appTemplateId ?? ""));
+    const internal = toInternalUrl(
+      value,
+      await getTemplateForOrg(source.organizationId, source.appTemplateId ?? ""),
+    );
     if (!internal) {
       throw new ValidationError(
         "Internal mode isn't available for this connection — use Public, or pick a database app's URL.",
@@ -194,6 +197,44 @@ export async function createConnection(
     connection: toConnectionView(row, source),
     requiresRedeploy: true,
   };
+}
+
+export interface ConnectBundleItem {
+  outputId: string;
+  envKey: string;
+}
+
+/**
+ * Wire a BUNDLE of outputs from one source app into a target project atomically:
+ * either every item links, or none does. On any failure, every connection made
+ * in THIS call is rolled back (its injected env var + link removed), so a partial
+ * failure never leaves a half-wired mix. Reuses `createConnection` per item, so
+ * the same-org + read-source/write-target invariants and clobber-guard apply.
+ */
+export async function connectBundle(
+  ctx: RequestContext,
+  targetProjectId: string,
+  input: { sourceProjectId: string; items: ConnectBundleItem[]; mode?: ConnectionMode },
+): Promise<{ connections: ConnectionView[]; requiresRedeploy: true }> {
+  const created: ConnectionView[] = [];
+  try {
+    for (const item of input.items) {
+      const { connection } = await createConnection(ctx, targetProjectId, {
+        sourceProjectId: input.sourceProjectId,
+        outputId: item.outputId,
+        envKey: item.envKey,
+        mode: input.mode,
+      });
+      created.push(connection);
+    }
+  } catch (err) {
+    // Roll back every link made in this bundle (best-effort) before surfacing.
+    for (const c of created) {
+      await deleteConnection(ctx, targetProjectId, c.id).catch(() => {});
+    }
+    throw err;
+  }
+  return { connections: created, requiresRedeploy: true };
 }
 
 export async function deleteConnection(

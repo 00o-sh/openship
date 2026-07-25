@@ -1,5 +1,6 @@
 {
   "available": true,
+  "verified": true,
   "id": "mail",
   "name": "Openship Mail",
   "description": "A complete self-hosted mail server — SMTP/IMAP + webmail on your own domain.",

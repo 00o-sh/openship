@@ -37,6 +37,7 @@ import { startService, ensureInternalToken, normalizeUrl } from "./up";
 import { ensureDashboard } from "../lib/dashboard";
 import { serviceStatus, stop as stopService, restart as restartService } from "../lib/service";
 import { saveInstanceUrl, readInstanceUrl } from "../lib/ports";
+import { runRepair, looksCorrupted, lastServiceError } from "../lib/repair";
 
 declare const __CLI_VERSION__: string;
 
@@ -90,23 +91,6 @@ async function bootstrapAdmin(
   if (ok) return { ok: true };
   if (data?.error === "An admin account already exists") return { ok: true, message: "already-exists" };
   return { ok: false, message: data?.error || "failed" };
-}
-
-/** Last error line from the service log — surfaced when the API won't boot so the
- *  user sees the real cause (e.g. a locked DB) instead of a bare timeout. */
-function lastServiceError(): string | null {
-  for (const name of ["up.err.log", "up.log"]) {
-    const p = join(homedir(), ".openship", "logs", name);
-    if (!existsSync(p)) continue;
-    try {
-      const lines = readFileSync(p, "utf8").trim().split("\n");
-      const hit = [...lines].reverse().find((l) => /error|locked|EADDRINUSE|throw|cannot/i.test(l));
-      if (hit) return hit.trim().slice(0, 200);
-    } catch {
-      /* ignore */
-    }
-  }
-  return null;
 }
 
 async function waitHealthy(apiPort: string, seconds = 90): Promise<boolean> {
@@ -878,15 +862,24 @@ export async function runControl(): Promise<void> {
     "Openship is already set up",
   );
 
+  // Crash-looping on a corrupt DB is the one case where "Start" won't help —
+  // surface Repair first and say so, instead of leaving the user guessing.
+  const corrupted = looksCorrupted();
+  if (corrupted) {
+    note(chalk.red("The service is installed but keeps failing to start — the database looks corrupted."), "Needs repair");
+  }
+
   const action = ensure(
     await select({
       message: "What would you like to do?",
       options: [
+        ...(corrupted ? [{ value: "repair", label: "Repair database", hint: "backup → heal → verify" }] : []),
         { value: "open", label: "Open the dashboard" },
         svc.running
           ? { value: "restart", label: "Restart the service" }
           : { value: "start", label: "Start the service" },
         { value: "stop", label: "Stop the service", hint: "won't restart on boot" },
+        ...(corrupted ? [] : [{ value: "repair", label: "Repair database", hint: "backup → heal a corrupt DB" }]),
         { value: "reset", label: "Reset admin password", hint: "sets a local email + password login" },
         { value: "reconfigure", label: "Re-run setup", hint: "reconfigure domain / cloud / admin" },
         { value: "quit", label: "Quit" },
@@ -895,6 +888,11 @@ export async function runControl(): Promise<void> {
   );
 
   switch (action) {
+    case "repair": {
+      const res = await runRepair();
+      outro(res.healed ? chalk.green(res.detail) : chalk.yellow(res.detail));
+      return;
+    }
     case "open":
       await open(primaryUrl).catch(() => {});
       outro(chalk.dim(`Opening ${primaryUrl}`));

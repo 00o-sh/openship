@@ -2,6 +2,7 @@
 
 import { useState, useCallback } from "react";
 import { Network, Globe, Lock, Shield, Loader2, RefreshCw, ScanLine } from "lucide-react";
+import { BlurIp } from "@/components/BlurIp";
 import { systemApi, type PortScanResult, type HostListener } from "@/lib/api/system";
 import { getApiErrorMessage } from "@/lib/api/client";
 import { useI18n, interpolate } from "@/components/i18n-provider";
@@ -221,7 +222,7 @@ function PortRow({ listener, labels }: { listener: HostListener; labels: Record<
             <span className="uppercase text-muted-foreground me-1.5 text-[11px] tracking-wide">
               {listener.proto}
             </span>
-            {listener.address}:{listener.port}
+            <BlurIp>{listener.address}</BlurIp>:{listener.port}
             {listener.service && (
               <span className="ms-2 rounded bg-muted/60 px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
                 {listener.service}

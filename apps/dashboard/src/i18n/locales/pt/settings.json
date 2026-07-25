@@ -472,7 +472,8 @@
       "description": "Escolha quais eventos vão para qual canal. Cada célula é uma assinatura.",
       "empty": "Adicione um canal primeiro para assinar eventos.",
       "eventHeader": "Evento",
-      "cellAria": "{category} via {channel}"
+      "cellAria": "{category} via {channel}",
+      "notifyMe": "Notificar-me"
     },
     "orgDefaults": {
       "title": "Padrões da organização",

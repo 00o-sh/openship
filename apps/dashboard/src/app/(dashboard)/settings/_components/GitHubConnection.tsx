@@ -23,6 +23,8 @@ import { useCloud } from "@/context/CloudContext";
 import { useModal } from "@/context/ModalContext";
 import { usePlatform } from "@/context/PlatformContext";
 import { githubApi } from "@/lib/api";
+import { incomingWebhooksApi } from "@/lib/api/incoming-webhooks";
+import { WebhookDeliveries } from "@/app/(dashboard)/projects/[id]/components/WebhookDeliveries";
 import { SettingsSection } from "./SettingsSection";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 
@@ -350,6 +352,15 @@ export function GitHubConnection() {
           connecting={connecting && !state.sources.ghCli.available}
         />
       )}
+
+      {/* Org-wide webhook delivery feed — project deliveries + GitHub pushes
+          forwarded to Cloud or from unmanaged repos ("why didn't my push deploy"). */}
+      <WebhookDeliveries
+        fetchPage={(cursor) => incomingWebhooksApi.orgDeliveries({ cursor }).then((r) => r.data)}
+        title="Webhook deliveries"
+        subtitle="Recent inbound webhooks across your projects, including pushes forwarded to Openship Cloud."
+        emptyText="No webhook deliveries recorded yet."
+      />
     </>
   );
 }

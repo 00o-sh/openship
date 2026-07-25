@@ -189,6 +189,19 @@ a coming-soon app can't be installed by API either.
 
 ---
 
+## Two field systems — don't mix them up
+
+The single most common authoring mistake. The catalog has **two** places to declare env, split by *role*:
+
+| | `configFields` (`AppConfigField`) | `settings` with `installStep: true` (`AppSettingField`) |
+|---|---|---|
+| For | **Machine**-generated / derived env | **Human** inputs the wizard renders |
+| Rendered as a form input? | **No** — resolved server-side | **Yes** — text/select/number/… |
+| Typical use | `generate: "secret"`/`"jwt"`, `generateGroup` | a name, a toggle, a chosen option |
+
+If you want the user to **fill it in**, it's an `installStep` **setting**, not a `configField`. Use
+`configFields` only for values the operator never types (generated secrets, signed keys, derived defaults).
+
 ## Field reference
 
 Full types live in [`../app-templates.ts`](../app-templates.ts). The ones you'll use most:
@@ -197,29 +210,72 @@ Full types live in [`../app-templates.ts`](../app-templates.ts). The ones you'll
 `template`: `framework` (stack id), `services`, `configFields`. For `flow`: `flowHref`.
 
 **`services[]`** (`TemplateServiceSpec`) — `name`, `image`, `ports`, `exposedPort`, `exposed`, `environment`
-(non-secret defaults), `secretEnv` (keys the operator/instantiator fills), `volumes` (named volumes are
-project-scoped), `dependsOn`, `healthcheck`, `restart`, `command`, and `routes[]` for a service that needs
-more than one public port.
+(non-secret defaults), `secretEnv` (env keys on this service that are **secrets** — forced encrypted and never
+written as plaintext env, whether the value comes from `environment` or a `configField`), `volumes` (named
+volumes are project-scoped), `dependsOn`, `healthcheck`, `restart`, `command`, and `routes[]` for a service
+that needs more than one public port.
 
-**`configFields[]`** (`AppConfigField`) — the Create-App form inputs. Each maps to one env `key` on one
-`service`. Use `generate: "secret"` for values the operator never types, `generateGroup` to share one
-generated value across fields, and `generate: "jwt"` (+ `jwtSecretGroup`, `jwtRole`) for signed keys
+**`configFields[]`** (`AppConfigField`) — **generated/derived env only** (see the table above). Each maps to
+one env `key` on one `service`. `generate: "secret"` for values the operator never types, `generateGroup` to
+share one generated value across fields, `generate: "jwt"` (+ `jwtSecretGroup`, `jwtRole`) for signed keys
 (Supabase anon/service_role). `secret: true` stores it encrypted.
 
 **Optional, high-value:**
-- **`settings[]`** (`AppSettingGroup`, see [`../app-settings.ts`](../app-settings.ts)) — the **day-2** curated
-  settings form shown after install (a friendly form over per-service env). A field with `installStep: true`
-  is also collected in the install wizard. Declaring `settings` makes the app "schema"-managed automatically.
+- **`settings[]`** (`AppSettingGroup`, see [`../app-settings.ts`](../app-settings.ts)) — the curated settings
+  form. Field `type`: `text`, `password`, `number` (+ `min`/`max`/`step`/`integer`), `boolean`, `select`,
+  `radio`, `multiselect` (+ `separator`), `textarea`. Add `pattern` (+ `patternError`) to validate text,
+  `required` to gate install, and `showIf: { field, service?, equals? | truthy? }` for simple conditional
+  visibility (equals/truthy only — no expressions). A field with `installStep: true` is collected in the
+  install wizard (**this is the human-input surface**); everything else is day-2. Validation is enforced live
+  in the wizard **and** server-side on save.
 - **`connection`** — the post-install **Connection card**: `outputs[]` with `source` of
-  `env:<service>:<KEY>` or `publicUrl:<service>[:<port>]`, `secret: true` to mask + reveal.
-- **`prepare[]`** — commands run **inside** a service container after the first deploy, whose stdout is
-  captured and persisted as an env var (e.g. Convex's admin key). Must be re-run-safe; failures are advisory.
+  `env:<service>:<KEY>`, `publicUrl:<service>[:<port>]`, or `template:…`, `secret: true` to mask + reveal,
+  `envKey`/`recommended` to prefill the "Use in a project" handover. An output may also declare `variants`
+  (labeled alternative forms of the same value — e.g. a public vs an internal-network URL — shown as a switch;
+  `sourceLabel` labels the primary), and `width: "half"` to pair two short outputs (e.g. user + password) on
+  one line. Variant `source`s use the same grammar + resolver as `source`.
+- **`prepare[]`** — commands run **inside** a service container (never a host shell), stdout captured and
+  persisted as an env var (e.g. Convex's admin key). Must be re-run-safe. `phase`: `"post-start"` (default),
+  `"post-ready"` (gated on a `readiness` probe), or `"pre-deploy"` (**reserved — not yet run by the engine**;
+  for pre-run DB init use `files` → `/docker-entrypoint-initdb.d` + `dependsOn` + `healthcheck` instead).
+  `mustSucceed: true` fails the deploy if the step errors (default: advisory).
 - **`endpoints[]`** — what the install wizard asks you how to ship: `kind: "http"` (domain-routable) vs
-  `"tcp"` (a raw DB port, no domain). Omit → one `http` endpoint per exposed service.
+  `"tcp"` (a raw DB port, no domain). `defaultMode` pre-selects the exposure (`domain`/`port`/`publish`/
+  `internal`), `allowedModes` restricts the choices offered, `scope` declares reachability intent. Omit
+  `endpoints` → one `http` endpoint per exposed service.
+- **`provides[]` / `requires[]`** — the connection graph. `provides` advertises a connectable bundle
+  (`outputRefs` = `connection.outputs` ids); `requires` declares a connection this app **needs** from another
+  project (`envKey`, `category`, `mode`, `optional`) — the install wizard offers a same-org source picker and
+  wires it in one shot. Same-org only; still user-confirmed.
 - **`files[]`** — generated config files bind-mounted into a container at deploy (for apps that need a config
   *file*, not just env — e.g. an init `.sql`). Self-hosted / desktop only. Supports placeholders.
 - **`management`** — override how the installed app is managed: `{ kind: "custom", href }` for a bespoke
   surface (mail → `/emails`); omit to derive (`schema` when `settings` exist, else raw project tabs).
+
+## Stability & versioning
+
+The catalog JSON is a **stable, versioned public API**. Growth is **additive and backward-compatible**: new
+optional fields, new enum members, new `prepare` phases all default to prior behavior — a field is never
+repurposed or removed within a schema version.
+
+- **`minEngine`** (optional, semver) — **the version knob.** Minimum Openship version required to install
+  this app. Set it to the release that introduced whatever new capability the template now uses.
+- **`schemaVersion`** (optional, defaults to 1) — the JSON *shape* revision. An instance can't parse a shape
+  newer than it understands (`MAX_SUPPORTED_SCHEMA`); bump it only on a genuinely breaking shape change.
+
+**One file per app — never author multiple versions.** The repo always holds the single latest file. You do
+NOT keep an "old version" around: an older instance simply keeps the copy that shipped **bundled in its own
+build**. The overlay only pushes an app to instances new enough to run it. Concretely, when an instance is
+older than an app's `minEngine`:
+
+- the app **is bundled** in that instance → it keeps serving the bundled copy (works, no break; the dashboard
+  may note an update is available);
+- the app **is brand-new** (not bundled) → the catalog shows a guided **"Requires Openship ≥ X"** card and
+  install is refused (client + server) until the instance updates — never a silent disappearance.
+
+Every entry — bundled and repo-overlay — is validated by the **same** strict schema, including **referential**
+checks: `service` references must resolve, `output.source` must be well-formed, `provides.outputRefs` must
+reference real outputs, `flowHref` must be an internal route. A bad reference fails the gate.
 
 ## Placeholders
 

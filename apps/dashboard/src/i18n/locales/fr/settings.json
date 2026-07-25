@@ -496,7 +496,8 @@
       "description": "Choisissez quels événements vont vers quel canal. Chaque cellule est un abonnement.",
       "empty": "Ajoutez d'abord un canal pour vous abonner aux événements.",
       "eventHeader": "Événement",
-      "cellAria": "{category} via {channel}"
+      "cellAria": "{category} via {channel}",
+      "notifyMe": "Me notifier"
     },
     "orgDefaults": {
       "title": "Valeurs par défaut de l'organisation",

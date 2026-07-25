@@ -28,6 +28,7 @@ import { useToast } from "@/context/ToastContext";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import type { Dictionary } from "@/i18n";
 import { usePlatform } from "@/context/PlatformContext";
+import { useCloud } from "@/context/CloudContext";
 import { resolveServiceHostnameLabel } from "@repo/core";
 import PublicEndpointsCard from "@/components/routing/PublicEndpointsCard";
 import { RoutingSettingsCard } from "@/components/routing/RoutingSettingsCard";
@@ -228,11 +229,22 @@ export const DomainSettings = () => {
     buildData,
     servicesData,
     refreshServices,
+    pendingDomainAction,
+    setPendingDomainAction,
   } = useProjectSettings();
   const { showToast } = useToast();
   const { t } = useI18n();
   const router = useRouter();
   const { baseDomain, selfHosted } = usePlatform();
+  // Free .<baseDomain> subdomains route through the Openship Cloud edge, so
+  // choosing "free" without a cloud connection opens the connect-cloud modal
+  // (requireCloud returns true immediately on SaaS / when already connected).
+  const { requireCloud } = useCloud();
+  // Awaitable: resolves true when connected (or after the user connects via the
+  // modal), false on dismiss. Callers `await` it so a free route is only chosen/
+  // saved once cloud is available. Single source: the `managed-project-domain`
+  // capability (copy from the shared registry).
+  const freeNeedsCloud = () => requireCloud("managed-project-domain", { domain: baseDomain });
   const openEdgeModal = useEdgeModal();
   const openVerifyModal = useVerifyModal();
 
@@ -820,6 +832,16 @@ export const DomainSettings = () => {
     };
   }, [id, hasProjectServer]);
 
+  // Arriving via the sidebar's "Add domain" affordance: open the add-domain
+  // form once the domains data has loaded, then clear the one-shot intent so it
+  // doesn't reopen on a later visit. Mirrors handleToggleCustomDomain's open.
+  useEffect(() => {
+    if (pendingDomainAction !== "add" || domainsData.isLoading) return;
+    setNewDomainPort(projectRuntimePort);
+    setShowCustomDomainSection(true);
+    setPendingDomainAction(null);
+  }, [pendingDomainAction, domainsData.isLoading, projectRuntimePort, setPendingDomainAction]);
+
   // Match a "no output found" check to a static card by routed path.
   const outputHintFor = (targetPath?: string): { path: string } | null => {
     if (!targetPath) return null;
@@ -1031,7 +1053,13 @@ export const DomainSettings = () => {
     }
   };
 
-  const handleSavePublicEndpoints = () => persistPublicEndpoints(publicEndpoints);
+  const handleSavePublicEndpoints = async () => {
+    // Free .<baseDomain> domains route through the Openship Cloud edge — block
+    // the save (opening the connect-cloud modal) when one is present without a
+    // cloud connection, so an edit can't persist a domain that can't route.
+    if (publicEndpoints.some((e) => e.domainType === "free") && !(await freeNeedsCloud())) return;
+    return persistPublicEndpoints(publicEndpoints);
+  };
 
   // Make a project domain the primary one by moving its endpoint to index 0 and
   // persisting the new order (primary = first endpoint). Matches by domain-row
@@ -1172,6 +1200,11 @@ export const DomainSettings = () => {
   const handleAddRoute = async () => {
     setAddRouteError(null);
     const { domainType, domain, port } = addRouteDraft;
+    // Free *.opsh.io routes only resolve behind the Openship Cloud edge — gate
+    // the add on a cloud connection, identical to handleSaveRoute /
+    // handleSavePublicEndpoints. requireCloud opens the connect modal and
+    // returns false when not connected, so the free route is never persisted.
+    if (domainType === "free" && !(await freeNeedsCloud())) return;
     const cleanPort = port.trim();
     if (!cleanPort) {
       setAddRouteError(t.projectSettings.domains.toast.enterPortShort);
@@ -1315,6 +1348,8 @@ export const DomainSettings = () => {
 
   const handleSaveRoute = async () => {
     if (!editingRouteService || !routeDraft) return;
+    // A free route rides the cloud edge — gate the save behind connect-cloud.
+    if (routeDraft.domainType === "free" && !(await freeNeedsCloud())) return;
     const patch: Partial<ServiceInput> = {};
     if (routeDraft.exposed !== editingRouteService.exposed) patch.exposed = routeDraft.exposed;
     if (routeDraft.domainType !== (editingRouteService.domainType === "custom" ? "custom" : "free"))
@@ -1433,7 +1468,10 @@ export const DomainSettings = () => {
                   <button
                     key={type}
                     type="button"
-                    onClick={() => setNewDomainType(type)}
+                    onClick={async () => {
+                      if (type === "free" && !(await freeNeedsCloud())) return;
+                      setNewDomainType(type);
+                    }}
                     className={`rounded-lg px-3 py-1.5 text-[12px] font-medium transition-colors ${
                       newDomainType === type
                         ? "bg-primary/10 text-primary ring-1 ring-primary/15"
@@ -1648,6 +1686,9 @@ export const DomainSettings = () => {
                 isManagedRow,
                 isRenewing,
                 isRechecking,
+                // Per-card Edit → the project's edit-domains mode, so a single-app
+                // domain card has the same ⋯ affordance as the per-service cards.
+                onEditRoute: () => setIsEditingDomains(true),
                 // Reassigning primary only makes sense with >1 project domain.
                 onSetPrimary:
                   hasMultipleProjectDomains && !domain.isPrimary
@@ -1782,7 +1823,10 @@ export const DomainSettings = () => {
                   <button
                     key={type}
                     type="button"
-                    onClick={() => setAddRouteDraft((d) => ({ ...d, domainType: type }))}
+                    onClick={async () => {
+                      if (type === "free" && !(await freeNeedsCloud())) return;
+                      setAddRouteDraft((d) => ({ ...d, domainType: type }));
+                    }}
                     className={`rounded-lg px-3 py-1.5 text-[12px] font-medium transition-colors ${
                       addRouteDraft.domainType === type
                         ? "bg-primary/10 text-primary ring-1 ring-primary/15"
@@ -1930,7 +1974,10 @@ export const DomainSettings = () => {
                 // on Save. saveMode="change" reports each edit straight to state
                 // (no per-keystroke/per-toggle request, no inline pill).
                 onExposedChange={(value) => setRouteDraft((prev) => (prev ? { ...prev, exposed: value } : prev))}
-                onDomainTypeChange={(value) => setRouteDraft((prev) => (prev ? { ...prev, domainType: value } : prev))}
+                onDomainTypeChange={async (value) => {
+                  if (value === "free" && !(await freeNeedsCloud())) return;
+                  setRouteDraft((prev) => (prev ? { ...prev, domainType: value } : prev));
+                }}
                 onDomainChange={(value) => setRouteDraft((prev) => (prev ? { ...prev, domain: value } : prev))}
                 onCustomDomainChange={(value) => setRouteDraft((prev) => (prev ? { ...prev, customDomain: value } : prev))}
                 onExposedPortChange={(value) => setRouteDraft((prev) => (prev ? { ...prev, exposedPort: value } : prev))}

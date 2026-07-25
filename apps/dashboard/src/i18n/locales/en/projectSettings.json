@@ -349,7 +349,12 @@
       "applyingTitle": "Applying",
       "applyFailed": "Couldn't apply the env to the running service",
       "applyFailedTitle": "Apply failed"
-    }
+    },
+    "linkedBadge": "Linked",
+    "linkedManaged": "via {app}",
+    "linkedTitle": "Linked integration",
+    "linkedBody": "This value comes from the {app} connection. Manage it from that app — changes made here won't stick.",
+    "unlink": "Remove connection"
   },
   "gitInfo": {
     "repository": "Repository",

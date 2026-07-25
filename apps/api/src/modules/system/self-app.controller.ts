@@ -15,10 +15,11 @@
  */
 
 import type { Context } from "hono";
+import type { ImportedSite, ManualCert } from "@repo/adapters";
 import { repos, db, schema, eq } from "@repo/db";
 import { SYSTEM, safeErrorMessage } from "@repo/core";
 import { env } from "../../config";
-import { assertNotCloud } from "../../lib/controller-helpers";
+import { assertNotCloud, platform } from "../../lib/controller-helpers";
 import { ensureLocalUser } from "../../lib/local-user";
 import { createProject } from "../projects/project-crud.service";
 import { cloudClient } from "../../lib/cloud/client";
@@ -341,6 +342,54 @@ export async function selfEdgePreflight(c: Context) {
     // Scan the foreign proxy's sites (if importable) so the CLI can offer migration.
     const { sites, warnings } = await importSites(executor, status);
     return c.json({ status, sites, warnings });
+  } catch (err) {
+    return c.json({ error: safeErrorMessage(err) }, 500);
+  }
+}
+
+/**
+ * POST /api/system/edge/import-sites — register sites parsed from a foreign proxy
+ * as routes on THIS box's CONTAINER edge (internal-token gated, docker-edge mode).
+ *
+ * `openship up` (compose) detects + stops the foreign proxy on the HOST and parses
+ * its vhosts BEFORE `docker compose up` (the host-net edge container can't bind
+ * :80/:443 otherwise, and it can't read the host filesystem). It then hands the
+ * parsed sites here — plus any cert PEMs it read host-side (`certPems`, keyed by
+ * the source cert path) — so we re-serve them through the container edge.
+ *
+ * No new routing machinery: we drive the SAME provider the deploy pipeline uses,
+ * resolved from the local platform (a `NginxProvider` on the `DockerEdgeExecutor`
+ * when `OPENSHIP_EDGE_MODE=docker`), via the shared `registerImportedSites`.
+ */
+export async function edgeImportSites(c: Context) {
+  const guard = assertNotCloud(c); if (guard) return guard;
+
+  let body: { sites?: unknown; certPems?: unknown };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+  if (!Array.isArray(body.sites)) return c.json({ error: "`sites` must be an array" }, 400);
+  const sites = body.sites as ImportedSite[];
+  if (sites.length === 0) return c.json({ registered: [], warnings: [] });
+
+  const certPems =
+    body.certPems && typeof body.certPems === "object"
+      ? (body.certPems as Record<string, ManualCert>)
+      : undefined;
+
+  try {
+    const { registerImportedSites } = await import("@repo/adapters");
+    const p = platform();
+    if (!p.executor) return c.json({ error: "This instance has no local edge to import into" }, 400);
+    const warnings: string[] = [];
+    const registered = await registerImportedSites(p.routing, p.ssl, p.executor, sites, {
+      certPems,
+      warnings,
+      onLog: (entry) => console.log(`[edge-import] ${entry.message}`),
+    });
+    return c.json({ registered, warnings });
   } catch (err) {
     return c.json({ error: safeErrorMessage(err) }, 500);
   }

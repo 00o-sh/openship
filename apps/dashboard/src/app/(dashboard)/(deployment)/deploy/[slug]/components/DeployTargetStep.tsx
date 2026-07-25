@@ -1,7 +1,8 @@
 "use client";
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
-import { Server, Cloud, Cpu, ArrowRight, Pencil, ChevronDown, ChevronUp, CheckCircle2, Loader2, Plus, Settings2, Zap, Globe, GitBranch, Search } from "lucide-react";
+import { Server, Cloud, Cpu, ArrowRight, Pencil, ChevronDown, ChevronUp, CheckCircle2, Loader2, Plus, Settings2, Zap, Globe, GitBranch, Search, ShieldAlert, ShieldCheck, Terminal } from "lucide-react";
+import { BlurIp } from "@/components/BlurIp";
 import { useDeployment } from "@/context/DeploymentContext";
 import { usesServiceDeployment } from "@/context/deployment/types";
 import type { DeploymentConfig } from "@/context/deployment/types";
@@ -12,8 +13,9 @@ import { settingsApi } from "@/lib/api/settings";
 import type { ServerInfo } from "@/lib/api/system";
 import { useToast } from "@/context/ToastContext";
 import { useModal } from "@/context/ModalContext";
-import type { DeployTarget, BuildStrategy, CloneStrategy } from "@/context/deployment/types";
-import { createPersistedValue, createPersistedFlag } from "@/lib/persisted-value";
+import type { DeployTarget, BuildStrategy, CloneStrategy, RuntimeMode } from "@/context/deployment/types";
+import { isTypicallyStatic, STACKS, type StackId } from "@repo/core";
+import { createPersistedValue } from "@/lib/persisted-value";
 import { AddServerModal } from "./AddServerModal";
 import ServerRuntimePicker from "./ServerRuntimePicker";
 import { useI18n, interpolate } from "@/components/i18n-provider";
@@ -82,6 +84,97 @@ export const OptionCard: React.FC<OptionCardProps> = ({
   </div>
 );
 
+// ─── Serve mode (static-capable apps) ────────────────────────────────────────
+// The one honest isolation choice a frontend/static app has: served as files by
+// the edge (nothing runs) vs run as a real server process. "Server process"
+// requires a start command + port (preflight hard-fails otherwise), so we
+// surface those inputs inline instead of shipping a toggle that fails two steps
+// later — and only THEN is the Sandbox/Direct runtime picker meaningful.
+const ServeModePicker: React.FC = () => {
+  const { config, updateOptions } = useDeployment();
+  const { t } = useI18n();
+  const sm = t.deploy.serveMode;
+  const hasServer = config.options.hasServer;
+  const stackDef = config.framework in STACKS ? STACKS[config.framework as StackId] : undefined;
+
+  const selectServer = () =>
+    updateOptions({
+      hasServer: true,
+      startCommand: config.options.startCommand || (stackDef?.defaultStartCommand ?? ""),
+      productionPort: config.options.productionPort || String(stackDef?.defaultPort ?? ""),
+    });
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <h3 className="text-base font-semibold text-foreground flex items-center gap-2">
+          <Globe className="size-4 text-muted-foreground" />
+          {sm.heading}
+        </h3>
+        <p className="text-sm text-muted-foreground mt-0.5">{sm.subtitle}</p>
+      </div>
+
+      <div className="space-y-2">
+        <OptionCard
+          value="static"
+          selected={!hasServer}
+          onSelect={() => updateOptions({ hasServer: false })}
+          icon={<Globe className="size-5" />}
+          label={sm.staticLabel}
+          description={sm.staticDesc}
+        />
+        <OptionCard
+          value="server"
+          selected={hasServer}
+          onSelect={selectServer}
+          icon={<Terminal className="size-5" />}
+          label={sm.serverLabel}
+          description={sm.serverDesc}
+        />
+      </div>
+
+      {/* Static: built in a Docker sandbox, then served as files by the edge. */}
+      {!hasServer && (
+        <div className="flex items-start gap-2.5 rounded-xl border border-info-border bg-info-bg px-3 py-2.5">
+          <Globe className="size-4 text-info shrink-0 mt-0.5" />
+          <p className="text-[12px] leading-relaxed text-info">{sm.staticNote}</p>
+        </div>
+      )}
+
+      {/* Server process: the required start command + port (else preflight fails). */}
+      {hasServer && (
+        <div className="space-y-2.5 rounded-xl border border-border/50 bg-card/40 p-3">
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-foreground/80">{sm.startCommandLabel}</label>
+            <input
+              type="text"
+              value={config.options.startCommand}
+              placeholder={sm.startCommandPlaceholder}
+              onChange={(e) => updateOptions({ startCommand: e.target.value })}
+              className="w-full rounded-lg border border-border/60 bg-card px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/60 focus:border-primary/50 focus:outline-none focus:ring-1 focus:ring-primary/20"
+            />
+            <p className="text-[11px] text-muted-foreground/70 leading-relaxed">{sm.startCommandHint}</p>
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-foreground/80">{sm.portLabel}</label>
+            <input
+              type="number"
+              min={1}
+              max={65535}
+              value={config.options.productionPort}
+              placeholder="3000"
+              onChange={(e) => updateOptions({ productionPort: e.target.value })}
+              className="w-full rounded-lg border border-border/60 bg-card px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/60 focus:border-primary/50 focus:outline-none focus:ring-1 focus:ring-primary/20"
+            />
+          </div>
+          {/* Sandbox/Direct is real only now that a process runs — server target only. */}
+          {config.deployTarget === "server" && !!config.serverId && <ServerRuntimePicker />}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ─── Server picker (collapsed → searchable list) ─────────────────────────────
 
 interface ServerPickerProps {
@@ -113,9 +206,13 @@ const ServerRowContent: React.FC<{ server: ServerInfo; active: boolean }> = ({ s
           )}
         </p>
         <p className="text-[11px] text-muted-foreground truncate">
-          {server.isLocal
-            ? t.deploy.targetStep.thisServerHost
-            : `${server.sshUser || "root"}@${server.sshHost}:${server.sshPort || 22}`}
+          {server.isLocal ? (
+            t.deploy.targetStep.thisServerHost
+          ) : (
+            <>
+              {server.sshUser || "root"}@<BlurIp>{server.sshHost}</BlurIp>:{server.sshPort || 22}
+            </>
+          )}
         </p>
       </div>
     </>
@@ -235,6 +332,11 @@ interface CompactSummaryProps {
    *  tier chip for a "Static" chip — there's no machine to size when
    *  the workload is just files served from the edge. */
   hasServer?: boolean;
+  /** Resolved runtime for a self-hosted SERVER deploy — drives a persistent
+   *  chip so a user who never opens Advanced still sees whether the app runs
+   *  sandboxed (Docker) or directly on the host ("bare"), the latter carrying a
+   *  warning. Ignored for cloud (tier chip) and static (edge-served chip). */
+  runtimeMode?: RuntimeMode;
   onEdit: () => void;
 }
 
@@ -245,6 +347,7 @@ export const DeployTargetSummary: React.FC<CompactSummaryProps> = ({
   showBuildStrategy = true,
   cloudResourceTier,
   hasServer = true,
+  runtimeMode,
   onEdit,
 }) => {
   const { t } = useI18n();
@@ -290,30 +393,39 @@ export const DeployTargetSummary: React.FC<CompactSummaryProps> = ({
   const buildDest = buildStrategy === "local" ? "local" : deployTarget;
   const sameDestination = showBuildStrategy && buildDest === deployTarget;
 
-  // Cloud-only chip on the right of the summary. Two shapes:
-  //   - Static workloads (no Start command, files served from the edge)
-  //     have no machine to size — show a neutral "Static" chip instead
-  //     of a power tier. Otherwise "Low" / "Medium" / etc. would imply
-  //     a runtime that doesn't exist.
-  //   - Otherwise the picked resource tier with a Zap (power) icon.
-  const tierChip =
-    deployTarget === "cloud"
-      ? !hasServer
-        ? (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-info-bg text-[11px] font-medium text-info shrink-0">
-            <Globe className="size-3" />
-            {t.deploy.summary.static}
-          </span>
-        )
-        : cloudResourceTier
-          ? (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-warning-bg text-[11px] font-medium text-warning shrink-0">
-              <Zap className="size-3" />
-              <span>{tierLabels[cloudResourceTier] ?? cloudResourceTier}</span>
-            </span>
-          )
-          : null
-      : null;
+  // Right-hand chip on the summary — one at a time, by workload shape:
+  //   - Static (files served from the edge, any target): neutral info chip.
+  //     No machine to size, no process to sandbox.
+  //   - Cloud + server: the picked resource tier (Zap).
+  //   - Self-hosted server: the runtime — "bare" carries a persistent WARNING
+  //     (runs directly on the host, unsandboxed) so it's visible even when the
+  //     user never opens Advanced; "docker" a neutral Sandboxed chip.
+  const runtimeChip = !hasServer ? (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-info-bg text-[11px] font-medium text-info shrink-0">
+      <Globe className="size-3" />
+      {t.deploy.summary.runtimeStatic}
+    </span>
+  ) : deployTarget === "cloud" ? (
+    cloudResourceTier ? (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-warning-bg text-[11px] font-medium text-warning shrink-0">
+        <Zap className="size-3" />
+        <span>{tierLabels[cloudResourceTier] ?? cloudResourceTier}</span>
+      </span>
+    ) : null
+  ) : deployTarget === "server" && runtimeMode === "bare" ? (
+    <span
+      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-warning-bg text-[11px] font-medium text-warning shrink-0"
+      title={t.deploy.summary.runtimeDirectHint}
+    >
+      <ShieldAlert className="size-3" />
+      {t.deploy.summary.runtimeDirectWarning}
+    </span>
+  ) : deployTarget === "server" && runtimeMode === "docker" ? (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-success-bg text-[11px] font-medium text-success shrink-0">
+      <ShieldCheck className="size-3" />
+      {t.deploy.summary.runtimeSandboxed}
+    </span>
+  ) : null;
 
   return (
     <button
@@ -355,7 +467,7 @@ export const DeployTargetSummary: React.FC<CompactSummaryProps> = ({
           </>
         )}
       </div>
-      {tierChip}
+      {runtimeChip}
       <Pencil className="size-3.5 text-muted-foreground transition-opacity" />
     </button>
   );
@@ -449,10 +561,6 @@ export const lastPickStore = createPersistedValue<LastPick>(
     return true;
   },
 );
-
-// "Have we shown the first-deploy build hint yet?" - set on the first
-// Continue. Once set, subsequent deploys get the full Build picker.
-const buildHintFlag = createPersistedFlag("openship.build-hint-seen");
 
 // ─── Main step ───────────────────────────────────────────────────────────────
 
@@ -801,11 +909,6 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
   // Track when the defaults fetch is done so we can suppress the picker
   // for a brief moment instead of flashing the full picker before collapsing.
   const [defaultsLoaded, setDefaultsLoaded] = useState(false);
-  // First-deploy-ever flag - read from localStorage on mount. When true,
-  // we hide the Build picker, auto-match build to deploy, and show a small
-  // hint card instead. Flipped off on the first successful Continue so the
-  // full picker re-appears on subsequent deploys.
-  const [isFirstBuildHint, setIsFirstBuildHint] = useState(false);
   // Build picker lives under an "Advanced" disclosure
   // so the screen leads with the deploy-target decision. Folded by default
   // because the build strategy is correctly seeded from the user's saved
@@ -846,32 +949,35 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
   const showBuildStrategy =
     config.projectType === "app" || (config.projectType === "services" && !isServiceDeployment);
 
-  // On mount: read first-deploy flag from localStorage. We treat the very
-  // first deploy as "build hint shown" - once the user clicks Continue we
-  // mark it seen, and from then on the full Build picker is back. Skipping
-  // the picker on first run keeps the UI focused; the option remains
-  // available in the post-continue summary and in Settings.
-  useEffect(() => {
-    setIsFirstBuildHint(!buildHintFlag.isSet());
-  }, []);
+  // A frontend/static stack (vite, CRA, plain static…) can EITHER be served as
+  // files by the edge (hasServer=false) OR run as a real server process
+  // (hasServer=true). We surface that as an explicit choice — the only honest
+  // isolation decision a static-capable app has (Sandbox/Direct is meaningless
+  // when nothing runs). `framework in STACKS` guards isTypicallyStatic, which
+  // dereferences the stack def and would throw on an unknown framework id.
+  const isStaticCapable =
+    config.projectType === "app" &&
+    !isServiceDeployment &&
+    config.framework in STACKS &&
+    isTypicallyStatic(config.framework as StackId);
 
-  // First-deploy-only: preselect the build strategy until the user makes an
-  // explicit pick in the Advanced disclosure (buildStrategyTouchedRef).
-  // UNIFIED build: build on the same place you deploy — a SERVER target builds
-  // on that server (no separate "This Machine" step), and cloud builds in the
-  // cloud runtime. Only the bare "local" target builds locally (it IS the host,
-  // so buildStrategy is inert there anyway). A server deploy that lacks a clone
-  // credential still auto-downgrades to a local build at deploy time
-  // (Sidebar.handleDeploy), so this never hard-fails a credential-less box.
+
+  // UNIFIED BUILD — build where you deploy, as the PERSISTENT default (every
+  // untouched deploy, not just the first). A SERVER target builds on that server
+  // (desktop → remote build + clone-on-server via git-credential forwarding;
+  // VPS → the isLocal "This Server", i.e. build on this machine), and cloud
+  // builds in the cloud runtime. Only the bare "local" target builds locally (it
+  // IS the host, so buildStrategy is inert there). A server deploy that lacks a
+  // clone credential still auto-downgrades to a local build at deploy time
+  // (Sidebar.handleDeploy), so this never hard-fails a credential-less box. An
+  // explicit pick in the Advanced disclosure (buildStrategyTouchedRef) wins.
   useEffect(() => {
-    // Never override an explicit user pick — only preselect on the untouched
-    // first-deploy default.
-    if (!isFirstBuildHint || buildStrategyTouchedRef.current) return;
+    if (buildStrategyTouchedRef.current) return;
     const want: BuildStrategy = config.deployTarget === "local" ? "local" : "server";
     if (config.buildStrategy !== want) {
       updateConfig({ buildStrategy: want });
     }
-  }, [isFirstBuildHint, config.deployTarget, config.buildStrategy, updateConfig]);
+  }, [config.deployTarget, config.buildStrategy, updateConfig]);
 
   // Sandbox (docker) is the default for a fresh self-hosted server APP. Seeded
   // once, and only when the runtime choice actually applies (server app, not
@@ -1263,9 +1369,6 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
     if (!wouldAutoSkip) return;
     if (autoSkippedRef.current) return;
     autoSkippedRef.current = true;
-    // Persist the "build hint seen" flag too - auto-skipping past the
-    // picker also means the user has effectively been through it once.
-    buildHintFlag.set();
     onContinue();
   }, [wouldAutoSkip, onContinue]);
 
@@ -1296,7 +1399,7 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
     }
   };
 
-  const handleContinue = () => {
+  const handleContinue = async () => {
     // The only hard gate at this step: deploying TO Openship Cloud needs an
     // Openship Cloud connection. Anything else (free .${baseDomain} domains
     // on own-server / local, free domains in compose services, etc.) is a
@@ -1305,13 +1408,10 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
     // is paternalistic and breaks the "I picked my own server, leave me
     // alone" signal the user just gave us.
     if (config.deployTarget === "cloud" && !hasCloudConnected) {
-      if (!requireCloud(ts.requireCloudFeature)) {
+      if (!(await requireCloud("cloud-deploy-target"))) {
         return;
       }
     }
-
-    // Mark the build hint as seen - future deploys get the full Build picker.
-    buildHintFlag.set();
 
     // Persist the soft "remember this target for next time" memory now — on
     // commit, not on every tentative click. This is what lets a returning user
@@ -1341,9 +1441,18 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
   const showServerAdvanced =
     showFullPicker && config.deployTarget === "server" && !!config.serverId;
   // Runtime-isolation (Sandbox/Direct) applies only to a self-hosted server APP —
-  // docker/compose always run sandboxed, static has no long-running process.
+  // docker/compose always run sandboxed, static has no long-running process. For
+  // a static-capable app the picker is rendered INLINE under ServeModePicker
+  // (only once the user opts into "run as a server process"), so exclude it here
+  // to avoid rendering ServerRuntimePicker twice.
   const showRuntimeIsolation =
-    config.options.hasServer && config.projectType !== "docker" && !isServiceDeployment;
+    config.options.hasServer &&
+    config.projectType !== "docker" &&
+    !isServiceDeployment &&
+    !isStaticCapable;
+  // The static-vs-server choice — shown up-front (not buried in Advanced) for
+  // any static-capable app, so a vite/CRA user isn't silently defaulted.
+  const showServeMode = showFullPicker && isStaticCapable;
   const showRightPanel = showCloudPicker || showServerAdvanced;
 
   // Action controls (extracted so they can live in the left column on a single-
@@ -1448,6 +1557,8 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
           buildStrategy={config.buildStrategy}
           serverName={summaryServerName}
           showBuildStrategy={showBuildStrategy}
+          hasServer={config.options.hasServer}
+          runtimeMode={config.runtimeMode}
           onEdit={() => setExpanded(true)}
         />
       )}
@@ -1512,6 +1623,10 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
           )}
         </div>
       )}
+
+      {/* Static-capable apps: choose "served as files" vs "runs as a server
+          process". Picking server unlocks the real Sandbox/Direct picker. */}
+      {showServeMode && <ServeModePicker />}
 
       {/* Advanced (Sandbox/Direct, build location, clone, git-forward) renders
           as a compact panel in the RIGHT column for server deploys — see the

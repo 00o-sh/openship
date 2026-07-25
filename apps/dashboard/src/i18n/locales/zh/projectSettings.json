@@ -218,7 +218,13 @@
       "savedTitle": "已保存",
       "saveFailed": "保存环境变量失败",
       "saveFailedTitle": "保存失败"
-    }
+    },
+    "linkedBadge": "已链接",
+    "linkedManaged": "通过 {app}",
+    "linkedTitle": "已链接的集成",
+    "linkedBody": "此值来自 {app} 连接。请在该应用中管理 — 这里的更改不会保留。",
+    "unlink": "移除连接",
+    "close": "关闭"
   },
   "gitInfo": {
     "repository": "仓库",

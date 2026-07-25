@@ -37,5 +37,15 @@ r.post("/migrate", { tag: "server:write", collection: true }, migration.startMig
 r.get("/migrations/:id", { tag: "server:read", collection: true }, migration.getMigration);
 r.get("/migrations/:id/stream", { tag: "server:read", collection: true }, migration.streamMigration);
 r.post("/migrations/:id/cutover", { tag: "server:write", collection: true }, migration.confirmCutover);
+// Abort an in-flight migration (kills the transfer + rolls back).
+r.post("/migrations/:id/cancel", { tag: "server:write", collection: true }, migration.cancelMigration);
+// Resume a partial run: re-transfer pending paths (edit/skip), then finish.
+r.post("/migrations/:id/resume", { tag: "server:write", collection: true }, migration.resumeMigration);
+// Delete a terminal run's record (history cleanup; project + data untouched).
+r.delete("/migrations/:id", { tag: "server:write", collection: true }, migration.deleteMigration);
+// The in-flight run for a server, so a reloaded client can re-attach.
+r.get("/active", { tag: "server:read", collection: true }, migration.getActiveMigration);
+// Recent runs for a server (the "Migrations" tab list, like project deployments).
+r.get("/runs", { tag: "server:read", collection: true }, migration.getMigrationRuns);
 
 export const migrationRoutes = r.hono;

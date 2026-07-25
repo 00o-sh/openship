@@ -8,6 +8,7 @@ import { useCloud } from "@/context/CloudContext";
 import { ConnectPrompt } from "./components/ConnectPrompt";
 import { LoadingSkeleton } from "./components/LoadingSkeleton";
 import { RepositoryList } from "./components/RepositoryList";
+import { useLibraryRepos } from "./useLibraryRepos";
 import { GhCliConsent } from "./components/GhCliConsent";
 import { LocalProjects } from "./components/LocalProjects";
 import { FolderUpload } from "./components/FolderUpload";
@@ -43,11 +44,13 @@ export default function LibraryPage() {
     accounts,
     selectedOwner,
     setSelectedOwner,
-    repos,
-    loadingRepos,
     refresh,
     installUrl,
   } = useGitHub();
+  // Server-paginated repo list for the Library (own hook so the shared
+  // GitHubContext.repos — used by the GitSettings + migration pickers — stays a
+  // full-set, client-side list). Fetches a page at a time + authoritative counts.
+  const libRepos = useLibraryRepos(selectedOwner, connected);
   const { selfHosted, deployMode } = usePlatform();
   // Only the desktop app can read the user's folder off disk (native picker +
   // co-located API). A remote self-hosted browser can't — it uploads like SaaS.
@@ -178,13 +181,25 @@ export default function LibraryPage() {
             <GhCliConsent login={state.sources.ghCli.login} onAllow={allowGhCli} />
           ) : (
             <RepositoryList
-              repos={repos}
+              repos={libRepos.repos}
               accounts={accounts}
               selectedOwner={selectedOwner}
               setSelectedOwner={setSelectedOwner}
               loading={loading}
-              loadingRepos={loadingRepos}
+              loadingRepos={libRepos.loading}
               installUrl={installUrl}
+              server={{
+                search: libRepos.search,
+                onSearch: libRepos.setSearch,
+                visibility: libRepos.visibility,
+                onVisibility: libRepos.setVisibility,
+                sort: libRepos.sort,
+                onSort: libRepos.setSort,
+                page: libRepos.meta.page,
+                totalPages: libRepos.meta.totalPages,
+                onPage: libRepos.setPage,
+                count: libRepos.meta.count,
+              }}
             />
           )}
         </div>
@@ -192,10 +207,15 @@ export default function LibraryPage() {
         {/* ── RIGHT COLUMN ───────────────────────────────────────── */}
         <LibrarySidebar
           selectedOwner={selectedOwner}
-          repos={repos}
+          repos={libRepos.repos}
           selfHosted={selfHosted}
           state={state}
           cloudConnected={cloudConnected}
+          counts={{
+            total: libRepos.meta.total,
+            publicCount: libRepos.meta.publicCount,
+            privateCount: libRepos.meta.privateCount,
+          }}
         />
       </div>
 

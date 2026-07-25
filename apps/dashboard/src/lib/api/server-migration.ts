@@ -136,6 +136,24 @@ export interface MigrationPreviewService {
   warnings: string[];
 }
 
+/** One measured item in the transfer plan. */
+export interface SizedItem {
+  ref: string;
+  kind: "volume" | "bind" | "image" | "path";
+  /** Apparent bytes, or null when unmeasurable (timeout / missing). */
+  bytes: number | null;
+  /** Source existence + type for a bind/custom path (undefined for volume/image).
+   *  `exists:false` → the plan warns; the run would park `partial` for it. */
+  exists?: boolean;
+  type?: "dir" | "file";
+}
+
+/** A user-selected extra path to move: source (on source host) → dest (on target). */
+export interface CustomPath {
+  source: string;
+  dest: string;
+}
+
 export interface MigrationPreview {
   sameServer: boolean;
   services: MigrationPreviewService[];
@@ -145,7 +163,23 @@ export interface MigrationPreview {
   /** Reverse proxies that won't be imported (Openship's edge replaces them). */
   droppedProxies: string[];
   warnings: string[];
+  /** Cross-server transfer plan (payload sizes). Absent for same-server.
+   *  `partial` = a size couldn't be measured, so `totalBytes` is a lower bound. */
+  plan?: {
+    totalBytes: number;
+    partial: boolean;
+    items: SizedItem[];
+  };
+  /** Per kept domain: whether the source cert will be CARRIED (reused, no ACME)
+   *  or re-issued on publish. Cross-server only. */
+  sslByDomain?: Array<{ domain: string; hasCert: boolean }>;
+  /** Cross-server: services whose target volume(s) already hold data — the user
+   *  resolves each (override/clone/keep) at the plan step before migrating. */
+  conflicts?: Array<{ serviceName: string; volumes: string[] }>;
 }
+
+/** Per-service resolution for a target-volume conflict. */
+export type ConflictAction = "override" | "clone" | "keep";
 
 export type MigrationStatus =
   | "queued"
@@ -155,18 +189,54 @@ export type MigrationStatus =
   | "verifying"
   | "awaiting_cutover"
   | "cutover"
+  | "partial"
   | "succeeded"
   | "failed"
   | "rolled_back";
+
+/** A data path that didn't transfer — a `partial` run's resolvable to-do item. */
+export interface PendingItem {
+  key: string;
+  kind: "volume" | "bind" | "path";
+  source: string;
+  dest?: string;
+  serviceName?: string;
+  reason: "missing" | "denied" | "error";
+  message?: string;
+}
 
 export interface MigrationRun {
   id: string;
   status: MigrationStatus;
   mode: "cross_server" | "same_server";
+  projectName?: string | null;
   projectId?: string | null;
   deploymentId?: string | null;
   bytesMoved?: number | null;
   errorMessage?: string | null;
+  /** Durable session log (newline-joined) for the run detail view. */
+  logs?: string | null;
+  sourceServerId?: string | null;
+  targetServerId?: string | null;
+  serviceNames?: string[];
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  /** `partial` run's unresolved paths (edit/skip → resume). */
+  pendingItems?: PendingItem[];
+  /** Snapshot of the start input — drives a failed run's edit-&-retry re-seed
+   *  (detail fetch only; stripped from the list). */
+  inputSnapshot?: Record<string, unknown> | null;
+}
+
+/** Live data-move progress during `moving_data` (in-memory, coarse per-poll).
+ *  `movedBytes` is the aggregate across all tasks; `totalBytes` the scanned
+ *  payload size (null when unknown — relay path — so the UI shows bytes, not a
+ *  %). `task`/`kind` label the current unit. */
+export interface TransferProgress {
+  task: string;
+  kind: "image" | "volume";
+  movedBytes: number;
+  totalBytes: number | null;
 }
 
 /**
@@ -275,6 +345,8 @@ export const dockerMigrationApi = {
     sourceServerId: string;
     targetServerId: string;
     serviceNames: string[];
+    /** Extra paths to size in the plan (cross-server). */
+    customPaths?: CustomPath[];
   }) =>
     api.post<{ success: boolean; preview: MigrationPreview }>(
       endpoints.dockerMigration.preview,
@@ -309,6 +381,15 @@ export const dockerMigrationApi = {
     serviceSubpaths?: Record<string, string>;
     /** serviceName → env override (edited in the wizard; else discovered env). */
     serviceEnv?: Record<string, Record<string, string>>;
+    /** Extra paths to move (cross-server): source host path → target host path. */
+    customPaths?: CustomPath[];
+    /** serviceName → domain/route to publish server-side once the target is up. */
+    routesByServiceName?: Record<
+      string,
+      { exposedPort?: string; domainType: "free" | "custom"; domain?: string; customDomain?: string }
+    >;
+    /** serviceName → target-volume conflict resolution (override/clone/keep). */
+    conflictResolution?: Record<string, ConflictAction>;
     /** Adopt Openship-managed containers too (raw Docker) — must match the scan. */
     flatDocker?: boolean;
   }) =>
@@ -317,9 +398,9 @@ export const dockerMigrationApi = {
       input,
     ),
 
-  /** Poll a migration run's current state. */
+  /** Poll a migration run's current state (+ coarse live transfer progress). */
   getMigration: (id: string) =>
-    api.get<{ success: boolean; run: MigrationRun }>(
+    api.get<{ success: boolean; run: MigrationRun; progress?: TransferProgress | null }>(
       endpoints.dockerMigration.migration(id),
     ),
 
@@ -329,4 +410,29 @@ export const dockerMigrationApi = {
       confirmationToken,
       kill,
     }),
+
+  /** Abort an in-flight migration (kills the transfer + rolls back on the server). */
+  cancel: (id: string) =>
+    api.post<{ success: boolean }>(endpoints.dockerMigration.cancel(id), {}),
+
+  /** Delete a terminal run's record (history cleanup; project + data untouched). */
+  remove: (id: string) =>
+    api.delete<{ success: boolean }>(endpoints.dockerMigration.migration(id)),
+
+  /** Resume a `partial` run: re-transfer the pending paths (per-key source
+   *  overrides) and skip the chosen ones; finishes to cutover when none remain. */
+  resume: (id: string, body: { overrides?: Record<string, string>; skip?: string[] }) =>
+    api.post<{ success: boolean }>(endpoints.dockerMigration.resume(id), body),
+
+  /** The in-flight run for a server (or null) — for re-attaching after a reload. */
+  getActive: (serverId: string) =>
+    api.get<{ success: boolean; run: MigrationRun | null; confirmationToken: string | null }>(
+      `${endpoints.dockerMigration.active}?serverId=${encodeURIComponent(serverId)}`,
+    ),
+
+  /** Recent runs for a server (newest first) — the "Migrations" tab list. */
+  list: (serverId: string) =>
+    api.get<{ success: boolean; runs: MigrationRun[] }>(
+      `${endpoints.dockerMigration.runs}?serverId=${encodeURIComponent(serverId)}`,
+    ),
 };

@@ -435,20 +435,10 @@ export function resolveBuildImageForDeploymentMode(
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/**
- * Whether any compose service uses a managed (free) domain that requires
- * Openship Cloud. Checks by domain *type*, not by domain string -
- * works regardless of the configured cloud domain.
- */
-export function servicesNeedCloud(services?: ComposeServiceInfo[]): boolean {
-  if (!services?.length) return false;
-  return services.some((s) => s.exposed && s.domainType !== "custom");
-}
-
-export function publicEndpointsNeedCloud(endpoints?: PublicEndpoint[]): boolean {
-  if (!endpoints?.length) return false;
-  return endpoints.some((endpoint) => endpoint.domainType !== "custom");
-}
+// The needs-cloud predicate (managed/free domain ⇒ needs cloud) is defined ONCE
+// in @repo/core and re-exported here under the historical names, so existing
+// importers are unchanged and client + server share one definition.
+export { servicesNeedCloud, endpointsNeedCloud as publicEndpointsNeedCloud } from "@repo/core";
 
 export function createPublicEndpoint(
   overrides: Partial<PublicEndpoint> = {},
@@ -763,6 +753,13 @@ export interface DeploymentContextType {
   stopDeployment: () => Promise<void>;
   redeploy: (deploymentId: string) => Promise<string | null>;
   respondToPrompt: (action: string) => Promise<void>;
+  /** Open the shared clone-credential modal for a github-credential error code
+   *  (single handler for the deploy wizard, redeploy, and the build page).
+   *  Returns true when it opened; false when the code isn't credential-related. */
+  maybeOpenCredentialModal: (
+    errorCode: string | null | undefined,
+    opts?: { trigger?: "preflight-fail" | "build-fail"; onResolved?: () => void },
+  ) => boolean;
   reset: () => void;
 
   // Terminal

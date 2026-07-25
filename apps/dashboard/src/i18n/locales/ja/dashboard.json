@@ -79,6 +79,9 @@
     "preferences": "環境設定"
   },
   "pages": {
+    "apps": {
+      "moreApps": "他 {count} 件"
+    },
     "projects": {
       "title": "プロジェクト",
       "description": "アプリケーションを簡単にデプロイして管理できます",

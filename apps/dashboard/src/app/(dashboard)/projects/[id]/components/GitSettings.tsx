@@ -2,21 +2,17 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
-  ChevronDown,
   Download,
   Eye,
   EyeOff,
   ExternalLink,
   GitBranch,
   GitCommit,
-  Globe,
   Github,
   Key,
   Loader2,
   RotateCcw,
   Trash2,
-  Webhook,
-  Zap,
 } from "lucide-react";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { useGitHub } from "@/context/GitHubContext";
@@ -35,13 +31,10 @@ export const GitSettings = () => {
   const github = useGitHub();
   const { showToast } = useToast();
   const { t } = useI18n();
-  const [isTogglingAutoDeploy, setIsTogglingAutoDeploy] = useState(false);
   const [isTogglingRollback, setIsTogglingRollback] = useState(false);
   const [savingRollbackWindow, setSavingRollbackWindow] = useState(false);
   const [isLinking, setIsLinking] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
-  const [isSettingDomain, setIsSettingDomain] = useState(false);
-  const [showDomainMenu, setShowDomainMenu] = useState(false);
   const hasRefreshed = useRef(false);
 
   /* ── Per-project clone-token override ─────────────────────────── */
@@ -111,26 +104,6 @@ export const GitSettings = () => {
     }
   }, [refreshGit]);
 
-  const handleAutoDeployToggle = async () => {
-    setIsTogglingAutoDeploy(true);
-    try {
-      const newState = !gitData.autoDeployEnabled;
-      const response = await projectsApi.setAutoDeploy(id, newState);
-      if (response.success) {
-        showToast(newState ? t.projectSettings.git.toast.autoDeployEnabled : t.projectSettings.git.toast.autoDeployDisabled, "success");
-        await refreshGit();
-      } else {
-        showToast(response.error || t.projectSettings.git.toast.autoDeployFailed, "error");
-        await refreshGit();
-      }
-    } catch (error) {
-      showToast(getApiErrorMessage(error, t.projectSettings.git.toast.autoDeployFailed), "error");
-      await refreshGit();
-    } finally {
-      setIsTogglingAutoDeploy(false);
-    }
-  };
-
   const handleRollbackStrategyToggle = async () => {
     setIsTogglingRollback(true);
     try {
@@ -168,24 +141,6 @@ export const GitSettings = () => {
       showToast(getApiErrorMessage(error, t.projectSettings.git.toast.rollbackHistoryFailed), "error");
     } finally {
       setSavingRollbackWindow(false);
-    }
-  };
-
-  const handleSetWebhookDomain = async (domain: string | null) => {
-    setIsSettingDomain(true);
-    setShowDomainMenu(false);
-    try {
-      const response = await projectsApi.setWebhookDomain(id, domain);
-      if (response.success) {
-        showToast(domain ? interpolate(t.projectSettings.git.toast.webhookDomainSet, { domain }) : t.projectSettings.git.toast.webhookDomainCleared, "success");
-        await refreshGit();
-      } else {
-        showToast(response.error || t.projectSettings.git.toast.webhookDomainFailed, "error");
-      }
-    } catch (error) {
-      showToast(getApiErrorMessage(error, t.projectSettings.git.toast.webhookDomainFailed), "error");
-    } finally {
-      setIsSettingDomain(false);
     }
   };
 
@@ -350,21 +305,6 @@ export const GitSettings = () => {
         </div>
       )}
 
-      {/* No webhook endpoint banner - local/private instances need a direct endpoint */}
-      {gitData.webhookStrategy === "none" && (
-        <div className="flex items-start gap-3 rounded-2xl border border-info-border bg-info-bg px-5 py-4">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-info-bg">
-            <Globe className="size-4 text-info" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h3 className="text-[14px] font-semibold text-foreground">{t.projectSettings.git.webhookBanner.title}</h3>
-            <p className="mt-0.5 text-[12px] text-muted-foreground">
-              {t.projectSettings.git.webhookBanner.description}
-            </p>
-          </div>
-        </div>
-      )}
-
       <div className="space-y-5">
         <SectionCard
           title={t.projectSettings.git.source.title}
@@ -407,120 +347,9 @@ export const GitSettings = () => {
             </div>
           </div>
 
-          {/* Only show auto-deploy/webhook when prerequisites are met */}
-          {!(
-            (projectData.deployTarget === "cloud" && !gitData.installationInstalled) ||
-            (gitData.webhookStrategy === "none" && !gitData.verifiedDomains?.length)
-          ) && (
-            <>
-              {/* Webhook Domain Picker - show when verified domains are available */}
-              {gitData.verifiedDomains && gitData.verifiedDomains.length > 0 && projectData.deployTarget !== "cloud" && (
-                <div className="rounded-xl border border-border/50 bg-muted/20 px-4 py-3">
-                  <div className="flex items-start gap-3">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                      <Globe className="size-4" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-[13px] font-medium text-foreground">{t.projectSettings.git.webhookEndpoint.title}</p>
-                      <p className="mt-0.5 text-[12px] text-muted-foreground">
-                        {gitData.webhookDomain
-                          ? t.projectSettings.git.webhookEndpoint.descriptionSet
-                          : t.projectSettings.git.webhookEndpoint.descriptionUnset
-                        }
-                      </p>
-                      <div className="relative mt-2">
-                        <button
-                          type="button"
-                          onClick={() => setShowDomainMenu(!showDomainMenu)}
-                          disabled={isSettingDomain}
-                          className="flex w-full items-center justify-between gap-2 rounded-lg border border-border/60 bg-background px-3 py-2 text-start text-[13px] transition-colors hover:border-border disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          <span className={gitData.webhookDomain ? "text-foreground" : "text-muted-foreground"}>
-                            {isSettingDomain ? t.projectSettings.git.webhookEndpoint.updating : gitData.webhookDomain || t.projectSettings.git.webhookEndpoint.select}
-                          </span>
-                          {isSettingDomain ? <Loader2 className="size-3.5 animate-spin text-muted-foreground" /> : <ChevronDown className="size-3.5 text-muted-foreground" />}
-                        </button>
-                        {showDomainMenu && (
-                          <div className="absolute start-0 end-0 top-full z-10 mt-1 overflow-hidden rounded-lg border border-border/60 bg-popover shadow-lg">
-                            {gitData.verifiedDomains.map((d) => (
-                              <button
-                                key={d.hostname}
-                                type="button"
-                                onClick={() => handleSetWebhookDomain(d.hostname)}
-                                className={`flex w-full items-center gap-2 px-3 py-2 text-start text-[13px] transition-colors hover:bg-muted/50 ${gitData.webhookDomain === d.hostname ? "bg-primary/5 text-primary" : "text-foreground"}`}
-                              >
-                                <Globe className="size-3.5 shrink-0" />
-                                {d.hostname}
-                                {d.ssl && <span className="ms-auto text-[11px] text-success">SSL</span>}
-                              </button>
-                            ))}
-                            {gitData.webhookDomain && (
-                              <button
-                                type="button"
-                                onClick={() => handleSetWebhookDomain(null)}
-                                className="flex w-full items-center gap-2 border-t border-border/30 px-3 py-2 text-start text-[13px] text-muted-foreground transition-colors hover:bg-muted/50"
-                              >
-                                {t.projectSettings.git.webhookEndpoint.clear}
-                              </button>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              <div className="grid gap-3 sm:grid-cols-2">
-                <InfoCard
-                  icon={Zap}
-                  title={t.projectSettings.git.autoDeployCard.title}
-                  value={gitData.autoDeployEnabled ? t.projectSettings.git.autoDeployCard.enabled : t.projectSettings.git.autoDeployCard.disabled}
-                  description={
-                    gitData.autoDeployEnabled
-                      ? gitData.webhookStrategy === "domain"
-                          ? interpolate(t.projectSettings.git.autoDeployCard.descDelivers, { domain: String(gitData.webhookDomain ?? "") })
-                          : t.projectSettings.git.autoDeployCard.descAuto
-                      : t.projectSettings.git.autoDeployCard.descManual
-                  }
-                  action={
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={gitData.autoDeployEnabled}
-                      onClick={handleAutoDeployToggle}
-                      disabled={isTogglingAutoDeploy}
-                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${gitData.autoDeployEnabled ? "bg-primary" : "bg-muted"} ${isTogglingAutoDeploy ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}
-                    >
-                      {isTogglingAutoDeploy ? (
-                        <span className="mx-auto">
-                          <Loader2 className="size-3.5 animate-spin text-background" />
-                        </span>
-                      ) : (
-                        <span className={`inline-block h-4 w-4 transform rounded-full bg-background transition-transform ${gitData.autoDeployEnabled ? "translate-x-6 rtl:-translate-x-6" : "translate-x-1 rtl:-translate-x-1"}`} />
-                      )}
-                    </button>
-                  }
-                />
-                <InfoCard
-                  icon={Webhook}
-                  title={t.projectSettings.git.webhookCard.title}
-                  value={
-                    gitData.webhookStrategy === "domain" && gitData.webhookActive
-                      ? t.projectSettings.git.webhookCard.direct
-                      : gitData.webhookActive
-                          ? t.projectSettings.git.webhookCard.active
-                          : t.projectSettings.git.webhookCard.inactive
-                  }
-                  description={
-                    gitData.webhookStrategy === "domain" && gitData.webhookActive
-                      ? interpolate(t.projectSettings.git.webhookCard.descDirect, { domain: String(gitData.webhookDomain ?? "") })
-                      : gitData.webhookActive
-                          ? t.projectSettings.git.webhookCard.descActive
-                          : t.projectSettings.git.webhookCard.descInactive
-                  }
-                  tone={gitData.webhookActive ? "success" : "neutral"}
-                />
+          {/* Rollback strategy + history (independent of the webhook — the GitHub
+              push→deploy hook + its route/status now live in the Webhooks tab). */}
+          <div className="grid gap-3 sm:grid-cols-2">
                 <InfoCard
                   icon={RotateCcw}
                   title={t.projectSettings.git.rollbackStrategy.title}
@@ -599,9 +428,7 @@ export const GitSettings = () => {
                     />
                   );
                 })()}
-              </div>
-            </>
-          )}
+          </div>
         </SectionCard>
 
         <SectionCard
@@ -806,6 +633,7 @@ function InfoCard({
   value,
   description,
   action,
+  footer,
   tone = "neutral",
 }: {
   icon: React.ComponentType<{ className?: string }>;
@@ -813,6 +641,8 @@ function InfoCard({
   value: string;
   description: string;
   action?: React.ReactNode;
+  /** Optional full-width content below the row (e.g. the webhook delivery-domain picker). */
+  footer?: React.ReactNode;
   tone?: "neutral" | "success";
 }) {
   return (
@@ -830,6 +660,7 @@ function InfoCard({
         </div>
         {action ? <div className="shrink-0">{action}</div> : null}
       </div>
+      {footer ? <div className="mt-3 border-t border-border/40 pt-3">{footer}</div> : null}
     </div>
   );
 }

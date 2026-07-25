@@ -41,6 +41,7 @@ import { assertResourceInOrg } from "../../lib/controller-helpers";
 import type { RequestContext } from "../../lib/request-context";
 import { toAdapterRow } from "../backup-destinations/hydrate-server";
 import { restoreRunBus } from "./restore.sse";
+import { notification } from "../../lib/notification-dispatcher";
 
 const TRUNCATE_ERROR = 4096;
 
@@ -374,6 +375,32 @@ export class RestoreOrchestrator {
       }
     } catch {
       // bus failures never block the FSM
+    }
+
+    // Notify on the terminal restore outcome (best-effort; never blocks the
+    // FSM). `cancelled` is user-initiated — no notification. succeeded/failed
+    // both map to the "Restore completed" category via the dispatcher.
+    if (status === "succeeded" || status === "failed" || status === "server_error") {
+      try {
+        const row = await repos.backupRestore.findById(restoreId);
+        if (row) {
+          const project = await repos.project.findById(row.projectId).catch(() => null);
+          notification.emit({
+            organizationId: row.organizationId,
+            eventType: status === "succeeded" ? "backup_restore.completed" : "backup_restore.failed",
+            resourceType: "backup_restore",
+            resourceId: restoreId,
+            payload: {
+              projectName: project?.name ?? null,
+              status,
+              bytesRestored: typeof patch?.bytesRestored === "number" ? patch.bytesRestored : null,
+              errorMessage: typeof patch?.errorMessage === "string" ? patch.errorMessage : null,
+            },
+          });
+        }
+      } catch (err) {
+        console.error(`[restore-orchestrator] notify failed for ${restoreId}: ${safeErrorMessage(err)}`);
+      }
     }
   }
 

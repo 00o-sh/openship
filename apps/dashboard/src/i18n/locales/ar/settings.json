@@ -472,7 +472,8 @@
       "description": "اختر أي الأحداث تذهب إلى أي قناة. كل خلية اشتراك واحد.",
       "empty": "أضف قناة أولًا للاشتراك في الأحداث.",
       "eventHeader": "الحدث",
-      "cellAria": "{category} عبر {channel}"
+      "cellAria": "{category} عبر {channel}",
+      "notifyMe": "إشعاري"
     },
     "orgDefaults": {
       "title": "الإعدادات الافتراضية للمؤسسة",

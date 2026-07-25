@@ -28,15 +28,23 @@ import { safeErrorMessage } from "@repo/core";
 import {
   resolveExecutor,
   transferVolume,
+  transferImage,
+  scopedVolumeName,
   type ServiceHandle,
   type TransferEndpoint,
   type TransferMode,
   type TransferCompression,
 } from "@repo/adapters";
 import type { RequestContext } from "../../lib/request-context";
-import { createServerDockerRuntime } from "../../lib/deployment-runtime";
+import {
+  createServerDockerRuntime,
+  createServerCommandExecutor,
+} from "../../lib/deployment-runtime";
+import { establishDirectLink, PathMissingError, statPath, sq } from "./direct-transfer";
+import { sizeOfMoveSet } from "./migration-size";
 import { withKeyedMutex } from "../../lib/provision-lock";
 import { requestBuildAccess } from "../deployments/build.service";
+import { restartServiceContainer, updateService } from "../services/service.service";
 import { linkProjectRepo } from "../projects/project-crud.service";
 import { teardownProject } from "../projects/project-teardown";
 import { discoverServerStack } from "./docker-inspect.service";
@@ -49,6 +57,16 @@ import { migrationRunBus } from "./migration.sse";
  *  "copy" = duplicate data into a new openship-<slug>-<name> volume, leaving the
  *  original untouched. Cross-server ignores this (it always copies A→B, keeps A). */
 export type VolumeStrategy = "reuse" | "copy";
+
+/** Aggregate data-move progress: bytes moved so far across ALL tasks, over the
+ *  scanned payload size (null when unknown → the client shows bytes, not a %).
+ *  `task`/`kind` name the current unit for a detail line. */
+export interface ProgressUpdate {
+  task: string;
+  kind: "image" | "volume";
+  movedBytes: number;
+  totalBytes: number | null;
+}
 
 export interface StartMigrationInput {
   organizationId: string;
@@ -71,9 +89,49 @@ export interface StartMigrationInput {
   serviceSubpaths?: Record<string, string>;
   /** serviceName → env override (defaults to the discovered container's env). */
   serviceEnv?: Record<string, Record<string, string>>;
+  /** User-selected extra paths to move (cross-server): each a source path on the
+   *  source host → a destination path on the target host (file or folder). */
+  customPaths?: Array<{ source: string; dest: string }>;
+  /** serviceName → how to resolve a target-volume conflict (target already has
+   *  data): "override" (overwrite it), "clone" (new namespaced volume, service
+   *  mounts it), "keep" (use the existing target data as-is). Chosen at the plan
+   *  step; a resolved service's conflict no longer hard-fails the move. */
+  conflictResolution?: Record<string, "override" | "clone" | "keep">;
+  /** serviceName → the domain/route to publish once the target is verified.
+   *  Published SERVER-SIDE post-verify (was client-only, so it was lost when the
+   *  wizard unmounted or a run was opened from the list). */
+  routesByServiceName?: Record<
+    string,
+    { exposedPort?: string; domainType: "free" | "custom"; domain?: string; customDomain?: string }
+  >;
   /** Adopt in flat-docker mode — MUST match the scan the user selected from, or
    *  openship-labeled containers get treated as managed and "none are found". */
   flatDocker?: boolean;
+}
+
+/** A built image to move: probed/saved by `id` (reliable), re-tagged to `tag`
+ *  on the target so the adopted service's deploy imageRef resolves. */
+interface BuiltImage {
+  id: string;
+  tag: string;
+}
+
+/** A data path that did NOT transfer — a `partial` run's to-do list. `key` is
+ *  the stable id a resume uses to apply an override / skip. */
+export interface PendingItem {
+  key: string;
+  kind: "volume" | "bind" | "path";
+  source: string;
+  dest?: string;
+  serviceName?: string;
+  reason: "missing" | "denied" | "error";
+  message?: string;
+}
+
+/** moveData result: bytes written + the items that didn't make it. */
+interface MoveResult {
+  bytesMoved: number;
+  pendingItems: PendingItem[];
 }
 
 const VERIFY_TIMEOUT_MS = 20 * 60 * 1000; // 20 min for the target deploy
@@ -102,6 +160,68 @@ async function runPool<T, R>(
 }
 
 class MigrationOrchestratorImpl {
+  /** Latest data-move progress per run, surfaced through getMigration so the
+   *  wizard's existing poll can draw a bar without a second SSE subscription.
+   *  Transient (in-memory) — cleared when the run reaches a terminal state.
+   *  `totalBytes` is null when the payload size is unknown (relay path). */
+  private readonly progressByRun = new Map<string, ProgressUpdate>();
+
+  /** Per-run cancel state + the direct-transfer `runTag` (the ephemeral-key
+   *  marker) so a cancel can pkill exactly this run's rsync/ssh. Entry is
+   *  created when the pipeline starts and cleared on a terminal transition.
+   *  Single API process (self-hosted), so a cancel POST reliably reaches the
+   *  running pipeline through this map. */
+  private readonly cancelByRun = new Map<string, { cancelled: boolean; runTag?: string }>();
+
+  /** Durable per-run session log. run()'s log() closure appends here; a throttled
+   *  flush mirrors it to the run row's `logs` column so a reloaded or failed run
+   *  keeps its history (the in-memory buffer alone dies with the client reload).
+   *  Kept until run()'s finally flushes-and-clears — NOT cleared by transition. */
+  private readonly logsByRun = new Map<string, string[]>();
+  private readonly logFlushAt = new Map<string, number>();
+
+  /** Latest transfer progress for a run, or null. */
+  getProgress(id: string): ProgressUpdate | null {
+    return this.progressByRun.get(id) ?? null;
+  }
+
+  /** The in-memory log tail for a still-running run (fresher than the throttled
+   *  DB copy) — getMigration prefers it while the run is live. */
+  getLiveLogs(id: string): string | null {
+    const buf = this.logsByRun.get(id);
+    return buf && buf.length > 0 ? buf.join("\n") : null;
+  }
+
+  /** Append one line to a run's session log; console + buffer + throttled flush. */
+  private appendLog(id: string, message: string): void {
+    console.log(`[migration] ${id}: ${message}`);
+    const buf = this.logsByRun.get(id) ?? [];
+    buf.push(`[${new Date().toISOString()}] ${message}`);
+    this.logsByRun.set(id, buf);
+    const now = Date.now();
+    if (now - (this.logFlushAt.get(id) ?? 0) < 2000) return;
+    this.logFlushAt.set(id, now);
+    void this.flushLogs(id);
+  }
+
+  /** Mirror the buffer to the DB, keeping only the last 256 KiB. */
+  private async flushLogs(id: string): Promise<void> {
+    const buf = this.logsByRun.get(id);
+    if (!buf || buf.length === 0) return;
+    const MAX = 256 * 1024;
+    let text = buf.join("\n");
+    if (text.length > MAX) text = text.slice(text.length - MAX);
+    await repos.dockerMigrationRun.updateLogs(id, text).catch(() => {});
+  }
+
+  /** Throw if the run was cancelled — checked at phase boundaries so a cancel
+   *  rides the existing `catch → rollback` (no new terminal status). */
+  private throwIfCancelled(id: string | undefined): void {
+    if (id && this.cancelByRun.get(id)?.cancelled) {
+      throw new Error("Cancelled by user");
+    }
+  }
+
   /** Create the run row and kick the async pipeline. Returns immediately.
    *  Serialized + in-flight-guarded so two concurrent starts (double-click,
    *  client retry, two operators) can't race the SAME server — which would stop
@@ -139,6 +259,9 @@ class MigrationOrchestratorImpl {
         mode,
         killOriginals: input.killOriginals,
         confirmationToken,
+        // Snapshot the start input so a `partial` run can be resumed and a
+        // `failed` run re-opened pre-filled (edit & retry).
+        inputSnapshot: input as unknown as Record<string, unknown>,
       });
       setImmediate(() => {
         void this.run(ctx, run.id, input).catch((err) =>
@@ -162,6 +285,8 @@ class MigrationOrchestratorImpl {
       deploymentId: (patch as { deploymentId?: string })?.deploymentId ?? null,
     });
     if (status === "succeeded" || status === "failed" || status === "rolled_back") {
+      this.progressByRun.delete(id);
+      this.cancelByRun.delete(id);
       migrationRunBus.publish(id, {
         type: "complete",
         status,
@@ -182,10 +307,23 @@ class MigrationOrchestratorImpl {
     // Set only when adopt CREATED the project (not when it reused an existing
     // same-name one) — so rollback tears down our own draft, never the user's.
     let createdProjectId: string | undefined;
+    // Data paths that didn't transfer — non-empty ⇒ the run parks `partial`.
+    let pendingItems: PendingItem[] = [];
+
+    // Register cancel state up front so a cancel POST can flag + target this
+    // run. Don't clobber: a cancel may already have flagged it between begin()
+    // and this setImmediate'd run() starting (throwIfCancelled at adopt catches it).
+    if (!this.cancelByRun.has(id)) this.cancelByRun.set(id, { cancelled: false });
+
+    // Central session logger — mirrors to the durable `logs` column so the run
+    // is debuggable after a client reload or a failure.
+    const log = (message: string) => this.appendLog(id, message);
 
     try {
       // ── adopt ──
+      this.throwIfCancelled(id);
       await this.transition(id, "adopting");
+      log(`${sameServer ? "same-server" : "cross-server"} migration of ${serviceNames.length} service(s): ${serviceNames.join(", ")}`);
       const stack = await discoverServerStack(sourceServerId, organizationId, undefined, {
         flatDocker: input.flatDocker,
       });
@@ -263,10 +401,46 @@ class MigrationOrchestratorImpl {
         attachNames.has(r.name),
       );
 
+      // Cancel checkpoint on the attach-live path too: a same-server reuse run
+      // has an empty deploy set (skips every check below), so without this a
+      // cancel during `adopting` would never take effect and the run would
+      // proceed to `succeeded`. (Same-server has no killable transfer process.)
+      this.throwIfCancelled(id);
+
       if (deployChosen.length > 0) {
         // ── moving_data: quiesce the deploy set's originals + copy volumes ──
+        this.throwIfCancelled(id);
         await this.transition(id, "moving_data");
-        const bytesMoved = await this.moveData(
+        // Cross-server: the locally-built images (compose `build:`) move as data
+        // (docker save|load). Registry-only images are pulled by the target, so
+        // they're never transferred. Saved/probed by IMAGE ID (a create-time tag
+        // can fail to resolve → silent drop); re-tagged on the target. Deduped by
+        // id — services often share an image.
+        const builtImages: BuiltImage[] = sameServer
+          ? []
+          : [
+              ...new Map(
+                deployChosen
+                  .filter((s) => Boolean(s.build) && s.image)
+                  .map((s) => {
+                    const tag = s.image as string;
+                    const id = s.imageId ?? tag;
+                    return [id, { id, tag }] as const;
+                  }),
+              ).values(),
+            ];
+        // Throttle progress to the SSE bus (a fast stream fires per chunk;
+        // ~once/400ms is plenty for a bar). The snapshot is always updated (the
+        // poll reads the latest); only the bus publish is throttled.
+        let lastEmit = 0;
+        const emitProgress = (u: ProgressUpdate) => {
+          this.progressByRun.set(id, u);
+          const now = Date.now();
+          if (now - lastEmit < 400) return;
+          lastEmit = now;
+          migrationRunBus.publish(id, { type: "progress", ...u });
+        };
+        const move = await this.moveData(
           projectId,
           sourceServerId,
           targetServerId,
@@ -274,20 +448,50 @@ class MigrationOrchestratorImpl {
           scannedContainerIds,
           sameServer,
           input.volumeStrategies ?? {},
+          builtImages,
+          input.customPaths ?? [],
           { mode: input.transferMode, compression: input.transferCompression },
-          (m) => console.log(`[migration] ${id}: ${m}`),
+          input.conflictResolution ?? {},
+          log,
+          emitProgress,
+          id,
         );
-        await this.transition(id, "moving_data", { bytesMoved });
+        pendingItems = move.pendingItems;
+        await this.transition(id, "moving_data", { bytesMoved: move.bytesMoved });
+        log(
+          `data move complete: ${move.bytesMoved} bytes` +
+            (pendingItems.length ? ` · ${pendingItems.length} path(s) pending` : ""),
+        );
+
+        // A "clone"-resolved conflict landed the data in a scoped volume; flip
+        // the service to namespaced so the deploy MOUNTS the clone (not the bare
+        // volume that held the pre-existing data). Done AFTER the move (which
+        // enumerates the source bare) and BEFORE the deploy (which reads the row).
+        const cloneServices = Object.entries(input.conflictResolution ?? {})
+          .filter(([, a]) => a === "clone")
+          .map(([name]) => name);
+        if (cloneServices.length > 0) {
+          const rows = await repos.service.listByProject(projectId);
+          for (const name of cloneServices) {
+            const row = rows.find((r) => r.name === name);
+            if (row && !row.namespaceVolumes) {
+              await repos.service.update(row.id, { namespaceVolumes: true }).catch(() => {});
+              log(`clone: ${name} now mounts its namespaced (cloned) volume`);
+            }
+          }
+        }
 
         // ── deploying ──
         // Scope the compose deploy to the deploy set: attach-live rows are
         // temporarily disabled so the build skips them (deployComposeServices
         // only deploys enabled rows), then re-enabled + attached below. Restored
         // in finally so a failure never leaves rows disabled.
+        this.throwIfCancelled(id);
         await this.transition(id, "deploying");
         for (const r of attachRows) {
           await repos.service.update(r.id, { enabled: false });
         }
+        log(`deploying to target server…`);
         try {
           const dep = await requestBuildAccess(ctx, {
             projectId,
@@ -303,10 +507,12 @@ class MigrationOrchestratorImpl {
           }
         }
         await this.transition(id, "deploying", { deploymentId });
+        log(`target deployment ${deploymentId} started; verifying health…`);
 
         // ── verifying ──
+        this.throwIfCancelled(id);
         await this.transition(id, "verifying");
-        const verified = await this.waitForDeployment(deploymentId);
+        const verified = await this.waitForDeployment(deploymentId, id);
         if (!verified || verified.status !== "ready") {
           // Surface WHY, not a dead-end "did not become ready": a timeout, or the
           // deployment's own error PLUS which service(s) failed (so a
@@ -316,6 +522,15 @@ class MigrationOrchestratorImpl {
             ? `it was still deploying after ${mins} minutes`
             : await this.describeDeployFailure(deploymentId, verified);
           throw new Error(`The target deployment did not become ready — ${reason}.`);
+        }
+
+        // Carry the source's existing TLS certs onto the target (cross-server)
+        // BEFORE the post-verify domain publish reads them — so a kept domain
+        // reuses its cert instead of re-issuing via ACME. Best-effort.
+        if (!sameServer) {
+          await this.carrySourceCerts(sourceServerId, targetServerId, organizationId, chosen).catch(
+            (err) => console.warn(`[migration] ${id}: cert carry skipped: ${safeErrorMessage(err)}`),
+          );
         }
       } else {
         // Pure attach-live (same-server reuse only): no data move, no build.
@@ -328,6 +543,7 @@ class MigrationOrchestratorImpl {
       // Attach the reuse set's live containers straight into the deployment
       // (reconstruct service_deployment rows by container id — no redeploy).
       if (attachRows.length > 0) {
+        this.throwIfCancelled(id);
         await this.transition(id, "verifying");
         await attachLiveRuntime({
           deploymentId: deploymentId!,
@@ -339,22 +555,48 @@ class MigrationOrchestratorImpl {
         });
       }
 
-      // ── cutover (opt-in) / awaiting_cutover ──
-      // Only the deploy set has originals to retire. A pure attach-live run
-      // adopted the live containers in place, so there is nothing to cut over.
-      if (deployChosen.length > 0) {
+      // Publish the chosen domains/routes SERVER-SIDE now the target is verified
+      // (was client-only → lost when the wizard unmounted or a run was opened
+      // from the list; same-server included). Best-effort — domains never fail a
+      // migration.
+      await this.publishRoutes(ctx, projectId, input.routesByServiceName, log);
+
+      // ── partial / cutover / awaiting_cutover ──
+      // Some paths didn't move → PARK as `partial` (target UP, source
+      // stopped-but-kept): cutover is gated (killing the source now would lose
+      // the un-moved data). The user resolves (edit path / skip) + resumes.
+      if (pendingItems.length > 0) {
+        await this.transition(id, "partial", { pendingItems });
+        log(
+          `migration PARTIAL — ${pendingItems.length} path(s) pending ` +
+            `(${pendingItems.map((p) => p.key).join(", ")}); resolve + resume to finish`,
+        );
+      } else if (deployChosen.length > 0) {
+        // Only the deploy set has originals to retire. A pure attach-live run
+        // adopted the live containers in place, so there is nothing to cut over.
         const run = await repos.dockerMigrationRun.findById(id);
         if (run?.killOriginals) {
+          this.throwIfCancelled(id);
           await this.transition(id, "cutover");
+          log(`cutover: stopping + removing the source originals`);
           await this.cutover(sourceServerId, organizationId, scannedContainerIds);
           await this.transition(id, "succeeded");
+          log(`migration succeeded`);
         } else {
           await this.transition(id, "awaiting_cutover");
+          log(`target verified healthy — awaiting cutover confirmation`);
         }
       } else {
         await this.transition(id, "succeeded");
+        log(`migration succeeded (attach-live, no cutover)`);
       }
     } catch (err) {
+      // A cancelled run rolls back like any pre-cutover failure, but with a
+      // clean, user-facing reason instead of the raw (killed-rsync) error.
+      const reason = this.cancelByRun.get(id)?.cancelled
+        ? "Cancelled by user"
+        : safeErrorMessage(err);
+      log(`FAILED — ${reason}; rolling back (restart source, tear down target)`);
       await this.rollback(
         ctx,
         id,
@@ -362,8 +604,14 @@ class MigrationOrchestratorImpl {
         scannedContainerIds,
         deploymentId,
         createdProjectId,
-        safeErrorMessage(err),
+        reason,
       );
+    } finally {
+      // Persist the tail (throttling may have skipped the last lines), then
+      // release the buffer — the DB copy is now the source of truth.
+      await this.flushLogs(id);
+      this.logsByRun.delete(id);
+      this.logFlushAt.delete(id);
     }
   }
 
@@ -382,9 +630,14 @@ class MigrationOrchestratorImpl {
     scannedContainerIds: Record<string, string>,
     sameServer: boolean,
     volumeStrategies: Record<string, VolumeStrategy>,
+    builtImages: BuiltImage[],
+    customPaths: Array<{ source: string; dest: string }>,
     transfer: { mode?: TransferMode; compression?: TransferCompression },
+    conflictResolution: Record<string, "override" | "clone" | "keep">,
     log: (message: string) => void,
-  ): Promise<number> {
+    onProgress?: (u: ProgressUpdate) => void,
+    runId?: string,
+  ): Promise<MoveResult> {
     const rtA = await createServerDockerRuntime(sourceServerId, organizationId);
     const rtB = sameServer
       ? null
@@ -396,6 +649,65 @@ class MigrationOrchestratorImpl {
         await rtA.stop(cid).catch(() => {});
       }
 
+      // Cross-server DEFAULT: move data DIRECTLY server-to-server (rsync +
+      // docker save|ssh|load), single hop, no byte through the API host. The
+      // "stream" transfer mode is the explicit opt-back-in to the API-host relay
+      // below (for when the two servers can't reach each other).
+      if (rtB && transfer.mode !== "stream") {
+        // On-the-wire rsync compression is opt-in ("zstd"/"gzip" → -z); "auto"/
+        // unset stays OFF (a fast LAN link usually beats the compressor).
+        const compress =
+          transfer.compression === "zstd" || transfer.compression === "gzip";
+        return await this.moveDataDirect(
+          projectId,
+          sourceServerId,
+          targetServerId,
+          organizationId,
+          rtA,
+          builtImages,
+          customPaths,
+          compress,
+          conflictResolution,
+          log,
+          onProgress,
+          runId,
+        );
+      }
+
+      // Relay path (same-server copy, or the explicit "stream" override): the
+      // API host relays bytes. Aggregate movedBytes across tasks; totalBytes is
+      // unknown here (no upfront scan) so the bar shows raw bytes, not a %.
+      const relayBytes = new Map<string, number>();
+      const relayMoved = () => {
+        let n = 0;
+        for (const b of relayBytes.values()) n += b;
+        return n;
+      };
+
+      // Cross-server: stream each locally-built image A→B as data so the target
+      // adopts the exact same image (docker save | docker load). Immutable, so
+      // order-independent; deduped by the caller. A missing-on-source image is
+      // skipped (the target pulls it). Runs before volumes so a huge image fails
+      // fast, before we spend time on volume copies.
+      let imageBytes = 0;
+      if (rtB && builtImages.length > 0) {
+        for (const image of builtImages) {
+          if (!(await rtA.imageExistsLocally(image.id))) {
+            log(`image ${image.tag}: not present on source — target will pull`);
+            continue;
+          }
+          const task = `image:${image.tag}`;
+          const r = await transferImage(rtA, rtB, image, {
+            onProgress: (bytes) => {
+              relayBytes.set(task, bytes);
+              onProgress?.({ task, kind: "image", movedBytes: relayMoved(), totalBytes: null });
+            },
+            log: (m) => log(`image ${image}: ${m}`),
+          });
+          imageBytes += r.bytesMoved;
+        }
+      }
+
       const services = await repos.service.listByProject(projectId);
       const project = await repos.project.findById(projectId);
       const projectSlug = project?.slug ?? "";
@@ -404,7 +716,13 @@ class MigrationOrchestratorImpl {
       // Collect (src → dst) transfer tasks for BOTH topologies, then run them
       // through the ONE transfer core. No per-topology pipe duplication — same
       // vs cross only differ in which executor/handle each end uses.
-      const tasks: Array<{ label: string; src: TransferEndpoint; dst: TransferEndpoint }> = [];
+      const tasks: Array<{
+        label: string;
+        kind: "volume" | "bind";
+        source: string;
+        src: TransferEndpoint;
+        dst: TransferEndpoint;
+      }> = [];
 
       if (sameServer || !rtB) {
         // Same daemon: copy the volumes of "copy"-marked services bare→scoped.
@@ -432,6 +750,8 @@ class MigrationOrchestratorImpl {
             if (!dst) continue;
             tasks.push({
               label: svc.name,
+              kind: "volume",
+              source: src.source,
               src: { exec: execA, handle: bareHandle, sourceId: src.id },
               dst: { exec: execA, handle: scopedHandle, sourceId: dst.id },
             });
@@ -453,6 +773,12 @@ class MigrationOrchestratorImpl {
             projectSlug,
             namespaceVolumes: svc.namespaceVolumes,
           };
+          // Scoped dst handle for a "clone"-resolved service (target volume →
+          // openship-<slug>-<name>); mirrors the same-server copy branch.
+          const action = conflictResolution[svc.name];
+          const scopedHandle: ServiceHandle = { ...handle, namespaceVolumes: true };
+          const scopedSrcs =
+            action === "clone" ? await execB.listSources(scopedHandle) : [];
           const sources = await execA.listSources(handle);
           for (const src of sources) {
             if (src.type === "bind") {
@@ -460,10 +786,20 @@ class MigrationOrchestratorImpl {
             } else if (src.type !== "volume") {
               continue;
             }
+            // Volume conflict resolution: keep = don't transfer (use existing);
+            // clone = land in the scoped target volume; override/none = bare.
+            let dst: TransferEndpoint = { exec: execB, handle, sourceId: src.id };
+            if (src.type === "volume" && action === "keep") continue;
+            if (src.type === "volume" && action === "clone") {
+              const sd = scopedSrcs.find((d) => d.type === "volume" && d.target === src.target);
+              if (sd) dst = { exec: execB, handle: scopedHandle, sourceId: sd.id };
+            }
             tasks.push({
               label: svc.name,
+              kind: src.type === "bind" ? "bind" : "volume",
+              source: src.source,
               src: { exec: execA, handle, sourceId: src.id },
-              dst: { exec: execB, handle, sourceId: src.id },
+              dst,
             });
           }
         }
@@ -471,9 +807,12 @@ class MigrationOrchestratorImpl {
         // Cross-server reuses BARE volume names on the target, and transfer runs
         // with clearTarget:true — so a same-named volume already holding data on
         // B (from an unrelated stack) would be silently wiped. Refuse BEFORE any
-        // destructive write; the caller's rollback then restarts the originals.
+        // destructive write — UNLESS the user resolved that service's conflict at
+        // the plan step (override/clone/keep). The caller's rollback restarts the
+        // originals otherwise.
         const conflicts: string[] = [];
         for (const task of tasks) {
+          if (conflictResolution[task.label]) continue; // resolved — not blocking
           const probe = await task.dst.exec.probeVolume?.(task.dst.handle, task.dst.sourceId);
           if (probe?.exists && !probe.empty) conflicts.push(`${task.label}/${task.dst.sourceId}`);
         }
@@ -488,20 +827,339 @@ class MigrationOrchestratorImpl {
       // Bounded parallelism — a few volumes move at once without saturating a
       // single SSH link. transferVolume picks direct (same-daemon) vs stream and
       // the compression per the mode/compression request (auto = topology-aware).
+      // Per-item resilient (parity with the direct path): a task that fails
+      // becomes a PENDING item (→ `partial`, resolvable + resumable) instead of
+      // aborting the whole migration.
+      const pendingItems: PendingItem[] = [];
       const results = await runPool(tasks, TRANSFER_CONCURRENCY, async (t) => {
-        const r = await transferVolume(t.src, t.dst, {
-          mode: transfer.mode,
-          compression: transfer.compression,
-          clearTarget: true,
-          log: (m) => log(`${t.label}/${t.src.sourceId}: ${m}`),
-        });
-        log(`${t.label}/${t.src.sourceId}: ${r.strategy} (${r.compression}) — ${r.bytesMoved} bytes`);
-        return r.bytesMoved;
+        // Cancel check BEFORE the resilience try (see the direct path).
+        this.throwIfCancelled(runId);
+        const task = `volume:${t.label}/${t.src.sourceId}`;
+        try {
+          const r = await transferVolume(t.src, t.dst, {
+            mode: transfer.mode,
+            compression: transfer.compression,
+            clearTarget: true,
+            log: (m) => log(`${t.label}/${t.src.sourceId}: ${m}`),
+            onProgress: (bytes) => {
+              relayBytes.set(task, bytes);
+              onProgress?.({ task, kind: "volume", movedBytes: relayMoved(), totalBytes: null });
+            },
+          });
+          log(`${t.label}/${t.src.sourceId}: ${r.strategy} (${r.compression}) — ${r.bytesMoved} bytes`);
+          return r.bytesMoved;
+        } catch (err) {
+          const message = safeErrorMessage(err);
+          pendingItems.push({
+            key: `${t.kind}:${t.source}`,
+            kind: t.kind,
+            source: t.source,
+            serviceName: t.label,
+            reason: "error",
+            message,
+          });
+          log(`SKIPPED ${t.kind}:${t.source}: ${message} → pending (resolve + resume to finish)`);
+          return 0;
+        }
       });
-      return results.reduce((sum, n) => sum + n, 0);
+      return {
+        bytesMoved: imageBytes + results.reduce((sum, n) => sum + n, 0),
+        pendingItems,
+      };
     } finally {
       await rtA.dispose().catch(() => {});
       if (rtB) await rtB.dispose().catch(() => {});
+    }
+  }
+
+  /**
+   * Direct server-to-server move: the SOURCE box rsyncs volumes/binds and pipes
+   * `docker save | ssh | docker load` straight to the TARGET (or the reverse,
+   * for asymmetric firewalls) — no byte touches the API host. An ephemeral,
+   * per-run SSH trust is bootstrapped and torn down here. Fails loudly if
+   * neither direction connects (the caller's rollback restarts the originals).
+   * Returns total bytes moved.
+   */
+  private async moveDataDirect(
+    projectId: string,
+    sourceServerId: string,
+    targetServerId: string,
+    organizationId: string,
+    rtA: Awaited<ReturnType<typeof createServerDockerRuntime>>,
+    builtImages: BuiltImage[],
+    customPaths: Array<{ source: string; dest: string }>,
+    compress: boolean,
+    conflictResolution: Record<string, "override" | "clone" | "keep">,
+    log: (message: string) => void,
+    onProgress?: (u: ProgressUpdate) => void,
+    runId?: string,
+  ): Promise<MoveResult> {
+    const [source, target] = await Promise.all([
+      createServerCommandExecutor(sourceServerId, organizationId),
+      createServerCommandExecutor(targetServerId, organizationId),
+    ]);
+    const runTag = crypto.randomBytes(6).toString("hex");
+    // Record the marker so a cancel can pkill exactly this run's rsync/ssh.
+    if (runId) {
+      const reg = this.cancelByRun.get(runId);
+      if (reg) reg.runTag = runTag;
+    }
+    const link = await establishDirectLink({
+      sourceExec: source.executor,
+      targetExec: target.executor,
+      sourceConn: source.conn,
+      targetConn: target.conn,
+      runId: runTag,
+      compress,
+      log,
+    });
+    if (!link) {
+      throw new Error(
+        `Neither server can open a direct SSH connection to the other ` +
+          `(checked source→target ${target.conn.host}:${target.conn.port} and ` +
+          `target→source ${source.conn.host}:${source.conn.port}). Open server-to-server ` +
+          `SSH (port 22) between them, or retry with the "Relay via control host" transfer mode.`,
+      );
+    }
+
+    try {
+      log(`direct link established (${link.direction})`);
+
+      // Enumerate the source's movable data FIRST: bare-named volumes + movable
+      // bind paths (same enumeration the relay path uses; forced DB-fallback
+      // ids) + the built images actually present on the source.
+      const services = await repos.service.listByProject(projectId);
+      const project = await repos.project.findById(projectId);
+      const projectSlug = project?.slug ?? "";
+      const execA = resolveExecutor("docker", rtA);
+      const volumeNames = new Set<string>();
+      const bindPaths = new Set<string>();
+      // ref → owning service name, so a pending item names the service to restart.
+      const owner = new Map<string, string>();
+      for (const svc of services) {
+        const handle: ServiceHandle = {
+          id: svc.id,
+          projectId,
+          name: svc.name,
+          image: svc.image ?? null,
+          env: {},
+          volumes: svc.volumes ?? [],
+          containerId: null,
+          projectSlug,
+          namespaceVolumes: svc.namespaceVolumes,
+        };
+        for (const src of await execA.listSources(handle)) {
+          if (src.type === "volume") {
+            volumeNames.add(src.source);
+            if (!owner.has(src.source)) owner.set(src.source, svc.name);
+          } else if (src.type === "bind" && isMovableBind(src.source)) {
+            bindPaths.add(src.source);
+            if (!owner.has(src.source)) owner.set(src.source, svc.name);
+          }
+        }
+      }
+      const imagesToMove: BuiltImage[] = [];
+      for (const image of builtImages) {
+        if (await rtA.imageExistsLocally(image.id)) imagesToMove.push(image);
+        else log(`image ${image.tag}: not present on source — target will pull`);
+      }
+
+      // Refuse to clobber a pre-existing, non-empty volume on the target — UNLESS
+      // the user resolved that service's conflict at the plan step (override /
+      // clone / keep). A resolved volume isn't a blocking conflict; an unresolved
+      // one still hard-fails (safe). Clone targets a fresh scoped name, so it
+      // never conflicts anyway.
+      const conflicts: string[] = [];
+      for (const name of volumeNames) {
+        if (conflictResolution[owner.get(name) ?? ""]) continue; // resolved — not blocking
+        const out = await target.executor
+          .exec(
+            `if docker volume inspect ${sq(name)} >/dev/null 2>&1; then ` +
+              `mp=$(docker volume inspect ${sq(name)} -f '{{.Mountpoint}}'); ` +
+              `[ -n "$(ls -A "$mp" 2>/dev/null)" ] && echo CONFLICT || true; fi`,
+          )
+          .catch(() => "");
+        if (out.includes("CONFLICT")) conflicts.push(name);
+      }
+      if (conflicts.length > 0) {
+        throw new Error(
+          `Target server already has data in volume(s): ${conflicts.join(", ")}. ` +
+            "Remove or rename them on the target, then retry — refusing to overwrite existing data.",
+        );
+      }
+
+      // Scan the payload size on the source → the progress-bar denominator.
+      // Best-effort: an unmeasurable item leaves totalBytes a lower bound (the
+      // bar still advances, just against a slightly-low total).
+      const sized = await sizeOfMoveSet(source.executor, {
+        volumeNames: [...volumeNames],
+        bindPaths: [...bindPaths],
+        images: imagesToMove,
+        customPaths: customPaths.map((c) => c.source),
+      }).catch(() => null);
+      const totalBytes = sized && sized.totalBytes > 0 ? sized.totalBytes : null;
+      log(`transfer plan: ${totalBytes ?? "?"} bytes across ${volumeNames.size} volume(s), ` +
+        `${bindPaths.size} bind(s), ${imagesToMove.length} image(s), ${customPaths.length} path(s)`);
+
+      const bytesByTask = new Map<string, number>();
+      const track =
+        (task: string, kind: "image" | "volume") =>
+        (bytes: number) => {
+          // Per-task floor: a resumed rsync re-reports from a lower offset, so
+          // clamp to the max seen — the bar never rewinds on a resume/retry.
+          bytesByTask.set(task, Math.max(bytesByTask.get(task) ?? 0, bytes));
+          let movedBytes = 0;
+          for (const b of bytesByTask.values()) movedBytes += b;
+          onProgress?.({ task, kind, movedBytes, totalBytes });
+        };
+
+      // Images first — sequential (large; save|load contends on the link).
+      for (const image of imagesToMove) {
+        await link.transferImage(image, track(`image:${image.tag}`, "image"));
+      }
+
+      // Volumes + binds + user custom paths, bounded concurrency over the link.
+      const items: Array<
+        | { kind: "volume"; ref: string }
+        | { kind: "bind"; ref: string }
+        | { kind: "path"; source: string; dest: string }
+      > = [
+        ...[...volumeNames].map((ref) => ({ kind: "volume" as const, ref })),
+        ...[...bindPaths].map((ref) => ({ kind: "bind" as const, ref })),
+        ...customPaths.map((c) => ({ kind: "path" as const, source: c.source, dest: c.dest })),
+      ];
+      // Per-item resilient: one bad/missing path becomes a PENDING item (→ the
+      // run parks `partial`, resolvable + resumable) instead of aborting the
+      // whole migration. A genuine link/tool failure also lands here.
+      const pendingItems: PendingItem[] = [];
+      await runPool(items, TRANSFER_CONCURRENCY, async (it) => {
+        // Cancel check BEFORE the resilience try — a cancel must abort the run,
+        // not get swallowed into pendingItems as if the path failed.
+        this.throwIfCancelled(runId);
+        try {
+          if (it.kind === "volume") {
+            // Conflict resolution (per owning service): keep = don't transfer
+            // (use existing target data); clone = land in a fresh scoped volume;
+            // override/none = overwrite the bare target (clearTarget default).
+            const action = conflictResolution[owner.get(it.ref) ?? ""];
+            if (action === "keep") {
+              log(`volume ${it.ref}: keeping existing target data (not transferred)`);
+            } else {
+              const dstName = action === "clone" ? scopedVolumeName(projectSlug, it.ref) : undefined;
+              await link.transferVolume(it.ref, track(`volume:${it.ref}`, "volume"), dstName);
+            }
+          } else if (it.kind === "bind") await link.transferBind(it.ref, track(`bind:${it.ref}`, "volume"));
+          else await link.transferPath(it.source, it.dest, track(`path:${it.source}`, "volume"));
+        } catch (err) {
+          const missing = err instanceof PathMissingError;
+          const message = safeErrorMessage(err);
+          const pending: PendingItem =
+            it.kind === "path"
+              ? { key: `path:${it.source}`, kind: "path", source: it.source, dest: it.dest, reason: missing ? "missing" : "error", message }
+              : {
+                  key: `${it.kind}:${it.ref}`,
+                  kind: it.kind,
+                  source: it.ref,
+                  serviceName: owner.get(it.ref),
+                  reason: missing ? "missing" : "error",
+                  message,
+                };
+          pendingItems.push(pending);
+          log(`SKIPPED ${pending.key}: ${message} → pending (resolve + resume to finish)`);
+        }
+        return 0;
+      });
+
+      let total = 0;
+      for (const b of bytesByTask.values()) total += b;
+      return { bytesMoved: total, pendingItems };
+    } finally {
+      // rtA/rtB are disposed by moveData's own finally (this runs on its return).
+      await link.cleanup();
+    }
+  }
+
+  /**
+   * Carry the SOURCE's existing TLS certs onto the TARGET so a kept domain
+   * reuses its cert instead of re-issuing via ACME. Reads the foreign-proxy
+   * cert/key (already discovered per service as `existingRoute.ssl`) on the
+   * source and writes the PEM pair to the target's canonical edge path
+   * `/etc/letsencrypt/live/<domain>/{fullchain,privkey}.pem` — the exact path the
+   * target edge + `reuseServerCertForDomain` read at publish time, for bare host
+   * AND docker-edge (shared volume). Best-effort: any read/write failure just
+   * falls back to ACME on publish (domains never fail a deploy).
+   */
+  /** Expose the migrated services + set their domains once the target is up.
+   *  Mirrors the wizard's old client-side applyRoutes, but server-driven so it
+   *  survives the client leaving the flow. Reuses `updateService` (which
+   *  reconciles the edge routes). Best-effort per service. */
+  private async publishRoutes(
+    ctx: RequestContext,
+    projectId: string,
+    routes: StartMigrationInput["routesByServiceName"],
+    log: (m: string) => void,
+  ): Promise<void> {
+    if (!routes || Object.keys(routes).length === 0) return;
+    const services = await repos.service.listByProject(projectId).catch(() => []);
+    const byName = new Map(services.map((s) => [s.name, s]));
+    for (const [name, spec] of Object.entries(routes)) {
+      const svc = byName.get(name);
+      const domain = (spec.domainType === "custom" ? spec.customDomain : spec.domain)
+        ?.trim()
+        .toLowerCase();
+      if (!svc || !domain) continue;
+      try {
+        await updateService(ctx, projectId, svc.id, {
+          exposed: true,
+          ...(spec.exposedPort ? { exposedPort: spec.exposedPort } : {}),
+          domainType: spec.domainType,
+          ...(spec.domainType === "custom" ? { customDomain: domain } : { domain }),
+        });
+        log(`published route ${name} → ${domain}`);
+      } catch (err) {
+        log(`route ${name} skipped: ${safeErrorMessage(err)}`);
+      }
+    }
+  }
+
+  private async carrySourceCerts(
+    sourceServerId: string,
+    targetServerId: string,
+    organizationId: string,
+    chosen: Array<{
+      existingRoute?: { domains: string[]; ssl: { certPath?: string; keyPath?: string } };
+    }>,
+  ): Promise<void> {
+    // domain → source cert/key file paths, from the proxy scan attached to each
+    // discovered service. First writer wins per domain.
+    const domainCerts = new Map<string, { certPath: string; keyPath: string }>();
+    for (const s of chosen) {
+      const r = s.existingRoute;
+      if (!r?.ssl?.certPath || !r.ssl.keyPath) continue;
+      for (const domain of r.domains) {
+        // Hostname-only guard — the domain becomes a filesystem path segment.
+        if (!/^[a-z0-9.-]+$/i.test(domain) || domain.includes("..")) continue;
+        if (!domainCerts.has(domain)) {
+          domainCerts.set(domain, { certPath: r.ssl.certPath, keyPath: r.ssl.keyPath });
+        }
+      }
+    }
+    if (domainCerts.size === 0) return;
+
+    const source = await createServerCommandExecutor(sourceServerId, organizationId);
+    const target = await createServerCommandExecutor(targetServerId, organizationId);
+    for (const [domain, paths] of domainCerts) {
+      try {
+        const certPem = await source.executor.readFile(paths.certPath);
+        const keyPem = await source.executor.readFile(paths.keyPath);
+        if (!certPem?.includes("BEGIN CERTIFICATE") || !keyPem?.includes("PRIVATE KEY")) continue;
+        const dir = `/etc/letsencrypt/live/${domain}`;
+        await target.executor.writeFile(`${dir}/fullchain.pem`, certPem);
+        await target.executor.writeFile(`${dir}/privkey.pem`, keyPem);
+        console.log(`[migration] carried TLS cert for ${domain} → target ${dir}`);
+      } catch (err) {
+        console.warn(`[migration] cert carry failed for ${domain}: ${safeErrorMessage(err)}`);
+      }
     }
   }
 
@@ -510,9 +1168,11 @@ class MigrationOrchestratorImpl {
    *  window elapsed before it reached a terminal state. */
   private async waitForDeployment(
     deploymentId: string,
+    runId?: string,
   ): Promise<Awaited<ReturnType<typeof repos.deployment.findById>> | null> {
     const deadline = Date.now() + VERIFY_TIMEOUT_MS;
     while (Date.now() < deadline) {
+      if (runId) this.throwIfCancelled(runId); // a cancel during verify breaks out
       const dep = await repos.deployment.findById(deploymentId);
       if (dep && TERMINAL_DEPLOY.has(dep.status)) return dep;
       await new Promise((r) => setTimeout(r, VERIFY_POLL_MS));
@@ -568,6 +1228,62 @@ class MigrationOrchestratorImpl {
     }
   }
 
+  /**
+   * Cancel an in-flight migration: flag it (so the pipeline's boundary checks
+   * throw) AND kill the running transfer on both boxes (a flag alone can't
+   * interrupt the long `moveData` await). The killed rsync/ssh exits non-zero →
+   * the pipeline's `catch → rollback` restarts the source + tears down the
+   * target, ending `rolled_back` "Cancelled by user". Not valid once parked at
+   * `awaiting_cutover` (use resolveCutover) or terminal.
+   */
+  async cancel(
+    id: string,
+    organizationId: string,
+  ): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
+    const run = await repos.dockerMigrationRun.findById(id);
+    if (!run || run.organizationId !== organizationId) {
+      return { ok: false, status: 404, error: "Migration not found" };
+    }
+    const CANCELLABLE = ["queued", "adopting", "moving_data", "deploying", "verifying"];
+    if (!CANCELLABLE.includes(run.status)) {
+      return { ok: false, status: 409, error: `Migration is not cancellable (status: ${run.status})` };
+    }
+    const reg = this.cancelByRun.get(id) ?? { cancelled: false };
+    reg.cancelled = true;
+    this.cancelByRun.set(id, reg);
+    await this.killTransfer(
+      run.sourceServerId,
+      run.targetServerId,
+      run.organizationId,
+      reg.runTag,
+    );
+    return { ok: true };
+  }
+
+  /** Kill the direct-transfer's rsync/ssh by its ephemeral-key marker on BOTH
+   *  boxes (the initiator carries the marked argv; the other pkill is a no-op).
+   *  Best-effort — the per-server begin-guard makes the broad fallback pattern
+   *  unambiguous. */
+  private async killTransfer(
+    sourceServerId: string | null,
+    targetServerId: string | null,
+    organizationId: string,
+    runTag?: string,
+  ): Promise<void> {
+    const pattern = runTag ? `openship-migration-${runTag}` : "openship-migration-";
+    const serverIds = [...new Set([sourceServerId, targetServerId].filter(Boolean))] as string[];
+    await Promise.all(
+      serverIds.map(async (sid) => {
+        try {
+          const { executor } = await createServerCommandExecutor(sid, organizationId);
+          await executor.exec(`pkill -f ${sq(pattern)} 2>/dev/null || true`).catch(() => {});
+        } catch {
+          /* best-effort — the boundary flag-check still rolls the run back */
+        }
+      }),
+    );
+  }
+
   /** Confirm the destructive cutover (or finish keeping the originals stopped).
    *  Timing-safe token compare. Only valid from `awaiting_cutover`. */
   async resolveCutover(
@@ -602,6 +1318,147 @@ class MigrationOrchestratorImpl {
     }
     await this.transition(id, "succeeded");
     return { ok: true };
+  }
+
+  /**
+   * Resume a `partial` run: re-transfer the pending paths (with per-item source
+   * overrides), skip the ones the user chose to drop, restart the services whose
+   * data changed, and — if nothing remains pending — finish the migration the
+   * normal way (cutover / awaiting_cutover). Fire-and-forget like `begin`; the
+   * status flips out of `partial` synchronously so a double-resume 409s.
+   */
+  async resume(
+    ctx: RequestContext,
+    id: string,
+    organizationId: string,
+    opts: { overrides?: Record<string, string>; skip?: string[] },
+  ): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
+    const run = await repos.dockerMigrationRun.findById(id);
+    if (!run || run.organizationId !== organizationId) {
+      return { ok: false, status: 404, error: "Migration not found" };
+    }
+    if (run.status !== "partial") {
+      return { ok: false, status: 409, error: `Migration is not resumable (status: ${run.status})` };
+    }
+    if (!run.sourceServerId || !run.targetServerId) {
+      return { ok: false, status: 409, error: "Source/target server is no longer available" };
+    }
+    // Flip out of `partial` first (guards a concurrent resume), then run async.
+    await this.transition(id, "moving_data");
+    setImmediate(() => {
+      void this.runResume(ctx, run, organizationId, opts).catch((err) =>
+        console.error(`[migration] resume ${id} crashed:`, safeErrorMessage(err)),
+      );
+    });
+    return { ok: true };
+  }
+
+  private async runResume(
+    ctx: RequestContext,
+    run: Awaited<ReturnType<typeof repos.dockerMigrationRun.findById>> & object,
+    organizationId: string,
+    opts: { overrides?: Record<string, string>; skip?: string[] },
+  ): Promise<void> {
+    const id = run.id;
+    const log = (m: string) => this.appendLog(id, m);
+    const pending = (run.pendingItems ?? []) as PendingItem[];
+    const skipSet = new Set(opts.skip ?? []);
+    const overrides = opts.overrides ?? {};
+    const toRetry = pending.filter((p) => !skipSet.has(p.key));
+    const stillPending: PendingItem[] = [];
+    const resolvedServices = new Set<string>();
+    try {
+      log(`resume: retrying ${toRetry.length}, skipping ${pending.length - toRetry.length} item(s)`);
+      const [source, target] = await Promise.all([
+        createServerCommandExecutor(run.sourceServerId!, organizationId),
+        createServerCommandExecutor(run.targetServerId!, organizationId),
+      ]);
+      const runTag = crypto.randomBytes(6).toString("hex");
+      const link = await establishDirectLink({
+        sourceExec: source.executor,
+        targetExec: target.executor,
+        sourceConn: source.conn,
+        targetConn: target.conn,
+        runId: runTag,
+        log,
+      });
+      if (!link) {
+        throw new Error(
+          "Neither server can open a direct SSH connection to the other — cannot resume the transfer.",
+        );
+      }
+      try {
+        for (const item of toRetry) {
+          const src = overrides[item.key] ?? item.source;
+          try {
+            if (item.kind === "volume") {
+              await link.transferVolume(item.source, () => {});
+            } else if (item.kind === "bind") {
+              // An override reads from a NEW source path but still writes to the
+              // ORIGINAL bind path (where the target container mounts it).
+              if (src !== item.source) await link.transferPath(src, item.source, () => {});
+              else await link.transferBind(item.source, () => {});
+            } else {
+              await link.transferPath(src, item.dest ?? item.source, () => {});
+            }
+            if (item.serviceName) resolvedServices.add(item.serviceName);
+            log(`resolved ${item.key}`);
+          } catch (err) {
+            const missing = err instanceof PathMissingError;
+            stillPending.push({
+              ...item,
+              source: src,
+              reason: missing ? "missing" : "error",
+              message: safeErrorMessage(err),
+            });
+            log(`still pending ${item.key}: ${safeErrorMessage(err)}`);
+          }
+        }
+      } finally {
+        await link.cleanup();
+      }
+
+      // Restart the services whose data changed so they re-read it.
+      if (resolvedServices.size > 0 && run.projectId) {
+        const rows = await repos.service.listByProject(run.projectId);
+        for (const name of resolvedServices) {
+          const row = rows.find((r) => r.name === name);
+          if (row) {
+            await restartServiceContainer(ctx, run.projectId, row.id).catch((err) =>
+              log(`restart ${name} failed: ${safeErrorMessage(err)}`),
+            );
+          }
+        }
+      }
+
+      if (stillPending.length > 0) {
+        await this.transition(id, "partial", { pendingItems: stillPending });
+        log(`resume incomplete — ${stillPending.length} path(s) still pending`);
+      } else {
+        await repos.dockerMigrationRun.updatePending(id, []);
+        const scanned = (run.scannedContainerIds ?? {}) as Record<string, string>;
+        if (run.killOriginals && run.sourceServerId) {
+          await this.transition(id, "cutover");
+          await this.cutover(run.sourceServerId, organizationId, scanned);
+          await this.transition(id, "succeeded");
+          log(`resume complete — all paths moved; cutover done`);
+        } else {
+          await this.transition(id, "awaiting_cutover");
+          log(`resume complete — all paths moved; awaiting cutover confirmation`);
+        }
+      }
+    } catch (err) {
+      // Resume couldn't run (no link, etc): leave it PARTIAL (target stays up —
+      // never roll back a partial). Restore the pending list so the user retries.
+      await this.transition(id, "partial", {
+        pendingItems: stillPending.length > 0 ? stillPending : pending,
+      }).catch(() => {});
+      log(`resume failed: ${safeErrorMessage(err)}`);
+    } finally {
+      await this.flushLogs(id);
+      this.logsByRun.delete(id);
+      this.logFlushAt.delete(id);
+    }
   }
 
   /**
@@ -716,7 +1573,9 @@ class MigrationOrchestratorImpl {
       return;
     }
     for (const run of runs) {
-      if (run.status === "awaiting_cutover") continue;
+      // Parked states survive a restart untouched: the target is UP and the run
+      // waits on an interactive resolve (cutover confirm / pending-path resume).
+      if (run.status === "awaiting_cutover" || run.status === "partial") continue;
       const scanned = (run.scannedContainerIds ?? {}) as Record<string, string>;
 
       // A crash mid-CUTOVER is NOT a rollback: the target was already verified

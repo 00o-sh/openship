@@ -36,6 +36,7 @@
   },
   "dependencies": {
     "@clack/prompts": "^0.11.0",
+    "@repo/adapters": "workspace:*",
     "@repo/core": "workspace:*",
     "@repo/onboarding": "workspace:*",
     "commander": "^14.0.3",

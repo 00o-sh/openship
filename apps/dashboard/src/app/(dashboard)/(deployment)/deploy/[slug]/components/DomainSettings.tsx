@@ -3,8 +3,7 @@
 import React, { useCallback } from "react";
 import { getApiErrorMessage, projectsApi } from "@/lib/api";
 import { useToast } from "@/context/ToastContext";
-import { useI18n, interpolate } from "@/components/i18n-provider";
-import { usePlatform } from "@/context/PlatformContext";
+import { useI18n } from "@/components/i18n-provider";
 import { RoutingModePicker, type RoutingMode } from "@/components/routing/RoutingModePicker";
 import { createPublicEndpoint, type PublicEndpoint } from "@/context/deployment/types";
 
@@ -74,7 +73,6 @@ const DomainSettings: React.FC<DomainSettingsProps> = ({
 }) => {
   const { showToast } = useToast();
   const { t } = useI18n();
-  const { baseDomain } = usePlatform();
 
   const handleChange = useCallback(async (
     nextEndpoints: PublicEndpoint[],
@@ -134,10 +132,6 @@ const DomainSettings: React.FC<DomainSettingsProps> = ({
       mode={mode}
       onModeChange={handleModeChange}
       labels={{
-        freeLabel: t.deploy.domainSettings.routeFreeLabel,
-        freeDesc: interpolate(t.deploy.domainSettings.routeFreeDesc, { domain: baseDomain }),
-        customLabel: t.deploy.domainSettings.routeCustomLabel,
-        customDesc: t.deploy.domainSettings.routeCustomDesc,
         noneLabel: t.deploy.domainSettings.routeNoneLabel,
         noneDesc: t.deploy.domainSettings.routeNoneDesc,
       }}

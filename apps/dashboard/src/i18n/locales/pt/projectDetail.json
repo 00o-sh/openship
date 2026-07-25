@@ -59,7 +59,9 @@
       "waiting": "Aguardando requisições recebidas…",
       "streamError": "Erro no stream",
       "connectionLost": "Conexão com o stream de logs perdida",
-      "connectFailed": "Falha ao conectar ao stream de logs"
+      "connectFailed": "Falha ao conectar ao stream de logs",
+      "noDomain": "Adicione um domínio para ver os logs de requisições",
+      "noDomainHint": "Os logs de requisições HTTP são coletados por domínio — adicione um domínio a este projeto primeiro."
     },
     "terminal": {
       "fallbackName": "Terminal",

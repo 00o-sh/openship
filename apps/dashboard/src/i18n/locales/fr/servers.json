@@ -108,12 +108,12 @@
   },
   "detail": {
     "tabs": {
-      "services": "Services",
+      "migrations": "Migrations",
       "overview": "Aperçu",
       "components": "Composants",
       "github": "Git",
       "security": "Sécurité",
-      "ports": "Ports",
+      "ports": "Redirection de ports",
       "terminal": "Terminal"
     },
     "healthy": "En bon état",
