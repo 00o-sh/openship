@@ -71,7 +71,8 @@ export async function verify(c: Context) {
   const ctx = getRequestContext(c);
   const id = param(c, "id");
   await permission.assert(getRequestContext(c), { resourceType: "domain", resourceId: id, action: "write" });
-  const result = await domainService.verifyDomain(ctx, id);
+  const force = c.req.query("force") === "1" || c.req.query("force") === "true";
+  const result = await domainService.verifyDomain(ctx, id, { force });
 
   // Audit verify attempts (both success and failure) so DNS verification
   // is traceable in the audit log alongside domain.added / domain.removed.
@@ -143,8 +144,10 @@ export async function verifyStream(c: Context) {
     // The generic prepare modal expects a `session` event to start; verify has no
     // prompt to answer, so it's just the stream opener.
     await emit("session", JSON.stringify({ type: "session" }));
+    const force = c.req.query("force") === "1" || c.req.query("force") === "true";
     try {
       const result = await domainService.verifyDomain(ctx, id, {
+        force,
         // Intermediate logs are fire-and-forget — they flush during the run.
         onLog: (line) => {
           void emit("log", JSON.stringify({ type: "log", message: line, level: "info" }));

@@ -1,10 +1,37 @@
 import type { Project } from "@repo/db";
 import type { ManualCert, SslProvider, SslResult } from "@repo/adapters";
-import { ForbiddenError, NotFoundError } from "@repo/core";
+import { ForbiddenError, NotFoundError, SYSTEM } from "@repo/core";
 import { repos } from "@repo/db";
 import { env } from "../config/env";
 import { platform } from "./controller-helpers";
+import { createProvisionLock } from "./provision-lock";
 import { resolveDeploymentPlatform, type DeploymentMeta } from "./deployment-runtime";
+
+/**
+ * The per-domain issuance lock key. EVERY path that can open an ACME order
+ * (manual Verify, `manageDomainSsl` provision/renew, the ssl:renew scheduler
+ * which routes through `manageDomainSsl("renew")`) serializes on this exact
+ * string so two of them can never run certbot for the same hostname at once —
+ * concurrent HTTP-01 challenges collide and burn Let's Encrypt rate-limit
+ * budget. In-process mutex (single-process self-hosted) layered over a Postgres
+ * advisory lock (multi-instance SaaS); see provision-lock.ts.
+ */
+function sslIssueLockKey(hostname: string): string {
+  return `ssl:issue:${hostname.trim().toLowerCase()}`;
+}
+
+/**
+ * A cert is "comfortably valid" for REUSE when it's present, parses, and has
+ * more life left than the renewal window — i.e. the renewer wouldn't touch it
+ * yet. Verify reuses such a cert instead of spending a fresh ACME issuance.
+ * (readCertInfo reports `verified:true` for any parseable cert even if expired,
+ * so the expiry comparison must live here, not in the adapter.)
+ */
+function certComfortablyValid(result: SslResult): boolean {
+  if (!result.verified || !result.expiresAt) return false;
+  const daysLeft = (new Date(result.expiresAt).getTime() - Date.now()) / 86_400_000;
+  return daysLeft > SYSTEM.DOMAINS.SSL_RENEW_BEFORE_DAYS;
+}
 
 export type DomainSslAction = "provision" | "renew" | "verify";
 
@@ -165,7 +192,16 @@ export async function manageDomainSsl(
 ): Promise<SslResult> {
   const { domainRecord, project } = await resolveAuthorizedDomain(hostname, opts);
   const ssl = await resolveSslProvider(project);
-  const result = await executeSslAction(ssl, domainRecord.hostname, opts.action);
+  // `verify` is a read-only cert inspection (no ACME) → no lock. `provision`/
+  // `renew` can open an ACME order, so serialize them per-hostname on the shared
+  // issue lock — this is what stops the ssl:renew scheduler (which calls us with
+  // action:"renew") from racing a manual Verify on the same domain.
+  const runAction = (h: string, a: DomainSslAction): Promise<SslResult> =>
+    a === "verify"
+      ? executeSslAction(ssl, h, a)
+      : createProvisionLock(sslIssueLockKey(h)).run(() => executeSslAction(ssl, h, a));
+
+  const result = await runAction(domainRecord.hostname, opts.action);
   await persistSslResult(domainRecord.id, domainRecord.sslStatus, result);
 
   if (opts.includeWww) {
@@ -174,7 +210,7 @@ export async function manageDomainSsl(
 
     if (wwwRecord && wwwRecord.projectId === domainRecord.projectId && wwwRecord.verified) {
       // Same project → same host → reuse the resolved provider.
-      const wwwResult = await executeSslAction(ssl, wwwRecord.hostname, opts.action);
+      const wwwResult = await runAction(wwwRecord.hostname, opts.action);
       await persistSslResult(wwwRecord.id, wwwRecord.sslStatus, wwwResult);
     }
   }
@@ -195,7 +231,7 @@ export async function manageDomainSsl(
  */
 export async function provisionDomainCertForVerify(
   hostname: string,
-  opts: { projectId?: string; onLog?: (line: string) => void } = {},
+  opts: { projectId?: string; onLog?: (line: string) => void; force?: boolean } = {},
 ): Promise<SslResult> {
   const { domainRecord, project } = await resolveAuthorizedDomain(hostname, {
     action: "provision",
@@ -203,7 +239,32 @@ export async function provisionDomainCertForVerify(
     allowUnverified: true,
   });
   const ssl = await resolveSslProvider(project);
-  const result = await ssl.provisionCert(domainRecord.hostname, { onLog: opts.onLog });
+
+  // Serialize issuance per-hostname, and re-check the cert INSIDE the lock.
+  // This closes the TOCTOU: two concurrent Verify hits (or Verify racing the
+  // renewal scheduler) both queue on the lock; the first issues, and the second
+  // — now inside the lock — sees the freshly-issued cert and reuses it instead
+  // of opening a second ACME order. The service-level fast-path in verifyDomain
+  // is only a cheap read-only optimization; THIS is the authoritative gate.
+  const result = await createProvisionLock(sslIssueLockKey(domainRecord.hostname)).run(async () => {
+    if (!opts.force) {
+      const existing = await ssl.verifyCert(domainRecord.hostname).catch(() => null);
+      if (existing && certComfortablyValid(existing)) {
+        opts.onLog?.(
+          `A valid certificate is already present for ${domainRecord.hostname}` +
+            (existing.expiresAt ? ` (expires ${existing.expiresAt.slice(0, 10)})` : "") +
+            " — reusing it. No new certificate requested.",
+        );
+        return existing;
+      }
+    }
+    // Decided to issue (missing / near-expiry / forced): pass `force` so the
+    // adapter runs certbot even when a stale cert file is present on disk —
+    // otherwise its file-exists short-circuit would return the old cert and a
+    // near-expiry renewal would silently no-op.
+    return ssl.provisionCert(domainRecord.hostname, { onLog: opts.onLog, force: true });
+  });
+
   await persistSslResult(domainRecord.id, domainRecord.sslStatus, result);
   return result;
 }

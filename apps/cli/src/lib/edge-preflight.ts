@@ -18,21 +18,27 @@
  * Everything is behind an injectable `deps` object so the flow is unit-testable
  * with fakes — no real docker/ss/fs.
  */
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import chalk from "chalk";
 import { isCancel, log, note, select } from "@clack/prompts";
+import { OS_DIR } from "./paths";
 import {
   LocalExecutor,
   beginEdgeTakeover as realBeginEdgeTakeover,
   completeEdgeTakeover as realCompleteEdgeTakeover,
   foreignProxyOnEdge as realForeignProxyOnEdge,
   importSites as realImportSites,
+  detectInstalledProxy as realDetectInstalledProxy,
+  scanImportableSites as realScanImportableSites,
   ourEdgeContainerRunning as realOurEdgeContainerRunning,
   recoverInterruptedTakeover as realRecoverInterruptedTakeover,
   rollbackEdgeTakeover as realRollbackEdgeTakeover,
   type CommandExecutor,
   type EdgeStatus,
   type ImportedSite,
+  type ProxyKind,
 } from "@repo/adapters/proxy";
 
 export type EdgeAction = "migrate" | "takeover" | "cancel";
@@ -73,6 +79,13 @@ export interface EdgePreflightDeps {
     isEdgeHealthy?: () => Promise<boolean>,
   ): Promise<void>;
   ourEdgeContainerRunning(executor: CommandExecutor): Promise<boolean>;
+  /** A proxy INSTALLED on this host but not holding the ports (we stopped it). */
+  detectInstalledProxy(executor: CommandExecutor): Promise<ProxyKind | null>;
+  /** Parse one proxy's on-disk config directly — no EdgeStatus/occupant needed. */
+  scanProxySites(
+    executor: CommandExecutor,
+    proxy: ProxyKind,
+  ): Promise<{ sites: ImportedSite[]; warnings: string[] }>;
   /** Read a cert/key PEM off the host filesystem; null if unreadable. */
   readCert(path: string): string | null;
   /** Show the detected conflict (sites + non-migratable warnings) to the operator. */
@@ -85,6 +98,15 @@ export interface EdgePreflightDeps {
 /** A filesystem path safe to read without shell/path surprises (absolute, no metachars). */
 function isSafePath(p: string): boolean {
   return /^\/[A-Za-z0-9._/-]+$/.test(p);
+}
+
+/** Read a PEM off the host filesystem; null when unreadable. The default `readCert` dep. */
+function readCertFile(p: string): string | null {
+  try {
+    return readFileSync(p, "utf8");
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -119,7 +141,14 @@ export async function planAndApplyHostEdge(
     .catch(() => {});
 
   const { status, blocked, owner } = await deps.foreignProxyOnEdge(executor);
-  if (!blocked) return { proceed: true }; // free, or already ours
+  if (!blocked) {
+    // Ports are free or already ours — but a proxy we STOPPED on an earlier run
+    // may still have its vhosts on disk, unimported. probeEdge can't see it (it
+    // holds no ports), so without this its sites are silently stranded: the
+    // operator was told they'd be migrated and nothing serves them. Nothing to
+    // stop here, so no journal/consent-to-kill — just offer to import.
+    return await offerStoppedProxyImport(executor, deps);
+  }
 
   const { sites, warnings } = await deps.importSites(executor, status);
 
@@ -152,6 +181,206 @@ export async function rollbackHostEdge(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** Marker: sites from a stopped proxy were already imported — don't re-offer. */
+const IMPORTED_MARKER = join(OS_DIR, "imported-proxy");
+
+/** Record that a stopped proxy's sites were imported, so re-runs don't duplicate. */
+export function markStoppedProxyImported(): void {
+  try {
+    mkdirSync(OS_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(IMPORTED_MARKER, new Date().toISOString(), { mode: 0o600 });
+  } catch {
+    /* best-effort — worst case we offer again and the operator declines */
+  }
+}
+
+/**
+ * The ports are free/ours, but an installed-yet-stopped proxy may still hold
+ * unimported vhosts (we stopped it on a previous run). Offer to bring them in.
+ * Interactive only: on a headless run we don't guess at re-importing sites.
+ */
+async function offerStoppedProxyImport(
+  executor: CommandExecutor,
+  deps: EdgePreflightDeps,
+): Promise<EdgePlan> {
+  if (!deps.interactive || existsSync(IMPORTED_MARKER)) return { proceed: true };
+
+  let proxy: ProxyKind | null = null;
+  try {
+    proxy = await deps.detectInstalledProxy(executor);
+  } catch {
+    return { proceed: true };
+  }
+  if (!proxy) return { proceed: true };
+
+  // Scan the proxy's config DIRECTLY. The `importSites(executor, status)` entry
+  // derives the proxy from a live occupant, which by definition doesn't exist
+  // here — faking an EdgeStatus to satisfy it would be a lie the type system
+  // can't check.
+  let sites: ImportedSite[] = [];
+  let warnings: string[] = [];
+  try {
+    const scan = await deps.scanProxySites(executor, proxy);
+    sites = scan.sites;
+    warnings = scan.warnings;
+  } catch {
+    return { proceed: true };
+  }
+  if (sites.length === 0) return { proceed: true };
+
+  deps.render({ owner: `${proxy} (stopped)`, sites, warnings });
+  const take = await select({
+      message: `${proxy} is stopped but still has ${sites.length} site(s) configured — import them into Openship's edge?`,
+      options: [
+        { value: "import", label: `Import ${sites.length} site(s)`, hint: "serve them from Openship's edge" },
+        { value: "skip", label: "Skip", hint: "leave them unserved" },
+      ],
+      initialValue: "import",
+  });
+  if (isCancel(take) || take !== "import") return { proceed: true };
+
+  return { proceed: true, action: "migrate", sites, certPems: collectCertPems(sites, readCertFile) };
+}
+
+/* ── Doctor: "the edge container can't bind" diagnosis + repair ───────────── */
+
+export interface EdgeDiagnosis {
+  /** Our edge container exists in some state (running, restarting, exited). */
+  containerExists: boolean;
+  /** …and is actually running. */
+  containerRunning: boolean;
+  /** Human label of whatever holds :80/:443, or null when the ports are free. */
+  occupant: string | null;
+  /**
+   * The occupant is a competing OPENRESTY/proxy on the HOST while our edge is
+   * containerized. This is the case the takeover flow misses: `ourLuaOnHost`
+   * marks a host OpenResty as "ours", so `foreignProxyOnEdge` reports
+   * blocked=false and nothing stops it — it just squats :80/:443 forever and the
+   * edge container crash-loops on `bind() … Address already in use`.
+   */
+  hostProxySquatting: boolean;
+  /** Sites parsed off the occupant, when it's an importable proxy. */
+  sites: ImportedSite[];
+  /** True when the container is up AND nothing else holds the ports. */
+  healthy: boolean;
+}
+
+function dockerState(name: string): { exists: boolean; running: boolean } {
+  const r = spawnSync(
+    "docker",
+    ["ps", "-a", "--filter", `name=^${name}$`, "--format", "{{.State}}"],
+    { encoding: "utf8" },
+  );
+  const state = (r.stdout ?? "").trim();
+  return { exists: state.length > 0, running: state === "running" };
+}
+
+/**
+ * Why isn't the containerized edge serving? Answers the question `openship doctor`
+ * needs, without changing anything.
+ */
+export async function diagnoseEdge(): Promise<EdgeDiagnosis> {
+  const empty: EdgeDiagnosis = {
+    containerExists: false,
+    containerRunning: false,
+    occupant: null,
+    hostProxySquatting: false,
+    sites: [],
+    healthy: false,
+  };
+  if (process.platform !== "linux") return empty;
+
+  const { exists, running } = dockerState("openship-edge");
+  const executor = new LocalExecutor();
+  let status: EdgeStatus | undefined;
+  let owner: string | null = null;
+  try {
+    const probe = await realForeignProxyOnEdge(executor);
+    status = probe.status;
+    owner = probe.owner || null;
+  } catch {
+    return { ...empty, containerExists: exists, containerRunning: running };
+  }
+
+  // Occupants that are NOT our edge container: a host process (systemd unit or a
+  // bare pid) or some other container. If our container is meant to own these
+  // ports, anything else here is what's blocking it.
+  const foreignOccupants = status.occupants.filter((o) => o.containerName !== "openship-edge");
+  const hostProxySquatting =
+    !running && foreignOccupants.some((o) => !o.containerName);
+
+  let sites: ImportedSite[] = [];
+  if (status.occupants.length > 0) {
+    try {
+      sites = (await realImportSites(executor, status)).sites;
+    } catch {
+      /* best-effort — a non-importable occupant just has no sites */
+    }
+  }
+
+  return {
+    containerExists: exists,
+    containerRunning: running,
+    occupant: foreignOccupants.length > 0 ? owner : null,
+    hostProxySquatting,
+    sites,
+    healthy: running && foreignOccupants.length === 0,
+  };
+}
+
+/**
+ * Free :80/:443 for the edge container and bring it up.
+ *
+ * `migrate` imports the occupant's sites into our edge first; `stop` just frees
+ * the ports (the occupant's sites stop being served). Both go through the SAME
+ * journaled stop as `openship up`, so an interrupted repair is restorable, and
+ * both reuse the api's import endpoint rather than reimplementing registration.
+ */
+export async function repairEdgeConflict(
+  mode: "migrate" | "stop",
+  apiPort: string,
+  onLog: (message: string, level?: "info" | "warn" | "error") => void,
+): Promise<{ ok: boolean; registered: string[]; detail: string }> {
+  if (process.platform !== "linux") {
+    return { ok: false, registered: [], detail: "the containerized edge is Linux-only" };
+  }
+  const executor = new LocalExecutor();
+  const { status } = await realForeignProxyOnEdge(executor);
+  if (status.occupants.length === 0) {
+    spawnSync("docker", ["restart", "openship-edge"], { stdio: "ignore" });
+    return { ok: true, registered: [], detail: "ports were already free — restarted the edge" };
+  }
+
+  const scan = mode === "migrate" ? await realImportSites(executor, status) : { sites: [], warnings: [] };
+  const certPems =
+    mode === "migrate" ? collectCertPems(scan.sites, readCertFile) : undefined;
+
+  // Journaled: if the edge still won't come up, rollbackHostEdge() restores this.
+  await realBeginEdgeTakeover(executor, status, (entry) => onLog(entry.message, entry.level));
+  spawnSync("docker", ["restart", "openship-edge"], { stdio: "ignore" });
+
+  if (mode === "migrate" && scan.sites.length > 0) {
+    const { importMigratedSites } = await import("./edge-import");
+    const outcome = await importMigratedSites(apiPort, scan.sites, certPems);
+    if (outcome.registered.length === 0) {
+      return {
+        ok: false,
+        registered: [],
+        detail: `freed the ports but registered none of the ${scan.sites.length} site(s) — journal kept so the old proxy can be restored`,
+      };
+    }
+    await completeHostEdge();
+    return {
+      ok: true,
+      registered: outcome.registered,
+      detail: `migrated ${outcome.registered.length}/${scan.sites.length} site(s) and restarted the edge`,
+    };
+  }
+
+  await completeHostEdge();
+  return { ok: true, registered: [], detail: "freed :80/:443 and restarted the edge" };
 }
 
 /**
@@ -221,13 +450,9 @@ function defaultDeps(): EdgePreflightDeps {
         isEdgeHealthy,
       ),
     ourEdgeContainerRunning: realOurEdgeContainerRunning,
-    readCert: (p) => {
-      try {
-        return readFileSync(p, "utf8");
-      } catch {
-        return null;
-      }
-    },
+    detectInstalledProxy: realDetectInstalledProxy,
+    scanProxySites: realScanImportableSites,
+    readCert: readCertFile,
     render: ({ owner, sites, warnings }) => {
       if (sites.length > 0) {
         const lines = sites.map((st) => {

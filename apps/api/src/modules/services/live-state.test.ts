@@ -275,6 +275,53 @@ describe("resolveLiveServiceState", () => {
   });
 });
 
+// Project teardown now reclaims containers through this matcher (the label sweep
+// alone misses an adopted one, which then survived the delete and fought the next
+// deploy for its ports). That makes these two properties load-bearing for a
+// DESTRUCTIVE path, so they get their own guarantees.
+describe("resolveLiveServiceState — teardown safety", () => {
+  it("reclaims an adopted container whose openship.project names ANOTHER project", () => {
+    const live = [
+      container({
+        id: "c_adopted",
+        names: ["openship-openship-postgres"],
+        labels: { "openship.project": "proj_PREVIOUS", "openship.service": "postgres" },
+      }),
+    ];
+    const m = resolveLiveServiceState({
+      services: [{ id: "svc_pg", name: "postgres" }],
+      live,
+      projectId: "proj_CURRENT",
+      slug: "openship",
+    });
+    expect(m.get("svc_pg")?.containerId).toBe("c_adopted");
+  });
+
+  it("never claims a container that belongs to a different project's stack", () => {
+    const live = [
+      // Same service NAME, different project: different canonical name, different
+      // project label, different compose project. Nothing may match.
+      container({
+        id: "c_theirs",
+        names: ["openship-otherapp-postgres"],
+        labels: {
+          "openship.project": "proj_THEIRS",
+          "openship.service": "postgres",
+          "com.docker.compose.project": "otherapp",
+          "com.docker.compose.service": "postgres",
+        },
+      }),
+    ];
+    const m = resolveLiveServiceState({
+      services: [{ id: "svc_pg", name: "postgres" }],
+      live,
+      projectId: "proj_CURRENT",
+      slug: "openship",
+    });
+    expect(m.get("svc_pg")?.containerId).toBeNull();
+  });
+});
+
 describe("describeLiveState", () => {
   it("names the container, state and identity key per service", () => {
     const services = [

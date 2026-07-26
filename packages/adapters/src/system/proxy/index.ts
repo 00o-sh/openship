@@ -34,7 +34,7 @@ export {
   completeEdgeTakeover,
 } from "./takeover-journal";
 export type { RegisterImportedSitesOptions } from "./takeover";
-export { scanImportableSites, canImportProxy, scanOpenshipEdge } from "./import";
+export { scanImportableSites, canImportProxy, scanOpenshipEdge, detectInstalledProxy } from "./import";
 export type {
   EdgeClassification,
   EdgeConflictDetails,

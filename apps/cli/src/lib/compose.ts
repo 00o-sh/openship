@@ -316,6 +316,91 @@ function composeProjectName(prev: Record<string, string>): string {
   return Object.keys(prev).length > 0 ? "compose" : "openship";
 }
 
+/**
+ * Containers from a PREVIOUS run of this same compose file that are now orphaned
+ * under a different project name.
+ *
+ * Renaming the compose project (or letting it be derived from the directory)
+ * starts a SECOND stack rather than replacing the first. The old `edge` keeps
+ * :80/:443 — it is host-networked — so the new edge crashloops on
+ * `bind() … Address already in use`, and the old edge serves vhosts out of the
+ * old project's volume while the api writes them into the new one. Net effect:
+ * everything reports "Deployed" and nothing is served.
+ *
+ * Identified by compose's own `project.config_files` label pointing at OUR
+ * compose file, so this can never match an unrelated stack that happens to have a
+ * service called `edge` — and by construction it only ever lists containers a
+ * previous `openship up` created. Volumes are deliberately NOT touched: they hold
+ * the database and issued certificates.
+ */
+function orphanedStackContainers(project: string): Array<{ name: string; project: string }> {
+  const r = spawnSync(
+    "docker",
+    [
+      "ps",
+      "-a",
+      "--format",
+      '{{.Names}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.project.config_files"}}',
+    ],
+    { encoding: "utf8" },
+  );
+  if (r.status !== 0 || !r.stdout) return [];
+  return r.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [name, proj, configFiles] = line.split("\t");
+      return { name: name ?? "", project: proj ?? "", configFiles: configFiles ?? "" };
+    })
+    .filter(
+      (c) =>
+        c.name &&
+        c.project &&
+        c.project !== project &&
+        // config_files is a comma-separated list (base + build override).
+        c.configFiles.split(",").some((f) => f.trim() === COMPOSE_FILE),
+    )
+    .map(({ name, project: proj }) => ({ name, project: proj }));
+}
+
+/** Remove orphaned containers from a previous project so the new stack can bind. */
+function removeOrphanedStack(project: string): void {
+  const orphans = orphanedStackContainers(project);
+  if (orphans.length === 0) return;
+  const projects = [...new Set(orphans.map((o) => o.project))].join(", ");
+  console.log(
+    `  Removing ${orphans.length} container(s) from a previous stack (project "${projects}") — ` +
+      `they would hold the ports this stack needs. Volumes are kept.`,
+  );
+  spawnSync("docker", ["rm", "-f", ...orphans.map((o) => o.name)], { stdio: "ignore" });
+}
+
+/**
+ * Warn when a previous project's data volumes exist but won't be mounted, so a
+ * project-name change can never look like silent data loss. Our compose declares
+ * the volume key `openship_sites`, so any `<project>_openship_sites` names a prior
+ * stack of ours.
+ */
+function warnOrphanedVolumes(project: string): void {
+  const r = spawnSync("docker", ["volume", "ls", "--format", "{{.Name}}"], { encoding: "utf8" });
+  if (r.status !== 0 || !r.stdout) return;
+  const others = new Set(
+    r.stdout
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.endsWith("_openship_sites"))
+      .map((l) => l.slice(0, -"_openship_sites".length))
+      .filter((p) => p && p !== project),
+  );
+  if (others.size === 0) return;
+  console.log(
+    `  Note: volumes from a previous install (project "${[...others].join(", ")}") are still on disk\n` +
+      `  and are NOT mounted by this stack — its database and certificates start fresh.\n` +
+      `  Remove them with \`docker volume ls | grep _openship_\` once you're sure they aren't needed.`,
+  );
+}
+
 function renderEnv(opts: ComposeUpOpts, host: { user: string; keyPath: string } | null): string {
   const prev = readEnvFile();
   const lines: string[] = [
@@ -411,6 +496,13 @@ export function composeUp(opts: ComposeUpOpts): { ok: boolean; apiPort: string; 
   const buildDir = materialize(opts);
   const apiPort = opts.apiPort || "4000";
   const dashPort = opts.dashboardPort || "3001";
+
+  // A previous stack under a different project name would still hold :80/:443
+  // (host-networked edge) and 4000/3001, leaving the new edge in a bind() crash
+  // loop while the old one serves stale vhosts. Clear it before bringing ours up.
+  const project = readEnvFile().COMPOSE_PROJECT_NAME || "openship";
+  removeOrphanedStack(project);
+  warnOrphanedVolumes(project);
 
   if (buildDir) {
     // Only the upstream images can be pulled; ours don't exist in a registry for

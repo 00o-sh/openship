@@ -23,6 +23,7 @@ import {
 import { resolveOrgCloudUserId } from "../../lib/cloud/transport";
 import { buildServiceRouteDomain } from "../../lib/routing-domains";
 import { createReachabilityProbe } from "../../lib/server-reachability";
+import { resolveLiveServiceState } from "../services/live-state";
 
 /** Hard ceiling on a docker-over-SSH volume inspect during manifest/preview.
  *  These calls `.catch(() => [])` on ERROR, but a half-open SSH socket never
@@ -326,6 +327,40 @@ export async function collectProjectManifest(
     }
   }
 
+  // ── Adopted-container sweep (identity-based, not label-based) ─────
+  // A migration can adopt a container IN PLACE, and docker labels are immutable
+  // in place — so it still carries the PREVIOUS project's `openship.project` and
+  // is invisible to the label sweep above. Its DB row can also point at an id a
+  // redeploy replaced. Either way the container survived a "delete everything"
+  // teardown, kept its volumes, and then fought the next deploy for its ports.
+  // Resolve by the SAME identity chain the live-state read uses (canonical
+  // `openship-<slug>-<svc>` name / compose labels / tracked id), so teardown
+  // reclaims exactly what the Services panel can see. Deduped by pushContainer.
+  const ownServices = await repos.service.listByProject(project.id).catch(() => []);
+  if (ownServices.length > 0) {
+    const targets = ownServices.map((s) => ({ id: s.id, name: s.name }));
+    for (const docker of sweepRuntimes) {
+      if (!docker.supports("hostContainerQuery") || !docker.listAllContainers) continue;
+      const containers = await withTimeout(
+        docker.listAllContainers(),
+        INSPECT_TIMEOUT_MS,
+        `sweep host containers ${project.id}`,
+      ).catch(() => [] as Awaited<ReturnType<DockerRuntime["listAllContainers"]>>);
+      if (containers.length === 0) continue;
+      const matches = resolveLiveServiceState({
+        services: targets,
+        live: containers,
+        projectId: project.id,
+        slug: project.slug,
+      });
+      for (const match of matches.values()) {
+        if (!match.containerId) continue;
+        await pushVolumesForContainer(match.containerId, docker, "adopted");
+        pushContainer(match.containerId, docker, "adopted container");
+      }
+    }
+  }
+
   // ── Orphan image sweep (label-based, authoritative per host) ──────
   // Reclaim images labeled `openship.project=<id>` that NO DB row references —
   // e.g. a service was deleted (its imageRef row cascade-dropped) or a build
@@ -535,6 +570,33 @@ export async function previewProjectDeletion(project: Project): Promise<Deletion
     for (const sd of serviceRows) {
       if (sd.containerId && !serviceContainerByServiceId.has(sd.serviceId)) {
         serviceContainerByServiceId.set(sd.serviceId, { containerId: sd.containerId, runtime });
+      }
+    }
+
+    // Repair the map against the HOST: an adopted container (foreign labels) or
+    // one a redeploy replaced isn't the id the rows name, and the preview would
+    // then show "no container / no volumes" for a service whose volumes the
+    // teardown sweep goes on to delete. The confirmation must not understate the
+    // blast radius, so identity is resolved the same way everywhere.
+    if (runtime instanceof DockerRuntime && runtime.supports("hostContainerQuery")) {
+      const containers = await withTimeout(
+        runtime.listAllContainers(),
+        INSPECT_TIMEOUT_MS,
+        `preview host containers ${project.id}`,
+      ).catch(() => [] as Awaited<ReturnType<DockerRuntime["listAllContainers"]>>);
+      if (containers.length > 0) {
+        const matches = resolveLiveServiceState({
+          services: services.map((s) => ({ id: s.id, name: s.name })),
+          live: containers,
+          projectId: project.id,
+          slug: project.slug,
+          trackedIds: Object.fromEntries(serviceRows.map((sd) => [sd.serviceId, sd.containerId])),
+        });
+        for (const [serviceId, match] of matches) {
+          if (match.containerId) {
+            serviceContainerByServiceId.set(serviceId, { containerId: match.containerId, runtime });
+          }
+        }
       }
     }
   }

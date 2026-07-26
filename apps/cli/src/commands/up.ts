@@ -20,6 +20,7 @@ import {
 import { resolvePorts } from "../lib/ports";
 import { prepareFromSource, type FromSourceRun } from "../lib/from-source";
 import {
+  markStoppedProxyImported,
   planAndApplyHostEdge,
   rollbackHostEdge,
   completeHostEdge,
@@ -341,6 +342,8 @@ async function runCompose(opts: UpOpts & { yes?: boolean }): Promise<{ apiPort: 
   if (edgePlan.action === "migrate" && edgePlan.sites?.length) {
     const outcome = await importMigratedSites(res.apiPort, edgePlan.sites, edgePlan.certPems);
     importedOk = outcome.registered.length > 0;
+    // Don't re-offer a stopped proxy's sites on the next run once they're in.
+    if (importedOk) markStoppedProxyImported();
   }
   // Edge is serving — close the takeover journal so the next run's recovery
   // doesn't mistake it for an interrupted one and restart the old proxy.

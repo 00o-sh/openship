@@ -6,7 +6,7 @@
     "scan": "Scan server",
     "scanning": "Scanning…",
     "rescan": "Re-scan",
-    "flatDocker": "Flat Docker",
+    "flatDocker": "Flat listing",
     "flatDockerHint": "Ignore Openship labels — adopt everything (incl. Openship-managed containers) as plain Docker.",
     "flatDockerShort": "Adopt Openship-managed containers too.",
     "cancel": "Cancel",

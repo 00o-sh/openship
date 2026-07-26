@@ -27,6 +27,8 @@ const e = vi.hoisted(() => ({
   rollbacks: 0,
   completes: 0,
   restored: true,
+  /** Set once a stopped proxy's sites are imported (suppresses re-offering). */
+  marked: 0,
 }));
 vi.mock("../../src/lib/edge-preflight", () => ({
   planAndApplyHostEdge: async () => {
@@ -39,6 +41,9 @@ vi.mock("../../src/lib/edge-preflight", () => ({
   },
   completeHostEdge: async () => {
     e.completes++;
+  },
+  markStoppedProxyImported: () => {
+    e.marked++;
   },
 }));
 

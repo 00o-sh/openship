@@ -67,6 +67,13 @@ it into the clone chain. It sits second in priority — after any per-project ov
 installation token. Give a classic token the `repo` scope, or fine-grained read access to the repos you
 deploy.
 
+This card also has **Forward my git identity to build servers** — a single per-operator switch (replacing
+the old per-deploy checkbox). When on, a build that runs on a remote server clones directly on that server
+using your local `gh` login, tunneled over SSH just for the clone; nothing is written to the server. When
+off, the server falls back to its own git login, a stored token, the public path, or cloning on Openship
+and transferring. See [Git authentication for private repos](/docs/guides/git-authentication) for the full
+chain.
+
 ### Personal Access Tokens
 
 Bearer tokens for the API, CLI, and MCP clients. Each token **acts as you** — it carries your role's

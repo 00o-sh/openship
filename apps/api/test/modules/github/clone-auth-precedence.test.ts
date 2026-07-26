@@ -166,9 +166,11 @@ describe("resolveBuildGitToken — server build, fall-through when server has no
     expect(res).toEqual({ anonymous: true });
   });
 
-  it("uses the server's OWN verified git access before forwarding or falling back", async () => {
+  it("uses the server's OWN verified git access before the App/PAT chain and the api-host fallback", async () => {
     // Nothing of ours reaches the server, but the server itself can read the repo.
-    getLocalGhToken.mockResolvedValue("ghtok"); // a relay WOULD be possible
+    // NOTE: forwarding is step 1 by design, so this asserts ambient beats
+    // everything BELOW it — with no forwardable identity, ambient wins.
+    getLocalGhToken.mockResolvedValue(null); // nothing to forward
     probeServerGitAccess.mockResolvedValue({ via: "gh" });
     const res = await resolveBuildGitToken({
       ...base,
@@ -183,8 +185,24 @@ describe("resolveBuildGitToken — server build, fall-through when server has no
     expect(res).toEqual({ ambient: { via: "gh" } });
   });
 
-  it("never probes the server before the App/PAT chain has had its turn", async () => {
+  it("prefers the server's own access over an App/PAT token (operator precedence)", async () => {
+    // The self-hosted model has no GitHub App, so the operator's own switches come
+    // first: a server that can already read the repo needs nothing shipped to it.
     tokenFor.mockResolvedValue({ token: "apptok" });
+    probeServerGitAccess.mockResolvedValue({ via: "gh" });
+    const res = await resolveBuildGitToken({
+      ...base,
+      buildStrategy: "server",
+      serverId: "s1",
+      serverExecutor: { exec: vi.fn() } as any,
+      repoUrl: "https://github.com/acme/app.git",
+    });
+    expect(res).toEqual({ ambient: { via: "gh" } });
+  });
+
+  it("still resolves an App/PAT token when the server has no access of its own", async () => {
+    tokenFor.mockResolvedValue({ token: "apptok" });
+    probeServerGitAccess.mockResolvedValue(null);
     const res = await resolveBuildGitToken({
       ...base,
       buildStrategy: "server",
@@ -193,8 +211,6 @@ describe("resolveBuildGitToken — server build, fall-through when server has no
       repoUrl: "https://github.com/acme/app.git",
     });
     expect(res).toEqual({ token: "apptok" });
-    // The guarantee that no already-working deploy changes its clone path.
-    expect(probeServerGitAccess).not.toHaveBeenCalled();
   });
 
   it("does not probe when the clone won't run on the server (no executor passed)", async () => {
@@ -209,9 +225,11 @@ describe("resolveBuildGitToken — server build, fall-through when server has no
     expect(probeServerGitAccess).not.toHaveBeenCalled();
   });
 
-  it("falls through to the relay when the server cannot reach the repo itself", async () => {
+  it("forwards FIRST when the operator opted in and a local identity exists", async () => {
+    // Step 1 of the chain: an explicit operator switch outranks the server's own
+    // credentials, so the probe is never even reached.
     getLocalGhToken.mockResolvedValue("ghtok");
-    probeServerGitAccess.mockResolvedValue(null);
+    probeServerGitAccess.mockResolvedValue({ via: "gh" });
     const res = await resolveBuildGitToken({
       ...base,
       buildStrategy: "server",
@@ -221,7 +239,7 @@ describe("resolveBuildGitToken — server build, fall-through when server has no
       allowRelayFallback: true,
     });
     expect(res).toEqual({ relay: true });
-    expect(probeServerGitAccess).toHaveBeenCalledTimes(1);
+    expect(probeServerGitAccess).not.toHaveBeenCalled();
   });
 
   it("api-host fallback carries a tokenFor('local') token when no local gh exists", async () => {

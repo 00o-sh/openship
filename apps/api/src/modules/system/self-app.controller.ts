@@ -25,6 +25,7 @@ import { createProject } from "../projects/project-crud.service";
 import { cloudClient } from "../../lib/cloud/client";
 import { getCloudConnectionStatusForOrg } from "../../lib/cloud/session";
 import { ensureAdoptDeployment, provisionSelfAppEdge } from "../../lib/startup/self-deploy";
+import { reapplyProjectLiveRoutes } from "../domains/project-route.service";
 import { refreshSelfAppPublicUrl } from "../../lib/public-url";
 import { streamSSE } from "../../lib/sse";
 import {
@@ -210,9 +211,16 @@ export async function selfRegister(c: Context) {
       return c.json({ error: "Could not resolve this server's public address for the edge proxy" }, 400);
     }
     // Oblien's edge validates `target` as a full URL (not `host:port`) and
-    // terminates TLS itself, forwarding to the origin box over plain HTTP on the
-    // dashboard port.
-    const target = `http://${host}:${dashPort}`;
+    // terminates TLS itself, forwarding to the origin box over plain HTTP.
+    //
+    // Target :80 — OUR EDGE — not the dashboard port. Pointing Cloud straight at
+    // :3001 meant the free domain only worked if that port was open to the
+    // internet, put the dashboard on a public port in plain HTTP (bypassable:
+    // anyone hitting <ip>:3001 skipped the edge, its TLS, rate limits and rules),
+    // and left the local edge with no vhost for the hostname at all. Now the box
+    // needs nothing but :80/:443 open, and the free domain routes exactly like a
+    // custom one — through the edge, by Host header, to the dashboard on loopback.
+    const target = `http://${host}`;
     try {
       const result = await cloudClient({ organizationId }).edgeProxy.sync({ slug, target });
       if (!result) {
@@ -224,8 +232,10 @@ export async function selfRegister(c: Context) {
     } catch (err) {
       return c.json({ error: safeErrorMessage(err) }, 502);
     }
-    // Oblien's edge terminates TLS for *.opsh.io and forwards to the box, so the
-    // domain is live + secured the moment the proxy syncs.
+    // Oblien's edge terminates TLS for *.opsh.io, so the domain is secured the
+    // moment the proxy syncs — but it forwards to :80 here, which is OUR edge, so
+    // the edge also needs a vhost for this hostname or every request lands on
+    // default_server and 404s.
     await repos.domain.findOrCreate({
       projectId,
       hostname,
@@ -236,6 +246,18 @@ export async function selfRegister(c: Context) {
       status: "active",
       sslStatus: "active",
     });
+    // Register the LOCAL route (plain :80 vhost — Cloud already terminated TLS,
+    // so no cert is needed on the box for a free hostname). Best-effort like every
+    // routing step, but logged loudly: without it the domain resolves and then
+    // 404s, which is indistinguishable from a DNS problem to the operator.
+    const freshFree = await repos.project.findById(projectId);
+    if (freshFree) {
+      await reapplyProjectLiveRoutes(freshFree, [], { isSelfApp: true }).catch((err) =>
+        console.warn(
+          `[self-register] free domain ${hostname} registered with Cloud but the local edge route failed: ${safeErrorMessage(err)}`,
+        ),
+      );
+    }
     await refreshSelfAppPublicUrl().catch(() => {});
     return c.json({ ok: true, url: `https://${hostname}`, hostname });
   }

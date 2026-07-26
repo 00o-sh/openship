@@ -5,7 +5,7 @@
     "selectServer": "اختر خادمًا",
     "scan": "فحص الخادم",
     "scanning": "جارٍ الفحص…",
-    "flatDocker": "Docker مسطّح",
+    "flatDocker": "قائمة مسطّحة",
     "flatDockerHint": "تجاهل تسميات Openship — اعتمد كل شيء (بما في ذلك حاويات Openship) كـ Docker عادي.",
     "flatDockerShort": "يشمل الحاويات التي يديرها Openship.",
     "rescan": "إعادة الفحص",

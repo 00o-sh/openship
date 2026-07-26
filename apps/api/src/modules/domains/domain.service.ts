@@ -15,7 +15,7 @@
  */
 
 import { repos, type Domain, type Project } from "@repo/db";
-import { NotFoundError, ConflictError, ValidationError, safeErrorMessage, normalizeCustomHostname, isValidCustomHostname } from "@repo/core";
+import { NotFoundError, ConflictError, ValidationError, safeErrorMessage, normalizeCustomHostname, isValidCustomHostname, SYSTEM } from "@repo/core";
 import { platform, assertResourceInOrg } from "../../lib/controller-helpers";
 import { buildBackgroundContext, type RequestContext } from "../../lib/request-context";
 import { manageDomainSsl, installDomainCert, provisionDomainCertForVerify, verifyExistingCert } from "../../lib/domain-ssl";
@@ -469,7 +469,7 @@ export async function reuseServerCertForDomain(ctx: RequestContext, domainId: st
 export async function verifyDomain(
   ctx: RequestContext,
   domainId: string,
-  opts: { onLog?: (line: string) => void } = {},
+  opts: { onLog?: (line: string) => void; force?: boolean } = {},
 ) {
   const log = (line: string) => opts.onLog?.(line);
   const { domain, project } = await getDomainWithAuth(domainId, ctx.organizationId);
@@ -544,11 +544,45 @@ export async function verifyDomain(
       }
     }
 
+    // Reuse an already-valid cert instead of always re-issuing. A read-only
+    // probe (no ACME) on the serving host — reachability was just confirmed
+    // above, so if the edge already holds a cert with comfortable life left
+    // (beyond the renewal window) the domain is proven reachable AND TLS is
+    // live, so Verify succeeds without spending a Let's Encrypt issuance. A
+    // missing/near-expiry cert falls through to issuance below (which is itself
+    // locked + rechecks). `?force=1` skips this to force a fresh cert.
+    if (!opts.force) {
+      const existing = await verifyExistingCert(domain.hostname, {
+        projectId: domain.projectId ?? undefined,
+      }).catch(() => null);
+      const daysLeft = existing?.expiresAt
+        ? (new Date(existing.expiresAt).getTime() - Date.now()) / 86_400_000
+        : -1;
+      if (existing?.verified && daysLeft > SYSTEM.DOMAINS.SSL_RENEW_BEFORE_DAYS) {
+        log(
+          `A valid certificate is already present for ${domain.hostname} (expires ${existing.expiresAt.slice(0, 10)}) — reusing it. No new certificate requested.`,
+        );
+        await markDomainVerifiedActive(domain, domainId, {
+          issuer: existing.issuer,
+          expiresAt: existing.expiresAt,
+        });
+        return {
+          verified: true,
+          recordVerified: true,
+          cnameVerified: true,
+          txtVerified: true,
+          message: "Domain verified — a valid certificate is already present; no new certificate was requested.",
+          sslStatus: "active",
+        };
+      }
+    }
+
     try {
       log(`Requesting a certificate for ${domain.hostname} (standalone HTTP-01 via the edge)…`);
       const result = await provisionDomainCertForVerify(domain.hostname, {
         projectId: domain.projectId ?? undefined,
         onLog: opts.onLog,
+        force: opts.force,
       });
       if (result.verified) {
         log("Certificate issued — marking the domain verified and SSL active.");

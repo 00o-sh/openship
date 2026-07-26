@@ -24,6 +24,9 @@ export {
   stopTargetsForStatus,
 } from "./index";
 export { ourEdgeContainerRunning } from "./detect";
+// Recover the sites of a proxy we already STOPPED: probeEdge can't see it (it
+// holds no ports), but its vhosts are still on disk and the parsers are read-only.
+export { detectInstalledProxy, scanImportableSites } from "./import";
 // The rollback journal — same file + same restore logic the api uses, so a
 // takeover the CLI starts can be finished OR rolled back by either side. Lives in
 // takeover-journal.ts precisely so this lean subpath doesn't pull in the OpenResty
@@ -36,6 +39,7 @@ export {
 } from "./takeover-journal";
 export { LocalExecutor } from "../local-executor";
 export type {
+  ProxyKind,
   EdgeStatus,
   EdgeStopTarget,
   ImportedSite,

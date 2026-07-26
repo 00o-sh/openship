@@ -600,11 +600,17 @@ ${webhookLocation}${extraLocations}
    * a webroot failure becomes a "deploy continues on HTTP, retry from
    * Domains tab" warning instead of a deploy abort.
    */
-  async provisionCert(domain: string, opts?: { onLog?: (line: string) => void }): Promise<SslResult> {
+  async provisionCert(
+    domain: string,
+    opts?: { onLog?: (line: string) => void; force?: boolean },
+  ): Promise<SslResult> {
     assertValidDomain(domain);
 
-    // Check if cert already exists
-    if (await this.certsExist(domain)) {
+    // Reuse an existing cert unless the caller forces a reissue. `force` is set
+    // when the service layer has already decided the current cert is missing /
+    // near-expiry / a deliberate renew — without it this short-circuit would
+    // return a stale cert and a renewal would silently no-op.
+    if (!opts?.force && (await this.certsExist(domain))) {
       return this.readCertInfo(domain);
     }
 
@@ -636,6 +642,9 @@ ${webhookLocation}${extraLocations}
         "certonly", "--standalone", "--http-01-port", String(ACME_HTTP01_PORT),
         "--cert-name", domain, "-d", domain,
         ...emailArgs, "--agree-tos", "--non-interactive",
+        // Forced reissue: certbot would otherwise print "not due for renewal"
+        // (exit 0) when a lineage exists, leaving the stale cert in place.
+        ...(opts?.force ? ["--force-renewal"] : []),
       ], opts?.onLog);
     } catch (err) {
       // Replace certbot's opaque opener with the real, actionable cause.

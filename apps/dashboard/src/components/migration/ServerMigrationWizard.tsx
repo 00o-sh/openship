@@ -676,9 +676,12 @@ export function ServerMigrationWizard({
   const deriveName = (bound: string | null) =>
     bound && bound !== STANDALONE ? bound : (serverName ?? "");
 
-  /** Can the active project accept a service from `key` group? Empty project →
-   *  binds to any group; otherwise only its already-bound group. */
-  const canBind = (key: string) => !active || active.services.size === 0 || active.bound === key;
+  /** Free select: a project can pull services from ANY compose group. The old
+   *  one-compose-per-project guard (which dimmed other groups with "add a
+   *  separate project to import it") is relaxed — everything is selectable into
+   *  the active project. `bound` is still tracked, but only to auto-derive the
+   *  project name from the first group picked. */
+  const canBind = (_key: string) => true;
 
   const toggleService = (svc: DiscoveredService, key: string) => {
     if (!active || isExcluded(svc)) return;
@@ -2023,49 +2026,21 @@ export function ServerMigrationWizard({
       <div ref={stepTopRef} className="grid grid-cols-1 gap-6 items-start lg:grid-cols-[minmax(0,1fr)_340px]">
         {/* ── LEFT: discovered containers ── */}
         <div className="min-w-0 space-y-4">
-          {/* "← Back to migrations" owns the top line — it's navigation out of the
-              flow, not a control of it. The project tabs + rescan sit on their own
-              row below; the scan-mode option lives in the card on the right. */}
-          {backBtn}
+          {/* "← Back to migrations" leaves the flow; the rescan is a control of
+              it, but they share this one line so the page doesn't spend two rows
+              on chrome.
 
-          {adoptable && stack && (
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                {projects.map((p) => {
-                  const on = p.id === active?.id;
-                  return (
-                    <div
-                      key={p.id}
-                      className={`group inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm transition-colors cursor-pointer ${
-                        on ? " bg-primary/10 text-foreground" : "text-muted-foreground hover:bg-muted/40"
-                      }`}
-                      onClick={() => setActiveId(p.id)}
-                    >
-                      <span className="font-medium truncate max-w-[160px]">{p.name || m.wizard.projectName}</span>
-                      <span className="text-xs text-muted-foreground">· {p.services.size}</span>
-                      {projects.length > 1 && (
-                        <button
-                          type="button"
-                          onClick={(e) => { e.stopPropagation(); removeProject(p.id); }}
-                          className="rounded p-0.5 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-                          aria-label={m.wizard.removeProject}
-                        >
-                          <X className="size-3.5" />
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
-                <button
-                  type="button"
-                  onClick={addProject}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-dashed border-border px-3 py-1.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors"
-                >
-                  <Plus className="size-3.5" />
-                  {m.wizard.addProject}
-                </button>
-              </div>
-              {rescanBtn}
+              The project tabs + "Add project" that used to own the row below are
+              deliberately NOT rendered here for now. Multi-project splitting is
+              still fully wired — projects / activeId / addProject / removeProject
+              state, exclusive `claimedBy` assignment, and the modal variant that
+              still renders the tabs — so bringing this back is a JSX-only change.
+              `active` falls back to projects[0], which the scan always creates,
+              so the single-project path works untouched. */}
+          {(backBtn || (adoptable && stack)) && (
+            <div className="flex items-center gap-3">
+              {backBtn}
+              {adoptable && stack && <div className="ms-auto">{rescanBtn}</div>}
             </div>
           )}
 
@@ -2638,8 +2613,9 @@ function ServiceGroup({
   const isCompose = group.project !== null;
   const key = group.project ?? "__standalone__";
 
-  // The active project can bind to this group iff empty or already bound to it.
-  const bindable = activeProject.services.size === 0 || activeProject.bound === key;
+  // Free select — every group is bindable into the active project (no
+  // one-compose-per-project restriction; no "add a separate project" gating).
+  const bindable = true;
   const selectable = group.services.filter(
     (s) => !isExcluded(s) && (claimedBy.get(svcUid(s)) ?? activeProject.id) === activeProject.id,
   );
@@ -2733,12 +2709,12 @@ function ServiceRow({
           : readOnly
             ? "cursor-default border-primary/30 bg-primary/[0.05]"
             : checked
-              ? "cursor-pointer border-primary/40 bg-primary/[0.05]"
-              : "cursor-pointer border-border bg-card hover:border-foreground/25 hover:bg-muted/20"
+              ? "cursor-pointer border-primary/60 bg-primary/[0.08] ring-1 ring-inset ring-primary/10"
+              : "cursor-pointer border-border/50 bg-card hover:border-foreground/25 hover:bg-muted/20"
       }`}
     >
       <span
-        className={`mt-0.5 size-[18px] rounded-md border flex items-center justify-center shrink-0 transition-colors ${
+        className={`mt-0.5 size-4 rounded-md border flex items-center justify-center shrink-0 transition-colors ${
           interactionBlocked
             ? "border-border bg-muted"
             : checked

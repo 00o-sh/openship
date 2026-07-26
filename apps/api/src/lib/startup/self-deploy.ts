@@ -346,11 +346,17 @@ export function registerSelfAdoptReconcile(): void {
           .catch((err) => console.warn(`[self-deploy] port sync failed: ${safeErrorMessage(err)}`));
       }
 
-      // (c) Self-heal the custom local-edge route + cert (Linux + root only).
+      // (c) Self-heal the local-edge route + cert (Linux + root only).
+      //
+      // FREE domains are included: Cloud terminates their TLS and forwards to :80
+      // on this box, so the local edge still needs the vhost. Gating this on
+      // "custom" meant an install whose edge was down during registration could
+      // never recover — the domain resolved and 404'd forever. Cert re-issue below
+      // is skipped for free (Cloud owns that cert), route repair is not.
       const primary = await repos.domain.getPrimaryByProject(project.id);
       if (
         primary &&
-        primary.domainType === "custom" &&
+        (primary.domainType === "custom" || primary.domainType === "free") &&
         !primary.externalIngress &&
         isLinuxRoot()
       ) {
@@ -364,7 +370,8 @@ export function registerSelfAdoptReconcile(): void {
           } catch (err) {
             console.warn(`[self-deploy] route reapply failed: ${safeErrorMessage(err)}`);
           }
-          if (primary.sslStatus !== "active") {
+          // Free domains are TLS-terminated by Cloud — never run certbot for one.
+          if (primary.domainType !== "free" && primary.sslStatus !== "active") {
             try {
               await manageDomainSsl(primary.hostname, { action: "provision", projectId: project.id });
             } catch (err) {
