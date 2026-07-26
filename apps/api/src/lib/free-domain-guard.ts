@@ -18,7 +18,10 @@ import { storedPublicEndpointsNeedCloud, type StoredPublicEndpoint } from "./pub
  */
 export async function assertFreeEndpointsAllowed(
   organizationId: string,
-  endpoints: Array<Pick<StoredPublicEndpoint, "domainType">> | null | undefined,
+  endpoints:
+    | Array<Pick<StoredPublicEndpoint, "domainType" | "domain" | "customDomain">>
+    | null
+    | undefined,
   capability: CloudCapability = "managed-project-domain",
 ): Promise<void> {
   // Only custom domains in play → no Cloud edge needed.

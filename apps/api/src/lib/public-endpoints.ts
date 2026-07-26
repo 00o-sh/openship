@@ -1,5 +1,5 @@
 import type { Domain, Project, Service } from "@repo/db";
-import { SYSTEM, resolveServiceHostnameLabel, endpointsNeedCloud } from "@repo/core";
+import { SYSTEM, resolveServiceHostnameLabel } from "@repo/core";
 import { getRoutingBaseDomain } from "./routing-domains";
 import { resolveServicePort, serviceKind } from "./deployable-service";
 import { env } from "../config/env";
@@ -374,10 +374,26 @@ export function syncStoredPublicEndpoints(opts: {
 }
 
 export function storedPublicEndpointsNeedCloud(
-  endpoints?: Array<Pick<StoredPublicEndpoint, "domainType">> | null,
+  endpoints?:
+    | Array<Pick<StoredPublicEndpoint, "domainType" | "domain" | "customDomain">>
+    | null,
 ): boolean {
-  // Single definition lives in @repo/core; kept as a named alias for callers.
-  return endpointsNeedCloud(endpoints);
+  if (!endpoints?.length) return false;
+  // Classify by the HOSTNAME's physical truth, never a bare `domainType` string.
+  // Only a managed *.<baseDomain> subdomain can resolve behind the Cloud edge, so
+  // only that actually needs Cloud. A real custom host routes on our OWN edge and
+  // never does — even when a migrated/stale row left its domainType unset or wrong
+  // (which is exactly what made removing a custom-domain route demand Cloud).
+  return endpoints.some((endpoint) => {
+    const custom = normalizeCustomDomain(endpoint.customDomain);
+    if (custom) return !!managedHostnameToSlug(custom);
+    const slug = normalizeSlug(endpoint.domain);
+    if (!slug) return false; // nothing routable → nothing to gate
+    // A bare slug is a managed free subdomain; a dotted value here is a misfiled
+    // custom host (e.g. a migrated api.example.com) that routes on our edge.
+    const hostname = slug.includes(".") ? slug : `${slug}${managedHostnameSuffix()}`;
+    return !!managedHostnameToSlug(hostname);
+  });
 }
 
 /**

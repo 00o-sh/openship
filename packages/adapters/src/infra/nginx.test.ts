@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { NginxProvider, renderProxyOptions } from "./nginx";
 import { PROXY_GZIP_TYPES } from "@repo/core";
-import { OPENRESTY_DEFAULT_PATHS, luaSourceAvailable, RULES_GUARD_PATH, ACME_HTTP01_PORT } from "./openresty-lua";
+import { OPENRESTY_DEFAULT_PATHS, luaSourceAvailable, RULES_GUARD_PATH, ACME_HTTP01_PORT, ensureOpenRestyConfig } from "./openresty-lua";
 import type { CommandExecutor, RouteConfig } from "../types";
 
 // L1 — config GENERATION. Proves NginxProvider emits the right nginx directives
@@ -216,5 +216,33 @@ describe("registerRoute renders proxy directives at server scope", () => {
     const { nginx, conf } = setup({ certDomains: ["app.example.com"] });
     await nginx.registerRoute(PROXY);
     expect(conf("app-example-com")!).not.toContain("client_max_body_size");
+  });
+});
+
+// Security: an HTTPS request whose SNI matches no vhost must NOT fall through to
+// the first-loaded 443 server block (cross-serving another app's cert+backend).
+// The default catch-all owns `443 ssl default_server` and rejects unknown SNI.
+describe("default catch-all rejects unmatched HTTPS hosts", () => {
+  test("ensureOpenRestyConfig writes a 443 default_server that rejects unknown SNI", async () => {
+    const files = new Map<string, string>();
+    const calls: string[] = [];
+    // nginx.conf already present → exercises the steady-state path (not bootstrap).
+    files.set(PATHS.confPath, `http {\n    include ${SITES}/*.conf;\n}\n`);
+    await ensureOpenRestyConfig(makeExecutor(files, {}, calls), PATHS);
+    const def = files.get(`${SITES}/_default.conf`);
+    expect(def).toBeDefined();
+    expect(def).toContain("listen 443 ssl default_server;");
+    expect(def).toContain("ssl_reject_handshake on;");
+    // and the HTTP catch-all stays a default_server too (no fallthrough on :80).
+    expect(def).toContain("listen 80 default_server;");
+  });
+
+  test("catch-all is re-written on every ensure (self-heals a stale 80-only copy)", async () => {
+    const files = new Map<string, string>();
+    files.set(PATHS.confPath, `http {\n    include ${SITES}/*.conf;\n}\n`);
+    // Simulate an already-deployed box whose _default.conf predates the 443 reject.
+    files.set(`${SITES}/_default.conf`, "server {\n    listen 80 default_server;\n}\n");
+    await ensureOpenRestyConfig(makeExecutor(files, {}, []), PATHS);
+    expect(files.get(`${SITES}/_default.conf`)).toContain("ssl_reject_handshake on;");
   });
 });

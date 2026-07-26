@@ -181,6 +181,14 @@ export async function ensureOpenRestyConfig(
   const pidDir = paths.pidPath.replace(/\/[^/]+$/, "");
   await executor.mkdir(pidDir);
 
+  // Base server blocks: the loopback management API and the default catch-all
+  // (incl. the 443 unknown-SNI reject). Written here - not just at install - so
+  // an already-deployed box self-heals the catch-all on its next deploy and no
+  // longer cross-serves an unrouted HTTPS host. Idempotent overwrite of static
+  // content; a stale copy is replaced. The deploy's route reload applies it.
+  await executor.writeFile(`${paths.sitesDir}/_management.conf`, MANAGEMENT_BLOCK);
+  await executor.writeFile(`${paths.sitesDir}/_default.conf`, DEFAULT_BLOCK);
+
   // Bootstrap: if nginx.conf doesn't exist (e.g. after a reinstall that
   // removed the old config), write a minimal working config.
   if (!(await executor.exists(paths.confPath))) {
@@ -336,7 +344,8 @@ export const ACME_CHALLENGE_LOCATION = `\
     }`;
 
 const DEFAULT_BLOCK = `\
-# Openship default catch-all - prevents the stock OpenResty welcome page
+# Openship default catch-all - prevents the stock OpenResty welcome page AND
+# stops an unmatched Host/SNI from being served the first real vhost by default.
 # Auto-generated - do not edit manually
 server {
     listen 80 default_server;
@@ -347,6 +356,18 @@ ${ACME_CHALLENGE_LOCATION}
     location / {
         return 404;
     }
+}
+
+# HTTPS catch-all. WITHOUT a 443 default_server, nginx serves the first-loaded
+# 443 vhost to any request whose SNI matches no server_name - so a domain we do
+# NOT route (removed / never-added / just pointed at this IP) silently gets some
+# other app's cert + backend. That is cross-serving, a security hole. Owning the
+# 443 default and rejecting unknown SNI closes it: an unrouted host gets a TLS
+# handshake failure, never a fallthrough. ssl_reject_handshake (OpenResty/nginx
+# >= 1.19.4; our installer pulls the newest LTS) needs no certificate.
+server {
+    listen 443 ssl default_server;
+    ssl_reject_handshake on;
 }
 `;
 
@@ -587,9 +608,8 @@ export async function deployLuaScripts(
       `sed -i '/http *{/a \\    lua_package_path "/usr/local/openresty/site/lualib/?.lua;;";' ${paths.confPath}`,
   );
 
-  // ── Management server block ──────────────────────────────────────────
-  await executor.writeFile(`${paths.sitesDir}/_management.conf`, MANAGEMENT_BLOCK);
-  await executor.writeFile(`${paths.sitesDir}/_default.conf`, DEFAULT_BLOCK);
+  // Base server blocks (_management.conf + _default.conf) are written by
+  // ensureOpenRestyConfig above - single writer, so they self-heal every deploy.
 
   // ── Validate + reload ────────────────────────────────────────────────
   await executor.exec(buildReloadCommand(paths));
