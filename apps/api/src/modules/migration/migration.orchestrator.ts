@@ -55,7 +55,7 @@ import { linkProjectRepo } from "../projects/project-crud.service";
 import type { ProjectCompositeRoute } from "@repo/core";
 import { teardownProject } from "../projects/project-teardown";
 import { discoverServerStack } from "./docker-inspect.service";
-import { adoptServerStack, attachLiveRuntime } from "./migrate.service";
+import { adoptServerStack, attachLiveRuntime, joinReusedContainersToGroup, parseRepoCompose } from "./migrate.service";
 import { isMovableBind } from "./migration-preflight";
 import { migrationRunBus } from "./migration.sse";
 
@@ -409,6 +409,18 @@ class MigrationOrchestratorImpl {
         deployChosen.filter((s) => s.containerId).map((s) => [s.name, s.containerId as string]),
       );
 
+      // Parse the linked repo's compose so adopted rows take their NATIVE
+      // build/image spec (mapped by the wizard) instead of a frozen running-image
+      // tag — the fix that makes a later Redeploy reclone + rebuild rather than
+      // 404 on a stale build tag. Best-effort: a GitHub hiccup falls back to
+      // legacy image-only adoption (the migration must never fail on this).
+      const repoServices = await (async () => {
+        const gs = input.gitSource;
+        if (!gs?.owner || !gs?.repo) return undefined;
+        const parsed = await parseRepoCompose(ctx, gs.owner, gs.repo, gs.branch).catch(() => []);
+        return parsed.length ? new Map(parsed.map((s) => [s.name, s])) : undefined;
+      })();
+
       const adopt = await adoptServerStack({
         serverId: sourceServerId,
         organizationId,
@@ -420,6 +432,7 @@ class MigrationOrchestratorImpl {
         serviceEnv: input.serviceEnv,
         serviceRenames: input.serviceRenames,
         flatDocker: input.flatDocker,
+        repoServices,
       });
       const projectId = adopt.projectId;
       if (adopt.created) createdProjectId = projectId;
@@ -446,13 +459,28 @@ class MigrationOrchestratorImpl {
         attachNames.has(r.name),
       );
 
+      // Repo compose services with no adopted container (e.g. a same-server run
+      // whose only running container is `postgres`, but the repo compose also
+      // declares web/dashboard/api/redis) are already created as native rows —
+      // with their env — by adoptServerStack. This just gates whether the native
+      // deploy has to run to build/pull them (and publish their domains).
+      const adoptedRowNames = new Set(chosen.map((s) => adopt.renames[s.name] ?? s.name));
+      const hasNewRepoServices = repoServices
+        ? [...repoServices.keys()].some((n) => !adoptedRowNames.has(n))
+        : false;
+
       // Cancel checkpoint on the attach-live path too: a same-server reuse run
       // has an empty deploy set (skips every check below), so without this a
       // cancel during `adopting` would never take effect and the run would
       // proceed to `succeeded`. (Same-server has no killable transfer process.)
       this.throwIfCancelled(id);
 
-      if (deployChosen.length > 0) {
+      // Run the native deploy when there are containers to move (cross-server /
+      // copy) OR new repo services to build/pull. Attach-live services are
+      // disabled during the build (below) so they stay zero-downtime; the deploy
+      // only builds the new ones. Only a pure same-server reuse with NO new repo
+      // services skips the deploy entirely (the `else`).
+      if (deployChosen.length > 0 || hasNewRepoServices) {
         // ── moving_data: quiesce the deploy set's originals + copy volumes ──
         this.throwIfCancelled(id);
         await this.transition(id, "moving_data");
@@ -552,14 +580,34 @@ class MigrationOrchestratorImpl {
         }
 
         // ── deploying ──
-        // Scope the compose deploy to the deploy set: attach-live rows are
-        // temporarily disabled so the build skips them (deployComposeServices
-        // only deploys enabled rows), then re-enabled + attached below. Restored
-        // in finally so a failure never leaves rows disabled.
+        // Scope the compose deploy to the reuse set: attach-live rows are disabled
+        // so the pipeline builds/deploys ONLY the new/moved services and never
+        // recreates the still-running reused containers. requestBuildAccess kicks
+        // the build off in the BACKGROUND and returns immediately, so the rows must
+        // stay disabled for the ENTIRE build+verify — re-enabling right after the
+        // call returns would race the async build into reading them enabled and
+        // recreating the reused containers. Re-enabled in the finally only AFTER
+        // waitForDeployment resolves (by then the build has read the disabled set);
+        // the finally still restores them on any failure/cancel.
         this.throwIfCancelled(id);
         await this.transition(id, "deploying");
         for (const r of attachRows) {
           await repos.service.update(r.id, { enabled: false });
+        }
+        // Unify with a native deploy: join the reused (attach-live) containers to
+        // the project network (alias = row name) BEFORE the build, so a freshly-
+        // built service resolves them by name from its first start (web →
+        // postgres:5432). The deploy's ensureServiceGroup reuses this network.
+        // Best-effort — a join failure must never block the migration.
+        if (attachRows.length > 0) {
+          await joinReusedContainersToGroup({
+            serverId: targetServerId,
+            organizationId,
+            slug: adopt.slug,
+            attach: attachChosen,
+            serviceRows: attachRows,
+            renames: adopt.renames,
+          }).catch((err) => log(`network join skipped: ${safeErrorMessage(err)}`));
         }
         log(`deploying to target server…`);
         try {
@@ -569,29 +617,33 @@ class MigrationOrchestratorImpl {
             serverId: targetServerId,
             runtimeMode: "docker",
             serviceDeploymentMode: "services",
+            // One-time cutover: native `build:` rows reuse the transferred/running
+            // image on THIS deploy (no rebuild); a later Redeploy has no handover
+            // and rebuilds from the repo.
+            handoverImages: adopt.handover,
           });
           deploymentId = dep.deployment_id;
+          await this.transition(id, "deploying", { deploymentId });
+          log(`target deployment ${deploymentId} started; verifying health…`);
+
+          // ── verifying ──
+          this.throwIfCancelled(id);
+          await this.transition(id, "verifying");
+          const verified = await this.waitForDeployment(deploymentId, id);
+          if (!verified || verified.status !== "ready") {
+            // Surface WHY, not a dead-end "did not become ready": a timeout, or the
+            // deployment's own error PLUS which service(s) failed (so a
+            // "partial_failure" names the culprit instead of a bare status).
+            const mins = Math.round(VERIFY_TIMEOUT_MS / 60000);
+            const reason = !verified
+              ? `it was still deploying after ${mins} minutes`
+              : await this.describeDeployFailure(deploymentId, verified);
+            throw new Error(`The target deployment did not become ready — ${reason}.`);
+          }
         } finally {
           for (const r of attachRows) {
             await repos.service.update(r.id, { enabled: true }).catch(() => {});
           }
-        }
-        await this.transition(id, "deploying", { deploymentId });
-        log(`target deployment ${deploymentId} started; verifying health…`);
-
-        // ── verifying ──
-        this.throwIfCancelled(id);
-        await this.transition(id, "verifying");
-        const verified = await this.waitForDeployment(deploymentId, id);
-        if (!verified || verified.status !== "ready") {
-          // Surface WHY, not a dead-end "did not become ready": a timeout, or the
-          // deployment's own error PLUS which service(s) failed (so a
-          // "partial_failure" names the culprit instead of a bare status).
-          const mins = Math.round(VERIFY_TIMEOUT_MS / 60000);
-          const reason = !verified
-            ? `it was still deploying after ${mins} minutes`
-            : await this.describeDeployFailure(deploymentId, verified);
-          throw new Error(`The target deployment did not become ready — ${reason}.`);
         }
 
         // Carry the source's existing TLS certs onto the target (cross-server)
@@ -665,7 +717,11 @@ class MigrationOrchestratorImpl {
         }
       } else {
         await this.transition(id, "succeeded");
-        log(`migration succeeded (attach-live, no cutover)`);
+        log(
+          hasNewRepoServices
+            ? `migration succeeded (attached running service(s); built/pulled + routed the new repo service(s))`
+            : `migration succeeded (attach-live, no cutover)`,
+        );
       }
     } catch (err) {
       // A cancelled run rolls back like any pre-cutover failure, but with a

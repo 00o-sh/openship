@@ -30,7 +30,8 @@ import { isCloudConnectedForOrg } from "../../lib/cloud/session";
 import { runCloudPreflight, type CloudPreflightData } from "../../lib/cloud-preflight";
 import { isStaticService, type DeployableService } from "../../lib/deployable-service";
 import { serviceKind } from "./compose/project-services";
-import { resolveClonePlan } from "./clone-plan";
+import { relayConfigEligible, resolveClonePlan } from "./clone-plan";
+import { hasLocalGitIdentity } from "../github/github.local-auth";
 import { isPublicRepo } from "../github/github.http";
 import { getRoutingBaseDomain } from "../../lib/routing-domains";
 import { resolveServerHost } from "../../lib/server-target";
@@ -241,13 +242,8 @@ async function relayWillClone(
   isDesktop: boolean,
   forwardGitCredentials: boolean | undefined,
 ): Promise<boolean> {
-  if (!isDesktop || forwardGitCredentials === false) return false;
-  try {
-    const { getLocalGhToken } = await import("../github/github.local-auth");
-    return !!(await getLocalGhToken());
-  } catch {
-    return false;
-  }
+  if (!relayConfigEligible({ isDesktop, forwardGitCredentials })) return false;
+  return hasLocalGitIdentity();
 }
 
 async function checkRemoteBuildTokenLeak(
@@ -438,9 +434,12 @@ async function checkCloneOnServerCredential(
     ...baseCheck,
     status: "warn",
     message:
-      `"Clone on the server" is selected, but no GitHub credential is available to ship to the build host. ` +
-      `The deploy will fall back to cloning on the API host and transferring the context. ` +
-      `Install the Openship App on "${owner}" or add a per-project clone token to clone directly on the server.`,
+      `"Clone on the server" is selected, but Openship holds no GitHub credential for the build host. ` +
+      `The deploy will check whether the server already reaches this repo with its own git credentials ` +
+      `(a \`gh\` login, a credential helper, or its ssh key) and clone there if it does — otherwise it ` +
+      `falls back to cloning on the API host and transferring the context. To make the on-server clone ` +
+      `deterministic, connect the server under Servers → GitHub (a read-only per-repo deploy key is the ` +
+      `narrowest option), install the Openship App on "${owner}", or add a per-project clone token.`,
   };
 }
 

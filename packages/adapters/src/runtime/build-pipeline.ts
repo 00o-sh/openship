@@ -14,6 +14,7 @@
 import type { BuildConfig, BuildStep, LogEntry, LogCallback } from "../types";
 import { safeErrorMessage, packageManagerEnsureCommand } from "@repo/core";
 import { sq, injectGitToken, assembleGitClone } from "./git-clone";
+import { materializeGitSsh, shellGitSshWriter, type GitSshMaterial } from "./git-ssh-material";
 
 // Re-exported for the docker adapters that import these from here.
 export { sq, injectGitToken, toGitHubSshUrl, assembleGitClone } from "./git-clone";
@@ -229,31 +230,28 @@ export async function runBuildPipeline(
           // so the key bytes never reach the log) and clone over git@github.com.
           // Requires a runtime that can write a secret file; otherwise refuse
           // rather than risk leaking the key.
-          let sshFiles: { keyFile: string; knownHostsFile: string } | undefined;
-          let sshCleanup: string | null = null;
+          let sshMaterial: GitSshMaterial | undefined;
           if (config.gitSsh) {
-            if (!env.writeSecretFile) {
+            const writeSecretFile = env.writeSecretFile;
+            if (!writeSecretFile) {
               throw new Error(
                 "SSH-based GitHub auth isn't supported on this build runtime — use a token or the tunnel relay.",
               );
             }
-            const dir = `${env.projectDir}.gitssh`;
-            const keyFile = `${dir}/id`;
-            const knownHostsFile = `${dir}/known_hosts`;
-            await exec(`mkdir -p ${sq(dir)} && chmod 700 ${sq(dir)}`);
-            await env.writeSecretFile(keyFile, config.gitSsh.privateKey);
-            await env.writeSecretFile(knownHostsFile, config.gitSsh.knownHosts);
-            await exec(`chmod 600 ${sq(keyFile)}`);
-            sshFiles = { keyFile, knownHostsFile };
-            sshCleanup = `rm -rf ${sq(dir)}`;
+            sshMaterial = await materializeGitSsh(
+              shellGitSshWriter({ exec, writeSecret: writeSecretFile }),
+              `${env.projectDir}.gitssh`,
+              config.gitSsh,
+            );
           }
 
-          // Centralized clone assembly (token / relay / ssh) — see git-clone.ts.
+          // Centralized clone assembly (token / relay / ssh / ambient) — see git-clone.ts.
           const { cloneUrl, gitEnv: GIT_ENV, credFlag: CRED } = assembleGitClone({
             repoUrl: config.repoUrl,
             gitToken: config.gitToken,
             gitCredentialHelperPath: config.gitCredentialHelperPath,
-            ssh: sshFiles,
+            ssh: sshMaterial,
+            ambient: config.gitAmbient,
           });
 
           try {
@@ -285,7 +283,7 @@ export async function runBuildPipeline(
             }
           } finally {
             // Always remove the ephemeral SSH key material, success or fail.
-            if (sshCleanup) await exec(sshCleanup).catch(() => {});
+            await sshMaterial?.cleanup();
           }
         },
       );

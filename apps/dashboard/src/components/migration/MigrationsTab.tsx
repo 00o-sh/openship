@@ -162,28 +162,25 @@ export function MigrationsTab({
           <Loader2 className="size-5 animate-spin" />
         </div>
       ) : runs.length === 0 ? (
-        <div className="flex flex-col items-center gap-4 rounded-2xl border border-dashed border-border bg-card px-6 py-12 text-center">
-          <span className="inline-flex size-12 items-center justify-center rounded-2xl bg-muted text-muted-foreground">
-            <Boxes className="size-6" />
-          </span>
-          <div className="space-y-1.5">
-            <p className="text-sm font-medium text-foreground">{tab.empty}</p>
-            <p className="mx-auto max-w-md text-xs leading-relaxed text-muted-foreground">
-              {tab.emptyDesc}
-            </p>
+        // Same card shell as the populated list, so the tab keeps its shape
+        // either way; the safety note is a flush footer, not a nested panel.
+        <div className="overflow-hidden rounded-2xl border border-border bg-card">
+          <div className="flex flex-col items-center gap-3 px-6 py-12 text-center">
+            <span className="inline-flex size-11 items-center justify-center rounded-xl bg-muted text-muted-foreground">
+              <Boxes className="size-5" />
+            </span>
+            <div className="space-y-1.5">
+              <p className="text-sm font-medium text-foreground">{tab.empty}</p>
+              <p className="mx-auto max-w-sm text-xs leading-relaxed text-muted-foreground">
+                {tab.emptyDesc}
+              </p>
+            </div>
           </div>
-          <button
-            onClick={() => setFlow({})}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground transition hover:bg-primary/90"
-          >
-            <Plus className="size-4" />
-            {tab.new}
-          </button>
           {/* Crystal-clear safety guarantee — migration COPIES, never moves;
               the source keeps running and nothing is deleted unless you opt in. */}
-          <div className="mt-1 flex max-w-md items-start gap-2.5 rounded-xl border border-success-border bg-success-bg/40 px-4 py-3 text-left">
-            <ShieldCheck className="mt-0.5 size-4 shrink-0 text-success" />
-            <p className="text-xs leading-relaxed text-muted-foreground">
+          <div className="flex items-start gap-2.5 border-t border-border bg-muted/30 px-5 py-3.5 text-start">
+            <ShieldCheck className="mt-px size-3.5 shrink-0 text-success" />
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
               <span className="font-medium text-foreground">{tab.safetyTitle}</span> {tab.safetyBody}
             </p>
           </div>

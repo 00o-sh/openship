@@ -69,6 +69,24 @@ export interface ClonePlan {
   relayEligible: boolean;
 }
 
+/**
+ * The CONFIG-level relay gate, on its own so preflight and the pipeline can't
+ * disagree about it. Whether a relay would actually clone additionally needs a
+ * forwardable local identity (`hasLocalGitIdentity`) and a real reverse tunnel
+ * (`executor.reverseForward`) — both runtime state, checked by their owners.
+ *
+ * Desktop-only is deliberate and load-bearing: the relay vends the operator's
+ * account-wide gh token on demand, so its trust boundary is "one operator's
+ * machine → their own server". A multi-tenant self-hosted box does not have that
+ * boundary; it uses per-server credentials or its own ambient git access instead.
+ */
+export function relayConfigEligible(input: {
+  isDesktop: boolean;
+  forwardGitCredentials?: boolean | null;
+}): boolean {
+  return input.isDesktop && input.forwardGitCredentials !== false;
+}
+
 export function resolveClonePlan(input: ClonePlanInput): ClonePlan {
   const onServer = input.effectiveTarget === "server";
 
@@ -111,6 +129,6 @@ export function resolveClonePlan(input: ClonePlanInput): ClonePlan {
     // on the build host with the operator's gh identity, nothing persisted),
     // opt-out via forwardGitCredentials === false. Real capability (SSH tunnel +
     // local gh) is verified at runtime; this is the config-level eligibility.
-    relayEligible: runsOnServer && input.isDesktop && input.forwardGitCredentials !== false,
+    relayEligible: runsOnServer && relayConfigEligible(input),
   };
 }

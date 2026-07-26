@@ -7,6 +7,7 @@
     "scanning": "Analyse…",
     "flatDocker": "Docker brut",
     "flatDockerHint": "Ignorer les libellés Openship — adopter tout (y compris les conteneurs gérés par Openship) comme du Docker brut.",
+    "flatDockerShort": "Adopte aussi les conteneurs gérés par Openship.",
     "rescan": "Re-scanner",
     "cancel": "Annuler",
     "close": "Fermer",

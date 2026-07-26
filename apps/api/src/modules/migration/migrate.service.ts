@@ -42,13 +42,20 @@ const DEPLOYMENT_ID_RE = /^dep_[A-Za-z0-9]+$/;
 /** Compose file names to probe in a linked repo (mirrors prepare.service COMPOSE_FILES). */
 const REPO_COMPOSE_FILES = ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"];
 
-/** Minimal compose-service shape returned to the migrate wizard's mapping step. */
+/** Compose-service shape returned to the migrate wizard's mapping step. Carries
+ *  enough to render a full native service card (env + deps), so a repo service
+ *  with no running container (e.g. `redis`) is a first-class, editable unit. */
 export interface RepoComposeService {
   name: string;
   build?: string;
   dockerfile?: string;
   image?: string;
   ports: string[];
+  environment: Record<string, string>;
+  dependsOn: string[];
+  volumes: string[];
+  command?: string;
+  restart?: string;
 }
 
 /**
@@ -81,6 +88,11 @@ export async function parseRepoCompose(
         dockerfile: s.dockerfile ?? undefined,
         image: s.image ?? undefined,
         ports: s.ports ?? [],
+        environment: s.environment ?? {},
+        dependsOn: s.dependsOn ?? [],
+        volumes: s.volumes ?? [],
+        command: s.command ?? undefined,
+        restart: s.restart ?? undefined,
       }));
     } catch {
       return []; // invalid YAML → graceful empty
@@ -106,6 +118,10 @@ export interface AdoptResult {
    *  the wizard mapped it, else the discovered name). Lets the orchestrator
    *  translate discovered-keyed attach/route inputs onto the (renamed) rows. */
   renames: Record<string, string>;
+  /** ROW name → running image to reuse ONCE at the first deploy (handoverImages).
+   *  Only populated for native `build:` rows (which would otherwise rebuild on
+   *  their first deploy). Empty when no repo is linked / everything is image-only. */
+  handover: Record<string, string>;
 }
 
 export interface ReimportResult {
@@ -187,7 +203,14 @@ export function buildAdoptedServiceRows(
    *  (no duplicate row / no fresh empty volume). Keyed by discovered name to
    *  match serviceEnv/serviceSubpaths/volumeStrategies. */
   serviceRenames?: Record<string, string>,
-): { rows: ParsedComposeList; renames: Record<string, string> } {
+  /** Mapped repo compose service spec, keyed by REPO service name. When a
+   *  discovered container maps to one, the row takes that service's NATIVE
+   *  build/image spec (so a later Redeploy reclones + rebuilds `build:` services
+   *  / pulls `image:` ones) — the running image is reused only ONCE, via the
+   *  returned `handover` map fed to the deploy's handoverImages. Absent (no repo
+   *  linked / unmapped) → the row adopts the running image as-is (legacy). */
+  repoServices?: Map<string, RepoComposeService>,
+): { rows: ParsedComposeList; renames: Record<string, string>; handover: Record<string, string> } {
   const nameCounts = new Map<string, number>();
   const firstUnique = new Map<string, string>(); // discovered name → FINAL row name
   const renames: Record<string, string> = {};
@@ -202,6 +225,7 @@ export function buildAdoptedServiceRows(
   });
 
   const claimedHostPorts = new Set<number>();
+  const handover: Record<string, string> = {};
   const rows = chosen.map((s, i) => {
     const { ports, droppedDuplicates } = normalizeHostPorts(s.ports, claimedHostPorts);
     if (droppedDuplicates.length > 0) {
@@ -210,18 +234,30 @@ export function buildAdoptedServiceRows(
           `kept ${uniqueNames[i]} on the internal network only (reachable as ${uniqueNames[i]}:<port>).`,
       );
     }
+    // Source of truth for build/image:
+    //  • Mapped to a repo compose service → take its NATIVE spec (build path /
+    //    registry image), so the project behaves like a native repo project:
+    //    Redeploy reclones + rebuilds `build:` services and pulls `image:` ones.
+    //    The running image is reused ONE TIME via the `handover` map below (fed to
+    //    the deploy as handoverImages) — never frozen into the row.
+    //  • No mapping (no repo linked / unmapped) → adopt the running image as-is
+    //    (legacy: we have no build source, so reuse the image). Cross-server the
+    //    image is transferred (docker save|load) so the target has it.
+    const repo = repoServices?.get(uniqueNames[i]) ?? repoServices?.get(serviceRenames?.[s.name] ?? s.name);
+    const native = repo && (repo.build || repo.image);
+    const source = native
+      ? { image: repo.image, build: repo.build, dockerfile: repo.dockerfile }
+      : { image: s.image, build: s.image ? undefined : s.build, dockerfile: s.image ? undefined : s.dockerfile };
+    // Hand the running image to the deploy for the one-time cutover: a native
+    // `build:` row would otherwise rebuild on its very first deploy. Only when we
+    // actually have a running image to reuse.
+    if (native && s.image && repo?.build) handover[uniqueNames[i]] = s.image;
     return {
       name: uniqueNames[i],
       kind: "compose" as const,
-      // Adopt the running container AS-IS via its current image — we don't have
-      // its original build source, so never carry a build context (which would
-      // make the deploy rebuild-from-source and fail preflight). Only an
-      // image-less container (rare) falls back to its build context. Cross-server,
-      // the image itself is TRANSFERRED as data (docker save|load) so the target
-      // has the exact same image to adopt — no registry, no rebuild.
-      image: s.image,
-      build: s.image ? undefined : s.build,
-      dockerfile: s.image ? undefined : s.dockerfile,
+      image: source.image,
+      build: source.build,
+      dockerfile: source.dockerfile,
       ports,
       // Only keep dependencies on services we're also adopting.
       dependsOn: s.dependsOn.filter((d) => selected.has(d)).map((d) => firstUnique.get(d) ?? d),
@@ -234,7 +270,7 @@ export function buildAdoptedServiceRows(
       advanced: s.healthcheck ? { healthcheck: s.healthcheck } : undefined,
     };
   });
-  return { rows, renames };
+  return { rows, renames, handover };
 }
 
 
@@ -261,8 +297,12 @@ export async function adoptServerStack(opts: {
   /** Adopt in flat-docker mode — must match the scan the user selected from, or
    *  openship-labeled containers are treated as managed and none are found. */
   flatDocker?: boolean;
+  /** Parsed repo compose services (name → spec). When present, adopted rows take
+   *  their NATIVE build/image from the mapped repo service (Redeploy rebuilds),
+   *  and the returned `handover` lets the first deploy reuse the running image. */
+  repoServices?: Map<string, RepoComposeService>;
 }): Promise<AdoptResult> {
-  const { serverId, organizationId, projectName, serviceNames, sameServer, volumeStrategies, serviceSubpaths, serviceEnv, serviceRenames, flatDocker } = opts;
+  const { serverId, organizationId, projectName, serviceNames, sameServer, volumeStrategies, serviceSubpaths, serviceEnv, serviceRenames, flatDocker, repoServices } = opts;
 
   const stack = await discoverServerStack(serverId, organizationId, undefined, { flatDocker });
   const selected = new Set(serviceNames);
@@ -318,8 +358,43 @@ export async function adoptServerStack(opts: {
   };
   const { project_id, created } = await ensureProject(ensureBody, organizationId);
 
-  const { rows: parsed, renames } = buildAdoptedServiceRows(chosen, selected, serviceEnv, serviceRenames);
-  const createdServices = await repos.service.syncFromCompose(project_id, parsed);
+  const { rows: parsed, renames, handover } = buildAdoptedServiceRows(
+    chosen,
+    selected,
+    serviceEnv,
+    serviceRenames,
+    repoServices,
+  );
+
+  // Repo compose services with NO adopted container (e.g. `redis`, or a `build:`
+  // app that isn't running) become native rows in the SAME create pass — so every
+  // service, adopted or new, is created through ONE path with its env resolved
+  // uniformly (wizard override wins, else the repo compose default). The migration
+  // deploy then builds/pulls them; the deploy's own compose reconcile only
+  // bootstraps their baseline afterwards (keep-ours), so nothing here is clobbered.
+  const adoptedNames = new Set(parsed.map((r) => r.name));
+  const newRows: ParsedComposeList = [];
+  if (repoServices) {
+    for (const [name, rs] of repoServices) {
+      if (adoptedNames.has(name)) continue;
+      newRows.push({
+        name,
+        kind: "compose",
+        image: rs.image,
+        build: rs.build,
+        dockerfile: rs.dockerfile,
+        ports: rs.ports ?? [],
+        // Keep deps only on services this project actually has (adopted or new).
+        dependsOn: (rs.dependsOn ?? []).filter((d) => repoServices.has(d) || adoptedNames.has(d)),
+        environment: serviceEnv?.[name] ?? rs.environment ?? {},
+        volumes: rs.volumes ?? [],
+        command: rs.command,
+        restart: rs.restart,
+      });
+    }
+  }
+
+  const createdServices = await repos.service.syncFromCompose(project_id, [...parsed, ...newRows]);
 
   // Apply the per-service options keyed by the DISCOVERED name: iterate `chosen`
   // (discovered), resolve the created row by its FINAL (possibly-renamed) name,
@@ -358,6 +433,7 @@ export async function adoptServerStack(opts: {
     // orchestrator uses this to translate the discovered-keyed attach/route
     // inputs onto the renamed rows.
     renames,
+    handover,
   };
 }
 
@@ -535,6 +611,39 @@ export async function attachLiveRuntime(opts: {
     }
 
     if (!existing) await repos.project.setActiveDeployment(projectId, deploymentId);
+  } finally {
+    await rt.dispose().catch(() => {});
+  }
+}
+
+/**
+ * Pre-join the migration's reused (attach-live) containers to the target project's
+ * `openship-<slug>` network with a DNS alias = each row's name, BEFORE the native
+ * deploy runs. The deploy's ensureServiceGroup is idempotent (reuses this
+ * network), so a freshly-built service resolves the reused container by name from
+ * its very first start (e.g. `web` → `postgres:5432`). This is what makes the
+ * migration fully unified with a native deploy instead of leaving the reused
+ * container off the new project's network. Best-effort — never blocks the deploy.
+ */
+export async function joinReusedContainersToGroup(opts: {
+  serverId: string;
+  organizationId: string;
+  slug: string;
+  attach: DiscoveredService[];
+  serviceRows: Service[];
+  renames?: Record<string, string>;
+}): Promise<void> {
+  const { serverId, organizationId, slug, attach, serviceRows, renames } = opts;
+  if (attach.length === 0 || !slug) return;
+  const rt = await createServerDockerRuntime(serverId, organizationId);
+  try {
+    if (!rt.joinServiceGroupContainers) return; // non-docker runtime → skip
+    const discByName = new Map(attach.map((c) => [renames?.[c.name] ?? c.name, c]));
+    const members = serviceRows
+      .filter((s) => discByName.has(s.name))
+      .map((s) => ({ containerId: discByName.get(s.name)?.containerId ?? "", alias: s.name }))
+      .filter((m) => m.containerId.length > 0);
+    await rt.joinServiceGroupContainers(slug, members);
   } finally {
     await rt.dispose().catch(() => {});
   }

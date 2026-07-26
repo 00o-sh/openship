@@ -173,15 +173,17 @@ export function RoutingSettingsCard({
     }
   };
 
-  // Exposed-port field with the label ABOVE — used when `portInline` places it
-  // to the right of the domain input. Matches the input height (h-11) so the
-  // two bottom-align.
+  // Exposed-port field placed to the RIGHT of the domain input. No label above
+  // (it used to float over empty space beside the label-less domain input); the
+  // placeholder + aria-label carry the meaning and both fields are a plain h-11
+  // so the row aligns cleanly with no dead whitespace.
   const portInlineField = showsPortTarget ? (
     <div className="shrink-0">
-      <label className="mb-1.5 block text-[13px] font-medium text-muted-foreground">{w.exposedPort}</label>
       <input
         type="text"
         inputMode="numeric"
+        aria-label={w.exposedPort}
+        title={w.exposedPort}
         value={saveMode === "explicit" ? draftPort : exposedPort}
         onChange={(event) => {
           if (saveMode === "explicit") setDraftPort(event.target.value);
@@ -190,10 +192,10 @@ export function RoutingSettingsCard({
         onBlur={() => {
           if (saveMode === "explicit" && draftPort !== (exposedPort ?? "")) commitPort();
         }}
-        placeholder="3000"
+        placeholder={w.exposedPort}
         disabled={disabled}
         list={hasPortOptions ? portListId : undefined}
-        className="w-24 h-11 rounded-2xl border border-border/50 bg-background/60 px-3.5 text-sm text-foreground outline-none"
+        className="w-24 h-11 rounded-2xl border border-border/50 bg-background/60 px-3.5 text-sm text-foreground outline-none placeholder:text-muted-foreground/40"
       />
       {hasPortOptions && (
         <datalist id={portListId}>

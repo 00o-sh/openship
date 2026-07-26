@@ -1,84 +1,234 @@
+import { Fragment } from "react";
+
 /**
- * Comparison - clean table, Openship column visually highlighted with
- * tinted background. Each cell carries a refined status mark (win / loss
- * / neutral) so the comparison reads at a glance, without bright colors.
+ * Comparison - grouped table, Openship column highlighted with a tinted rail.
+ * Each cell carries a refined status mark (win / loss / neutral) so it reads at
+ * a glance without bright colors.
+ *
+ * Two rules this table lives by:
+ *
+ * 1. ONLY REAL DIFFERENCES. The shared essentials - git deploys, TLS,
+ *    databases, backups, multi-server, cron - are deliberately absent. Everyone
+ *    has them, and claiming a win on them is the fastest way to lose a reader.
+ *    Where a competitor genuinely matches us the cell is `neutral`, never a
+ *    manufactured `loss`. Every claim here is verified against Vercel/Netlify
+ *    and Coolify/Dokploy/Dokku as of July 2026.
+ *
+ * 2. SAY IT THE CALM WAY. These capabilities involve Openship touching servers
+ *    the reader already runs, so the wording leads with what they get, not with
+ *    what we do to their box. "Works with the proxy you already run", never
+ *    "take over your proxy"; "picks up what's already running", never "adopt and
+ *    take over". Same fact, no implied risk.
+ *
+ * Order is commercial, not technical: what you're buying into → what comes
+ * included → whether it fits what you already run → how you get out.
  */
 
 type Status = "win" | "loss" | "neutral";
 type Cell = { text: string; status: Status };
 type Row = { feature: string; openship: Cell; managed: Cell; selfhost: Cell };
+type Group = { title: string; rows: Row[] };
 
-// Only the REAL exclusives — capabilities Openship has that managed clouds and
-// other self-hosted platforms (Coolify / Dokploy / Dokku) don't. The shared
-// essentials (git deploys, TLS, databases, backups, multi-server) are left out
-// on purpose: claiming a win on things everyone has is the fastest way to lose
-// trust. Every row here is verified against those tools.
-const ROWS: Row[] = [
+const GROUPS: Group[] = [
   {
-    feature: "Adopt a running server",
-    openship: { text: "Scan and take over existing containers in place", status: "win" },
-    managed:  { text: "No - redeploy from source",          status: "loss" },
-    selfhost: { text: "No - redeploy each app by hand",     status: "loss" },
+    title: "Where it runs, and what stays on",
+    rows: [
+      {
+        feature: "Who runs your workload",
+        openship: {
+          text: "Openship Cloud runs it, or self-host free on machines you own. One tool, one dashboard, and you can move either direction later.",
+          status: "win",
+        },
+        managed: {
+          text: "They run it, and run it well - but managed-only. There is no version you can host yourself.",
+          status: "neutral",
+        },
+        selfhost: {
+          text: "Their cloud hosts only the control panel. You still bring, run and pay for every server.",
+          status: "loss",
+        },
+      },
+      {
+        feature: "What has to stay switched on",
+        openship: {
+          text: "A native Mac, Windows and Linux app. The control plane runs on your machine only while the app is open - no extra box to keep alive just to deploy.",
+          status: "win",
+        },
+        managed: {
+          text: "No desktop app. Everything runs in their cloud, all the time.",
+          status: "loss",
+        },
+        selfhost: {
+          text: "No desktop app, and a control-plane server that has to stay up around the clock.",
+          status: "loss",
+        },
+      },
+      {
+        feature: "Where your source code travels",
+        openship: {
+          text: "From the desktop app, your folder or repo goes straight to the machine that will run it. Nothing always-on sits in the middle holding your code.",
+          status: "win",
+        },
+        managed: {
+          text: "Uploaded to their cloud and built there.",
+          status: "loss",
+        },
+        selfhost: {
+          text: "Lands on a long-lived control-plane box first - even when that box is your own.",
+          status: "loss",
+        },
+      },
+    ],
   },
   {
-    feature: "Move between servers",
-    openship: { text: "Shift a running stack and its data host-to-host", status: "win" },
-    managed:  { text: "Not applicable",                     status: "neutral" },
-    selfhost: { text: "Redeploy, migrate volumes by hand",  status: "loss" },
+    title: "Included, not bolted on",
+    rows: [
+      {
+        feature: "Email from your own domain",
+        openship: {
+          text: "A real mail server, set up for you: mailboxes, webmail, the SPF/DKIM/DMARC chain, and sending through SES or your own SMTP.",
+          status: "win",
+        },
+        managed: {
+          text: "Not included. Add SendGrid, Resend or Postmark and pay per message.",
+          status: "loss",
+        },
+        selfhost: {
+          text: "No managed mail server - you run the image and wire up the DNS chain yourself.",
+          status: "loss",
+        },
+      },
+      {
+        feature: "Traffic rules at the edge",
+        openship: {
+          text: "Rate limits, country / IP / user-agent blocks and hotlink protection, set per route from the dashboard and applied without a reload.",
+          status: "win",
+        },
+        managed: {
+          text: "Firewall and rate limiting exist, gated behind higher plans.",
+          status: "neutral",
+        },
+        selfhost: {
+          text: "Possible by hand-writing proxy config; no country rules out of the box.",
+          status: "neutral",
+        },
+      },
+      {
+        feature: "Who is actually hitting your app",
+        openship: {
+          text: "Per-route traffic, country breakdown and a live request log, built in.",
+          status: "win",
+        },
+        managed: {
+          text: "Strong analytics dashboards, capped or priced by plan.",
+          status: "neutral",
+        },
+        selfhost: {
+          text: "Not included - bolt on Grafana, Plausible or an ELK stack.",
+          status: "loss",
+        },
+      },
+      {
+        feature: "Access control and audit",
+        openship: {
+          text: "Grant access down to a single project, start teammates at zero permissions, and export a record of every change - on every plan.",
+          status: "win",
+        },
+        managed: {
+          text: "Broad team roles; audit trail and SSO on enterprise plans.",
+          status: "neutral",
+        },
+        selfhost: {
+          text: "Broad team roles only, with little or no change history.",
+          status: "loss",
+        },
+      },
+    ],
   },
   {
-    feature: "Leave anytime, keep running",
-    openship: { text: "'Remove from Openship' drops only our record - your containers, data and manifest keep running, re-importable later", status: "win" },
-    managed:  { text: "Nothing stays on your side - the workload only ever lived in their cloud", status: "loss" },
-    selfhost: { text: "Delete tears the app down; a surviving container is a bug, not a detach - and none can re-adopt a running app", status: "loss" },
+    title: "Fits the setup you already have",
+    rows: [
+      {
+        feature: "Servers with things already on them",
+        openship: {
+          text: "Point it at a server and it picks up the containers already running there. Nothing is rebuilt, nothing is restarted.",
+          status: "win",
+        },
+        managed: {
+          text: "Nothing to pick up - you redeploy from source.",
+          status: "loss",
+        },
+        selfhost: {
+          text: "Cannot take on an app that is already running; you recreate each one by hand.",
+          status: "loss",
+        },
+      },
+      {
+        feature: "The proxy you already run",
+        openship: {
+          text: "Carries on with your existing Traefik, nginx or Caddy on :80 and :443, and the switch is reversible in one step.",
+          status: "win",
+        },
+        managed: {
+          text: "Not applicable - their edge, their rules.",
+          status: "neutral",
+        },
+        selfhost: {
+          text: "Claims the proxy at install and expects to be the only thing on those ports.",
+          status: "loss",
+        },
+      },
+      {
+        feature: "Settings that live in your repo",
+        openship: {
+          text: "openship.json describes build, env, domains, services and resources - reviewed in a pull request like the rest of your code.",
+          status: "win",
+        },
+        managed: {
+          text: "vercel.json and netlify.toml do the same thing.",
+          status: "neutral",
+        },
+        selfhost: {
+          text: "A Procfile or compose file, but domains, env and resources stay dashboard-only.",
+          status: "neutral",
+        },
+      },
+    ],
   },
   {
-    feature: "Take over your proxy",
-    openship: { text: "Adopt Traefik / nginx / Caddy on :80/:443, rollback-safe", status: "win" },
-    managed:  { text: "Not applicable",                     status: "neutral" },
-    selfhost: { text: "They own the proxy from install",    status: "loss" },
-  },
-  {
-    feature: "Edge access rules",
-    openship: { text: "Rate-limit, IP + country + user-agent bans, hotlink - no reload, from a UI", status: "win" },
-    managed:  { text: "Basic, plan-gated",                  status: "neutral" },
-    selfhost: { text: "Hand-write Traefik / nginx; no geo", status: "neutral" },
-  },
-  {
-    feature: "Traffic analytics & logs",
-    openship: { text: "Per-route traffic, geo, live request logs - built in", status: "win" },
-    managed:  { text: "Dashboards, capped by plan",         status: "neutral" },
-    selfhost: { text: "Bolt on Grafana or Plausible",       status: "loss" },
-  },
-  {
-    feature: "Your code skips the control plane",
-    openship: { text: "Desktop reads your folder off disk or clones your repo and deploys straight to the target - no control-plane server in between", status: "win" },
-    managed:  { text: "Source uploaded to and built on their cloud", status: "loss" },
-    selfhost: { text: "Source clones or zip-uploads onto an always-on control-plane server first, even on your own box", status: "loss" },
-  },
-  {
-    feature: "Native desktop app, no daemon",
-    openship: { text: "macOS / Windows / Linux app; the control plane runs on your machine only while it's open - nothing always-on, full local power", status: "win" },
-    managed:  { text: "No desktop app - browser or CLI, everything runs in their cloud", status: "loss" },
-    selfhost: { text: "No desktop app - browser dashboard or CLI, backed by an always-on server", status: "loss" },
-  },
-  {
-    feature: "Built-in mail server",
-    openship: { text: "Postfix + Dovecot + webmail, trusted-relay sending", status: "win" },
-    managed:  { text: "Not included - bring Sendgrid",      status: "loss" },
-    selfhost: { text: "DIY Postfix, or not offered",        status: "loss" },
-  },
-  {
-    feature: "Cloud + self-host, one plane",
-    openship: { text: "Openship Cloud runs your workload (Micro to High), or self-host free - same tool, same dashboard", status: "win" },
-    managed:  { text: "Runs your workload, but managed-only - you can't self-host it", status: "neutral" },
-    selfhost: { text: "Their 'cloud' hosts only the control plane; you still bring and pay for your own servers", status: "loss" },
-  },
-  {
-    feature: "Audit log",
-    openship: { text: "Every change tracked, free",         status: "win" },
-    managed:  { text: "Higher plans only",                  status: "neutral" },
-    selfhost: { text: "Paid add-on or absent",              status: "loss" },
+    title: "If you change your mind",
+    rows: [
+      {
+        feature: "Moving to a different server",
+        openship: {
+          text: "Move a running app with its volumes and certificates to another machine, then cut traffic over once it checks out.",
+          status: "win",
+        },
+        managed: {
+          text: "Not applicable - you do not choose the machine.",
+          status: "neutral",
+        },
+        selfhost: {
+          text: "Redeploy on the new box and copy the volumes across by hand.",
+          status: "loss",
+        },
+      },
+      {
+        feature: "Leaving Openship",
+        openship: {
+          text: "On your own servers, removing a project deletes our record and nothing else. Containers, data and config keep serving traffic, and Openship can pick them back up later.",
+          status: "win",
+        },
+        managed: {
+          text: "Nothing stays behind - the workload only ever existed in their cloud.",
+          status: "loss",
+        },
+        selfhost: {
+          text: "Deleting tears the app down, and none of them can re-adopt a running app afterwards.",
+          status: "loss",
+        },
+      },
+    ],
   },
 ];
 
@@ -109,13 +259,14 @@ export function Comparison() {
     <section className="cmp-section">
       <div className="cmp-container">
         <header className="cmp-head">
-          <p className="cmp-eyebrow">Beyond the basics</p>
+          <p className="cmp-eyebrow">Straight comparison</p>
           <h2 className="cmp-title">
-            What the others<br />can&rsquo;t do.
+            Where Openship is<br />genuinely different.
           </h2>
           <p className="cmp-sub">
-            Git deploys, TLS, databases, backups &mdash; everyone has those. This is the short list
-            of what you get with Openship that managed clouds and other self-hosted platforms don&rsquo;t.
+            Git deploys, TLS, databases, backups, cron &mdash; every tool here has those, so
+            they are not on this list. What is below is where the choice actually changes
+            what you can do, and what it costs you to change your mind.
           </p>
         </header>
 
@@ -130,25 +281,36 @@ export function Comparison() {
             <div className="cmp-cell">Self-host (Coolify, Dokploy, Dokku)</div>
           </div>
 
-          {/* Body */}
-          {ROWS.map((r) => (
-            <div key={r.feature} className="cmp-row">
-              <div className="cmp-cell cmp-cell--feature">{r.feature}</div>
-              <div className="cmp-cell cmp-cell--win">
-                <StatusMark status={r.openship.status} />
-                <span>{r.openship.text}</span>
-              </div>
-              <div className="cmp-cell">
-                <StatusMark status={r.managed.status} />
-                <span>{r.managed.text}</span>
-              </div>
-              <div className="cmp-cell">
-                <StatusMark status={r.selfhost.status} />
-                <span>{r.selfhost.text}</span>
-              </div>
-            </div>
+          {/* Body, grouped */}
+          {GROUPS.map((g) => (
+            <Fragment key={g.title}>
+              <p className="cmp-group">{g.title}</p>
+              {g.rows.map((r) => (
+                <div key={r.feature} className="cmp-row">
+                  <div className="cmp-cell cmp-cell--feature">{r.feature}</div>
+                  <div className="cmp-cell cmp-cell--win">
+                    <StatusMark status={r.openship.status} />
+                    <span>{r.openship.text}</span>
+                  </div>
+                  <div className="cmp-cell">
+                    <StatusMark status={r.managed.status} />
+                    <span>{r.managed.text}</span>
+                  </div>
+                  <div className="cmp-cell">
+                    <StatusMark status={r.selfhost.status} />
+                    <span>{r.selfhost.text}</span>
+                  </div>
+                </div>
+              ))}
+            </Fragment>
           ))}
         </div>
+
+        <p className="cmp-foot">
+          Compared against the shipping versions of each tool, July 2026. A dash means
+          that tool genuinely matches Openship, or that the row does not apply to it.
+          We would rather score a row even than invent a cross.
+        </p>
       </div>
     </section>
   );

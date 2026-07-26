@@ -84,6 +84,7 @@ import type {
   DockerNetworkInfo,
 } from "./types";
 import { BuildLogger, parseLogLevel, sq, assembleGitClone } from "./build-pipeline";
+import { materializeGitSsh, shellGitSshWriter, type GitSshMaterial } from "./git-ssh-material";
 import { githubTarballUrl, downloadTarballOnRemote } from "./source-tarball";
 import { scopeVolumeBinds, isHostPathSource } from "./volume-namespace";
 import { createDockerBuildContext, prepareSourceTree, resolveServiceDockerfile } from "./docker-build-context";
@@ -818,9 +819,11 @@ export class DockerRuntime implements RuntimeAdapter {
 
     // Prefer a direct GitHub tarball download on the server (no git, no history,
     // no context transfer) when we can authenticate without the relay. HTTPS-
-    // only — skipped for the relay AND for SSH key auth. Falls through to git
-    // clone on ANY failure.
-    if (!useHelper && !config.gitSsh) {
+    // only — skipped for the relay AND for SSH key auth. Ambient auth is also
+    // skipped: the credential lives in the host's git config, which curl can't
+    // consult, so a private repo would 404 (a public one succeeds via the clone
+    // path just as cheaply). Falls through to git clone on ANY failure.
+    if (!useHelper && !config.gitSsh && !config.gitAmbient) {
       const ref = config.commitSha || config.branch;
       const tarUrl = githubTarballUrl(config.repoUrl, ref);
       if (tarUrl) {
@@ -847,33 +850,36 @@ export class DockerRuntime implements RuntimeAdapter {
     // SSH mode (per-server key / deploy key): write the 0600 key + known_hosts
     // on the remote out of band (executor.writeFile — never echoed) and clone
     // over git@github.com. Cleaned up in the finally below.
-    let sshFiles: { keyFile: string; knownHostsFile: string } | undefined;
-    let sshCleanup: string | null = null;
+    let sshMaterial: GitSshMaterial | undefined;
     if (config.gitSsh) {
-      const sshDir = `${remoteContextDir}.gitssh`;
-      const keyFile = `${sshDir}/id`;
-      const knownHostsFile = `${sshDir}/known_hosts`;
-      await executor.exec(`mkdir -p ${sq(sshDir)} && chmod 700 ${sq(sshDir)}`);
-      await executor.writeFile(keyFile, config.gitSsh.privateKey);
-      await executor.writeFile(knownHostsFile, config.gitSsh.knownHosts);
-      await executor.exec(`chmod 600 ${sq(keyFile)}`);
-      sshFiles = { keyFile, knownHostsFile };
-      sshCleanup = `rm -rf ${sq(sshDir)}`;
+      sshMaterial = await materializeGitSsh(
+        shellGitSshWriter({
+          exec: (cmd) => executor.exec(cmd),
+          writeSecret: (path, content) => executor.writeFile(path, content),
+        }),
+        `${remoteContextDir}.gitssh`,
+        config.gitSsh,
+      );
     }
 
-    // Centralized clone assembly (token / relay / ssh) — see git-clone.ts.
+    // Centralized clone assembly (token / relay / ssh / ambient) — see git-clone.ts.
     const { cloneUrl, gitEnv: GIT_ENV, credFlag: CRED } = assembleGitClone({
       repoUrl: config.repoUrl,
       gitToken: config.gitToken,
       gitCredentialHelperPath: config.gitCredentialHelperPath,
-      ssh: sshFiles,
+      ssh: sshMaterial,
+      ambient: config.gitAmbient,
     });
     const dir = sq(remoteContextDir);
 
-    log.log(
-      `Cloning ${config.repoUrl} on the server → ${remoteContextDir} ` +
-        `(${config.gitSsh ? "ssh key" : useHelper ? "forwarded credentials" : "token"})...\n`,
-    );
+    const authLabel = config.gitSsh
+      ? "ssh key"
+      : useHelper
+        ? "forwarded credentials"
+        : config.gitAmbient
+          ? `the server's own git credentials (${config.gitAmbient.via})`
+          : "token";
+    log.log(`Cloning ${config.repoUrl} on the server → ${remoteContextDir} (${authLabel})...\n`);
     await executor.exec(`rm -rf ${dir} && mkdir -p ${dir}`);
 
     const run = async (cmd: string) => {
@@ -905,7 +911,7 @@ export class DockerRuntime implements RuntimeAdapter {
       // Never ship .git into the build image.
       await executor.exec(`rm -rf ${sq(`${remoteContextDir}/.git`)}`).catch(() => {});
     } finally {
-      if (sshCleanup) await executor.exec(sshCleanup).catch(() => {});
+      await sshMaterial?.cleanup();
     }
   }
 
@@ -2568,6 +2574,42 @@ export class DockerRuntime implements RuntimeAdapter {
     // makes membership independent of that.
     await this.reconcileNetworkMembership(networkId, config.projectId);
     return { id: networkId };
+  }
+
+  /**
+   * Join already-running containers (migration attach-live reuse) to a project's
+   * `openship-<slug>` network with a DNS alias each — so a natively-deployed
+   * service in the SAME project resolves them by name (e.g. a freshly-built `web`
+   * reaching the reused `postgres:5432`). These containers keep their ORIGINAL
+   * openship labels, so the label-scoped reconcileNetworkMembership never joins
+   * them; this is the explicit, additive join (a network connect does NOT restart
+   * the container or touch its volumes). Idempotent + best-effort per member.
+   */
+  async joinServiceGroupContainers(
+    slug: string,
+    members: Array<{ containerId: string; alias: string }>,
+  ): Promise<void> {
+    if (members.length === 0) return;
+    const networkId = await this.ensureNetwork(slug);
+    const network = this.docker.getNetwork(networkId);
+    for (const m of members) {
+      if (!m.containerId) continue;
+      try {
+        await network.connect({
+          Container: m.containerId,
+          EndpointConfig: m.alias ? { Aliases: [m.alias] } : {},
+        });
+      } catch (err) {
+        // Already-on-network races are fine; anything else is swallowed — this is
+        // best-effort and must never block the migration deploy.
+        const msg = (err as { message?: string })?.message ?? "";
+        if (!/already exists|already connected/i.test(msg)) {
+          console.warn(
+            `[docker] group join failed for ${m.containerId.slice(0, 12)} (${m.alias}): ${msg}`,
+          );
+        }
+      }
+    }
   }
 
   /**

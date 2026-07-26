@@ -8,6 +8,7 @@
     "rescan": "Re-scan",
     "flatDocker": "Flat Docker",
     "flatDockerHint": "Ignore Openship labels — adopt everything (incl. Openship-managed containers) as plain Docker.",
+    "flatDockerShort": "Adopt Openship-managed containers too.",
     "cancel": "Cancel",
     "close": "Close",
     "projectName": "Project name",
@@ -99,7 +100,11 @@
       "routeNone": "None",
       "sslOn": "SSL",
       "sslOff": "No SSL",
-      "internalOnly": "Internal only — not publicly exposed."
+      "internalOnly": "Internal only — not publicly exposed.",
+      "serviceNewBadge": "New",
+      "deployActionReuse": "Reuse image",
+      "deployActionBuild": "Will build",
+      "deployActionPull": "Will pull"
     }
   },
   "run": {

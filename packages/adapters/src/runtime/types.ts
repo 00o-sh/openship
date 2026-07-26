@@ -204,6 +204,17 @@ export interface RuntimeAdapter {
    */
   attachToExternalNetworks?(projectId: string, networkNames: string[]): Promise<void>;
 
+  /**
+   * Join already-running containers (migration attach-live reuse) to a project's
+   * `openship-<slug>` network with a DNS alias each, so a natively-deployed
+   * service in the SAME project resolves them by name (reused `postgres` reachable
+   * from a freshly-built `web`). Additive network-connect — no restart, no volume
+   * touch. Best-effort + idempotent. Optional (docker only). */
+  joinServiceGroupContainers?(
+    slug: string,
+    members: Array<{ containerId: string; alias: string }>,
+  ): Promise<void>;
+
   // ── Rollback primitives ──────────────────────────────────────────────
   //
   // Three atomic ops the RollbackOrchestrator composes into "deploy

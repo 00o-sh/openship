@@ -36,7 +36,19 @@ export type {
   ShellOptions,
   ShellSession,
   ProvisionLock,
+  AmbientGitVia,
 } from "./types";
+
+// The one clone-command assembler (token / relay / ssh / ambient) + its shell
+// quoting, shared with the API so a probe and the clone it predicts can't drift.
+export {
+  sq,
+  assembleGitClone,
+  injectGitToken,
+  toGitHubSshUrl,
+  type GitCloneAuth,
+  type GitCloneInvocation,
+} from "./runtime/git-clone";
 
 export { BUILD_STEPS } from "./types";
 

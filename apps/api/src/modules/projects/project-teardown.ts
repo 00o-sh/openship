@@ -305,8 +305,13 @@ export async function teardownProject(
     const recordOnly = !!opts.recordOnly && !project.cloudWorkspaceId && !env.CLOUD_MODE;
 
     // ── Step 1: Cancel in-flight work (force=true only). ────────────────
+    // `keepProvisioned` for record-only: the cancel aborts the build and marks
+    // the row cancelled but must NOT destroy what the deploy already
+    // provisioned — otherwise the dashboard's automatic force-escalation on
+    // "active work" would tear down containers/images the user was promised
+    // stay on the server.
     if (opts.force) {
-      await stepCancelInFlight(projectId, ctx.userId, push);
+      await stepCancelInFlight(projectId, push, recordOnly);
     } else {
       push({ step: "cancel_in_flight", status: "skipped", details: "force=false" });
     }
@@ -412,8 +417,8 @@ function finalize(
 
 async function stepCancelInFlight(
   projectId: string,
-  actorUserId: string,
   push: (s: TeardownStep) => void,
+  keepProvisioned: boolean,
 ): Promise<void> {
   const before = await getActiveProjectState(projectId);
   if (!before.blocking) {
@@ -425,12 +430,13 @@ async function stepCancelInFlight(
 
   // Cancel each active deployment — cancelBuildSession aborts the build,
   // tears down half-provisioned containers/images, and marks the row
-  // cancelled. Best-effort: a deployment that has already finished
-  // between listing and cancelling will throw ForbiddenError, which we
-  // ignore — the next quiesce poll will pick that up.
+  // cancelled. `keepProvisioned` (record-only delete) skips that teardown so
+  // the cancel stays non-destructive on the server. Best-effort: a deployment
+  // that has already finished between listing and cancelling will throw
+  // ForbiddenError, which we ignore — the next quiesce poll will pick that up.
   for (const depId of before.activeDeploymentIds) {
     try {
-      await cancelBuildSession(depId);
+      await cancelBuildSession(depId, { keepProvisioned });
     } catch (err) {
       cancelErrors.push(`deployment ${depId}: ${safeErrorMessage(err)}`);
     }

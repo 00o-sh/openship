@@ -10,6 +10,20 @@ import type { BuildStrategy, ProxySettings } from "@repo/core";
 import type { Readable, Duplex } from "node:stream";
 export type { BuildStrategy } from "@repo/core";
 
+/**
+ * How a host authenticates to git using its OWN pre-existing credentials —
+ * nothing is shipped to it and nothing is read back off it.
+ *
+ *   "gh"     → the `gh` CLI is installed and logged in; git authenticates via
+ *              `gh auth git-credential` (injected per-invocation, so it works
+ *              even if `gh auth setup-git` was never run).
+ *   "helper" → a git credential helper is already configured on the host (or
+ *              `~/.git-credentials` exists); let git consult it.
+ *   "ssh"    → the host's own ssh keys/agent can reach the remote; clone over
+ *              `git@`.
+ */
+export type AmbientGitVia = "gh" | "helper" | "ssh";
+
 // ─── Resource configuration ──────────────────────────────────────────────────
 
 export interface ResourceConfig {
@@ -169,6 +183,18 @@ export interface BuildConfig {
     privateKey: string;
     knownHosts: string;
   };
+  /**
+   * The BUILD HOST authenticates the clone with its OWN pre-existing git
+   * credentials (`gh` login, a configured credential helper, or its ssh keys) —
+   * verified against this exact repo before the build starts. Nothing is shipped
+   * to the host and nothing is read back off it, so this is the narrowest of the
+   * clone-on-server credentials.
+   *
+   * Valid ONLY for a clone that runs on that host: the orchestrator's api-host
+   * clone must ignore it (see docker-build-context.ts). Mutually exclusive with
+   * `gitToken` / `gitCredentialHelperPath` / `gitSsh`.
+   */
+  gitAmbient?: { via: AmbientGitVia };
   /**
    * Clone the repo ON the remote build host instead of cloning on the
    * orchestrator and transferring the context. The Docker runtime honors this

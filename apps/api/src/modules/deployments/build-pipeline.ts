@@ -626,26 +626,38 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
           // gracefully (a LOCAL fallback credential, flagged apiHostFallback) instead
           // of hard-failing at token resolution after the server is provisioned.
           allowApiHostFallback: clonePlan.dockerClonesOnServer,
+          // Lets the chain ask the target server whether it already reaches this
+          // repo on its own — only consulted for a clone that runs THERE.
+          serverExecutor: clonePlan.runsOnServer ? targetExecutor : null,
+          repoUrl: snapshot.repoUrl,
+          onLog: (message) => logger.log(message),
         })
       : {};
 
-    // Clone-on-server needs a SHIPPABLE credential that can travel to the build
-    // host: the desktop relay (gitCred.relay) or an App/PAT token (gitCred.token
-    // WITHOUT apiHostFallback). An apiHostFallback token is a LOCAL credential for
-    // cloning on the orchestrator — NOT shippable — so it does not qualify. When
-    // no shippable credential exists, fall back to cloning on the API host and
-    // transferring the context — warn, never hard-fail. (The BARE runtime always
-    // clones on the target and is gated by preflight separately, so this fallback
-    // only changes DOCKER behavior.)
+    // Clone-on-server needs a credential the build host can actually AUTHENTICATE
+    // WITH. Four qualify: the server's own ambient git access (nothing moves), an
+    // ssh key or App/PAT token we ship it, the desktop relay, or a public repo
+    // (nothing needed). An apiHostFallback token is a LOCAL credential for cloning
+    // on the orchestrator — NOT usable there — so it does not qualify. When
+    // nothing qualifies, fall back to cloning on the API host and transferring the
+    // context — warn, never hard-fail. (The BARE runtime always clones on the
+    // target and is gated by preflight separately, so this only changes DOCKER.)
     const cloneCredentialAvailable =
+      !!gitCred.ambient ||
       gitCred.relay === true ||
       !!gitCred.ssh ||
+      gitCred.anonymous === true ||
       (!!gitCred.token && !gitCred.apiHostFallback);
     const effectiveCloneOnServer =
       cloneOnServer && (runtime.name === "bare" || cloneCredentialAvailable);
     if (cloneOnServer && runtime.name !== "bare" && !cloneCredentialAvailable) {
       logger.log(
-        "Clone-on-server was requested, but no git credential can reach the build host (no relay, no token). Falling back to cloning on the API host and transferring the build context.",
+        "Clone-on-server was requested, but nothing can authenticate the clone on the build host — " +
+          "the server has no GitHub identity of its own, no App/PAT token is available, and no git " +
+          "identity could be forwarded. Falling back to cloning on the API host and transferring the " +
+          "build context. To clone directly on the server, connect it under Servers → GitHub " +
+          "(a read-only per-repo deploy key is the narrowest option), or install the Openship App / " +
+          "add a per-project clone token.",
         "warn",
       );
     } else if (effectiveCloneOnServer && gitCred.relay) {
@@ -686,6 +698,10 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
     // Per-server SSH clone credential (ssh-server-key / ssh-deploy-key mode).
     // Consumed by the adapter clone step (git@github.com + GIT_SSH_COMMAND).
     if (gitCred.ssh) buildConfig.gitSsh = gitCred.ssh;
+    // The server authenticates with its own credentials. Gated on the clone
+    // actually running there: on the api-host path this names an identity that
+    // isn't ours to use, and the adapter would find no credential at all.
+    if (gitCred.ambient && effectiveCloneOnServer) buildConfig.gitAmbient = gitCred.ambient;
 
     // Desktop git-credential relay opener, shared by the single-app and compose
     // paths. Opens the reverse tunnel + remote helper (nothing persisted on the
@@ -777,6 +793,7 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
           gitToken: gitCred.token,
           gitCredentialHelperPath: composeRelay?.scriptPath,
           gitSsh: gitCred.ssh,
+          gitAmbient: effectiveCloneOnServer ? gitCred.ambient : undefined,
           cloneOnServer: effectiveCloneOnServer,
         });
       } finally {

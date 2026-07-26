@@ -45,13 +45,17 @@ export interface DiscoveredService {
   warnings: string[];
 }
 
-/** A service parsed from a LINKED repo's docker-compose (the map-step reference). */
+/** A service parsed from a LINKED repo's docker-compose (the map-step reference).
+ *  Carries env + deps so a repo service with no running container renders as a
+ *  full native service card in the wizard, not just a chip. */
 export interface ComposeRepoService {
   name: string;
   build?: string;
   dockerfile?: string;
   image?: string;
   ports: string[];
+  environment: Record<string, string>;
+  dependsOn: string[];
 }
 
 export interface DiscoveredGroup {
