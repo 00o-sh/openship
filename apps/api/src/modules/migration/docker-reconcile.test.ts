@@ -1,7 +1,12 @@
 import { describe, it, expect } from "vitest";
 import type { DockerContainerDetail } from "@repo/adapters";
 import type { ManifestProjectEntry } from "../../lib/openship-manifest";
-import { reconcileOpenshipProjects, isBuildHelper } from "./docker-reconcile";
+import {
+  reconcileOpenshipProjects,
+  isBuildHelper,
+  discoveredServiceName,
+  openshipStackName,
+} from "./docker-reconcile";
 
 describe("isBuildHelper", () => {
   it("is true only for a transient builder (openship.build, no deployment/service)", () => {
@@ -129,5 +134,63 @@ describe("reconcileOpenshipProjects", () => {
     const details = [container({ labels: { "openship.network": "shop" } })];
     const out = reconcileOpenshipProjects({ managedDetails: details, manifestById: null, knownHereIds: new Set(), snapshotIds: new Set() });
     expect(out).toEqual([]);
+  });
+});
+
+describe("discoveredServiceName — migrated container → compose-service mapping", () => {
+  it("maps an Openship-deployed container to its openship.service name (no compose label)", () => {
+    // The exact same-server migration case: container named openship-openship-web
+    // carrying openship.service=web MUST adopt as "web", so the git-compose
+    // reconcile updates it in place instead of creating a duplicate bare-name row.
+    expect(
+      discoveredServiceName(
+        {
+          name: "openship-openship-web",
+          labels: { "openship.project": "p1", "openship.service": "web", "openship.deployment": "d1" },
+        },
+        undefined,
+      ),
+    ).toBe("web");
+  });
+
+  it("prefers an explicit compose-file declaration over any label", () => {
+    expect(
+      discoveredServiceName(
+        { name: "c", composeService: "api", labels: { "openship.service": "web" } },
+        { name: "declared" },
+      ),
+    ).toBe("declared");
+  });
+
+  it("uses the real com.docker.compose.service label before openship.service", () => {
+    expect(
+      discoveredServiceName({ name: "c", composeService: "db", labels: { "openship.service": "x" } }, undefined),
+    ).toBe("db");
+  });
+
+  it("falls back to the container name when nothing identifies the service", () => {
+    expect(discoveredServiceName({ name: "some-container", labels: {} }, undefined)).toBe("some-container");
+    expect(discoveredServiceName({ name: "bare" }, undefined)).toBe("bare");
+  });
+});
+
+describe("openshipStackName — group Openship-deployed containers by their stack", () => {
+  it("derives the stack slug from openship-<slug>-<service>", () => {
+    expect(openshipStackName("openship-supabase-kong", "kong")).toBe("supabase");
+    expect(openshipStackName("openship-openship-web", "web")).toBe("openship");
+    expect(openshipStackName("openship-clincai-api", "api")).toBe("clincai");
+  });
+
+  it("handles hyphenated service names via the exact service label", () => {
+    // Without the exact label, naive splitting would mis-derive "mongodb-mongo".
+    expect(openshipStackName("openship-mongodb-mongo-express", "mongo-express")).toBe("mongodb");
+    expect(openshipStackName("openship-mongodb-mongo", "mongo")).toBe("mongodb");
+  });
+
+  it("returns null for a non-Openship / unidentifiable container (→ standalone)", () => {
+    expect(openshipStackName("my-random-container", undefined)).toBeNull();
+    expect(openshipStackName(undefined, "web")).toBeNull();
+    // Name that doesn't end in the service label → not our pattern.
+    expect(openshipStackName("openship-supabase-kong", "web")).toBeNull();
   });
 });

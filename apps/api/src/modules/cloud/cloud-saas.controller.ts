@@ -245,12 +245,11 @@ export async function desktopHandoff(c: Context) {
  *   - Code mint happens on POST /connect-authorize, not here
  */
 export async function connectHandoff(c: Context) {
+  const isDevice = c.req.query("mode") === "device";
   const codeChallenge = c.req.query("code_challenge");
   if (!codeChallenge || !/^[A-Za-z0-9_-]{40,128}$/.test(codeChallenge)) {
     return c.json({ error: "code_challenge query parameter is required", code: "MISSING_CODE_CHALLENGE" }, 400);
   }
-  const validation = validateConnectRedirect(c.req.query("redirect"));
-  if (!validation.ok) return c.json({ error: validation.error }, validation.status);
   const state = c.req.query("state");
   if (!state || typeof state !== "string" || state.length === 0 || state.length > 256) {
     return c.json({ error: "state query parameter is required", code: "MISSING_STATE" }, 400);
@@ -262,12 +261,18 @@ export async function connectHandoff(c: Context) {
   // /api/cloud/connect-authorize below, which is where the code mint
   // actually happens.
   const consentUrl = new URL("/cloud-authorize", cloudRuntimeTarget.dashboard);
-  consentUrl.searchParams.set("redirect", validation.url.toString());
   consentUrl.searchParams.set("state", state);
   consentUrl.searchParams.set("code_challenge", codeChallenge);
-  // Forward the device/poll marker so the consent page confirms in-place
-  // (headless CLI) instead of navigating to a callback the box can't serve.
-  if (c.req.query("mode") === "device") consentUrl.searchParams.set("mode", "device");
+  if (isDevice) {
+    // Device/poll flow (headless CLI): the code is delivered via connect-poll,
+    // not a browser redirect, so `redirect` is neither required nor forwarded —
+    // the consent page confirms in-place.
+    consentUrl.searchParams.set("mode", "device");
+  } else {
+    const validation = validateConnectRedirect(c.req.query("redirect"));
+    if (!validation.ok) return c.json({ error: validation.error }, validation.status);
+    consentUrl.searchParams.set("redirect", validation.url.toString());
+  }
   return c.redirect(consentUrl.toString());
 }
 
@@ -289,13 +294,14 @@ export async function connectHandoff(c: Context) {
  *   500 { error, code }        — on unexpected mint failure
  */
 export async function connectAuthorize(c: Context) {
-  let body: { redirect?: string; state?: string; codeChallenge?: string };
+  let body: { redirect?: string; state?: string; codeChallenge?: string; mode?: string };
   try {
-    body = await c.req.json<{ redirect?: string; state?: string; codeChallenge?: string }>();
+    body = await c.req.json<{ redirect?: string; state?: string; codeChallenge?: string; mode?: string }>();
   } catch {
     return c.json({ error: "Invalid JSON body", code: "INVALID_BODY" }, 400);
   }
 
+  const isDevice = body.mode === "device";
   const codeChallenge = body.codeChallenge;
   if (!codeChallenge || !/^[A-Za-z0-9_-]{40,128}$/.test(codeChallenge)) {
     return c.json(
@@ -303,9 +309,17 @@ export async function connectAuthorize(c: Context) {
       400,
     );
   }
-  const validation = validateConnectRedirect(body.redirect);
-  if (!validation.ok) {
-    return c.json({ error: validation.error, code: "INVALID_REDIRECT" }, validation.status);
+  // `redirect` is the delivery channel ONLY for the browser flow, where it MUST
+  // be validated (open-redirect/SSRF). The device/poll flow delivers the code via
+  // connect-poll — PKCE-locked + state-keyed — so it needs no redirect and there's
+  // no redirect target to guard.
+  let redirectUrl: string | undefined;
+  if (!isDevice) {
+    const validation = validateConnectRedirect(body.redirect);
+    if (!validation.ok) {
+      return c.json({ error: validation.error, code: "INVALID_REDIRECT" }, validation.status);
+    }
+    redirectUrl = validation.url.toString();
   }
   const state = body.state;
   if (!state || typeof state !== "string" || state.length === 0 || state.length > 256) {
@@ -354,7 +368,9 @@ export async function connectAuthorize(c: Context) {
       // code via connect-poll instead of catching the browser redirect.
       state,
     );
-    const callbackUrl = new URL(validation.url.toString());
+    // Device/poll: nothing to navigate to — the CLI's poll picks up the code.
+    if (isDevice) return c.json({ authorized: true });
+    const callbackUrl = new URL(redirectUrl!);
     callbackUrl.searchParams.set("code", code);
     callbackUrl.searchParams.set("state", state);
     return c.json({ callbackUrl: callbackUrl.toString() });

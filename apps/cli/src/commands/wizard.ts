@@ -101,13 +101,11 @@ async function connectOpenshipCloud(port: string, token?: string): Promise<{ ema
   // unguessable `state` to pick up the one-time, PKCE-locked code. This is why
   // it works over SSH — the browser (on the user's laptop) never has to reach
   // back to this box.
-  //   - mode=device → the consent page confirms in-place (no redirect).
-  //   - `redirect` is required + validated by the SaaS but never navigated to
-  //     in device mode; point it at the cloud origin so validation passes.
+  //   - mode=device → the consent page confirms in-place; the code is delivered
+  //     by the poll below, so there is NO redirect param at all.
   const handoff =
     `${apiBase}/api/cloud/connect-handoff` +
-    `?redirect=${encodeURIComponent(apiBase)}` +
-    `&state=${encodeURIComponent(state)}&code_challenge=${challenge}&mode=device`;
+    `?state=${encodeURIComponent(state)}&code_challenge=${challenge}&mode=device`;
 
   const overSsh = !!(process.env.SSH_CONNECTION || process.env.SSH_TTY || process.env.SSH_CLIENT);
   // Print the URL as a bare, single-line, selectable value. clack's note() boxes

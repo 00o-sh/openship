@@ -270,6 +270,49 @@ function inspectHealthcheckToCompose(
 /** Merge one container's inspect truth with its (optional) declared compose
  *  service. `imageDefaults` = the image's baked-in "KEY=VALUE" env, subtracted
  *  so only user-set vars are imported. */
+/**
+ * The compose-service IDENTITY for a discovered container — the name a migrated
+ * service adopts. Priority:
+ *   1. an explicit compose-file declaration (`declared.name`)
+ *   2. the `com.docker.compose.service` label (a real compose stack)
+ *   3. Openship's own `openship.service` label — Openship deploys compose
+ *      services as plain dockerode containers (`openship-<slug>-<svc>`) that
+ *      carry NO compose label, so without this step the moved service was named
+ *      after the CONTAINER (`openship-openship-web`) and no longer matched its
+ *      git-compose definition (`web`) → the reconcile created a DUPLICATE
+ *      bare-name row instead of updating the moved one in place.
+ *   4. the raw container name (last resort).
+ */
+export function discoveredServiceName(
+  detail: { composeService?: string; labels?: Record<string, string>; name: string },
+  declared: { name?: string } | undefined,
+): string {
+  return declared?.name ?? detail.composeService ?? detail.labels?.["openship.service"] ?? detail.name;
+}
+
+/**
+ * Display-grouping key for an Openship-DEPLOYED container that carries no
+ * compose label. Openship runs compose services as plain containers named
+ * `openship-<slug>-<svc>` (labels `openship.project`/`openship.service`, but NO
+ * `com.docker.compose.project`), so without this they all collapse into the
+ * single "standalone" bucket — the exact symptom in flat-docker mode where a
+ * moved stack (supabase / mongodb / …) showed as N loose containers instead of
+ * one group. Derive the stack SLUG from the container name minus the EXACT
+ * `openship.service` suffix (using the label makes it precise even for
+ * hyphenated service names like `mongo-express`). Returns null when the
+ * container isn't an Openship compose service (→ truly standalone).
+ */
+export function openshipStackName(
+  containerName: string | undefined,
+  serviceLabel: string | undefined,
+): string | null {
+  if (!containerName || !serviceLabel) return null;
+  const stripped = containerName.replace(/^openship-/, "");
+  const suffix = `-${serviceLabel}`;
+  if (!stripped.endsWith(suffix)) return null;
+  return stripped.slice(0, -suffix.length) || null;
+}
+
 export function toDiscoveredService(
   detail: DockerContainerDetail,
   declared: ComposeService | undefined,
@@ -306,15 +349,7 @@ export function toDiscoveredService(
     declared?.advanced?.healthcheck ??
     (detail.healthcheck ? inspectHealthcheckToCompose(detail.healthcheck) : undefined);
 
-  // Prefer the compose-service identity over the container name. Openship
-  // deploys compose services as plain dockerode containers named
-  // `openship-<slug>-<svc>` WITHOUT a `com.docker.compose.service` label — they
-  // carry `openship.service=<svc>` instead. Without this fallback the generic
-  // adopt path named the moved service after the container (`openship-openship-web`),
-  // which no longer matched its git-compose definition (`web`) → the reconcile
-  // created a DUPLICATE bare-name row instead of updating the moved one in place.
-  const name =
-    declared?.name ?? detail.composeService ?? detail.labels?.["openship.service"] ?? detail.name;
+  const name = discoveredServiceName(detail, declared);
   const image = detail.image || declared?.image;
   const ports = portsToComposeStrings(detail.ports);
 
@@ -395,9 +430,15 @@ export function reconcileStack(opts: {
     ...new Set(details.map((d) => d.composeProject).filter((p): p is string => Boolean(p))),
   ];
 
-  // Build each service alongside the compose project it belongs to, then group.
+  // Build each service alongside the group it belongs to, then group. Priority:
+  // the real compose project → else the Openship stack slug (openship-deployed
+  // services have no compose label, so this keeps a moved stack together instead
+  // of flattening it into standalone) → else truly standalone (null).
   const built = details.map((d) => ({
-    project: d.composeProject ?? null,
+    project:
+      d.composeProject ??
+      openshipStackName(d.name, d.labels?.["openship.service"]) ??
+      null,
     service: toDiscoveredService(
       d,
       d.composeService ? declared.get(d.composeService) : undefined,
