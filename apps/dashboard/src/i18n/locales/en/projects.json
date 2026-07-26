@@ -295,7 +295,9 @@
     "stopped": "Stopped",
     "disabled": "Disabled",
     "failed": "Failed",
-    "starting": "Starting"
+    "starting": "Starting",
+    "restarting": "Restarting",
+    "unknown": "Unknown"
   },
   "routingRetry": {
     "title": "Free domain routing needs attention",

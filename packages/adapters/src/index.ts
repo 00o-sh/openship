@@ -171,12 +171,17 @@ export {
 export { scanImportableSites, canImportProxy, scanOpenshipEdge } from "./system/proxy/import";
 export {
   runEdgeTakeover,
-  recoverInterruptedTakeover,
   registerImportedSites,
   type EdgeTakeoverOptions,
   type EdgeTakeoverResult,
   type RegisterImportedSitesOptions,
 } from "./system/proxy/takeover";
+export {
+  recoverInterruptedTakeover,
+  beginEdgeTakeover,
+  rollbackEdgeTakeover,
+  completeEdgeTakeover,
+} from "./system/proxy/takeover-journal";
 // The consolidated reverse-proxy / edge facade (single point for the chain).
 export { detectEdge, importSites, takeoverOnMigrate, foreignProxyOnEdge, ensureEdge } from "./system/proxy";
 

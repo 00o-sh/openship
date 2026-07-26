@@ -4,7 +4,7 @@ import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { usePlatform } from "@/context/PlatformContext";
 import { serviceKind, serviceCanStartWithoutBuild, servicesApi, sortServicesByPublicFirst, type Service, type ServiceContainer, type ServiceInput } from "@/lib/api/services";
-import { getApiErrorMessage } from "@/lib/api/client";
+import { getApiErrorMessage, isAbortError } from "@/lib/api/client";
 import { useToast } from "@/context/ToastContext";
 import { resolveServiceHostnameLabel, internalServiceAddress } from "@repo/core";
 import { useRouter } from "next/navigation";
@@ -71,10 +71,22 @@ export const ServicesTab = () => {
     try {
       setContainersLoading(true);
       setError(null);
-      const [, ctRes] = await Promise.all([refreshServices(), servicesApi.containers(id)]);
+      // allSettled, not all: with `all`, a rejection from the SECOND promise once
+      // the first has already rejected is orphaned, and an unhandled rejection
+      // surfaces as a bare runtime error overlay instead of this component's
+      // error state. The container read is also the one that can time out
+      // (it reflects live runtime state), so it must not take the tab down.
+      const [, containersResult] = await Promise.allSettled([
+        refreshServices(),
+        servicesApi.containers(id),
+      ]);
+      if (containersResult.status === "rejected") throw containersResult.reason;
+      const ctRes = containersResult.value;
       if (ctRes.success) setContainers(ctRes.containers ?? []);
     } catch (e) {
-      setError(e instanceof Error ? e.message : t.projects.services.failedLoad);
+      // An aborted request's message is "signal is aborted without reason" —
+      // useless to a user, so fall back to the generic copy for it.
+      setError(!isAbortError(e) && e instanceof Error ? e.message : t.projects.services.failedLoad);
     } finally {
       setContainersLoading(false);
     }
@@ -654,6 +666,19 @@ function StatusBadge({ status, t }: { status: string; t: Dictionary }) {
       dot: "bg-warning-solid",
       badge: "bg-warning-bg text-warning",
       label: t.projects.serviceStatus.starting,
+    },
+    // A bouncing container is NOT running — it used to render green, which hid
+    // whole stacks in a crash loop.
+    restarting: {
+      dot: "bg-warning-solid",
+      badge: "bg-warning-bg text-warning",
+      label: t.projects.serviceStatus.restarting,
+    },
+    // The host couldn't be reached — say so instead of echoing a stale status.
+    unknown: {
+      dot: "bg-muted-foreground/40",
+      badge: "bg-muted/60 text-muted-foreground",
+      label: t.projects.serviceStatus.unknown,
     },
   };
   const s = map[status] ?? map.stopped;

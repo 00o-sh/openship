@@ -519,6 +519,16 @@ export function ServiceDetailPanel({
         ) : sourceLabel ? (
           <span className="truncate text-sm text-muted-foreground">{sourceLabel}</span>
         ) : null}
+        {/* Another container on the host also answers to this service — a
+            leftover from an adopt/redeploy. It isn't the one we manage, and it
+            may still be holding a port or a volume. */}
+        {container?.duplicates && container.duplicates.length > 0 && (
+          <p className="mt-1 text-xs text-warning">
+            {interpolate(t.projectDetail.services.detail.duplicateContainers, {
+              names: container.duplicates.join(", "),
+            })}
+          </p>
+        )}
       </div>
 
       {/* ── Tab strip ──────────────────────────────────────────── */}
@@ -732,13 +742,17 @@ export function ServiceDetailPanel({
               <div className="flex items-center gap-2 flex-wrap">
                 {container?.containerId ? (
                   <>
-                    {status === "running" && (
+                    {/* A container that's up OR bouncing OR whose state we can't
+                        read is NOT something to offer "Start" on — Stop/Restart
+                        are the honest actions. Only a genuinely down container
+                        gets Start. */}
+                    {status !== "stopped" && status !== "failed" && (
                       <>
                         <ActionButton icon={Square} label={t.projectDetail.services.detail.stop} loading={actionLoading === "stop"} onClick={() => handleContainerAction("stop")} variant="danger" />
                         <ActionButton icon={RotateCw} label={t.projectDetail.services.detail.restart} loading={actionLoading === "restart"} onClick={() => handleContainerAction("restart")} variant="warning" />
                       </>
                     )}
-                    {status !== "running" && (
+                    {(status === "stopped" || status === "failed") && (
                       <ActionButton icon={Play} label={t.projectDetail.services.detail.start} loading={actionLoading === "start"} onClick={() => handleContainerAction("start")} variant="success" />
                     )}
                   </>
@@ -922,6 +936,8 @@ function StatusBadge({ status }: { status: string }) {
     disabled: { dot: "bg-muted-foreground/20", badge: "bg-muted/40 text-muted-foreground/50", label: labels.disabled },
     failed: { dot: "bg-danger-solid", badge: "bg-danger-bg text-danger", label: labels.failed },
     starting: { dot: "bg-warning-solid", badge: "bg-warning-bg text-warning", label: labels.starting },
+    restarting: { dot: "bg-warning-solid", badge: "bg-warning-bg text-warning", label: labels.restarting },
+    unknown: { dot: "bg-muted-foreground/40", badge: "bg-muted/60 text-muted-foreground", label: labels.unknown },
   };
   const s = map[status] ?? map.stopped;
   return (

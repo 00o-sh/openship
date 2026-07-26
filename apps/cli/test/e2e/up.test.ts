@@ -16,13 +16,29 @@ vi.mock("../../src/lib/compose", () => ({
     return h.composeUpResult;
   },
   composeInternalToken: () => h.internalToken,
+  // Default install: pulls published images. The dev/from-source build path has
+  // its own unit test (compose-source-build.test.ts).
+  sourceBuildDir: () => null,
 }));
 
-const e = vi.hoisted(() => ({ plan: { proceed: true } as any, calls: 0 }));
+const e = vi.hoisted(() => ({
+  plan: { proceed: true } as any,
+  calls: 0,
+  rollbacks: 0,
+  completes: 0,
+  restored: true,
+}));
 vi.mock("../../src/lib/edge-preflight", () => ({
   planAndApplyHostEdge: async () => {
     e.calls++;
     return e.plan;
+  },
+  rollbackHostEdge: async () => {
+    e.rollbacks++;
+    return e.restored;
+  },
+  completeHostEdge: async () => {
+    e.completes++;
   },
 }));
 
@@ -57,6 +73,9 @@ beforeEach(() => {
   h.internalToken = "tok";
   e.plan = { proceed: true };
   e.calls = 0;
+  e.rollbacks = 0;
+  e.completes = 0;
+  e.restored = true;
   // Clear any option values commander retained from a previous parse.
   (upCommand as any).setOptionValue?.("edge", undefined);
   (upCommand as any).setOptionValue?.("compose", undefined);
@@ -120,6 +139,32 @@ describe("openship up --compose (edge chain)", () => {
     expect(importCall!.headers["x-internal-token"]).toBe("tok");
     expect((importCall!.body as any).sites).toHaveLength(1);
     expect((importCall!.body as any).certPems).toEqual({ "/etc/ssl/a.crt": { certPem: "CERT", keyPem: "KEY" } });
+    // Edge is serving → the takeover journal is closed, so the NEXT run doesn't
+    // read it as interrupted and restart the proxy we just replaced.
+    expect(e.completes).toBe(1);
+    expect(e.rollbacks).toBe(0);
+  });
+
+  it("RESTORES the proxy when the stack fails to come up after a takeover", async () => {
+    // The hekai run: preflight stopped + disabled nginx, then `docker compose pull`
+    // died on a registry error. Without a rollback the box stays dark with the
+    // operator's proxy stopped AND disabled (it wouldn't even survive a reboot).
+    e.plan = { proceed: true, action: "takeover" };
+    h.composeUpResult = { ok: false, apiPort: "4000", dashPort: "3001" };
+
+    const r = await runCommand(upCommand, ["--compose"]);
+    expect(r.code).toBe(1);
+    expect(e.rollbacks).toBe(1);
+    expect(e.completes).toBe(0);
+    expect(con.text()).toMatch(/Restored the previous proxy/i);
+  });
+
+  it("does not roll back a failed bring-up when nothing was taken over", async () => {
+    e.plan = { proceed: true }; // edge was free — we never stopped anything
+    h.composeUpResult = { ok: false, apiPort: "4000", dashPort: "3001" };
+
+    await runCommand(upCommand, ["--compose"]);
+    expect(e.rollbacks).toBe(0);
   });
 
   it("rejects an invalid --edge value before any side effects", async () => {

@@ -264,7 +264,9 @@
     "stopped": "Durduruldu",
     "disabled": "Pasif",
     "failed": "Başarısız",
-    "starting": "Başlatılıyor"
+    "starting": "Başlatılıyor",
+    "restarting": "Yeniden başlatılıyor",
+    "unknown": "Bilinmiyor"
   },
   "routingRetry": {
     "title": "Ücretsiz alan adı yönlendirmesinin müdahaleye ihtiyacı var",

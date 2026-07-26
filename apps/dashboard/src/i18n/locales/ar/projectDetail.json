@@ -148,7 +148,9 @@
         "stopped": "متوقّف",
         "disabled": "معطّل",
         "failed": "فشل",
-        "starting": "قيد البدء"
+        "starting": "قيد البدء",
+        "restarting": "قيد إعادة التشغيل",
+        "unknown": "غير معروف"
       },
       "network": "الشبكة",
       "configuration": "الإعداد",
@@ -205,7 +207,8 @@
         "serviceDeleted": "تم حذف الخدمة",
         "deleteFailed": "تعذّر حذف الخدمة",
         "backupRunFailed": "فشلت عملية النسخ الاحتياطي"
-      }
+      },
+      "duplicateContainers": "توجد حاوية أخرى مطابقة لهذه الخدمة: {names}"
     },
     "settingsForm": {
       "name": "الاسم",

@@ -170,6 +170,62 @@ describe("probeEdge classification", () => {
     expect(stopTargetsForStatus(status).some((x) => x.container === "traefik-1")).toBe(true);
   });
 
+  test("REGRESSION: a worker PID on the edge ports resolves to the nginx MASTER", async () => {
+    // `ss` reports whichever nginx process holds the listening fd — on a
+    // hand-started nginx that's a WORKER, whose own cgroup carries no unit. The
+    // hekai run stopped that worker (twice, once per port); the master respawned
+    // it and kept :80/:443, so the compose edge could never bind. The takeover
+    // must target the master, and — since one proxy occupies both ports — exactly
+    // ONE stop target.
+    const status = await probeEdge(
+      makeExecutor([
+        ["sport = :80", 'LISTEN 0 511 *:80 *:* users:(("nginx",pid=2588536,fd=6))'],
+        ["sport = :443", 'LISTEN 0 511 *:443 *:* users:(("nginx",pid=2588536,fd=8))'],
+        ["-p 2588536 -o args=", "nginx: worker process"],
+        ["/proc/2588536/status", "2588100"],
+        ["-p 2588100 -o args=", "nginx: master process /usr/sbin/nginx -g daemon on;"],
+      ]),
+    );
+
+    expect(status.classification).toBe("known");
+    expect(status.occupants.every((o) => o.pid === 2588100)).toBe(true);
+
+    const targets = stopTargetsForStatus(status);
+    expect(targets).toHaveLength(1);
+    expect(targets[0]?.pid).toBe(2588100);
+    expect(targets[0]?.label).toBe("nginx (PID 2588100)");
+  });
+
+  test("SELF-TAKEOVER LOCK: a WORKER of our own OpenResty is still 'ours'", async () => {
+    // The master hop must not turn our own edge into a foreign proxy. `ss` reports
+    // the OpenResty worker (which renders as plain `nginx: worker process`); the
+    // hop resolves its master, whose args carry the openresty prefix.
+    const status = await probeEdge(
+      makeExecutor([
+        ["site_logger.lua", "ok"],
+        ["sport = :80", 'LISTEN 0 511 *:80 *:* users:(("nginx",pid=910,fd=6))'],
+        ["sport = :443", 'LISTEN 0 511 *:443 *:* users:(("nginx",pid=910,fd=8))'],
+        ["-p 910 -o args=", "nginx: worker process"],
+        ["/proc/910/status", "900"],
+        ["-p 900 -o args=", "nginx: master process /usr/local/openresty/nginx/sbin/nginx"],
+      ]),
+    );
+    expect(status.classification).toBe("ours");
+    expect(status.occupants).toHaveLength(0);
+    expect(status.canProceedClean).toBe(true);
+  });
+
+  test("a master listener is used as-is (no PPid hop to systemd)", async () => {
+    const status = await probeEdge(
+      makeExecutor([
+        ["sport = :80", 'LISTEN 0 511 *:80 *:* users:(("nginx",pid=4242,fd=6))'],
+        ["-p 4242 -o args=", "nginx: master process /usr/sbin/nginx"],
+        ["/proc/4242/status", "1"],
+      ]),
+    );
+    expect(status.occupants[0]?.pid).toBe(4242);
+  });
+
   test("unknown when an unrecognized process holds a port", async () => {
     const status = await probeEdge(
       makeExecutor([

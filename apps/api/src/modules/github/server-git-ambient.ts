@@ -53,8 +53,15 @@ function flag(out: string, name: string): boolean {
     .includes(`${name}=1`);
 }
 
+/**
+ * What the probe found. `"anonymous"` means the remote needs NO credential at
+ * all (a public repo) — kept distinct from the ambient mechanisms because the
+ * clone then carries nothing, not even the host's own helper.
+ */
+export type ProbedGitVia = "anonymous" | AmbientGitVia;
+
 export interface AmbientGitProbe {
-  via: AmbientGitVia;
+  via: ProbedGitVia;
 }
 
 /**
@@ -80,26 +87,39 @@ export async function probeServerGitAccess(opts: {
   }
   if (!flag(discovered, "git")) return null;
 
-  // Ordered by how specific the credential is. `gh` first: it mints its own
-  // short-lived-refreshable credential per request and is the mechanism most
-  // likely to be scoped to the intended account.
-  const candidates: AmbientGitVia[] = [];
+  // ALWAYS try no-credential access first, whatever the host has: if the repo is
+  // public the clone needs nothing, and attempting it is both cheaper and more
+  // truthful than asking GitHub's API whether it's public (that probe is
+  // unauthenticated, rate-limited 60/hr/IP and fails closed, so it reports a
+  // public repo as private the moment the budget runs out or the network
+  // hiccups). `git ls-remote` from the machine that will actually clone is the
+  // authority. Then the host's own credentials, most specific first.
+  const candidates: ProbedGitVia[] = ["anonymous"];
   if (flag(discovered, "gh")) candidates.push("gh");
   if (flag(discovered, "helper") || flag(discovered, "credfile")) candidates.push("helper");
   if (flag(discovered, "sshkey")) candidates.push("ssh");
-  if (candidates.length === 0) return null;
 
   for (const via of candidates) {
-    const { cloneUrl, gitEnv, credFlag } = assembleGitClone({ repoUrl: opts.repoUrl, ambient: { via } });
+    // "anonymous" assembles with NO credential and with the host's credential
+    // helper DISABLED, so success proves genuine unauthenticated access rather
+    // than silently borrowing whatever the box had lying around.
+    const { cloneUrl, gitEnv, credFlag } =
+      via === "anonymous"
+        ? assembleGitClone({ repoUrl: opts.repoUrl })
+        : assembleGitClone({ repoUrl: opts.repoUrl, ambient: { via } });
     // ls-remote is the same auth path the clone takes. Output is discarded — we
     // only want the exit status, and the ref list is noise in a build log.
     const cmd = `${gitEnv} git ${credFlag} ls-remote ${sq(cloneUrl)} HEAD >/dev/null 2>&1`;
     try {
       await opts.executor.exec(cmd, { timeout: VERIFY_TIMEOUT_MS });
-      opts.onLog?.(`The build server can reach this repo with its own git credentials (${via}).`);
+      opts.onLog?.(
+        via === "anonymous"
+          ? "The build server can read this repo with no credential — cloning there directly."
+          : `The build server can reach this repo with its own git credentials (${via}).`,
+      );
       return { via };
     } catch {
-      // Wrong account, no access, or that mechanism isn't really wired up.
+      // Not public, wrong account, or that mechanism isn't really wired up.
     }
   }
 

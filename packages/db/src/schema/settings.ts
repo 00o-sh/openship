@@ -246,6 +246,17 @@ export const userSettings = pgTable("user_settings", {
   githubCliDisabled: boolean("github_cli_disabled").notNull().default(false),
 
   /**
+   * Generic, instance-wide (per-operator) opt-in to FORWARD this host's git
+   * identity to a remote build server for clone-on-server — replaces the old
+   * per-deploy `forwardGitCredentials` choice. When on, a server build that has
+   * no credential of its own forwards the operator's local `gh` over the SSH
+   * reverse tunnel (token never persists on the server). When off, forwarding is
+   * never attempted and the clone falls to the server's own auth / public / the
+   * api-host clone. Set once in Settings → GitHub, not per project.
+   */
+  forwardGitToServer: boolean("forward_git_to_server").notNull().default(false),
+
+  /**
    * Operator opt-in for the gh-CLI escape hatch. The gh CLI token is the
    * INSTANCE OPERATOR'S long-lived PAT (whatever user ran `gh auth login`
    * on the host). The previous "owner of any org gets to use it" gate

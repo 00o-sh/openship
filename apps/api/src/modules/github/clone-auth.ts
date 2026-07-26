@@ -20,18 +20,23 @@
  *
  * This function owns the ORDER of the whole clone-credential chain; the steps
  * that aren't tokens live beside it here rather than in their own resolvers, so
- * there is one readable sequence:
+ * there is one readable sequence. The order is the OPERATOR's precedence — the
+ * self-hosted model has no GitHub App, so the operator's own switches come first:
  *
- *   1. per-server stored identity (device token / PAT / ssh key / deploy key)
- *   2. App installation or PAT (`tokenFor("remote")`)
- *   3. public repo → anonymous
- *   4. the server's OWN pre-existing git access (ambient, verified per repo)
- *   5. desktop credential relay (forwarded, nothing persisted)
- *   6. api-host clone + context transfer (docker only)
+ *   1. FORWARD my git identity — the operator flipped "Forward my git identity to
+ *      build servers" (Settings → Clone credentials) and a local `gh` exists:
+ *      clone directly on the build host over the desktop relay, nothing persisted.
+ *   2. the server's OWN pre-existing git access (ambient `gh`/helper/ssh, verified
+ *      per repo; `anonymous` when the repo needs no credential at all).
+ *   3. per-server stored identity (Server tab: device token / PAT / ssh key).
+ *   4. App installation or PAT (`tokenFor("remote")`) — cloud mode; self-host has none.
+ *   5. public repo → anonymous (fast-path API check; the step-2 probe is the authority).
+ *   6. api-host clone + context transfer (docker only) — clone here, ship the source.
  *
- * Steps 4-6 are all "nothing of ours can reach the server" fallbacks, ordered by
- * how little credential material moves: 4 moves none, 5 moves it only for the
- * lifetime of one git request, 6 keeps it here and moves the source instead.
+ * Each step self-gates on its own inputs (a per-server cred needs a serverId, the
+ * ambient probe needs a server executor, the relay needs desktop + the setting +
+ * an SSH tunnel), so a step only fires when it CAN — precedence decides only when
+ * several are available at once.
  */
 
 import { type BuildStrategy } from "@repo/core";
@@ -166,13 +171,41 @@ export async function resolveBuildGitToken(opts: {
     return resolveLocalCredential(opts.ctx, tokenCtx);
   }
 
-  // SERVER / REMOTE build: the clone/build runs off this host.
-  //
-  // Per-server GitHub identity FIRST (self-hosted): if this deploy's target
-  // server has its own configured GitHub auth (device-flow token, per-server
-  // PAT, or an SSH key), it wins for clones that run on that server — the
-  // operator explicitly configured the host. Falls through to the shared chain
-  // (App / PAT / relay) when the server has none.
+  // ── SERVER / REMOTE build: the clone/build runs off this host. ──────────────
+  // Order = the operator's precedence (see the module doc). Each block self-gates
+  // on its own inputs, so precedence only decides between the ones that CAN fire.
+
+  // 1. FORWARD (operator setting). `allowRelayFallback` is set by the pipeline
+  //    ONLY when the "Forward my git identity to build servers" setting is on AND
+  //    this is an eligible build (desktop, non-docker, an SSH reverse tunnel).
+  //    This is the operator's explicit "always use this" switch, so it wins
+  //    first. The relay vends the operator's LOCAL gh on demand — never persisted
+  //    on the remote — so only forward when a gh identity actually exists;
+  //    otherwise fall through so the relay never opens to vend nothing.
+  if (opts.allowRelayFallback && (await hasLocalGitIdentity())) {
+    return { relay: true };
+  }
+
+  // 2. The SERVER's OWN git (`gh` logged in there, a credential helper, its own
+  //    ssh key), verified against THIS repo so a server authenticated as the
+  //    wrong account reports nothing instead of failing mid-build. No credential
+  //    moves in either direction. `"anonymous"` = the repo needs none at all
+  //    (public) — the authoritative public check, since it actually attempts the
+  //    clone from the machine that will do it, unlike the rate-limited API probe.
+  if (opts.serverExecutor && opts.repoUrl) {
+    const { probeServerGitAccess } = await import("./server-git-ambient");
+    const probed = await probeServerGitAccess({
+      executor: opts.serverExecutor,
+      repoUrl: opts.repoUrl,
+      onLog: opts.onLog,
+    });
+    if (probed?.via === "anonymous") return { anonymous: true };
+    if (probed) return { ambient: { via: probed.via } };
+  }
+
+  // 3. Per-server stored identity (Server tab: device-flow token, per-server PAT,
+  //    or an SSH key). The operator explicitly configured this host, so it wins
+  //    over the shared App/PAT chain for clones that run on it.
   if (opts.serverId) {
     const serverCred = await resolveServerGitCredential({
       serverId: opts.serverId,
@@ -183,52 +216,27 @@ export async function resolveBuildGitToken(opts: {
     if (serverCred) return serverCred;
   }
 
-  // Otherwise prefer the SaaS-minted App installation token (short-lived,
-  // repo-scoped) or a PAT — gh is REFUSED in this chain (HIGH #7: never ship
-  // the operator's broad token off-host via the URL).
+  // 4. SaaS-minted App installation token (short-lived, repo-scoped) or a PAT —
+  //    gh is REFUSED in this chain (HIGH #7: never ship the operator's broad
+  //    token off-host via the URL). This is the only shippable credential in
+  //    cloud mode, where none of steps 1-3 apply.
   const r = await tokenFor(opts.ctx, "remote", tokenCtx);
   if (r?.token) return { token: r.token };
 
-  // No remote token — but a PUBLIC github.com repo clones anonymously (nothing
-  // to ship off-host, no relay/fallback needed). This is what lets a public
-  // repo deploy with zero credentials, exactly like Vercel. Checked here (only
-  // when no token resolved) so it never costs an API call for private repos.
+  // 5. PUBLIC github.com repo → clone anonymously (nothing to ship). FAST PATH
+  //    ONLY: isPublicRepo is unauthenticated + rate-limited (60/hr/IP) and fails
+  //    closed, so a "no" here means "not proven public", NEVER "private" — step 2
+  //    is the real authority when a server executor exists. Kept for cloud clones
+  //    (no executor to probe with) and as a cheap early out.
   if (opts.owner && opts.repo && (await isPublicRepo(opts.owner, opts.repo))) {
     return { anonymous: true };
   }
 
-  // Nothing of ours reaches the server — but the SERVER may already reach the
-  // repo on its own (`gh` logged in there, a configured credential helper, its
-  // own ssh key). Preferred over both remaining options because no credential
-  // moves in either direction, and verified against THIS repo first so a server
-  // authenticated as the wrong account reports nothing instead of failing the
-  // build. Deliberately placed AFTER the App/PAT chain: it can only turn a
-  // deploy that was about to give up into an on-server clone, never re-route one
-  // that already works.
-  if (opts.serverExecutor && opts.repoUrl) {
-    const { probeServerGitAccess } = await import("./server-git-ambient");
-    const ambient = await probeServerGitAccess({
-      executor: opts.serverExecutor,
-      repoUrl: opts.repoUrl,
-      onLog: opts.onLog,
-    });
-    if (ambient) return { ambient };
-  }
-
-  // No shippable server/App/PAT token. Prefer FORWARDING (the relay) over an
-  // api-host clone — it clones directly on the build host, atomically, with
-  // nothing persisted. But the relay vends the operator's LOCAL gh token
-  // specifically (its remote helper resolves via getLocalGhToken), so only
-  // forward when a gh identity actually exists — otherwise the relay would open
-  // and vend nothing. When it's absent, fall through to the api-host clone.
-  if (opts.allowRelayFallback && (await hasLocalGitIdentity())) {
-    return { relay: true };
-  }
-
-  // Docker clone-on-server with no shippable credential and no forwardable gh:
-  // degrade to an api-host clone rather than hard-failing after the server was
-  // already provisioned. The api-host clone runs on THIS host, so a LOCAL
-  // credential is valid (flagged apiHostFallback so callers never ship it off-host).
+  // 6. Docker clone-on-server with nothing shippable: degrade to an api-host
+  //    clone (clone on THIS host, transfer the context) rather than hard-failing
+  //    after the server was already provisioned. The clone runs on THIS host, so
+  //    a LOCAL credential is valid (flagged apiHostFallback so callers never ship
+  //    it off-host).
   if (opts.allowApiHostFallback) {
     const local = await resolveLocalCredential(opts.ctx, tokenCtx);
     return { ...local, apiHostFallback: true };

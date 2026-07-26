@@ -9,7 +9,11 @@
 
 import { AppError } from "@repo/core";
 import type { CommandExecutor } from "../../types";
-import { probeListeningPort } from "../../runtime/port-conflict";
+import {
+  describeProcess as probeProcess,
+  probeListeningPort,
+  type PortOccupant,
+} from "../../runtime/port-conflict";
 import { OPENRESTY_LUA_DIR } from "../../infra/openresty-lua";
 import type {
   EdgeOccupant,
@@ -172,12 +176,50 @@ async function listenerIsOurOpenResty(
   return false;
 }
 
+/** `nginx: worker process` / `openresty: worker process …` (the child that shows
+ *  up in `ss` because it inherited the listening fd). */
+const WORKER_RE = /\b(?:nginx|openresty)\s*:\s*worker process/i;
+const MASTER_RE = /\b(?:nginx|openresty)\s*:\s*master process/i;
+
+/**
+ * `ss` reports whichever nginx process holds the listening fd — usually a WORKER,
+ * because workers inherit it from the master. Stopping a worker frees nothing:
+ * the master still owns :80/:443 and immediately respawns it, so the takeover
+ * "succeeds" and the edge then fails to bind (the hekai symptom). Walk one hop up
+ * to the master when the listener is a worker, and re-resolve the systemd unit
+ * from the master's own cgroup.
+ *
+ * Deliberately narrow: only a worker→master hop, only when the parent really is
+ * the matching master. Never a blind PPid walk — that would climb to systemd
+ * (PID 1) for a service-started process.
+ */
+async function resolveProxyMaster(
+  executor: CommandExecutor,
+  listener: PortOccupant | null,
+): Promise<PortOccupant | null> {
+  if (!listener?.pid) return listener;
+  if (!WORKER_RE.test(`${listener.rawCommand ?? ""} ${listener.command ?? ""}`)) return listener;
+
+  const ppidRaw = await tryExec(
+    executor,
+    `awk '/^PPid:/{print $2}' /proc/${listener.pid}/status 2>/dev/null || true`,
+  );
+  const ppid = Number.parseInt((ppidRaw ?? "").trim(), 10);
+  if (!Number.isInteger(ppid) || ppid <= 1) return listener;
+
+  const master = await probeProcess(executor, ppid);
+  if (!master || !MASTER_RE.test(`${master.rawCommand ?? ""} ${master.command ?? ""}`)) {
+    return listener;
+  }
+  return master;
+}
+
 async function probeEdgePort(
   executor: CommandExecutor,
   port: number,
   ours: { containerRunning: boolean; luaOnHost: boolean },
 ): Promise<EdgeOccupant | null> {
-  const listener = await probeListeningPort(executor, port);
+  const listener = await resolveProxyMaster(executor, await probeListeningPort(executor, port));
   const docker = await detectDockerOnPort(executor, port);
   if (!listener && !docker) return null;
 
@@ -262,15 +304,32 @@ export async function probeEdge(executor: CommandExecutor): Promise<EdgeStatus> 
   };
 }
 
-/** Map foreign occupants to the concrete stop targets a takeover would act on. */
+/**
+ * Map foreign occupants to the concrete stop targets a takeover would act on.
+ *
+ * Occupants are per-port, so ONE proxy on :80 + :443 appears twice — deduped by
+ * identity (unit / container / pid) so we stop it once instead of issuing the same
+ * `systemctl disable --now` (or the same `kill`, which on the second pass targets
+ * a PID we already reaped) twice.
+ */
 export function stopTargetsForStatus(status: EdgeStatus): EdgeStopTarget[] {
-  return status.occupants.map((o) => ({
-    port: o.port,
-    unit: o.systemdUnit,
-    pid: o.pid,
-    container: o.containerName,
-    label: o.command,
-  }));
+  const out: EdgeStopTarget[] = [];
+  const seen = new Set<string>();
+  for (const o of status.occupants) {
+    const identity = o.systemdUnit ?? o.containerName ?? (o.pid ? `pid:${o.pid}` : `port:${o.port}`);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    out.push({
+      port: o.port,
+      unit: o.systemdUnit,
+      pid: o.pid,
+      container: o.containerName,
+      // Prefer the proxy kind over the raw cmdline — `nginx (PID 123)` reads
+      // better in "Stopping …" than `nginx: master process /usr/sbin/nginx …`.
+      label: o.proxy && o.pid ? `${o.proxy} (PID ${o.pid})` : o.command,
+    });
+  }
+  return out;
 }
 
 /**

@@ -148,7 +148,9 @@
         "stopped": "已停止",
         "disabled": "已禁用",
         "failed": "失败",
-        "starting": "启动中"
+        "starting": "启动中",
+        "restarting": "重启中",
+        "unknown": "未知"
       },
       "network": "网络",
       "configuration": "配置",
@@ -205,7 +207,8 @@
         "serviceDeleted": "服务已删除",
         "deleteFailed": "删除服务失败",
         "backupRunFailed": "备份运行失败"
-      }
+      },
+      "duplicateContainers": "另一个容器也匹配此服务：{names}"
     },
     "settingsForm": {
       "name": "名称",

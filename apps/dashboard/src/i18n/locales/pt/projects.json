@@ -249,7 +249,9 @@
     "stopped": "Parado",
     "disabled": "Desativado",
     "failed": "Falhou",
-    "starting": "A iniciar"
+    "starting": "A iniciar",
+    "restarting": "Reiniciando",
+    "unknown": "Desconhecido"
   },
   "routingRetry": {
     "title": "O encaminhamento do domínio gratuito precisa de atenção",

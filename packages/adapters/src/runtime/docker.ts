@@ -366,6 +366,15 @@ function parseTimestampedLine(line: string): { timestamp: string; message: strin
 }
 
 /** Extract first host port and first container IP from an inspected container */
+/** First non-empty IPAddress across a container's networks — the `docker ps`
+ *  list view carries the same network map as inspect, so both paths agree. */
+function firstNetworkIp(networks: unknown): string | undefined {
+  for (const net of Object.values((networks ?? {}) as Record<string, { IPAddress?: string }>)) {
+    if (net?.IPAddress) return net.IPAddress;
+  }
+  return undefined;
+}
+
 function extractNetworkInfo(data: { NetworkSettings: any }): {
   ip?: string;
   hostPort?: number;
@@ -417,6 +426,7 @@ export class DockerRuntime implements RuntimeAdapter {
     "serviceShell",
     "projectContainerSweep",
     "deploymentContainerQuery",
+    "hostContainerQuery",
   ]);
 
   /** Docker honors every extended compose key we currently support. */
@@ -1894,6 +1904,9 @@ export class DockerRuntime implements RuntimeAdapter {
     const containers = await this.docker.listContainers({ all: true });
     return containers.map((c) => {
       const labels = c.Labels ?? {};
+      // The list view already carries the network map, so the live-state read
+      // gets each container's internal IP without an inspect round-trip.
+      const ip = firstNetworkIp(c.NetworkSettings?.Networks);
       return {
         id: c.Id,
         names: (c.Names ?? []).map((n) => n.replace(/^\//, "")),
@@ -1909,6 +1922,7 @@ export class DockerRuntime implements RuntimeAdapter {
           ...(p.IP ? { ip: p.IP } : {}),
         })),
         mounts: (c.Mounts ?? []).map(normalizeDockerMount),
+        ...(ip ? { ip } : {}),
         composeProject: labels["com.docker.compose.project"] || undefined,
         composeService: labels["com.docker.compose.service"] || undefined,
       };

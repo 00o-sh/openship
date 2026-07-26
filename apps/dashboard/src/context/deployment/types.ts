@@ -309,16 +309,6 @@ export interface DeploymentConfig {
   /** Custom CPU/RAM/disk values, used only when cloudResourceTier === "custom". */
   cloudResourceCustom?: CloudResourceCustom;
   /**
-   * Per-deploy opt-in (desktop-only; default off) to forward the operator's
-   * LOCAL `gh` identity to a remote server so it can clone on-server using the
-   * relay — instead of building locally + uploading. Only meaningful for a
-   * server-target build; nothing is persisted on the remote.
-   *
-   * Internal now: derived from `cloneStrategy === "server"` on desktop. The
-   * user picks the clone location; this stays the backend relay switch.
-   */
-  forwardGitCredentials?: boolean;
-  /**
    * Where a server deploy clones the repo (default "api-host"). "server" makes
    * the build host clone directly — desktop via the credential relay, a
    * server-hosted instance via a short-lived token. The build always runs on

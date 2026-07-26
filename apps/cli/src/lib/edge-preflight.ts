@@ -23,13 +23,15 @@ import chalk from "chalk";
 import { isCancel, log, note, select } from "@clack/prompts";
 import {
   LocalExecutor,
+  beginEdgeTakeover as realBeginEdgeTakeover,
+  completeEdgeTakeover as realCompleteEdgeTakeover,
   foreignProxyOnEdge as realForeignProxyOnEdge,
-  freeEdgeTargets as realFreeEdgeTargets,
   importSites as realImportSites,
-  stopTargetsForStatus as realStopTargetsForStatus,
+  ourEdgeContainerRunning as realOurEdgeContainerRunning,
+  recoverInterruptedTakeover as realRecoverInterruptedTakeover,
+  rollbackEdgeTakeover as realRollbackEdgeTakeover,
   type CommandExecutor,
   type EdgeStatus,
-  type EdgeStopTarget,
   type ImportedSite,
 } from "@repo/adapters/proxy";
 
@@ -58,12 +60,19 @@ export interface EdgePreflightDeps {
     executor: CommandExecutor,
     status: EdgeStatus,
   ): Promise<{ sites: ImportedSite[]; warnings: string[] }>;
-  freeEdgeTargets(
+  /** Journal-then-free: writes the rollback record BEFORE stopping the proxy. */
+  beginEdgeTakeover(
     executor: CommandExecutor,
-    targets: EdgeStopTarget[],
+    status: EdgeStatus,
     onLog: (message: string, level?: "info" | "warn" | "error") => void,
   ): Promise<void>;
-  stopTargetsForStatus(status: EdgeStatus): EdgeStopTarget[];
+  /** Restore a proxy stopped by an earlier (crashed) run before we re-probe. */
+  recoverInterruptedTakeover(
+    executor: CommandExecutor,
+    onLog: (message: string, level?: "info" | "warn" | "error") => void,
+    isEdgeHealthy?: () => Promise<boolean>,
+  ): Promise<void>;
+  ourEdgeContainerRunning(executor: CommandExecutor): Promise<boolean>;
   /** Read a cert/key PEM off the host filesystem; null if unreadable. */
   readCert(path: string): string | null;
   /** Show the detected conflict (sites + non-migratable warnings) to the operator. */
@@ -96,6 +105,19 @@ export async function planAndApplyHostEdge(
   if (deps.platform !== "linux") return { proceed: true };
 
   const executor = deps.makeExecutor();
+
+  // A previous run may have stopped the operator's proxy and then died (failed
+  // image pull, Ctrl-C, crash). Restore it BEFORE probing, so detection sees the
+  // host's real state instead of "port free" — unless our edge container is in
+  // fact up, in which case that takeover succeeded and only its journal is stale.
+  await deps
+    .recoverInterruptedTakeover(
+      executor,
+      (m, l) => deps.warn(l === "info" ? m : chalk.yellow(m)),
+      () => deps.ourEdgeContainerRunning(executor),
+    )
+    .catch(() => {});
+
   const { status, blocked, owner } = await deps.foreignProxyOnEdge(executor);
   if (!blocked) return { proceed: true }; // free, or already ours
 
@@ -107,10 +129,42 @@ export async function planAndApplyHostEdge(
   // migrate captures the foreign certs (host FS) before we stop the proxy;
   // takeover just frees the ports and lets the imported sites drop.
   const certPems = action === "migrate" ? collectCertPems(sites, deps.readCert) : undefined;
-  await deps.freeEdgeTargets(executor, deps.stopTargetsForStatus(status), (m, l) =>
+  // Journaled stop: if the caller's bring-up fails it calls rollbackHostEdge()
+  // and the operator's proxy comes back, instead of the box staying dark.
+  await deps.beginEdgeTakeover(executor, status, (m, l) =>
     deps.warn(l === "info" ? m : chalk.yellow(m)),
   );
   return action === "migrate" ? { proceed: true, action, sites, certPems } : { proceed: true, action };
+}
+
+/**
+ * Restore the proxy `planAndApplyHostEdge` stopped. Call this on ANY failure
+ * between the takeover and a serving edge (compose up failed, API never became
+ * healthy) — otherwise 80/443 stay dark with the operator's proxy stopped AND
+ * disabled. Returns true if something was actually restored.
+ */
+export async function rollbackHostEdge(): Promise<boolean> {
+  if (process.platform !== "linux") return false;
+  try {
+    return await realRollbackEdgeTakeover(new LocalExecutor(), (entry) =>
+      console.log(chalk.yellow(`  ${entry.message}`)),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Mark the takeover finished once the edge is actually serving, so the next run's
+ * recovery doesn't mistake it for an interrupted one and restart the old proxy.
+ */
+export async function completeHostEdge(): Promise<void> {
+  if (process.platform !== "linux") return;
+  try {
+    await realCompleteEdgeTakeover(new LocalExecutor());
+  } catch {
+    /* best-effort — a stale journal only costs one recovery probe next run */
+  }
 }
 
 async function resolveAction(
@@ -158,8 +212,15 @@ function defaultDeps(): EdgePreflightDeps {
     makeExecutor: () => new LocalExecutor(),
     foreignProxyOnEdge: realForeignProxyOnEdge,
     importSites: realImportSites,
-    freeEdgeTargets: realFreeEdgeTargets,
-    stopTargetsForStatus: realStopTargetsForStatus,
+    beginEdgeTakeover: (executor, status, onLog) =>
+      realBeginEdgeTakeover(executor, status, (entry) => onLog(entry.message, entry.level)),
+    recoverInterruptedTakeover: (executor, onLog, isEdgeHealthy) =>
+      realRecoverInterruptedTakeover(
+        executor,
+        (entry) => onLog(entry.message, entry.level),
+        isEdgeHealthy,
+      ),
+    ourEdgeContainerRunning: realOurEdgeContainerRunning,
     readCert: (p) => {
       try {
         return readFileSync(p, "utf8");

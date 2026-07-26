@@ -786,13 +786,8 @@ export function useDeploymentBuild(
         // Only a server target uses serverId — never let a stale id ride along
         // with a cloud/local deploy (backend gates it too, but be explicit).
         serverId: config.deployTarget === "server" ? config.serverId : undefined,
-        // Per-deploy git credential forwarding — only sent for a server target
-        // (the only build that clones on-host). The API re-checks desktop +
-        // server-build before honoring it.
-        forwardGitCredentials:
-          config.deployTarget === "server" && config.forwardGitCredentials === true
-            ? true
-            : undefined,
+        // Git-credential forwarding is no longer a per-deploy choice — it's a
+        // generic per-operator setting (Settings → GitHub) the API reads directly.
         // Clone location — only meaningful for a server target. Clone-on-server
         // is now the DEFAULT (secure, atomic: credential forwarded over the SSH
         // relay for the clone, never stored). Only an explicit "api-host" pick

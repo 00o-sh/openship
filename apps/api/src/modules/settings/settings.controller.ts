@@ -13,6 +13,8 @@ import {
   isValidTransferCompression,
   getRouteStrategy,
   isValidRouteStrategy,
+  getForwardGitToServer,
+  setForwardGitToServer,
   type BuildMode,
 } from "./settings.service";
 
@@ -28,14 +30,51 @@ function generateId() {
 /** GET / - return platform settings for the authenticated user */
 export async function get(c: Context) {
   const ctx = getRequestContext(c);
-  const [buildMode, deployDefaults, cloneCreds, transferPrefs, routeStrategy] = await Promise.all([
-    getBuildMode(ctx.userId),
-    getDeployDefaults(ctx.userId),
-    getCloneCredentialsState(ctx.userId),
-    getTransferPrefs(ctx.userId),
-    getRouteStrategy(ctx.userId),
-  ]);
-  return c.json({ buildMode, ...deployDefaults, ...cloneCreds, ...transferPrefs, routeStrategy });
+  const [buildMode, deployDefaults, cloneCreds, transferPrefs, routeStrategy, forwardGitToServer] =
+    await Promise.all([
+      getBuildMode(ctx.userId),
+      getDeployDefaults(ctx.userId),
+      getCloneCredentialsState(ctx.userId),
+      getTransferPrefs(ctx.userId),
+      getRouteStrategy(ctx.userId),
+      getForwardGitToServer(ctx.userId),
+    ]);
+  return c.json({
+    buildMode,
+    ...deployDefaults,
+    ...cloneCreds,
+    ...transferPrefs,
+    routeStrategy,
+    forwardGitToServer,
+  });
+}
+
+/**
+ * PATCH /forward-git - flip the generic "forward my git identity to remote build
+ * servers" preference. This is the per-operator replacement for the old
+ * per-deploy `forwardGitCredentials` toggle: when on, a server clone may forward
+ * the local `gh` over the SSH tunnel; when off, the clone falls back to the
+ * server's own ambient git / stored token / public / clone-local chain.
+ *
+ * Body: { enabled: boolean }
+ */
+export async function updateForwardGitToServer(c: Context) {
+  const ctx = getRequestContext(c);
+  const body = await c.req.json().catch(() => ({}));
+  if (typeof body?.enabled !== "boolean") {
+    return c.json({ error: "enabled must be a boolean" }, 400);
+  }
+
+  await setForwardGitToServer(ctx.userId, body.enabled);
+
+  audit.recordAsync(auditContextFrom(c, ctx.organizationId, ctx.userId), {
+    eventType: "settings.updated",
+    resourceType: "settings",
+    resourceId: ctx.userId,
+    after: { action: "forwardGitToServer.set", forwardGitToServer: body.enabled },
+  });
+
+  return c.json({ forwardGitToServer: body.enabled });
 }
 
 /** PATCH /route-strategy - update just the edge→app route strategy default */

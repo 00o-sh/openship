@@ -249,7 +249,9 @@
     "stopped": "Gestoppt",
     "disabled": "Deaktiviert",
     "failed": "Fehlgeschlagen",
-    "starting": "Wird gestartet"
+    "starting": "Wird gestartet",
+    "restarting": "Startet neu",
+    "unknown": "Unbekannt"
   },
   "routingRetry": {
     "title": "Freie Domain-Weiterleitung erfordert Aufmerksamkeit",

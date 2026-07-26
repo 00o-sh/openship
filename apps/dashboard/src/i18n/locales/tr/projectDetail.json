@@ -151,7 +151,9 @@
         "stopped": "Durduruldu",
         "disabled": "Pasif",
         "failed": "Başarısız",
-        "starting": "Başlatılıyor"
+        "starting": "Başlatılıyor",
+        "restarting": "Yeniden başlatılıyor",
+        "unknown": "Bilinmiyor"
       },
       "network": "Ağ",
       "configuration": "Yapılandırma",
@@ -212,7 +214,8 @@
         "serviceDeleted": "Servis silindi",
         "deleteFailed": "Servis silinemedi",
         "backupRunFailed": "Yedekleme işlemi başarısız oldu"
-      }
+      },
+      "duplicateContainers": "Bu servisle eşleşen başka bir konteyner var: {names}"
     },
     "settingsForm": {
       "name": "Ad",

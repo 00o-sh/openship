@@ -10,10 +10,22 @@ import { fileURLToPath } from "node:url";
 
 import { ensureDashboard } from "../lib/dashboard";
 import { installAndStart, preview } from "../lib/service";
-import { composeUp, composeIsViableDefault, composeInternalToken, hasDockerCompose } from "../lib/compose";
+import {
+  composeUp,
+  composeIsViableDefault,
+  composeInternalToken,
+  hasDockerCompose,
+  sourceBuildDir,
+} from "../lib/compose";
 import { resolvePorts } from "../lib/ports";
 import { prepareFromSource, type FromSourceRun } from "../lib/from-source";
-import { planAndApplyHostEdge, type EdgeAction } from "../lib/edge-preflight";
+import {
+  planAndApplyHostEdge,
+  rollbackHostEdge,
+  completeHostEdge,
+  type EdgeAction,
+} from "../lib/edge-preflight";
+import { importMigratedSites } from "../lib/edge-import";
 import {
   resolveInstallInputs,
   headlessProvision,
@@ -289,7 +301,12 @@ async function runCompose(opts: UpOpts & { yes?: boolean }): Promise<{ apiPort: 
   }
 
   const publicUrl = opts.publicUrl ? normalizePublicUrl(opts.publicUrl) : undefined;
-  const spinner = ora("Starting Openship via Docker Compose…").start();
+  const fromSource = sourceBuildDir();
+  const spinner = ora(
+    fromSource
+      ? `Building Openship from ${fromSource} and starting the stack…`
+      : "Starting Openship via Docker Compose…",
+  ).start();
   const res = composeUp({
     apiPort: opts.port,
     dashboardPort: opts.dashboardPort,
@@ -298,10 +315,13 @@ async function runCompose(opts: UpOpts & { yes?: boolean }): Promise<{ apiPort: 
   });
   if (!res.ok) {
     spinner.fail("docker compose failed to start the stack");
+    // The preflight stopped AND disabled the operator's proxy to free 80/443. The
+    // stack isn't coming up, so put it back — never leave the box dark.
+    const restored = edgePlan.action ? await rollbackHostEdge() : false;
     console.error(
       chalk.dim("\n  Check `docker compose -f ~/.openship/compose/docker-compose.yml logs`.\n") +
-        (edgePlan.action
-          ? chalk.yellow("  Note: the previous proxy on :80/:443 was stopped during preflight — restart it manually if you're aborting.\n")
+        (restored
+          ? chalk.yellow("  Restored the previous proxy on :80/:443 — your sites are serving again.\n")
           : chalk.dim("  If ports 80/443 are held by another proxy, re-run — the preflight will offer to migrate or take over.\n")),
     );
     process.exit(1);
@@ -315,6 +335,9 @@ async function runCompose(opts: UpOpts & { yes?: boolean }): Promise<{ apiPort: 
   if (edgePlan.action === "migrate" && edgePlan.sites?.length) {
     await importMigratedSites(res.apiPort, edgePlan.sites, edgePlan.certPems);
   }
+  // Edge is serving — close the takeover journal so the next run's recovery
+  // doesn't mistake it for an interrupted one and restart the old proxy.
+  if (edgePlan.action) await completeHostEdge();
 
   const dashboardUrl = publicUrl ?? `http://localhost:${res.dashPort}`;
   console.log(
@@ -325,60 +348,6 @@ async function runCompose(opts: UpOpts & { yes?: boolean }): Promise<{ apiPort: 
       (headless ? "" : chalk.dim("  Create an admin: open the dashboard and register the first account.\n")),
   );
   return { apiPort: res.apiPort, dashPort: res.dashPort };
-}
-
-/** Wait for the compose api container to answer its health stub. */
-async function waitForApiHealth(port: string, tries: number): Promise<boolean> {
-  for (let i = 0; i < tries; i++) {
-    try {
-      const r = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(2000) });
-      if (r.ok) return true;
-    } catch {
-      /* not up yet */
-    }
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  return false;
-}
-
-/**
- * Post the sites migrated off a foreign proxy to the api's internal edge-import
- * endpoint (the api registers them into the container edge). Uses the compose
- * stack's INTERNAL_TOKEN (from compose/.env — NOT the bare-mode token file).
- */
-async function importMigratedSites(
-  apiPort: string,
-  sites: ImportedSite[],
-  certPems?: Record<string, { certPem: string; keyPem: string }>,
-): Promise<void> {
-  const token = composeInternalToken();
-  if (!token) {
-    console.log(chalk.yellow("  Couldn't read the stack's internal token — skipping site import. Re-run to retry.\n"));
-    return;
-  }
-  const spinner = ora(`Importing ${sites.length} migrated site${sites.length === 1 ? "" : "s"} into the edge…`).start();
-  if (!(await waitForApiHealth(apiPort, 60))) {
-    spinner.warn("API didn't become healthy in time — migrated sites not imported. Re-run `openship up` to retry.");
-    return;
-  }
-  try {
-    const r = await fetch(`http://127.0.0.1:${apiPort}/api/system/edge/import-sites`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Internal-Token": token },
-      body: JSON.stringify({ sites, certPems }),
-      signal: AbortSignal.timeout(120000),
-    });
-    const data = (await r.json().catch(() => ({}))) as { registered?: string[]; warnings?: string[]; error?: string };
-    if (!r.ok) {
-      spinner.warn(`Site import failed: ${data.error ?? `HTTP ${r.status}`}. Re-run to retry.`);
-      return;
-    }
-    const registered = data.registered ?? [];
-    spinner.succeed(`Migrated ${registered.length} site${registered.length === 1 ? "" : "s"} into Openship's edge.`);
-    for (const w of (data.warnings ?? []).slice(0, 8)) console.log(chalk.dim(`    • ${w}`));
-  } catch (e) {
-    spinner.warn(`Site import failed: ${(e as Error).message}. Re-run to retry.`);
-  }
 }
 
 /**

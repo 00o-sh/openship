@@ -338,23 +338,20 @@ export function RoutingSettingsCard({
                 {portInline && actionSlot}
               </div>
 
-              {/* DNS hint — lazy: only shown once records are resolvable (or
-                  loading). No "enter a valid domain" nag; DNS isn't required up
+              {/* DNS hint — shown ONLY once records actually resolve. The
+                  "checking…" loading state was dropped: it flashed on every
+                  keystroke and jittered the card height. DNS isn't required up
                   front (verified later at preflight / in domain settings). */}
-              {(loadingRecords || hasRecords) && (
+              {hasRecords && (
                 <div className="rounded-lg border border-border/50 bg-muted/20 overflow-hidden">
                   <div className="flex items-center gap-2 px-3 py-2">
                     <Server className="size-3 text-muted-foreground shrink-0" />
-                    {loadingRecords ? (
-                      <p className="text-sm text-muted-foreground flex-1">{w.checkingDns}</p>
-                    ) : (
-                      <p className="text-sm text-muted-foreground flex-1">
-                        {interpolate(w.addRecordHint, {
-                          primary: dnsRecords.find((record) => record.type !== "TXT")?.type ?? "",
-                          txt: "TXT",
-                        })}
-                      </p>
-                    )}
+                    <p className="text-sm text-muted-foreground flex-1">
+                      {interpolate(w.addRecordHint, {
+                        primary: dnsRecords.find((record) => record.type !== "TXT")?.type ?? "",
+                        txt: "TXT",
+                      })}
+                    </p>
                     {hasRecords && (
                       <button
                         type="button"

@@ -1238,42 +1238,15 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
     },
   ];
 
-  // Whether the credential-forwarding relay can run for this target. The relay
-  // is desktop-only and needs a real SSH reverse tunnel — which every remote
-  // server has (key, password, OR agent), and only a local/no-SSH target lacks.
-  // So any server with a configured SSH auth method is relay-capable; the
-  // backend re-checks the true capability (executor.reverseForward) + a local gh
-  // before actually forwarding, and degrades to an api-host clone otherwise.
-  const selectedServerAuth = servers.find((s) => s.id === config.serverId)?.sshAuthMethod ?? null;
-  const relayCapable = selectedServerAuth != null;
-  // Single source of truth for "forward the git credential for a server clone":
-  // desktop + an SSH-reachable server. Both the default effect and the manual
-  // clone-card pick read this, so they can never drift.
-  const canForwardServerClone = isDesktop && relayCapable;
-
-  // Default the clone location to "on the server" and, for a capable desktop
-  // server clone, default forwarding ON — the secure + atomic path (clone on the
-  // build host, nothing persisted). Only for a brand-new deploy, and only when
-  // the choice is UNSET: never override an explicit user pick, so an opt-out
-  // (unchecking → forwardGitCredentials=false) sticks.
+  // Default the clone location to "on the server" for a brand-new deploy when
+  // the choice is UNSET. Git-identity forwarding is no longer a per-deploy
+  // choice — it's the operator-wide "Forward my git identity to build servers"
+  // setting (Settings → Clone credentials), resolved server-side at build time.
   useEffect(() => {
     if (config.projectId) return;
     if (!showCloneStrategy) return;
-    const clone: CloneStrategy = config.cloneStrategy ?? "server";
-    const patch: { cloneStrategy?: CloneStrategy; forwardGitCredentials?: boolean } = {};
-    if (config.cloneStrategy == null) patch.cloneStrategy = clone;
-    if (config.forwardGitCredentials == null && clone === "server" && canForwardServerClone) {
-      patch.forwardGitCredentials = true;
-    }
-    if (Object.keys(patch).length > 0) updateConfig(patch);
-  }, [
-    config.projectId,
-    showCloneStrategy,
-    config.cloneStrategy,
-    config.forwardGitCredentials,
-    canForwardServerClone,
-    updateConfig,
-  ]);
+    if (config.cloneStrategy == null) updateConfig({ cloneStrategy: "server" });
+  }, [config.projectId, showCloneStrategy, config.cloneStrategy, updateConfig]);
 
   // Advanced-panel summary line (build location). Clone location has its own
   // right-panel picker, so it isn't summarized here.
@@ -1712,18 +1685,7 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
                             key={opt.value}
                             value={opt.value}
                             selected={cloneStrategy === opt.value}
-                            onSelect={() =>
-                              updateConfig({
-                                cloneStrategy: opt.value,
-                                // "Clone on the server" forwards the git identity
-                                // (desktop + SSH-reachable server); "api-host" is
-                                // the explicit opt-out (false → clone here +
-                                // transfer). The backend re-checks the real relay
-                                // capability + a local gh before forwarding.
-                                forwardGitCredentials:
-                                  opt.value === "server" && canForwardServerClone,
-                              })
-                            }
+                            onSelect={() => updateConfig({ cloneStrategy: opt.value })}
                             icon={opt.icon}
                             label={opt.label}
                             description={opt.description}
@@ -1732,29 +1694,6 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
                         ))}
                       </div>
                     </div>
-                  )}
-
-                  {/* Git credential forwarding — Direct (bare) app, desktop-only. */}
-                  {isDesktop && config.runtimeMode === "bare" && !isServiceDeployment && config.buildStrategy === "server" && (
-                    <label className="flex items-start gap-2.5 cursor-pointer select-none rounded-xl border border-border/50 bg-card/40 px-4 py-3">
-                      <input
-                        type="checkbox"
-                        checked={config.forwardGitCredentials === true}
-                        onChange={(e) => updateConfig({ forwardGitCredentials: e.target.checked })}
-                        className="mt-0.5 size-4 shrink-0 rounded border-border/60 bg-card text-primary focus:ring-2 focus:ring-primary/30 focus:ring-offset-0 cursor-pointer"
-                      />
-                      <span className="min-w-0">
-                        <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
-                          <GitBranch className="size-3.5 text-muted-foreground" />
-                          {ts.gitForwardLabel}
-                        </span>
-                        <span className="mt-0.5 block text-xs text-muted-foreground leading-snug">
-                          {ts.gitForwardDescPre}
-                          <span className="font-mono text-foreground/80">gh</span>
-                          {ts.gitForwardDescPost}
-                        </span>
-                      </span>
-                    </label>
                   )}
                   </div>
                 </div>

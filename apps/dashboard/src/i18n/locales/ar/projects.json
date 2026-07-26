@@ -249,7 +249,9 @@
     "stopped": "متوقف",
     "disabled": "معطّل",
     "failed": "فاشل",
-    "starting": "قيد البدء"
+    "starting": "قيد البدء",
+    "restarting": "قيد إعادة التشغيل",
+    "unknown": "غير معروف"
   },
   "routingRetry": {
     "title": "توجيه النطاق المجاني يحتاج إلى إجراء",

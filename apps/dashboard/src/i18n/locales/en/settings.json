@@ -219,6 +219,9 @@
     "clear": "Clear",
     "useAsDefault": "Use as default clone token",
     "useAsDefaultDesc": "When on, the clone module uses this token as the second tier in the chain (after per-project overrides). When off, the token is stored but not used - handy if you only want it active for specific deploys.",
+    "forwardGitLabel": "Forward my git identity to build servers",
+    "forwardGitDesc": "When a build runs on a remote server, forward your local GitHub CLI login over the SSH tunnel so private repos clone directly on the server — no GitHub App needed. When off, the server falls back to its own git login, a stored token, or the public/local clone path.",
+    "forwardGitFailed": "Failed to update git forwarding",
     "toast": {
       "pasteFirst": "Paste a token before saving",
       "notLikeToken": "That doesn't look like a GitHub token. Save anyway if you're sure.",

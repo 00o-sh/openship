@@ -115,6 +115,10 @@ export interface ServiceDrift {
   changes: Array<{ field: string; from: unknown; to: unknown }>;
 }
 
+/** A service's LIVE runtime view — read off the host on every request, never
+ *  from the deploy-time status column. `status` is
+ *  running | starting | restarting | stopped | failed | unknown
+ *  ("unknown" = the host couldn't be reached, not a claim about the service). */
 export interface ServiceContainer {
   serviceId: string;
   serviceName: string;
@@ -123,6 +127,10 @@ export interface ServiceContainer {
   ip: string | null;
   hostPort: number | null;
   imageRef: string | null;
+  /** Which identity key matched the container: label | name | trackedId | compose. */
+  matchedBy?: "label" | "name" | "trackedId" | "compose" | null;
+  /** Other containers on the host that also answer to this service (leftovers). */
+  duplicates?: string[];
 }
 
 export interface ServiceVolumeSize {

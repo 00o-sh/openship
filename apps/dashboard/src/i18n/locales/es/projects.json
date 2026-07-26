@@ -249,7 +249,9 @@
     "stopped": "Detenido",
     "disabled": "Deshabilitado",
     "failed": "Fallido",
-    "starting": "Iniciando"
+    "starting": "Iniciando",
+    "restarting": "Reiniciando",
+    "unknown": "Desconocido"
   },
   "routingRetry": {
     "title": "El enrutamiento del dominio gratuito necesita atención",

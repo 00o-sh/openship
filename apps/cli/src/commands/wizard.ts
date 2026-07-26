@@ -47,8 +47,16 @@ import { ensureDashboard } from "../lib/dashboard";
 import { serviceStatus, stop as stopService, restart as restartService } from "../lib/service";
 import { saveInstanceUrl, readInstanceUrl } from "../lib/ports";
 import { runRepair, looksCorrupted, lastServiceError } from "../lib/repair";
-import { ensureDocker, hasDockerCompose, composeUp, composeInternalToken } from "../lib/compose";
-import { planAndApplyHostEdge } from "../lib/edge-preflight";
+import {
+  ensureDocker,
+  hasDockerCompose,
+  composeUp,
+  composeInternalToken,
+  sourceBuildDir,
+} from "../lib/compose";
+import { planAndApplyHostEdge, rollbackHostEdge, completeHostEdge } from "../lib/edge-preflight";
+import { importMigratedSites } from "../lib/edge-import";
+import type { ImportedSite } from "@repo/adapters/proxy";
 import { headlessProvision, type InstallInputs } from "../lib/instance-provision";
 
 declare const __CLI_VERSION__: string;
@@ -603,6 +611,11 @@ export async function runWizard(): Promise<void> {
   const s = spinner();
   let started: { port: string; dashPort: string; publicUrl?: string };
   let provisionToken: string | undefined;
+  // Host-edge takeover state (compose only): what the operator chose, plus the
+  // sites/certs to hand the api once the container edge is up.
+  let edgeAction: "migrate" | "takeover" | "cancel" | undefined;
+  let migratedSites: ImportedSite[] | undefined;
+  let migratedCertPems: Record<string, { certPem: string; keyPem: string }> | undefined;
   if (method === "compose") {
     // A foreign proxy already on 80/443? Migrate/take it over first (interactive)
     // so the container edge can bind — the same host-edge pipe `openship up` uses.
@@ -611,9 +624,23 @@ export async function runWizard(): Promise<void> {
       cancel("Left the existing proxy on 80/443 running — re-run and choose migrate/takeover when ready.");
       process.exit(0);
     }
-    log.step("Pulling images and starting the Docker Compose stack…");
+    // Kept outside this branch so the health-check failure below can roll the
+    // takeover back, and so the post-up import knows what to register.
+    edgeAction = edgePlan.action;
+    migratedSites = edgePlan.sites;
+    migratedCertPems = edgePlan.certPems;
+    log.step(
+      sourceBuildDir()
+        ? "Building the Openship images from your source checkout (first run takes a few minutes)…"
+        : "Pulling images and starting the Docker Compose stack…",
+    );
     const up = composeUp({ publicUrl, trustProxy: behindProxy, version: __CLI_VERSION__ });
     if (!up.ok) {
+      // The preflight stopped + disabled the operator's proxy to free 80/443. The
+      // stack isn't coming up, so restore it rather than leaving the box dark.
+      if (edgePlan.action && (await rollbackHostEdge())) {
+        log.warn("Restored the previous proxy on 80/443 — your existing sites are serving again.");
+      }
       log.error("The Docker Compose stack didn't come up. Run `openship up --compose` to see the error.");
       process.exit(1);
     }
@@ -638,6 +665,9 @@ export async function runWizard(): Promise<void> {
 
   if (!(await waitHealthy(started.port))) {
     s.stop("Openship didn't become healthy in time.", 1);
+    if (method === "compose" && edgeAction && (await rollbackHostEdge())) {
+      log.warn("Restored the previous proxy on 80/443 — your existing sites are serving again.");
+    }
     const reason = lastServiceError();
     if (reason) log.error(reason);
     if (reason && /lock/i.test(reason)) {
@@ -659,6 +689,21 @@ export async function runWizard(): Promise<void> {
     s.message("Starting the Openship dashboard");
     await waitDashboard(started.dashPort);
     s.stop("Deployed.");
+
+    // Migrate, phase 2 — the container edge exists now, so re-register the
+    // foreign proxy's sites into it (same helper `openship up` uses). Without
+    // this, "Migrate N sites & take over" would take the ports and serve nothing
+    // for those hostnames.
+    if (edgeAction === "migrate" && migratedSites?.length) {
+      const imported = await importMigratedSites(started.port, migratedSites, migratedCertPems);
+      if (!imported.ok) {
+        log.warn(
+          `Your ${migratedSites.length} existing site${migratedSites.length === 1 ? "" : "s"} ` +
+            "aren't served yet — re-run `openship up` to retry the import.",
+        );
+      }
+    }
+    if (edgeAction) await completeHostEdge();
 
     let liveUrl = publicUrl ?? `http://localhost:${started.dashPort}`;
     if (domainPlan.type === "free") {

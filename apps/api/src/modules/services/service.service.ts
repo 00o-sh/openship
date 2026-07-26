@@ -3,7 +3,7 @@
  */
 
 import { normalizeRoutingFields, repos, composeSpecDiff, type Service, type ServicePublicEndpoint } from "@repo/db";
-import { serviceStatusToContainerState, isValidCustomHostname, ValidationError, withTimeout, type ServiceContainerState } from "@repo/core";
+import { isValidCustomHostname, ValidationError, withTimeout, type ServiceContainerState } from "@repo/core";
 import {
   BuildLogger,
   DockerRuntime,
@@ -15,13 +15,17 @@ import { scopedVolumeName, type CommandExecutor } from "@repo/adapters";
 import { encrypt, decrypt } from "../../lib/encryption";
 import { assertResourceInOrg, platform } from "../../lib/controller-helpers";
 import type { RequestContext } from "../../lib/request-context";
-import { resolveDeploymentPlatform, resolveServerExecutor } from "../../lib/deployment-runtime";
-import { containerIdForService } from "./service-container";
+import { resolveServerExecutor } from "../../lib/deployment-runtime";
+import {
+  containerIdForService,
+  liveContainerIdWithRuntime,
+  resolveServicePlatform,
+} from "./service-container";
+import { resolveLiveServiceState, type LiveMatchKind } from "./live-state";
 import { parseVolumeSpec, type VolumeKind } from "./volume-spec";
 import { sq } from "../migration/direct-transfer";
 import { bounded, duBytes, volumeBytes } from "../migration/migration-size";
 import { deployComposeServices } from "../deployments/compose/deploy.service";
-import type { DeploymentConfigSnapshot } from "../deployments/build.service";
 import { buildServiceRouteDomains, serviceCustomHostnames } from "../../lib/routing-domains";
 import { resolveServicePublicEndpoints } from "../../lib/public-endpoints";
 import { assertFreeEndpointsAllowed } from "../../lib/free-domain-guard";
@@ -665,75 +669,193 @@ export async function listServiceDeployments(deploymentId: string) {
   return repos.service.listByDeployment(deploymentId);
 }
 
-export async function getActiveServiceContainers(ctx: RequestContext, projectId: string) {
-  const project = await repos.project.findById(projectId);
-  assertResourceInOrg(project, "Project", ctx.organizationId, projectId);
-  if (!project.activeDeploymentId) return [];
-  const rows = await repos.service.listByDeployment(project.activeDeploymentId);
-  if (rows.length === 0) return [];
-
-  // Reflect the REAL runtime state, not the deploy-time status column (written
-  // "success" once at deploy and never touched by stop/crash). The persisted
-  // status is the fallback for every row.
-  const persisted = () =>
-    rows.map((row) => ({ ...row, status: serviceStatusToContainerState(row.status) }));
-
-  const dep = await repos.deployment.findById(project.activeDeploymentId);
-  const runtime = dep
-    ? await resolveServicePlatform(project, dep)
-        .then((r) => r.platform.runtime)
-        .catch(() => null)
-    : null;
-  if (!runtime) return persisted();
-
-  try {
-    // FAST path: ONE label-filtered `docker ps` for the whole deployment
-    // instead of N per-service `docker inspect` round-trips over SSH (the
-    // latter made this endpoint take ~17s and time out the Services tab). The
-    // dashboard polls this, so it MUST be one call.
-    const live = await withLiveQueryTimeout(
-      (async () => {
-        if (runtime.supports("deploymentContainerQuery") && runtime.listDeploymentContainers) {
-          const containers = await runtime.listDeploymentContainers(dep!.id);
-          const byId = new Map(containers.map((c) => [c.containerId, c]));
-          return rows.map((row) => {
-            if (!row.containerId) return { ...row, status: serviceStatusToContainerState(row.status) };
-            const c = byId.get(row.containerId);
-            // A tracked container missing from `docker ps` is gone → stopped.
-            return { ...row, status: c ? containerStatusToServiceState(c.status) : "stopped" };
-          });
-        }
-        // Cloud (no batch query): per-workload lookup — bounded set, Oblien API
-        // (not SSH), and it also refreshes the live private IP.
-        if (runtime.supports("containerInfo")) {
-          return Promise.all(
-            rows.map(async (row) => {
-              const fb = serviceStatusToContainerState(row.status);
-              if (!row.containerId) return { ...row, status: fb };
-              const info = await runtime.getContainerInfo(row.containerId).catch(() => null);
-              return info
-                ? { ...row, status: containerStatusToServiceState(info.status), ip: info.ip ?? row.ip }
-                : { ...row, status: fb };
-            }),
-          );
-        }
-        return null; // runtime can't report → use persisted
-      })(),
-    );
-    return live ?? persisted();
-  } catch {
-    return persisted();
-  } finally {
-    await runtime.dispose?.();
-  }
+/** One row of the Services panel's live view. Config (id/name) is DB-owned;
+ *  everything else is read off the host on every request. */
+export interface LiveServiceContainer {
+  serviceId: string;
+  serviceName: string;
+  /** The container the service ACTUALLY runs as — resolved live, so logs /
+   *  terminal / start act on the real thing even after an adopt or an
+   *  out-of-band recreate. */
+  containerId: string | null;
+  status: ServiceContainerState;
+  ip: string | null;
+  hostPort: number | null;
+  imageRef: string | null;
+  /** Which identity key resolved the container (label / name / trackedId /
+   *  compose), or null when nothing matched. Diagnostic. */
+  matchedBy: LiveMatchKind | null;
+  /** Other containers on the host that also answer to this service — a leftover
+   *  duplicate the operator should know about. */
+  duplicates: string[];
 }
 
-/** Bound the live status query so a slow/hung runtime degrades to the persisted
- *  status instead of hanging the (polled) containers endpoint. */
+/**
+ * The Services panel's state, read LIVE from the host every time.
+ *
+ * The service ROWS are the config (DB); their state never is. Earlier this asked
+ * docker for `label=openship.deployment=<active dep>` and intersected with each
+ * row's stored container id, which made every ADOPTED container invisible — a
+ * migration attaches running containers in place and docker labels can't be
+ * changed in place, so an attached container keeps the OLD deployment label and
+ * reported "stopped" while serving traffic. Identity is now resolved by
+ * label → canonical name → tracked id → compose label (see live-state.ts) and
+ * the status comes off whatever that resolves to.
+ */
+export async function getActiveServiceContainers(
+  ctx: RequestContext,
+  projectId: string,
+): Promise<LiveServiceContainer[]> {
+  const project = await repos.project.findById(projectId);
+  assertResourceInOrg(project, "Project", ctx.organizationId, projectId);
+
+  // Every CONFIGURED service, not just those with a row in the active deployment
+  // — a service the deployment never recorded (attached by a migration, added
+  // afterwards) must still report its real state instead of vanishing.
+  const services = await repos.service.listByProject(projectId);
+  if (services.length === 0) return [];
+
+  const dep = project.activeDeploymentId
+    ? await repos.deployment.findById(project.activeDeploymentId)
+    : null;
+  // service_deployment rows are IDENTITY HINTS ONLY (container id, image). Their
+  // `status` column is a deploy-time artifact and is never read for liveness.
+  const hints = new Map(
+    (dep ? await repos.service.listByDeployment(dep.id) : []).map((r) => [r.serviceId, r]),
+  );
+  const trackedIds = Object.fromEntries(
+    [...hints.entries()].map(([serviceId, r]) => [serviceId, r.containerId]),
+  );
+
+  /** Shape one row without a live match — used when there is nothing to query
+   *  (never deployed) or when the host could not be reached ("unknown"). */
+  const flat = (status: ServiceContainerState): LiveServiceContainer[] =>
+    services
+      .filter((svc) => svc.enabled !== false)
+      .map((svc) => {
+        const hint = hints.get(svc.id);
+        return {
+          serviceId: svc.id,
+          serviceName: svc.name,
+          containerId: hint?.containerId ?? null,
+          status,
+          ip: hint?.ip ?? null,
+          hostPort: hint?.hostPort ?? null,
+          imageRef: hint?.imageRef ?? null,
+          matchedBy: null,
+          duplicates: [],
+        };
+      });
+
+  if (!dep) return flat("stopped"); // nothing deployed yet → nothing can be live
+
+  // ONE budget for the WHOLE live path — platform resolution included. That
+  // resolution opens the pooled SSH connection (resolveServerExecutor →
+  // sshManager.acquire), and it used to sit OUTSIDE the timeout: an unreachable
+  // or saturated box (e.g. one busy receiving a build-context transfer) stalled
+  // this *polled* endpoint past the dashboard's 15s request timeout, so the tab
+  // aborted instead of reporting a state.
+  const live = await withLiveQueryTimeout(
+    (async (): Promise<LiveServiceContainer[] | null> => {
+      const runtime = await resolveServicePlatform(project, dep)
+        .then((r) => r.platform.runtime)
+        .catch(() => null);
+      if (!runtime) return null;
+
+      try {
+        // Docker: ONE label-agnostic `docker ps -a` for the whole host, matched
+        // by identity. One call — the dashboard polls this endpoint, and N
+        // per-service `docker inspect` round-trips over SSH took ~17s.
+        if (runtime.supports("hostContainerQuery") && runtime.listAllContainers) {
+          const containers = await runtime.listAllContainers();
+          const matches = resolveLiveServiceState({
+            services: services.map((s) => ({ id: s.id, name: s.name })),
+            live: containers,
+            projectId,
+            slug: project.slug,
+            trackedIds,
+          });
+          return (
+            services
+              // A DISABLED service with no container is left OUT so the panel can
+              // render "Disabled"; one that is somehow still running is reported
+              // truthfully (a disabled-but-running service is worth seeing).
+              .filter((svc) => svc.enabled !== false || matches.get(svc.id)?.containerId)
+              .map((svc) => {
+                const m = matches.get(svc.id);
+                const hint = hints.get(svc.id);
+                return {
+                  serviceId: svc.id,
+                  serviceName: svc.name,
+                  containerId: m?.containerId ?? null,
+                  status: m?.status ?? "stopped",
+                  ip: m?.ip ?? null,
+                  hostPort: m?.hostPort ?? hint?.hostPort ?? null,
+                  imageRef: m?.image ?? hint?.imageRef ?? null,
+                  matchedBy: m?.matchedBy ?? null,
+                  duplicates: m?.duplicates ?? [],
+                } satisfies LiveServiceContainer;
+              })
+          );
+        }
+        // Cloud (no host container list): per-workload lookup — bounded set,
+        // Oblien API (not SSH), and it also refreshes the live private IP.
+        if (runtime.supports("containerInfo")) {
+          return Promise.all(
+            services
+              .filter((svc) => svc.enabled !== false)
+              .map(async (svc) => {
+                const hint = hints.get(svc.id);
+                const base = {
+                  serviceId: svc.id,
+                  serviceName: svc.name,
+                  containerId: hint?.containerId ?? null,
+                  ip: hint?.ip ?? null,
+                  hostPort: hint?.hostPort ?? null,
+                  imageRef: hint?.imageRef ?? null,
+                  matchedBy: null,
+                  duplicates: [],
+                };
+                if (!hint?.containerId) return { ...base, status: "stopped" as ServiceContainerState };
+                const info = await runtime.getContainerInfo(hint.containerId).catch(() => null);
+                return {
+                  ...base,
+                  status: info ? containerStatusToServiceState(info.status) : "unknown",
+                  ip: info?.ip ?? base.ip,
+                  matchedBy: info ? ("trackedId" as LiveMatchKind) : null,
+                } satisfies LiveServiceContainer;
+              }),
+          );
+        }
+        return null; // runtime can't report → unknown, never a stale DB status
+      } finally {
+        // Teardown must never extend the response: releasing the pooled SSH hold
+        // is fire-and-forget (it still runs, we just don't wait on it).
+        void Promise.resolve(runtime.dispose?.()).catch(() => {});
+      }
+    })().catch(() => null),
+  );
+  // Unreachable host / timeout / runtime without a query: say UNKNOWN. The old
+  // fallback echoed the deploy-time status column, which is how a long-dead
+  // service kept rendering "Running".
+  return live ?? flat("unknown");
+}
+
+/**
+ * Bound the live-status path so a slow/hung/unreachable runtime degrades to the
+ * persisted status instead of hanging the (polled) containers endpoint.
+ *
+ * The budget covers SSH connect + the query together, so it has to be roomier
+ * than the old query-only 6s while staying well under the dashboard's 15s
+ * request timeout — a request that exceeds THAT is what turns a degradable read
+ * into an aborted one.
+ */
+const LIVE_QUERY_BUDGET_MS = 10_000;
+
 function withLiveQueryTimeout<T>(p: Promise<T>): Promise<T | null> {
   return Promise.race([
     p,
-    new Promise<null>((resolve) => setTimeout(() => resolve(null), 6000)),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), LIVE_QUERY_BUDGET_MS)),
   ]);
 }
 
@@ -833,10 +955,20 @@ export async function getServiceVolumeSizes(
   if (!dep) return unmeasured(false);
 
   // Resolve the host that runs this service's container → its shell executor.
+  // The container id is resolved LIVE on the way past: a stale recorded id made
+  // `docker inspect .Mounts` 404, which dropped every volume onto the slow
+  // per-volume `du` fallback and timed this endpoint out.
   let serverId: string | null = null;
+  let liveContainerId: string | null = null;
   try {
     const resolved = await resolveServicePlatform(project, dep);
     serverId = resolved.serverId;
+    liveContainerId = await liveContainerIdWithRuntime(resolved.platform.runtime, {
+      service: { id: svc.id, name: svc.name },
+      projectId,
+      slug: project.slug,
+      tracked: await containerIdForService(dep, { id: svc.id, name: svc.name }),
+    });
     await resolved.platform.runtime?.dispose?.();
   } catch {
     // fall through — try the instance's local host below
@@ -853,7 +985,8 @@ export async function getServiceVolumeSizes(
     return unmeasured(false);
   }
 
-  const containerId = await containerIdForService(dep, { id: svc.id, name: svc.name });
+  const containerId =
+    liveContainerId ?? (await containerIdForService(dep, { id: svc.id, name: svc.name }));
   const cacheKey = `${projectId}:${serviceId}:${containerId ?? "none"}`;
   const hit = volSizeCache.get(cacheKey);
   if (hit && Date.now() - hit.at < VOL_SIZE_TTL_MS) return hit.value;
@@ -910,19 +1043,17 @@ export async function getServiceVolumeSizes(
 
 // ─── Per-service container actions ───────────────────────────────────────────
 
-/** A service is a CONTAINER (Docker, on a server/local target) or an Oblien
- *  WORKSPACE (cloud) — never the app's bare host process. Resolve the platform
- *  with the runtime pinned to Docker so service start/stop/logs target the real
- *  service runtime even when the project's app deploys "bare". Cloud stays on
- *  CloudRuntime (runtimeMode is irrelevant there). */
-async function resolveServicePlatform(
-  project: { organizationId: string },
-  dep: { meta: unknown },
-) {
-  const snapshot = { ...(dep.meta as DeploymentConfigSnapshot), runtimeMode: "docker" as const };
-  return resolveDeploymentPlatform(snapshot, { organizationId: project.organizationId });
-}
-
+/**
+ * The runtime + the container id for one service's actions (start/stop/restart/
+ * logs/exec).
+ *
+ * The container id is resolved LIVE against the host, not read off the
+ * `service_deployment` row: that row's id goes stale the moment a redeploy
+ * replaces the container, and every action then failed with docker's
+ * "(HTTP code 404) no such container". The row is still used as an identity hint
+ * (it's the only key an adopted container with a foreign name has) — see
+ * live-state.ts for the resolution order.
+ */
 async function resolveServiceContainer(
   ctx: RequestContext,
   projectId: string,
@@ -935,17 +1066,34 @@ async function resolveServiceContainer(
   const dep = await repos.deployment.findById(project.activeDeploymentId);
   if (!dep) throw new Error("Active deployment not found");
 
+  const svc = (await repos.service.listByProject(projectId)).find((s) => s.id === serviceId);
+  if (!svc) throw new Error("Service not found");
+
   const rows = await repos.service.listByDeployment(dep.id);
   const row = rows.find((r) => r.serviceId === serviceId);
-  if (!row?.containerId) throw new Error("Service has no running container");
 
   const resolved = await resolveServicePlatform(project, dep);
-  return {
-    runtime: resolved.platform.runtime,
-    containerId: row.containerId,
-    serverId: resolved.serverId,
-    row,
-  };
+  const runtime = resolved.platform.runtime;
+
+  // Live query answered → trust it. No match = the container is genuinely gone,
+  // and saying so beats handing docker a dead id.
+  const containerId = await liveContainerIdWithRuntime(runtime, {
+    service: { id: svc.id, name: svc.name },
+    projectId,
+    slug: project.slug,
+    tracked: row?.containerId ?? null,
+  });
+  // Heal the record so the DB-hint consumers (backups, restore) converge on the
+  // same container instead of each rediscovering the drift.
+  if (row && containerId && row.containerId !== containerId) {
+    await repos.service.updateServiceDeployment(row.id, { containerId }).catch(() => {});
+  }
+  if (!containerId) {
+    await runtime.dispose?.().catch(() => {});
+    throw new Error("Service has no running container");
+  }
+
+  return { runtime, containerId, serverId: resolved.serverId, row, service: svc };
 }
 
 /** Map a live runtime ContainerStatus onto the UI's service state vocabulary.
@@ -1055,9 +1203,11 @@ export async function startServiceContainer(
   if (existing?.containerId) {
     try {
       await existing.runtime.start(existing.containerId);
-      await repos.service
-        .updateServiceDeployment(existing.row.id, { status: "success" })
-        .catch(() => {});
+      if (existing.row) {
+        await repos.service
+          .updateServiceDeployment(existing.row.id, { status: "success" })
+          .catch(() => {});
+      }
       return { containerId: existing.containerId };
     } finally {
       await existing.runtime.dispose?.();
@@ -1078,9 +1228,10 @@ export async function stopServiceContainer(
   );
   try {
     await runtime.stop(containerId);
-    // Persist the state change (partial update — preserves ip/imageRef) so
-    // every reader converges, not just the live-reconciled services panel.
-    await repos.service.updateServiceDeployment(row.id, { status: "stopped" }).catch(() => {});
+    // Deploy-history bookkeeping only — the panel reads state from the host.
+    if (row) {
+      await repos.service.updateServiceDeployment(row.id, { status: "stopped" }).catch(() => {});
+    }
     return { containerId };
   } finally {
     await runtime.dispose?.();
@@ -1099,7 +1250,9 @@ export async function restartServiceContainer(
   );
   try {
     await runtime.restart(containerId);
-    await repos.service.updateServiceDeployment(row.id, { status: "success" }).catch(() => {});
+    if (row) {
+      await repos.service.updateServiceDeployment(row.id, { status: "success" }).catch(() => {});
+    }
     return { containerId };
   } finally {
     await runtime.dispose?.();

@@ -149,7 +149,6 @@ export const BuildAccessBody = Type.Object({
       { description: "CPU/RAM/disk when cloudResourceTier='custom'." },
     ),
   ),
-  forwardGitCredentials: Type.Optional(Type.Boolean()),
   cloneStrategy: Type.Optional(Type.Union([Type.Literal("api-host"), Type.Literal("server")])),
 });
 

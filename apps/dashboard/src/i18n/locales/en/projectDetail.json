@@ -151,7 +151,9 @@
         "stopped": "Stopped",
         "disabled": "Disabled",
         "failed": "Failed",
-        "starting": "Starting"
+        "starting": "Starting",
+        "restarting": "Restarting",
+        "unknown": "Unknown"
       },
       "network": "Network",
       "configuration": "Configuration",
@@ -212,7 +214,8 @@
         "serviceDeleted": "Service deleted",
         "deleteFailed": "Failed to delete service",
         "backupRunFailed": "Backup run failed"
-      }
+      },
+      "duplicateContainers": "Another container also matches this service: {names}"
     },
     "settingsForm": {
       "name": "Name",

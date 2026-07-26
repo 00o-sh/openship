@@ -393,6 +393,7 @@ export const endpoints = {
     deployDefaults: "settings/deploy-defaults",
     cloneCredentials: "settings/clone-credentials",
     cloneStrategyPreference: "settings/clone-strategy-preference",
+    forwardGit: "settings/forward-git",
   },
 
   /* ---------------------------------------------------------------- */

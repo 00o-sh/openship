@@ -148,7 +148,9 @@
         "stopped": "Detenido",
         "disabled": "Deshabilitado",
         "failed": "Fallido",
-        "starting": "Iniciando"
+        "starting": "Iniciando",
+        "restarting": "Reiniciando",
+        "unknown": "Desconocido"
       },
       "network": "Red",
       "configuration": "Configuración",
@@ -205,7 +207,8 @@
         "serviceDeleted": "Servicio eliminado",
         "deleteFailed": "No se pudo eliminar el servicio",
         "backupRunFailed": "La ejecución de la copia de seguridad falló"
-      }
+      },
+      "duplicateContainers": "Otro contenedor también coincide con este servicio: {names}"
     },
     "settingsForm": {
       "name": "Nombre",

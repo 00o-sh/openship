@@ -21,8 +21,9 @@ function deps(over: Partial<EdgePreflightDeps> = {}): EdgePreflightDeps {
     makeExecutor: () => ({}) as any,
     foreignProxyOnEdge: vi.fn(async () => ({ status: status(), blocked: true, owner: "nginx" })),
     importSites: vi.fn(async () => ({ sites: [tlsSite], warnings: [] })),
-    freeEdgeTargets: vi.fn(async () => {}),
-    stopTargetsForStatus: vi.fn(() => []),
+    beginEdgeTakeover: vi.fn(async () => {}),
+    recoverInterruptedTakeover: vi.fn(async () => {}),
+    ourEdgeContainerRunning: vi.fn(async () => false),
     readCert: vi.fn((p: string) => (p.endsWith(".crt") ? "CERT" : "KEY")),
     render: vi.fn(),
     confirm: vi.fn(async () => "cancel"),
@@ -47,14 +48,14 @@ describe("planAndApplyHostEdge", () => {
     expect(plan).toEqual({ proceed: true });
     expect(d.importSites).not.toHaveBeenCalled();
     expect(d.confirm).not.toHaveBeenCalled();
-    expect(d.freeEdgeTargets).not.toHaveBeenCalled();
+    expect(d.beginEdgeTakeover).not.toHaveBeenCalled();
   });
 
   it("cancels (no take-over) when the user declines", async () => {
     const d = deps({ confirm: vi.fn(async () => "cancel") });
     const plan = await planAndApplyHostEdge({}, d);
     expect(plan).toEqual({ proceed: false });
-    expect(d.freeEdgeTargets).not.toHaveBeenCalled();
+    expect(d.beginEdgeTakeover).not.toHaveBeenCalled();
   });
 
   it("takeover stops the proxy and carries no sites", async () => {
@@ -63,7 +64,7 @@ describe("planAndApplyHostEdge", () => {
     expect(plan.proceed).toBe(true);
     expect(plan.action).toBe("takeover");
     expect(plan.sites).toBeUndefined();
-    expect(d.freeEdgeTargets).toHaveBeenCalledTimes(1);
+    expect(d.beginEdgeTakeover).toHaveBeenCalledTimes(1);
   });
 
   it("migrate stops the proxy, returns sites, and collects safe cert PEMs", async () => {
@@ -73,7 +74,7 @@ describe("planAndApplyHostEdge", () => {
     expect(plan.action).toBe("migrate");
     expect(plan.sites).toEqual([tlsSite]);
     expect(plan.certPems).toEqual({ "/etc/ssl/a.crt": { certPem: "CERT", keyPem: "KEY" } });
-    expect(d.freeEdgeTargets).toHaveBeenCalledTimes(1);
+    expect(d.beginEdgeTakeover).toHaveBeenCalledTimes(1);
   });
 
   it("does not collect PEMs for unsafe cert paths", async () => {
@@ -85,6 +86,44 @@ describe("planAndApplyHostEdge", () => {
     const plan = await planAndApplyHostEdge({}, d);
     expect(plan.certPems).toEqual({});
     expect(d.readCert).not.toHaveBeenCalled();
+  });
+
+  it("stops the proxy through the JOURNALED path (so a failed bring-up can roll back)", async () => {
+    const order: string[] = [];
+    const d = deps({
+      confirm: vi.fn(async () => "migrate"),
+      beginEdgeTakeover: vi.fn(async () => {
+        order.push("begin");
+      }),
+      importSites: vi.fn(async () => {
+        order.push("import");
+        return { sites: [tlsSite], warnings: [] };
+      }),
+    });
+    await planAndApplyHostEdge({}, d);
+    // beginEdgeTakeover journals then frees — the CLI must never call the raw
+    // freeEdgeTargets, or a failed compose up leaves 80/443 dark with no record.
+    expect(order).toEqual(["import", "begin"]);
+  });
+
+  it("restores an interrupted takeover BEFORE probing, and reports our edge health", async () => {
+    const calls: string[] = [];
+    const d = deps({
+      recoverInterruptedTakeover: vi.fn(async (_e, _l, isEdgeHealthy) => {
+        calls.push("recover");
+        await isEdgeHealthy?.();
+      }),
+      ourEdgeContainerRunning: vi.fn(async () => {
+        calls.push("edge-health");
+        return false;
+      }),
+      foreignProxyOnEdge: vi.fn(async () => {
+        calls.push("probe");
+        return { status: status("free"), blocked: false, owner: "" };
+      }),
+    });
+    await planAndApplyHostEdge({}, d);
+    expect(calls).toEqual(["recover", "edge-health", "probe"]);
   });
 
   it("honors the --edge flag without prompting", async () => {

@@ -31,11 +31,31 @@ describe("probeServerGitAccess — verification", () => {
     expect(await probeServerGitAccess({ executor: ex, repoUrl: REPO })).toEqual({ via: "gh" });
   });
 
-  it("returns null when the host has git but no credential of any kind", async () => {
-    const ex = executor({ discover: NONE });
+  it("tries no-credential access FIRST, even on a box with no credentials at all", async () => {
+    // The regression this exists for: a plain box (git, no gh, no helper, no key)
+    // used to produce zero candidates and return null WITHOUT EVER TRYING — so a
+    // public repo fell back to an api-host clone + context transfer.
+    const ex = executor({ discover: NONE, verifyOk: () => true });
+    expect(await probeServerGitAccess({ executor: ex, repoUrl: REPO })).toEqual({
+      via: "anonymous",
+    });
+  });
+
+  it("tries anonymous before any host credential, so a public repo borrows nothing", async () => {
+    const ex = executor({ discover: ALL, verifyOk: () => true });
+    expect(await probeServerGitAccess({ executor: ex, repoUrl: REPO })).toEqual({
+      via: "anonymous",
+    });
+    const verifies = ex.commands.filter((c) => c.includes("ls-remote"));
+    expect(verifies).toHaveLength(1);
+    expect(verifies[0]).not.toContain("gh auth git-credential");
+  });
+
+  it("returns null when the host has git but nothing can read the repo", async () => {
+    const ex = executor({ discover: NONE, verifyOk: () => false });
     expect(await probeServerGitAccess({ executor: ex, repoUrl: REPO })).toBeNull();
-    // Nothing to verify, so it must not spend round trips trying.
-    expect(ex.commands.filter((c) => c.includes("ls-remote"))).toHaveLength(0);
+    // Exactly one attempt: anonymous. No credential existed to try after it.
+    expect(ex.commands.filter((c) => c.includes("ls-remote"))).toHaveLength(1);
   });
 
   it("returns null when a mechanism EXISTS but cannot read this repo", async () => {
@@ -94,12 +114,20 @@ describe("probeServerGitAccess — no credential moves in either direction", () 
     expect(verify).not.toContain("BEGIN OPENSSH PRIVATE KEY");
   });
 
-  it("keeps the host's own credential helper enabled (it IS the auth)", async () => {
+  it("keeps the host's own credential helper enabled in ambient mode (it IS the auth)", async () => {
+    const ex = executor({ discover: ALL, verifyOk: (c) => c.includes("gh auth git-credential") });
+    await probeServerGitAccess({ executor: ex, repoUrl: REPO });
+    const ambient = ex.commands.find((c) => c.includes("gh auth git-credential")) ?? "";
+    // The token path disables it; ambient must not, or there'd be no credential.
+    expect(ambient).not.toContain("-c credential.helper=");
+  });
+
+  it("proves anonymous access with the host's helper DISABLED", async () => {
+    // Otherwise a box that happens to hold a credential would look "public".
     const ex = executor({ discover: ALL, verifyOk: () => true });
     await probeServerGitAccess({ executor: ex, repoUrl: REPO });
-    const verify = ex.commands.find((c) => c.includes("ls-remote")) ?? "";
-    // The token path disables it; ambient must not, or there'd be no credential.
-    expect(verify).not.toContain("-c credential.helper=");
+    const anon = ex.commands.find((c) => c.includes("ls-remote")) ?? "";
+    expect(anon).toContain("-c credential.helper=");
   });
 
   it("discards ref output so a build log can't leak private branch names", async () => {

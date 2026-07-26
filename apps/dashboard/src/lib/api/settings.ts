@@ -23,6 +23,12 @@ export interface UserSettingsResponse {
   cloneToken: CloneCredentialsState;
   cloneStrategyPreference: CloneStrategyPreference;
   routeStrategy: RouteStrategy;
+  /**
+   * Generic (per-operator) "forward my local git identity to remote build
+   * servers" preference. Replaces the old per-deploy forwardGitCredentials
+   * toggle. When on, a server clone may forward the local `gh` over SSH.
+   */
+  forwardGitToServer: boolean;
 }
 
 export interface DeployDefaultsResponse {
@@ -74,4 +80,8 @@ export const settingsApi = {
       endpoints.settings.cloneStrategyPreference,
       { preference },
     ),
+
+  /** Flip the generic "forward my git identity to remote build servers" preference. */
+  updateForwardGitToServer: (enabled: boolean) =>
+    api.patch<{ forwardGitToServer: boolean }>(endpoints.settings.forwardGit, { enabled }),
 };

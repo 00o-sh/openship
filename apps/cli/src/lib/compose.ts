@@ -20,13 +20,24 @@ import { join } from "node:path";
 import { systemCatalog, type EnvironmentProfile } from "@repo/adapters";
 
 import { OS_DIR } from "./paths";
+import { readSourceInstall } from "./source-install";
 
 declare const __CLI_VERSION__: string;
 
 const COMPOSE_DIR = join(OS_DIR, "compose");
 const INSTALL_METHOD_FILE = join(OS_DIR, "install-method");
 const COMPOSE_FILE = join(COMPOSE_DIR, "docker-compose.yml");
+/** From-source override: BUILDs api/dashboard/edge instead of pulling them. */
+const BUILD_FILE = join(COMPOSE_DIR, "docker-compose.build.yml");
 const ENV_FILE = join(COMPOSE_DIR, ".env");
+
+/** Images the stack builds from source in a dev install; the rest (postgres,
+ *  redis) are upstream and always pulled. */
+const BUILT_SERVICES = [
+  { service: "api", dockerfile: "apps/api/Dockerfile" },
+  { service: "dashboard", dockerfile: "apps/dashboard/Dockerfile" },
+  { service: "edge", dockerfile: "apps/edge/Dockerfile" },
+] as const;
 
 export type InstallMethod = "compose" | "bare";
 
@@ -112,6 +123,8 @@ export interface ComposeUpOpts {
   trustProxy?: boolean;
   registry?: string;
   version?: string;
+  /** Force the pull path even on a from-source install (escape hatch). */
+  build?: boolean;
 }
 
 /** Pinned compose stack. Vars come from the generated .env (env_file + interpolation). */
@@ -306,27 +319,85 @@ function renderEnv(opts: ComposeUpOpts, host: { user: string; keyPath: string } 
   return lines.join("\n") + "\n";
 }
 
-function materialize(opts: ComposeUpOpts): void {
+/**
+ * The monorepo checkout to BUILD the stack from, when this is a from-source
+ * ("dev") install — `openship-dev`, whose marker records the checkout dir.
+ *
+ * A dev install tracks a branch, so its `__CLI_VERSION__` names a release tag
+ * that isn't published: pulling `ghcr.io/oblien/openship-*:<that version>` fails
+ * with `denied`. The checkout has the Dockerfiles, so build the three images we
+ * own from it instead of pulling — same stack, same compose file, one override.
+ * Returns null (→ pull path) when there's no checkout or no Dockerfiles in it.
+ */
+export function sourceBuildDir(): string | null {
+  const marker = readSourceInstall();
+  if (!marker?.dir) return null;
+  const hasAll = BUILT_SERVICES.every((s) => existsSync(join(marker.dir, s.dockerfile)));
+  return hasAll ? marker.dir : null;
+}
+
+/** Override file pointing the images we own at the checkout's Dockerfiles. */
+function renderBuildOverride(repoDir: string): string {
+  const services = BUILT_SERVICES.map(
+    (s) => `  ${s.service}:
+    build:
+      context: ${repoDir}
+      dockerfile: ${s.dockerfile}
+`,
+  ).join("");
+  return `# Managed by \`openship up\` (from-source install) — builds instead of pulls.
+services:
+${services}`;
+}
+
+function materialize(opts: ComposeUpOpts): string | null {
   mkdirSync(COMPOSE_DIR, { recursive: true, mode: 0o700 });
   const host = provisionHostSshChannel(); // best-effort; null → LocalExecutor fallback
   writeFileSync(COMPOSE_FILE, COMPOSE_YAML);
   writeFileSync(ENV_FILE, renderEnv(opts, host), { mode: 0o600 });
+
+  const buildDir = opts.build === false ? null : sourceBuildDir();
+  if (buildDir) writeFileSync(BUILD_FILE, renderBuildOverride(buildDir));
+  return buildDir;
 }
 
 /** Run `docker compose <args>` in the compose dir, inheriting stdio. */
-function compose(args: string[], opts?: { quiet?: boolean }): number {
-  const r = spawnSync("docker", ["compose", "-f", COMPOSE_FILE, ...args], {
+function compose(args: string[], opts?: { quiet?: boolean; withBuildOverride?: boolean }): number {
+  const files = ["-f", COMPOSE_FILE];
+  if (opts?.withBuildOverride) files.push("-f", BUILD_FILE);
+  const r = spawnSync("docker", ["compose", ...files, ...args], {
     cwd: COMPOSE_DIR,
     stdio: opts?.quiet ? "ignore" : "inherit",
   });
   return r.status ?? 1;
 }
 
-/** `openship up` (compose): write files, pull the pinned images, start the stack. */
+/**
+ * `openship up` (compose): write files, then either PULL the pinned images
+ * (normal install) or BUILD api/dashboard/edge from the source checkout (dev
+ * install). Postgres/redis are upstream images and are pulled either way.
+ */
 export function composeUp(opts: ComposeUpOpts): { ok: boolean; apiPort: string; dashPort: string } {
-  materialize(opts);
+  const buildDir = materialize(opts);
   const apiPort = opts.apiPort || "4000";
   const dashPort = opts.dashboardPort || "3001";
+
+  if (buildDir) {
+    // Only the upstream images can be pulled; ours don't exist in a registry for
+    // this ref. `--pull=false` on build keeps it working offline after the first run.
+    if (compose(["pull", "postgres", "redis"], { withBuildOverride: true }) !== 0) {
+      return { ok: false, apiPort, dashPort };
+    }
+    if (compose(["build"], { withBuildOverride: true }) !== 0) {
+      return { ok: false, apiPort, dashPort };
+    }
+    if (compose(["up", "-d"], { withBuildOverride: true }) !== 0) {
+      return { ok: false, apiPort, dashPort };
+    }
+    writeInstallMethod("compose");
+    return { ok: true, apiPort, dashPort };
+  }
+
   if (compose(["pull"]) !== 0) return { ok: false, apiPort, dashPort };
   if (compose(["up", "-d"]) !== 0) return { ok: false, apiPort, dashPort };
   writeInstallMethod("compose");
@@ -349,6 +420,14 @@ export function composeUpdate(version?: string): boolean {
       ENV_FILE,
       Object.entries(env).map(([k, v]) => `${k}=${v}`).join("\n") + "\n",
       { mode: 0o600 },
+    );
+  }
+  // A from-source install rebuilds from its checkout — there is no published
+  // image for the branch it tracks.
+  if (sourceBuildDir()) {
+    return (
+      compose(["build"], { withBuildOverride: true }) === 0 &&
+      compose(["up", "-d"], { withBuildOverride: true }) === 0
     );
   }
   return compose(["pull"]) === 0 && compose(["up", "-d"]) === 0;

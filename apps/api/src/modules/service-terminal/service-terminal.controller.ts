@@ -35,7 +35,7 @@ import { safeErrorMessage } from "@repo/core";
 import { getRequestContext } from "../../lib/request-context";
 import { resolveActiveOrganizationId } from "../../middleware/active-organization";
 import { checkPermission } from "../../lib/permission";
-import { containerIdForService } from "../services/service-container";
+import { containerIdForService, liveContainerIdWithRuntime } from "../services/service-container";
 import {
   attachServiceWs,
   consumeServiceTerminalTicket,
@@ -194,8 +194,15 @@ async function resolveServiceForOrg(
   }
 
   // Resolve THIS service's own container via the shared resolver (never the
-  // compose primary — see containerIdForService).
-  const containerId = await containerIdForService(dep, service);
+  // compose primary — see containerIdForService), then VERIFY it against the
+  // host: a recorded id that a redeploy replaced would open a shell request on a
+  // dead container and fail with docker's "no such container".
+  const containerId = await liveContainerIdWithRuntime(runtime, {
+    service: { id: service.id, name: service.name },
+    projectId: project.id,
+    slug: project.slug,
+    tracked: await containerIdForService(dep, service),
+  });
   if (!containerId) {
     return {
       ok: false,

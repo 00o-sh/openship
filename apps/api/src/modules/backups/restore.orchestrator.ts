@@ -24,7 +24,7 @@
 
 import crypto from "node:crypto";
 import { repos, type BackupRun, type BackupRestoreStatus } from "@repo/db";
-import { containerIdForService } from "../services/service-container";
+import { liveContainerIdForService } from "../services/service-container";
 import {
   resolveDestination,
   resolveExecutor,
@@ -504,7 +504,13 @@ export class RestoreOrchestrator {
     let containerId: string | null = null;
     if (project.activeDeploymentId) {
       const dep = await repos.deployment.findById(project.activeDeploymentId);
-      if (dep) containerId = await containerIdForService(dep, serviceRow);
+      // Verified against the host — a restore into a container a redeploy has
+      // since replaced would write into nothing (or the wrong thing).
+      if (dep) {
+        containerId = await liveContainerIdForService(project, dep, serviceRow, {
+          projectId: project.id,
+        });
+      }
     }
 
     return {

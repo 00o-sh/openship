@@ -833,7 +833,6 @@ export async function requestBuildAccess(ctx: RequestContext, input: BuildAccess
     handoverImages,
     cloudResourceTier,
     cloudResourceCustom,
-    forwardGitCredentials,
     cloneStrategy,
   } = input;
 
@@ -1005,12 +1004,13 @@ export async function requestBuildAccess(ctx: RequestContext, input: BuildAccess
     buildStrategy ?? snapshot.buildStrategy,
     { deployTarget: snapshot.deployTarget },
   );
-  // Per-deploy git credential forwarding choice (desktop-only; default off).
-  // We carry the raw choice; the build pipeline enforces desktop + server-build
-  // gating before opening the relay, so a forged flag elsewhere is inert.
-  if (forwardGitCredentials === true) {
-    snapshot.forwardGitCredentials = true;
-  }
+  // Git-credential forwarding is now a GENERIC per-operator preference (Settings →
+  // Clone credentials), not a per-deploy toggle. Source it from the deploying
+  // user's setting as an EXPLICIT boolean: clone-plan treats `!== false` as
+  // eligible, so leaving it undefined when the setting is off would silently
+  // re-enable the relay on desktop. The build pipeline still enforces desktop +
+  // server-build + SSH gating before opening the relay.
+  snapshot.forwardGitCredentials = await settingsService.getForwardGitToServer(ctx.userId);
   // Per-deploy clone location. "server" makes a docker deploy clone on the build
   // host (relay on desktop, token otherwise); the pipeline gates it. Default
   // "api-host" (clone on the orchestrator + transfer) when unset.

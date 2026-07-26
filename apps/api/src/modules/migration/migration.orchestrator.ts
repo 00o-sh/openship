@@ -49,6 +49,7 @@ import { sizeOfMoveSet } from "./migration-size";
 import { withKeyedMutex } from "../../lib/provision-lock";
 import { requestBuildAccess } from "../deployments/build.service";
 import { restartServiceContainer, updateService } from "../services/service.service";
+import { describeLiveState, resolveLiveServiceState } from "../services/live-state";
 import { applyProjectRouting } from "../domains/routing-apply.service";
 import { resolveProjectRouteState, reapplyProjectLiveRoutes } from "../domains/project-route.service";
 import { linkProjectRepo } from "../projects/project-crud.service";
@@ -690,6 +691,14 @@ class MigrationOrchestratorImpl {
         log,
       );
 
+      // Read back what the migration actually produced: one line per service
+      // naming the container it resolves to on the host, how it was identified,
+      // and any leftover duplicate. Without this, a service whose container was
+      // adopted (foreign labels) or replaced looks identical in the run log to
+      // one that landed cleanly — the operator only found out from the panel.
+      // Log-only: never changes the run's outcome.
+      await this.logLiveState(projectId, targetServerId, organizationId, log);
+
       // ── partial / cutover / awaiting_cutover ──
       // Some paths didn't move → PARK as `partial` (target UP, source
       // stopped-but-kept): cutover is gated (killing the source now would lose
@@ -1304,6 +1313,56 @@ class MigrationOrchestratorImpl {
    *  Mirrors the wizard's old client-side applyRoutes, but server-driven so it
    *  survives the client leaving the flow. Reuses `updateService` (which
    *  reconciles the edge routes). Best-effort per service. */
+  /**
+   * Read the migrated project's REAL runtime state off the host and write it to
+   * the run log — one line per service: which container it resolves to, by which
+   * identity key, its live state, and any duplicate that also claims it.
+   *
+   * This is the migration's own read-back. A same-server "reuse" run adopts
+   * containers whose `openship.*` labels still name the PREVIOUS project (labels
+   * are immutable in place), so "did every service actually land?" can't be
+   * answered from the DB — only by matching the host. Best-effort, log-only.
+   */
+  private async logLiveState(
+    projectId: string,
+    serverId: string,
+    organizationId: string,
+    log: (m: string) => void,
+  ): Promise<void> {
+    try {
+      const project = await repos.project.findById(projectId);
+      const services = await repos.service.listByProject(projectId);
+      if (!project || services.length === 0) return;
+      const dep = project.activeDeploymentId
+        ? await repos.deployment.findById(project.activeDeploymentId)
+        : null;
+      const trackedIds = Object.fromEntries(
+        (dep ? await repos.service.listByDeployment(dep.id) : []).map((r) => [
+          r.serviceId,
+          r.containerId,
+        ]),
+      );
+      const rt = await createServerDockerRuntime(serverId, organizationId);
+      try {
+        const containers = await rt.listAllContainers();
+        const targets = services.map((s) => ({ id: s.id, name: s.name }));
+        const matches = resolveLiveServiceState({
+          services: targets,
+          live: containers,
+          projectId,
+          slug: project.slug,
+          trackedIds,
+        });
+        log(`live state after migration:`);
+        for (const line of describeLiveState(targets, containers, matches)) log(`  ${line}`);
+      } finally {
+        await rt.dispose().catch(() => {});
+      }
+    } catch (err) {
+      log(`live-state read-back skipped: ${safeErrorMessage(err)}`);
+    }
+  }
+
   private async publishRoutes(
     ctx: RequestContext,
     projectId: string,

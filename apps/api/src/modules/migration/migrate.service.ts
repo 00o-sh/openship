@@ -72,6 +72,12 @@ export async function parseRepoCompose(
   repo: string,
   branch?: string,
 ): Promise<RepoComposeService[]> {
+  // NB: we deliberately do NOT read the repo's `.env` for `${VAR}` interpolation.
+  // Secrets live in Openship's ENCRYPTED env store — captured from the running
+  // container for adopted services, or set via the wizard/env UI for new ones —
+  // never a committed repo file. Pulling a `.env` here would drop those values
+  // into the PLAINTEXT service.environment column. So a bare `${VAR}` with no
+  // inline default resolves to "" and the real value comes from the env store.
   for (const file of REPO_COMPOSE_FILES) {
     let content: string | null = null;
     try {
@@ -210,7 +216,14 @@ export function buildAdoptedServiceRows(
    *  returned `handover` map fed to the deploy's handoverImages. Absent (no repo
    *  linked / unmapped) → the row adopts the running image as-is (legacy). */
   repoServices?: Map<string, RepoComposeService>,
-): { rows: ParsedComposeList; renames: Record<string, string>; handover: Record<string, string> } {
+): {
+  rows: ParsedComposeList;
+  renames: Record<string, string>;
+  handover: Record<string, string>;
+  /** Host ports already claimed by the adopted rows — reused when normalizing the
+   *  new (container-less) repo rows so both paths strip 80/443 + dedupe together. */
+  claimedHostPorts: Set<number>;
+} {
   const nameCounts = new Map<string, number>();
   const firstUnique = new Map<string, string>(); // discovered name → FINAL row name
   const renames: Record<string, string> = {};
@@ -270,7 +283,7 @@ export function buildAdoptedServiceRows(
       advanced: s.healthcheck ? { healthcheck: s.healthcheck } : undefined,
     };
   });
-  return { rows, renames, handover };
+  return { rows, renames, handover, claimedHostPorts };
 }
 
 
@@ -358,7 +371,7 @@ export async function adoptServerStack(opts: {
   };
   const { project_id, created } = await ensureProject(ensureBody, organizationId);
 
-  const { rows: parsed, renames, handover } = buildAdoptedServiceRows(
+  const { rows: parsed, renames, handover, claimedHostPorts } = buildAdoptedServiceRows(
     chosen,
     selected,
     serviceEnv,
@@ -377,13 +390,18 @@ export async function adoptServerStack(opts: {
   if (repoServices) {
     for (const [name, rs] of repoServices) {
       if (adoptedNames.has(name)) continue;
+      // Run the compose host ports through the SAME normalizer + claimed-set as
+      // the adopted rows: strip edge-owned 80/443 (OpenResty owns them) and dedupe
+      // host ports already taken by a sibling — else a new `web` on "80:80" would
+      // collide with the edge and fail the deploy.
+      const { ports } = normalizeHostPorts(rs.ports ?? [], claimedHostPorts);
       newRows.push({
         name,
         kind: "compose",
         image: rs.image,
         build: rs.build,
         dockerfile: rs.dockerfile,
-        ports: rs.ports ?? [],
+        ports,
         // Keep deps only on services this project actually has (adopted or new).
         dependsOn: (rs.dependsOn ?? []).filter((d) => repoServices.has(d) || adoptedNames.has(d)),
         environment: serviceEnv?.[name] ?? rs.environment ?? {},
@@ -530,10 +548,15 @@ async function reattachRuntime(opts: {
  * live containers (by their existing container id), so the Services tab reads them
  * live immediately. The migrated project is a NEW id, so (unlike re-import) the
  * caller MINTS the deployment id and the adopted containers keep their ORIGINAL
- * `openship.*`/compose labels — status/logs work now via the stored container id,
- * but a LATER redeploy/teardown of the migrated project won't recognize them
- * (labels are immutable in place). This is the accepted trade for "control it in
- * place" on the same server; `copy`/cross-server services take the deploy path.
+ * `openship.*`/compose labels — labels are immutable in place.
+ *
+ * Status/logs/terminal therefore CANNOT be label-scoped for these containers: the
+ * live read matches them by canonical name and stored container id instead
+ * (services/live-state.ts). Getting that wrong is what made an attached, running
+ * service render "Stopped" — a label-filtered `docker ps` can never see it. A
+ * LATER redeploy/teardown of the migrated project still won't recognize them by
+ * label; that remains the accepted trade for "control it in place" on the same
+ * server. `copy`/cross-server services take the deploy path.
  *
  * When `deploymentId` already exists (a mixed run whose `copy` services were just
  * deployed) the attach rows are added to THAT deployment and the active-deployment

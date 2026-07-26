@@ -26,7 +26,13 @@ export {
   probeEdge,
   stopTargetsForStatus,
 } from "./detect";
-export { runEdgeTakeover, recoverInterruptedTakeover, registerImportedSites } from "./takeover";
+export { runEdgeTakeover, registerImportedSites } from "./takeover";
+export {
+  recoverInterruptedTakeover,
+  beginEdgeTakeover,
+  rollbackEdgeTakeover,
+  completeEdgeTakeover,
+} from "./takeover-journal";
 export type { RegisterImportedSitesOptions } from "./takeover";
 export { scanImportableSites, canImportProxy, scanOpenshipEdge } from "./import";
 export type {
@@ -76,8 +82,36 @@ export async function foreignProxyOnEdge(
 ): Promise<{ status: EdgeStatus; blocked: boolean; owner: string }> {
   const status = await probeEdge(executor);
   const blocked = !status.canProceedClean && status.occupants.length > 0;
-  const owner = status.occupants.map((o) => o.command ?? `port ${o.port}`).join(", ");
-  return { status, blocked, owner };
+  return { status, blocked, owner: describeEdgeOwner(status.occupants) };
+}
+
+/**
+ * Human label for what holds the edge ports.
+ *
+ * Occupants are per-port, so one nginx holding both :80 and :443 yields two
+ * entries — deduped here by identity (unit / container / pid) so the prompt reads
+ * `nginx.service` and not `nginx: worker process (PID 123), nginx: worker process
+ * (PID 123)`. Prefers the stable identity in order: systemd unit → container →
+ * `<proxy> (PID n)` → raw command, because the ports are already named in the
+ * sentence around this label.
+ */
+export function describeEdgeOwner(occupants: EdgeStatus["occupants"]): string {
+  const labels: string[] = [];
+  const seen = new Set<string>();
+  for (const o of occupants) {
+    const identity = o.systemdUnit ?? o.containerName ?? (o.pid ? `pid:${o.pid}` : o.command ?? `port:${o.port}`);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    labels.push(
+      o.systemdUnit ??
+        (o.containerName ? `docker container ${o.containerName}` : undefined) ??
+        (o.proxy && o.pid ? `${o.proxy} (PID ${o.pid})` : undefined) ??
+        o.proxy ??
+        o.command ??
+        `port ${o.port}`,
+    );
+  }
+  return labels.join(", ");
 }
 
 function sysLog(message: string, level: SystemLog["level"] = "info"): SystemLog {

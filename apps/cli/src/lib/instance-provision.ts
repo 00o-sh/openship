@@ -176,8 +176,9 @@ export async function headlessProvision(opts: {
    *  the ~/.openship token file); Compose install → the stack's compose/.env
    *  token (composeInternalToken). */
   token?: string;
-  /** Install method — only affects the custom-domain path (the host-OpenResty
-   *  self-register flow doesn't apply to the Compose container edge). */
+  /** Install method. Informational: the provisioning calls are now identical for
+   *  both — the api picks the host OpenResty or the container edge from
+   *  OPENSHIP_EDGE_MODE, so the CLI doesn't branch on it. */
   method?: "bare" | "compose";
   onLog?: (msg: string) => void;
 }): Promise<ProvisionResult> {
@@ -213,19 +214,15 @@ export async function headlessProvision(opts: {
     domainRegistered = res.ok;
     liveUrl = res.data?.url ?? (d.hostname ? `https://${d.hostname}` : undefined);
     if (!res.ok) warnings.push(`Domain registration returned: ${res.data?.error || "failed"}`);
-  } else if (d.kind === "custom" && opts.method === "compose") {
-    // The custom-domain self-register flow installs + takes over the HOST's
-    // OpenResty — but the Compose stack's edge is a CONTAINER that already owns
-    // :80/:443, so driving that host path here would conflict. On Compose, a
-    // custom domain is issued its cert by the container edge when the domain is
-    // added to the self-app project (Domains tab) — or use `--bare` for a fully
-    // headless custom-domain install. Don't run the wrong path silently.
-    warnings.push(
-      `Custom domain "${d.hostname}" was not auto-provisioned on the Compose edge (the container edge owns :80/:443). ` +
-        `Add the domain from the dashboard's Domains tab — the edge issues its Let's Encrypt cert — ` +
-        `or re-run with \`--bare\` for a fully headless custom-domain install. The admin account was created.`,
-    );
   } else if (d.kind === "custom") {
+    // Same call on compose and bare. It used to be skipped on compose out of a
+    // fear that self-register would install + take over the HOST's OpenResty and
+    // fight the container edge — it doesn't: with OPENSHIP_EDGE_MODE=docker,
+    // `ensureSelfEdgeInfra` returns early and installs nothing, then
+    // provisionSelfAppEdge routes + issues the cert THROUGH the edge container
+    // (vhost to the shared sites volume, `openresty -s reload` + certbot via
+    // `docker exec`). edgeTakeover/edgeMigrate are ignored in that mode — the
+    // host-side takeover already happened in the pre-up preflight.
     const res = await internalPost(
       port,
       "/api/system/self-register",

@@ -87,6 +87,34 @@ export async function setGithubCliDisabled(userId: string, disabled: boolean): P
 }
 
 /**
+ * Generic (per-operator, instance-wide) "forward my git identity to remote build
+ * servers" preference — replaces the old per-deploy `forwardGitCredentials`
+ * toggle. Read by the deploy pipeline to decide whether a server clone may
+ * forward the local `gh` over the SSH tunnel. Defaults false.
+ * @scope user
+ */
+export async function getForwardGitToServer(userId: string): Promise<boolean> {
+  const settings = await repos.settings.findByUser(userId);
+  return settings?.forwardGitToServer ?? false;
+}
+
+/** Flip the generic git-forward preference. Inserts a row if the user has none. @scope user */
+export async function setForwardGitToServer(userId: string, enabled: boolean): Promise<void> {
+  const existing = await repos.settings.findByUser(userId);
+  if (existing) {
+    await repos.settings.update(userId, { forwardGitToServer: enabled });
+    return;
+  }
+  const { randomBytes } = await import("node:crypto");
+  await repos.settings.upsert({
+    id: "us_" + randomBytes(12).toString("base64url"),
+    userId,
+    buildMode: "auto",
+    forwardGitToServer: enabled,
+  });
+}
+
+/**
  * Resolve the user's default deploy target + server id.
  *
  * Returns nulls when the user has no preference yet. Callers in the dashboard

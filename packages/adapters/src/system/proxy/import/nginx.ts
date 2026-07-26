@@ -91,6 +91,39 @@ function extractLocationProxies(serverBody: string): { path: string; proxyPass: 
   return out;
 }
 
+/**
+ * Is this block nothing but an HTTP→HTTPS upgrade for its OWN hostname —
+ * `return 301 https://$host$request_uri` / `rewrite ^ https://$server_name…
+ * permanent` / the same with the host written out literally?
+ *
+ * certbot writes exactly one of these per host beside the real :443 vhost, so a
+ * 5-site nginx yields 5 blocks with no proxy_pass and no root. They carry NO
+ * route to migrate (the TLS vhost beside them has it) and Openship's edge issues
+ * that redirect itself, so they're skipped SILENTLY — warning about them reads as
+ * "5 of your sites won't migrate" when every one of them did.
+ *
+ * A redirect to a DIFFERENT host is NOT this: that rule disappears on takeover,
+ * so it still warns.
+ */
+function isHttpsUpgradeForSelf(body: string, names: string[]): boolean {
+  const targets = [
+    ...body.matchAll(/(?:^|[\s;{])return\s+30[1-8]\s+([^;]+);/g),
+    ...body.matchAll(/(?:^|[\s;{])rewrite\s+\S+\s+([^;]+?)\s+permanent\s*;/g),
+  ].map((m) => m[1].trim());
+  if (targets.length === 0) return false;
+
+  return targets.every((raw) => {
+    if (!/^https:\/\//i.test(raw)) return false;
+    // `https://$host$request_uri` and `https://self.example.com$request_uri` both
+    // have no `/` before the trailing variable, so cut the authority at the first
+    // `$` that isn't the host variable itself.
+    const authority = raw.replace(/^https:\/\//i, "").split(/[/\s]/)[0] ?? "";
+    const host = (authority.match(/^(\$[a-z_]+|[^$:]+)/i)?.[1] ?? "").replace(/:\d+$/, "");
+    if (host === "$host" || host === "$server_name" || host === "$http_host") return true;
+    return names.includes(host);
+  });
+}
+
 function parseServer(
   body: string,
   source: string,
@@ -110,9 +143,10 @@ function parseServer(
   const certPath = firstDirective(body, "ssl_certificate");
   const keyPath = firstDirective(body, "ssl_certificate_key");
 
-  if (names.length === 0) {
-    return { warnings: [`nginx: skipped a server block with no usable server_name (${source})`] };
-  }
+  // No usable server_name = the default catch-all (`server_name _;` / omitted).
+  // It can't become a vhost (there's no hostname to register) and every nginx has
+  // one, so it's an expected skip, not a config item the operator lost.
+  if (names.length === 0) return { warnings: [] };
 
   // All routes for this vhost. Locations are the real source; fall back to a
   // (technically-invalid but seen-in-the-wild) server-level proxy_pass.
@@ -140,6 +174,8 @@ function parseServer(
     routes = resolved;
   } else if (root) {
     target = { kind: "static", root: root.replace(/;$/, "") };
+  } else if (isHttpsUpgradeForSelf(body, names)) {
+    return { warnings: [] }; // HTTPS-upgrade half of a certbot pair — nothing lost
   } else {
     warnings.push(`nginx: ${names[0]} has neither proxy_pass nor root — skipped (${source})`);
     return { warnings };

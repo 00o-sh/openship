@@ -148,7 +148,9 @@
         "stopped": "Parado",
         "disabled": "Desativado",
         "failed": "Falhou",
-        "starting": "Iniciando"
+        "starting": "Iniciando",
+        "restarting": "Reiniciando",
+        "unknown": "Desconhecido"
       },
       "network": "Rede",
       "configuration": "Configuração",
@@ -205,7 +207,8 @@
         "serviceDeleted": "Serviço excluído",
         "deleteFailed": "Falha ao excluir o serviço",
         "backupRunFailed": "Falha na execução do backup"
-      }
+      },
+      "duplicateContainers": "Outro contêiner também corresponde a este serviço: {names}"
     },
     "settingsForm": {
       "name": "Nome",

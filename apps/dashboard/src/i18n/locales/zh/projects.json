@@ -249,7 +249,9 @@
     "stopped": "已停止",
     "disabled": "已禁用",
     "failed": "失败",
-    "starting": "启动中"
+    "starting": "启动中",
+    "restarting": "重启中",
+    "unknown": "未知"
   },
   "routingRetry": {
     "title": "免费域名路由需要处理",

@@ -120,6 +120,57 @@ describe("scanNginx", () => {
     expect(res.warnings.some((w) => w.includes("redir.example.com"))).toBe(true);
   });
 
+  test("certbot HTTP→HTTPS stubs + the default catch-all are skipped SILENTLY", async () => {
+    // The real shape of a certbot-managed nginx (the hekai box): per host a :443
+    // vhost with the route and a :80 stub that only upgrades to HTTPS, plus one
+    // default_server. Every route must be found and NOTHING may be reported as
+    // "won't migrate" — that warning is how a clean scan looked broken.
+    const hosts = [
+      ["api.onvo.me", "http://localhost:1010"],
+      ["onvo.me", "http://127.0.0.1:39801"],
+      ["reflx.me", "http://localhost:3100"],
+    ];
+    const conf = `
+      server { listen 80 default_server; server_name _; return 444; }
+      ${hosts
+        .map(
+          ([host, up]) => `
+        server {
+          listen 80;
+          server_name ${host};
+          return 301 https://$host$request_uri;
+        }
+        server {
+          listen 443 ssl;
+          server_name ${host};
+          ssl_certificate /etc/letsencrypt/live/${host}/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/${host}/privkey.pem;
+          location / { proxy_pass ${up}; }
+        }`,
+        )
+        .join("\n")}
+    `;
+    const res = await scanNginx(makeExecutor([["nginx -T", conf]]));
+
+    expect(res.sites).toHaveLength(hosts.length);
+    for (const [host, up] of hosts) {
+      const site = res.sites.find((s) => s.serverNames.includes(host));
+      expect(site?.target).toEqual({ kind: "proxy", url: up });
+      expect(site?.ssl).toBe(true);
+    }
+    expect(res.warnings).toEqual([]);
+  });
+
+  test("a literal same-host HTTPS upgrade is silent, a cross-host redirect still warns", async () => {
+    const conf = `
+      server { server_name self.example.com; return 301 https://self.example.com$request_uri; }
+      server { server_name away.example.com; return 301 https://other.example.com$request_uri; }
+    `;
+    const res = await scanNginx(makeExecutor([["nginx -T", conf]]));
+    expect(res.warnings.some((w) => w.includes("self.example.com"))).toBe(false);
+    expect(res.warnings.some((w) => w.includes("away.example.com"))).toBe(true);
+  });
+
   test("ssl detection: IPv6 :443 counts, 8443 does not false-positive", async () => {
     const conf = `
       server {

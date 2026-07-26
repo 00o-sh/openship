@@ -262,7 +262,9 @@
     "stopped": "Arrêté",
     "disabled": "Désactivé",
     "failed": "Échec",
-    "starting": "Démarrage"
+    "starting": "Démarrage",
+    "restarting": "Redémarrage",
+    "unknown": "Inconnu"
   },
   "routingRetry": {
     "title": "Le routage du domaine gratuit nécessite votre attention",

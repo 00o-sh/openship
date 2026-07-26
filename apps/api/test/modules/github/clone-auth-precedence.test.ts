@@ -147,6 +147,25 @@ describe("resolveBuildGitToken — server build, fall-through when server has no
     expect(tokenFor).not.toHaveBeenCalled();
   });
 
+  it("still clones a PUBLIC repo on the server when isPublicRepo could not confirm it", async () => {
+    // The regression: isPublicRepo is unauthenticated and fails CLOSED (60/hr/IP),
+    // so a rate-limited or flaky call reported a public repo as private and the
+    // deploy fell back to an api-host clone + transfer. The server-side attempt is
+    // the authority, and it must override that "no".
+    isPublicRepo.mockResolvedValue(false);
+    probeServerGitAccess.mockResolvedValue({ via: "anonymous" });
+    const res = await resolveBuildGitToken({
+      ...base,
+      buildStrategy: "server",
+      serverId: "s1",
+      serverExecutor: { exec: vi.fn() } as any,
+      repoUrl: "https://github.com/acme/app.git",
+      allowApiHostFallback: true,
+    });
+    // Anonymous, NOT ambient: the clone carries no credential of any kind.
+    expect(res).toEqual({ anonymous: true });
+  });
+
   it("uses the server's OWN verified git access before forwarding or falling back", async () => {
     // Nothing of ours reaches the server, but the server itself can read the repo.
     getLocalGhToken.mockResolvedValue("ghtok"); // a relay WOULD be possible

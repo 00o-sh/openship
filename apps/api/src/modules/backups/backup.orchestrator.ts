@@ -24,7 +24,7 @@ import {
   type BackupPolicy,
   type BackupDestination,
 } from "@repo/db";
-import { containerIdForService } from "../services/service-container";
+import { liveContainerIdForService } from "../services/service-container";
 import { backupRunBus } from "./backup.sse";
 import { getJobRunner } from "../../lib/job-runner";
 import { toAdapterRow } from "../backup-destinations/hydrate-server";
@@ -674,13 +674,15 @@ export class BackupOrchestrator {
     };
   }
 
-  /** Find the live container id for a service, via the shared resolver. */
+  /** Find the live container id for a service, via the shared resolver —
+   *  verified against the host, so a backup never targets a container a
+   *  redeploy already replaced. */
   private async resolveServiceContainerId(serviceRow: Service): Promise<string | null> {
     const project = await repos.project.findById(serviceRow.projectId);
     if (!project?.activeDeploymentId) return null;
     const dep = await repos.deployment.findById(project.activeDeploymentId);
     if (!dep) return null;
-    return containerIdForService(dep, serviceRow);
+    return liveContainerIdForService(project, dep, serviceRow, { projectId: project.id });
   }
 }
 

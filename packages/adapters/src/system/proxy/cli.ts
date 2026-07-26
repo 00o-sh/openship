@@ -17,11 +17,23 @@
 export {
   probeEdge,
   detectEdge,
+  describeEdgeOwner,
   foreignProxyOnEdge,
   importSites,
   freeEdgeTargets,
   stopTargetsForStatus,
 } from "./index";
+export { ourEdgeContainerRunning } from "./detect";
+// The rollback journal — same file + same restore logic the api uses, so a
+// takeover the CLI starts can be finished OR rolled back by either side. Lives in
+// takeover-journal.ts precisely so this lean subpath doesn't pull in the OpenResty
+// installer / NginxProvider that the full takeover needs.
+export {
+  beginEdgeTakeover,
+  completeEdgeTakeover,
+  rollbackEdgeTakeover,
+  recoverInterruptedTakeover,
+} from "./takeover-journal";
 export { LocalExecutor } from "../local-executor";
 export type {
   EdgeStatus,
