@@ -157,7 +157,7 @@
   "scanFailed": "فشل فحص Docker",
   "adoptFailed": "تعذّر إنشاء المشروع",
   "entry": {
-    "cardTitle": "خادم Docker موجود",
+    "cardTitle": "خدمات موجودة",
     "cardDesc": "رحّل نشر Docker أو Compose قيد التشغيل إلى Openship.",
     "action": "ترحيل Docker",
     "tab": "خادم موجود",

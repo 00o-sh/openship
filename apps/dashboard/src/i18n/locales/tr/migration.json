@@ -141,7 +141,7 @@
   "scanFailed": "Docker incelemesi başarısız oldu",
   "adoptFailed": "Proje oluşturulamadı",
   "entry": {
-    "cardTitle": "Mevcut Docker sunucusu",
+    "cardTitle": "Mevcut servisler",
     "cardDesc": "Çalışan bir Docker veya Compose dağıtımını Openship'e taşıyın.",
     "action": "Uygulamaları taşı",
     "tab": "Mevcut sunucu",

@@ -17,6 +17,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Star,
+  Trash2,
 } from "lucide-react";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { RoutingConfigCard } from "./RoutingConfigCard";
@@ -235,6 +236,12 @@ export const DomainSettings = () => {
   const { t } = useI18n();
   const router = useRouter();
   const { baseDomain, selfHosted } = usePlatform();
+  // `selfHosted` is INSTANCE-level (this install runs self-hosted). A cloud-OWNED
+  // project (deployTarget "cloud") is canonical on Openship Cloud and uses the
+  // Oblien edge — the self-hosted edge features (edge-status, route-rules) aren't
+  // proxied for it, so their local endpoints 404. Gate those on the PROJECT being
+  // non-cloud, not on the instance flag.
+  const isCloudProject = projectData.deployTarget === "cloud";
   // Free .<baseDomain> subdomains route through the Openship Cloud edge, so
   // choosing "free" without a cloud connection opens the connect-cloud modal
   // (requireCloud returns true immediately on SaaS / when already connected).
@@ -256,7 +263,7 @@ export const DomainSettings = () => {
     reachable?: boolean | null;
   }>({ loading: false, ready: false });
   const checkEdge = useCallback(async () => {
-    if (!selfHosted) return;
+    if (!selfHosted || isCloudProject) return; // cloud projects use the Oblien edge — no local edge-status
     setEdge((e) => ({ ...e, loading: true }));
     try {
       const res = await projectsApi.getEdgeStatus(id);
@@ -269,7 +276,7 @@ export const DomainSettings = () => {
     } catch {
       setEdge({ loading: false, ready: false });
     }
-  }, [id, selfHosted]);
+  }, [id, selfHosted, isCloudProject]);
 
   // Install/own OpenResty + apply routes reload-free (no redeploy), surfacing the
   // 80/443 takeover consent if a foreign proxy holds them. Reused by the first
@@ -353,6 +360,10 @@ export const DomainSettings = () => {
   const [addRouteError, setAddRouteError] = useState<string | null>(null);
   const [addRouteSaving, setAddRouteSaving] = useState(false);
   const [isSavingPublicEndpoints, setIsSavingPublicEndpoints] = useState(false);
+  // Route the user has asked to remove (drives the styled confirm modal instead
+  // of an ugly native window.confirm).
+  const [removeTarget, setRemoveTarget] = useState<DomainSummaryItem | null>(null);
+  const [removing, setRemoving] = useState(false);
   const [isEditingDomains, setIsEditingDomains] = useState(false);
   // Tracks the per-domain Verify button state. Holds the domainId of the
   // row currently running its verify check so the button can spin and
@@ -478,7 +489,9 @@ export const DomainSettings = () => {
   // duplicated. Returns null when the stack needs no server edge (not
   // self-hosted, not deployed, or no public route yet).
   const renderEdgeControl = (): React.ReactNode => {
-    if (!edgeRelevant) return null;
+    // Cloud-owned projects route through the Oblien edge, not this box's OpenResty
+    // — "Set up edge" / "Edge ready" is self-hosted-only, so hide it for cloud.
+    if (!edgeRelevant || isCloudProject) return null;
     if (edge.loading) {
       return (
         <ActionButton
@@ -1169,6 +1182,36 @@ export const DomainSettings = () => {
     }
   };
 
+  // Remove a domain/route straight from the ⋯ menu (single-app + per-service) —
+  // no more digging through the edit modal. Backend drops the route + its edge
+  // registration; the app/service keeps running. Inline confirm so a stray click
+  // can't yank a live route.
+  const handleDeleteDomain = (summary: DomainSummaryItem) => {
+    if (!summary.domainId) return;
+    setRemoveTarget(summary); // open the styled confirm modal
+  };
+
+  const confirmRemoveRoute = async () => {
+    const summary = removeTarget;
+    if (!summary?.domainId) return;
+    setRemoving(true);
+    try {
+      await domainsApi.remove(summary.domainId);
+      updateDomains(
+        (Array.isArray(domainsData.domains) ? domainsData.domains : []).filter(
+          (d: any) => d?.id !== summary.domainId,
+        ),
+      );
+      if (id) invalidateProjectCaches(id);
+      showToast("Route removed.", "success", t.projectSettings.domains.toast.domainsTitle);
+      setRemoveTarget(null);
+    } catch (error) {
+      showToast(getApiErrorMessage(error, "Couldn't remove the route."), "error", t.projectSettings.domains.toast.domainsTitle);
+    } finally {
+      setRemoving(false);
+    }
+  };
+
   const projectLabel = projectData.slug || projectData.name || "project";
 
   const resolveServiceHostname = (service: Service) => {
@@ -1361,7 +1404,22 @@ export const DomainSettings = () => {
     }
     // Verify is NOT in this menu — pending cards render a direct inline Verify
     // button instead (see DomainOverviewCard), so it's never a scavenger hunt.
-    if (!isManagedRow && !domain.needsVerify && domain.domainId) {
+    //
+    // Which SSL actions show depends on WHO owns TLS for the row:
+    //   • self-hosted custom domain → certbot on this box: Renew, Recheck, and
+    //     BYO/Origin-CA upload.
+    //   • cloud / managed-edge row (Oblien) → TLS is auto-provisioned + renewed
+    //     by the edge, so only a read-only Recheck is meaningful (proxied to the
+    //     cloud via cloudDomainProxy — the "handover to Oblien"). No certbot
+    //     renew, no BYO upload (the backend refuses uploadCert on cloud anyway).
+    //   • self-hosted FREE .opsh.io → its cert lives on the cloud edge, but the
+    //     request isn't proxied from a self-hosted box, so a local certbot
+    //     recheck would mislead ("provisioning" for a cert that's actually live
+    //     on Oblien) — skip recheck there rather than show a wrong result.
+    const sslActionable = !domain.needsVerify && !!domain.domainId;
+    const certbotOwned = !isCloudProject && !isManagedRow; // self-hosted custom domain
+    const canRecheck = isCloudProject || !isManagedRow; // everything except self-hosted free
+    if (sslActionable && certbotOwned) {
       items.push({
         id: "renew",
         label: isRenewing ? m.renewing : m.renewSsl,
@@ -1369,6 +1427,8 @@ export const DomainSettings = () => {
         onClick: () => void handleRenewDomainSsl(domain.hostname),
         disabled: isRenewing,
       });
+    }
+    if (sslActionable && canRecheck) {
       items.push({
         id: "recheck",
         label: isRechecking ? m.rechecking : m.recheckSsl,
@@ -1376,11 +1436,24 @@ export const DomainSettings = () => {
         onClick: () => void handleRecheckSsl(domain.domainId!, domain.hostname),
         disabled: isRechecking,
       });
+    }
+    if (sslActionable && certbotOwned) {
       items.push({
         id: "upload-cert",
         label: m.uploadCert,
         icon: <ShieldCheck className="size-4" />,
         onClick: () => setCertUploadDomain({ domainId: domain.domainId!, hostname: domain.hostname }),
+      });
+    }
+    // Remove route — a direct destructive action for every real domain row (both
+    // free + custom), so deletion lives in the ⋯ menu, not buried in edit.
+    if (domain.domainId) {
+      items.push({
+        id: "delete",
+        label: "Remove route",
+        icon: <Trash2 className="size-4" />,
+        variant: "danger",
+        onClick: () => void handleDeleteDomain(domain),
       });
     }
     return items;
@@ -1498,17 +1571,6 @@ export const DomainSettings = () => {
       />
     </div>
   );
-  const multiDomainActions = (
-    <div className="flex flex-wrap items-center justify-end gap-2">
-      <ActionButton label={t.projectSettings.domains.actions.editDomains} icon={Pencil} onClick={handleStartEditingDomains} />
-      <ActionButton
-        label={showCustomDomainSection ? t.projectSettings.domains.actions.hideSetup : t.projectSettings.domains.actions.addDomain}
-        icon={Plus}
-        onClick={handleToggleCustomDomain}
-      />
-    </div>
-  );
-
   // Whether the DNS Records panel is ready to render. Sources, in order:
   //   1. dnsRecords — real records from a completed Connect call (both modes)
   //   2. previewedRecords — live preview from /domains/preview (self-hosted only,
@@ -1757,9 +1819,17 @@ export const DomainSettings = () => {
         // projects route per-service and render their own cards below instead —
         // no auto project "primary" domain for them.
         <div className="space-y-3">
+          {/* Unified with the compose/services toolbar: just the edge status +
+              one Add button. Visit lives on each card's header icon and Edit /
+              Set-primary / Remove live in each card's ⋯ menu — no separate
+              Visit / Edit-domains top buttons. */}
           <div className="flex flex-wrap items-center justify-end gap-2">
             {renderEdgeControl()}
-            {hasMultipleProjectDomains ? multiDomainActions : singleDomainActions}
+            <ActionButton
+              label={showCustomDomainSection ? t.projectSettings.domains.actions.hideSetup : t.projectSettings.domains.actions.addDomain}
+              icon={Plus}
+              onClick={handleToggleCustomDomain}
+            />
           </div>
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
             {domainSummaries.map((domain) =>
@@ -1950,7 +2020,9 @@ export const DomainSettings = () => {
           feature from the routing config above, but the same kind of edge
           concern, so it sits right here, collapsed by default. Moved out of the
           Advanced tab. */}
-      <RouteRules />
+      {/* Route rules are a self-hosted-edge feature (local-only endpoints); a
+          cloud-owned project uses the Oblien edge, so hide them for cloud. */}
+      {!isCloudProject && <RouteRules />}
 
       {editingRouteService && editingRoute && routeDraft && (
         <div
@@ -2085,6 +2157,50 @@ export const DomainSettings = () => {
                   {isUploadingCert ? t.projectSettings.domains.certUpload.submitting : t.projectSettings.domains.certUpload.submit}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {removeTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm"
+          onClick={() => !removing && setRemoveTarget(null)}
+        >
+          <div
+            className="w-full max-w-md overflow-hidden rounded-2xl border border-border/60 bg-card shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start gap-3 px-5 pt-5">
+              <span className="mt-0.5 inline-flex size-9 shrink-0 items-center justify-center rounded-xl bg-danger-bg text-danger">
+                <Trash2 className="size-4" />
+              </span>
+              <div className="min-w-0">
+                <h3 className="text-[14px] font-semibold text-foreground">Remove route</h3>
+                <p className="mt-0.5 break-all text-[12px] text-muted-foreground">{removeTarget.hostname}</p>
+              </div>
+            </div>
+            <p className="px-5 pt-3 text-[12px] leading-relaxed text-muted-foreground">
+              The app keeps running — only this route and its edge registration are removed. You can add it back at any time.
+            </p>
+            <div className="mt-5 flex justify-end gap-2 border-t border-border/40 px-5 py-4">
+              <button
+                type="button"
+                onClick={() => setRemoveTarget(null)}
+                disabled={removing}
+                className="inline-flex min-h-9 items-center rounded-xl bg-foreground/[0.06] px-3 text-[12px] font-medium text-foreground transition-colors hover:bg-foreground/[0.1] disabled:opacity-50"
+              >
+                {t.projectSettings.domains.edit.cancel}
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmRemoveRoute()}
+                disabled={removing}
+                className="inline-flex min-h-9 items-center gap-2 rounded-xl bg-danger-solid px-4 text-[12px] font-medium text-white transition-colors hover:bg-danger-solid/90 disabled:opacity-50"
+              >
+                {removing && <Loader2 className="size-4 animate-spin" />}
+                {removing ? "Removing…" : "Remove route"}
+              </button>
             </div>
           </div>
         </div>

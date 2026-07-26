@@ -130,20 +130,14 @@ function parseServer(
   }
 
   let target: ImportedSite["target"];
+  let routes: { path: string; url: string }[] | undefined;
   if (resolved.length > 0) {
     // Primary = the root location ("/") if present, else the first resolved.
+    // `routes` carries the FULL per-path set so a path-fan-out vhost (e.g.
+    // `/ → :1010`, `/v3 → :1020`) is preserved — the edge can path-route it.
     const primary = resolved.find((r) => r.path === "/") ?? resolved[0];
     target = { kind: "proxy", url: primary.url };
-    // An ImportedSite carries ONE upstream, but an OpenResty vhost can't
-    // path-route today — so surface any additional distinct upstreams instead
-    // of silently dropping the extra locations.
-    const others = resolved.filter((r) => r !== primary && r.url !== primary.url);
-    if (others.length > 0) {
-      warnings.push(
-        `nginx: ${names[0]} path-routes to multiple upstreams; migrated ${primary.path} → ${primary.url}. ` +
-          `Re-add manually: ${others.map((o) => `${o.path} → ${o.url}`).join(", ")}`,
-      );
-    }
+    routes = resolved;
   } else if (root) {
     target = { kind: "static", root: root.replace(/;$/, "") };
   } else {
@@ -152,6 +146,7 @@ function parseServer(
   }
 
   const site: ImportedSite = { serverNames: names, ssl, target, source };
+  if (routes) site.routes = routes;
   if (certPath && keyPath) site.tls = { certPath, keyPath };
   return { site, warnings };
 }

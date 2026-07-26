@@ -31,13 +31,17 @@ export interface DiscoveredService {
   proxyKind?: "nginx" | "caddy" | "apache" | "traefik" | "haproxy" | "openresty";
   /** Host edge ports (80/443) it publishes — reserved for Openship's edge. */
   edgePorts?: number[];
-  /** A route the server's existing (foreign) reverse proxy already serves for
-   *  this container, matched by published host port. Absent = none detected. */
-  existingRoute?: {
+  /** Routes the server's existing (foreign) reverse proxy already serves for this
+   *  container, matched by published host port. ONE ENTRY PER (port,path): a
+   *  path-fan-out domain (`/ → :1010`, `/v3 → :1020`) or a multi-port container
+   *  collects several. Absent = none detected. */
+  existingRoute?: Array<{
+    port: number;
+    path: string;
     domains: string[];
     ssl: { enabled: boolean; certPath?: string; keyPath?: string };
     source?: string;
-  };
+  }>;
   warnings: string[];
 }
 
@@ -92,6 +96,16 @@ export interface DiscoveredStack {
   alreadyManaged: number;
   /** Openship projects found on the server; `knownHere: false` are re-importable. */
   openshipProjects: OpenshipProjectGroup[];
+  /** Every route the foreign proxy serves, flattened (one per port+path) — for
+   *  the route review. Unmatched ones (no adopted service on that port) also
+   *  appear in `warnings`. */
+  proxyRoutes?: Array<{
+    port: number;
+    path: string;
+    domains: string[];
+    ssl: { enabled: boolean; certPath?: string; keyPath?: string };
+    source?: string;
+  }>;
 }
 
 export interface ReimportResult {
@@ -387,10 +401,18 @@ export const dockerMigrationApi = {
     serviceEnv?: Record<string, Record<string, string>>;
     /** Extra paths to move (cross-server): source host path → target host path. */
     customPaths?: CustomPath[];
-    /** serviceName → domain/route to publish server-side once the target is up. */
+    /** serviceName → domain/route to publish server-side once the target is up.
+     *  `targetPath` (e.g. "/v3") marks a service serving a PATH of a shared
+     *  domain (path fan-out); its absence = the root `/`. */
     routesByServiceName?: Record<
       string,
-      { exposedPort?: string; domainType: "free" | "custom"; domain?: string; customDomain?: string }
+      {
+        exposedPort?: string;
+        domainType: "free" | "custom";
+        domain?: string;
+        customDomain?: string;
+        targetPath?: string;
+      }
     >;
     /** serviceName → target-volume conflict resolution (override/clone/keep). */
     conflictResolution?: Record<string, ConflictAction>;

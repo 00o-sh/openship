@@ -120,15 +120,17 @@ export function resolveInstallInputs(flags: InstallFlags): InstallInputs {
 async function bootstrapOrReset(
   port: string,
   admin: InstallInputs["admin"],
+  token?: string,
 ): Promise<{ ok: boolean; message?: string }> {
-  const boot = await bootstrapAdmin(port, admin);
+  const boot = await bootstrapAdmin(port, admin, token);
   if (boot.ok && boot.message !== "already-exists") return { ok: true };
   if (boot.ok && boot.message === "already-exists") {
-    const rr = await internalPost(port, "/api/system/reset-admin-password", {
-      password: admin.password,
-      email: admin.email,
-      name: admin.name,
-    });
+    const rr = await internalPost(
+      port,
+      "/api/system/reset-admin-password",
+      { password: admin.password, email: admin.email, name: admin.name },
+      token,
+    );
     return rr.ok ? { ok: true, message: "reset-existing" } : { ok: false, message: rr.data?.error || "reset failed" };
   }
   return { ok: false, message: boot.message || "bootstrap failed" };
@@ -136,10 +138,10 @@ async function bootstrapOrReset(
 
 /** Drain a self-register provisioning SSE stream best-effort (custom domain ACME).
  *  Never throws — the site serves over HTTP until the cert is ready. */
-async function drainProvisionStream(port: string, sessionId: string): Promise<void> {
+async function drainProvisionStream(port: string, sessionId: string, token?: string): Promise<void> {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/api/system/self-register/stream?id=${sessionId}`, {
-      headers: { "X-Internal-Token": ensureInternalToken() },
+      headers: { "X-Internal-Token": token ?? ensureInternalToken() },
       signal: AbortSignal.timeout(180000),
     });
     if (!res.body) return;
@@ -170,9 +172,16 @@ export async function headlessProvision(opts: {
   port: string;
   dashPort?: string;
   inputs: InstallInputs;
+  /** Internal token for the loopback calls. Bare install → omit (falls back to
+   *  the ~/.openship token file); Compose install → the stack's compose/.env
+   *  token (composeInternalToken). */
+  token?: string;
+  /** Install method — only affects the custom-domain path (the host-OpenResty
+   *  self-register flow doesn't apply to the Compose container edge). */
+  method?: "bare" | "compose";
   onLog?: (msg: string) => void;
 }): Promise<ProvisionResult> {
-  const { port, inputs } = opts;
+  const { port, inputs, token } = opts;
   const log = opts.onLog ?? (() => {});
   const warnings: string[] = [];
 
@@ -182,7 +191,7 @@ export async function headlessProvision(opts: {
   }
 
   log("Creating the admin account…");
-  const admin = await bootstrapOrReset(port, inputs.admin);
+  const admin = await bootstrapOrReset(port, inputs.admin, token);
   if (!admin.ok) throw new HeadlessInputError(`Could not create the admin account: ${admin.message}`);
 
   const dashPort = opts.dashPort ? Number(opts.dashPort) : undefined;
@@ -192,42 +201,61 @@ export async function headlessProvision(opts: {
 
   log(`Registering domain (${d.kind})…`);
   if (d.kind === "none") {
-    await internalPost(port, "/api/system/self-register", { domainType: "byo" });
+    await internalPost(port, "/api/system/self-register", { domainType: "byo" }, token);
     domainRegistered = true;
   } else if (d.kind === "byo") {
-    const res = await internalPost(port, "/api/system/self-register", {
-      domainType: "byo",
-      ...(d.hostname ? { hostname: d.hostname } : {}),
-    });
+    const res = await internalPost(
+      port,
+      "/api/system/self-register",
+      { domainType: "byo", ...(d.hostname ? { hostname: d.hostname } : {}) },
+      token,
+    );
     domainRegistered = res.ok;
     liveUrl = res.data?.url ?? (d.hostname ? `https://${d.hostname}` : undefined);
     if (!res.ok) warnings.push(`Domain registration returned: ${res.data?.error || "failed"}`);
+  } else if (d.kind === "custom" && opts.method === "compose") {
+    // The custom-domain self-register flow installs + takes over the HOST's
+    // OpenResty — but the Compose stack's edge is a CONTAINER that already owns
+    // :80/:443, so driving that host path here would conflict. On Compose, a
+    // custom domain is issued its cert by the container edge when the domain is
+    // added to the self-app project (Domains tab) — or use `--bare` for a fully
+    // headless custom-domain install. Don't run the wrong path silently.
+    warnings.push(
+      `Custom domain "${d.hostname}" was not auto-provisioned on the Compose edge (the container edge owns :80/:443). ` +
+        `Add the domain from the dashboard's Domains tab — the edge issues its Let's Encrypt cert — ` +
+        `or re-run with \`--bare\` for a fully headless custom-domain install. The admin account was created.`,
+    );
   } else if (d.kind === "custom") {
-    const res = await internalPost(port, "/api/system/self-register", {
-      domainType: "custom",
-      hostname: d.hostname,
-      dashPort,
-      acmeEmail: d.acmeEmail,
-      edgeTakeover: d.edge === "takeover",
-      edgeMigrate: d.edge === "migrate",
-    });
+    const res = await internalPost(
+      port,
+      "/api/system/self-register",
+      {
+        domainType: "custom",
+        hostname: d.hostname,
+        dashPort,
+        acmeEmail: d.acmeEmail,
+        edgeTakeover: d.edge === "takeover",
+        edgeMigrate: d.edge === "migrate",
+      },
+      token,
+    );
     domainRegistered = res.ok;
     liveUrl = res.data?.url ?? `https://${d.hostname}`;
     if (res.ok && res.data?.sessionId) {
       log("Issuing HTTPS certificate (Let's Encrypt) — best-effort…");
-      await drainProvisionStream(port, String(res.data.sessionId));
+      await drainProvisionStream(port, String(res.data.sessionId), token);
     } else if (!res.ok) {
       warnings.push(`Custom domain provisioning returned: ${res.data?.error || "failed"}`);
     }
   } else {
     // free — requires the box to be Cloud-connected already; the server rejects
     // otherwise (we surface that as a warning rather than inventing a token flow).
-    const res = await internalPost(port, "/api/system/self-register", {
-      domainType: "free",
-      slug: d.slug,
-      publicHost: d.publicHost,
-      dashPort,
-    });
+    const res = await internalPost(
+      port,
+      "/api/system/self-register",
+      { domainType: "free", slug: d.slug, publicHost: d.publicHost, dashPort },
+      token,
+    );
     domainRegistered = res.ok;
     liveUrl = res.data?.url;
     if (!res.ok) {

@@ -1,15 +1,15 @@
 ---
 title: Move your setup to another install
-description: Take your whole OpenShip control plane — servers, projects, services, domains, env vars and secrets — from one install to another. The classic case is a local desktop → an always-on self-hosted server.
+description: Take your whole Openship control plane — servers, projects, services, domains, env vars and secrets — from one install to another. The classic case is a local desktop → an always-on self-hosted server.
 ---
 
 import { Step, Steps } from 'fumadocs-ui/components/steps';
 
-You started on the **desktop app** on your laptop, and now you want OpenShip itself to run on an
+You started on the **desktop app** on your laptop, and now you want Openship itself to run on an
 **always-on Linux server** so deploys keep working when your laptop is closed. You don't want to
 recreate every project, server connection, domain and secret by hand.
 
-OpenShip has a first-class **data transfer** for exactly this: export your entire instance to a single
+Openship has a first-class **data transfer** for exactly this: export your entire instance to a single
 encrypted file on the old machine, import it on the new one. It carries the whole control plane —
 server/SSH connections, projects (including local-folder source settings), services, domains and
 routes, environment variables, deployment history and backup destinations — and your **secrets travel
@@ -30,7 +30,7 @@ on export and re-encrypted under the *destination's* key on import.
 
 **Check after import:** projects that deploy from a **local folder** (no git — the “Deploy a local
 folder” flow) store the folder's path *on the source machine*. That path won't exist on the new machine,
-so OpenShip flags those projects on import. Re-point them, or just re-deploy each from a folder that lives
+so Openship flags those projects on import. Re-point them, or just re-deploy each from a folder that lives
 on the new machine (see the last step).
 
 ## Move it
@@ -70,7 +70,7 @@ scp openship-export.osx you@your-server:/tmp/
 
 ### Import on the new server
 
-Install and start OpenShip on the server first (see [Installation](/docs/getting-started/installation)),
+Install and start Openship on the server first (see [Installation](/docs/getting-started/installation)),
 then:
 
 ```bash

@@ -55,7 +55,7 @@ import * as sessionManager from "../session-manager";
 import { auditPorts } from "../port-audit.service";
 import type { PortCheckResult } from "../../../lib/deployment-runtime";
 import { resolveServicePort } from "./domain-helpers";
-import { buildCompositeRegistration } from "./composite-route";
+import { buildCompositeRegistration, buildDomainFanoutRegistrations } from "./composite-route";
 import { serviceKind } from "./project-services";
 import { buildUpstreamUrl, resolveRouteStrategy } from "../../../lib/upstream-url";
 import { withLoopbackPublish } from "../../../lib/loopback-publish";
@@ -1444,22 +1444,23 @@ export async function deployComposeServices(
   if (routeContext?.routing && runtime.name !== "cloud") {
     try {
       // Reusable routing core (shared with the routing API): resolve each
-      // service's live upstream from this deploy's results + its public domain.
+      // service's live upstream from this deploy's results.
+      const resolveTargetUrl = (serviceId: string) => {
+        const svc = enabled.find((s) => s.id === serviceId);
+        const res = results.find((r) => r.serviceId === serviceId);
+        const port = svc ? resolveServicePublicPort(svc) : undefined;
+        if (!port) return null;
+        return buildUpstreamUrl({
+          strategy: resolveRouteStrategy(project.routeStrategy),
+          ip: res?.ip,
+          hostPort: res?.hostPort,
+          containerPort: port,
+        });
+      };
       const composite = buildCompositeRegistration({
         services: enabled,
         routingConfig: project.routingConfig,
-        resolveTargetUrl: (serviceId) => {
-          const svc = enabled.find((s) => s.id === serviceId);
-          const res = results.find((r) => r.serviceId === serviceId);
-          const port = svc ? resolveServicePublicPort(svc) : undefined;
-          if (!port) return null;
-          return buildUpstreamUrl({
-            strategy: resolveRouteStrategy(project.routeStrategy),
-            ip: res?.ip,
-            hostPort: res?.hostPort,
-            containerPort: port,
-          });
-        },
+        resolveTargetUrl,
         resolveDomain: (serviceId) => {
           const svc = enabled.find((s) => s.id === serviceId);
           // Composite (vercel-style single-domain) uses the service's PRIMARY route.
@@ -1488,6 +1489,24 @@ export async function deployComposeServices(
         });
         logger.log(
           `Composed single domain ${r.hostname}: frontend at "/", backend proxied per vercel.json.\n`,
+        );
+      }
+
+      // Re-emit any migration path-fan-out domains (a domain whose paths route to
+      // DIFFERENT services) from this deploy's live upstreams — persisted on the
+      // project so a redeploy reproduces `/v3 → api` instead of dropping it.
+      for (const reg of buildDomainFanoutRegistrations({
+        routes: project.compositeRoutes,
+        resolveTargetUrl,
+      })) {
+        await routeContext.routing.registerRoute({
+          domain: reg.hostname,
+          tls: true,
+          targetUrl: reg.targetUrl!,
+          ...(reg.proxyLocations?.length ? { proxyLocations: reg.proxyLocations } : {}),
+        });
+        logger.log(
+          `Composed path-routed domain ${reg.hostname}: ${reg.proxyLocations?.length ?? 0} extra path location(s).\n`,
         );
       }
     } catch (err) {

@@ -10,10 +10,15 @@ import {
   type LogEntry,
   type ContainerStatus,
 } from "@repo/adapters";
+import { scopedVolumeName, type CommandExecutor } from "@repo/adapters";
 import { encrypt, decrypt } from "../../lib/encryption";
 import { assertResourceInOrg, platform } from "../../lib/controller-helpers";
 import type { RequestContext } from "../../lib/request-context";
-import { resolveDeploymentPlatform } from "../../lib/deployment-runtime";
+import { resolveDeploymentPlatform, resolveServerExecutor } from "../../lib/deployment-runtime";
+import { containerIdForService } from "./service-container";
+import { parseVolumeSpec, type VolumeKind } from "./volume-spec";
+import { sq } from "../migration/direct-transfer";
+import { bounded, duBytes, volumeBytes } from "../migration/migration-size";
 import { deployComposeServices } from "../deployments/compose/deploy.service";
 import type { DeploymentConfigSnapshot } from "../deployments/build.service";
 import { buildServiceRouteDomains, serviceCustomHostnames } from "../../lib/routing-domains";
@@ -694,6 +699,177 @@ function withLiveQueryTimeout<T>(p: Promise<T>): Promise<T | null> {
     p,
     new Promise<null>((resolve) => setTimeout(() => resolve(null), 6000)),
   ]);
+}
+
+// ─── Volume disk usage ───────────────────────────────────────────────────────
+
+export interface ServiceVolumeSize {
+  /** The compose volume string, verbatim — aligned by index to service.volumes. */
+  raw: string;
+  source: string;
+  target: string | null;
+  kind: VolumeKind;
+  readOnly: boolean;
+  /** On-disk size in bytes (apparent, `du -sb`). null = couldn't be measured
+   *  (not mounted / permission / timeout / no running container for a stopped
+   *  named volume). */
+  bytes: number | null;
+}
+
+export interface ServiceVolumeSizes {
+  /** False when there is no host to run `du` on (cloud/Oblien workload, or the
+   *  service isn't deployed) — the UI then just shows the mounts without sizes. */
+  measurable: boolean;
+  volumes: ServiceVolumeSize[];
+  /** Sum of the measured volumes, or null if none could be measured. */
+  totalBytes: number | null;
+  /** True when at least one volume couldn't be measured → totalBytes is a lower
+   *  bound (render it with a "≥"). */
+  partial: boolean;
+}
+
+const VOL_SIZE_CONCURRENCY = 4;
+const VOL_SIZE_TTL_MS = 60_000;
+// `du` on a large data volume is genuinely slow, and this endpoint is opened
+// (not polled) from the Overview tab — cache the measurement briefly, keyed by
+// the exact container, so re-opening the tab doesn't re-`du` every time.
+const volSizeCache = new Map<string, { at: number; value: ServiceVolumeSizes }>();
+
+/** Resolve a named volume's real on-host name (it may be namespaced at deploy
+ *  time as `openship-<slug>-<name>`) and `du` its mountpoint. Only used as a
+ *  fallback when the container isn't running to report authoritative mounts. */
+async function namedVolumeBytesByName(
+  exec: CommandExecutor,
+  slug: string,
+  name: string,
+  namespaced: boolean,
+): Promise<number | null> {
+  const scoped = scopedVolumeName(slug, name);
+  const candidates = namespaced ? [scoped, name] : [name, scoped];
+  const seen = new Set<string>();
+  for (const c of candidates) {
+    if (!c || seen.has(c)) continue;
+    seen.add(c);
+    const b = await volumeBytes(exec, c);
+    if (b != null) return b;
+  }
+  return null;
+}
+
+/**
+ * Measure the on-disk size of each of a service's volumes.
+ *
+ * There is no cheap size in Docker's API, so we measure on the host that owns
+ * the container: `docker inspect .Mounts` gives the authoritative host Source
+ * for every mount (handling volume namespacing + anonymous volumes), then
+ * `du -sb` sizes each path. When the container isn't running we fall back to
+ * resolving a named volume by name. Every probe is bounded (see du/volumeBytes)
+ * so a giant volume yields `bytes: null` (→ partial total) rather than hanging.
+ *
+ * Cloud workloads and not-yet-deployed services return `measurable: false`.
+ */
+export async function getServiceVolumeSizes(
+  ctx: RequestContext,
+  projectId: string,
+  serviceId: string,
+): Promise<ServiceVolumeSizes> {
+  const { project, svc } = await assertServiceAccess(ctx, projectId, serviceId);
+  const parsed = (svc.volumes ?? []).map((v) => parseVolumeSpec(v));
+
+  const unmeasured = (measurable: boolean): ServiceVolumeSizes => ({
+    measurable,
+    volumes: parsed.map((p) => ({
+      raw: p.raw,
+      source: p.source,
+      target: p.target,
+      kind: p.kind,
+      readOnly: p.readOnly,
+      bytes: null,
+    })),
+    totalBytes: null,
+    partial: parsed.length > 0,
+  });
+
+  if (parsed.length === 0) return { measurable: true, volumes: [], totalBytes: null, partial: false };
+  if (!project.activeDeploymentId) return unmeasured(false);
+
+  const dep = await repos.deployment.findById(project.activeDeploymentId);
+  if (!dep) return unmeasured(false);
+
+  // Resolve the host that runs this service's container → its shell executor.
+  let serverId: string | null = null;
+  try {
+    const resolved = await resolveServicePlatform(project, dep);
+    serverId = resolved.serverId;
+    await resolved.platform.runtime?.dispose?.();
+  } catch {
+    // fall through — try the instance's local host below
+  }
+  let executor: CommandExecutor;
+  try {
+    if (!serverId) {
+      const local = await repos.server.findLocal(project.organizationId).catch(() => null);
+      if (!local) return unmeasured(false); // cloud / no host to du on
+      serverId = local.id;
+    }
+    ({ executor } = await resolveServerExecutor(serverId, project.organizationId));
+  } catch {
+    return unmeasured(false);
+  }
+
+  const containerId = await containerIdForService(dep, { id: svc.id, name: svc.name });
+  const cacheKey = `${projectId}:${serviceId}:${containerId ?? "none"}`;
+  const hit = volSizeCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < VOL_SIZE_TTL_MS) return hit.value;
+
+  // Authoritative host paths from the LIVE container mounts (Destination → Source).
+  const mountsByDest = new Map<string, string>();
+  if (containerId) {
+    const out = await executor
+      .exec(`docker inspect ${sq(containerId)} --format '{{json .Mounts}}' 2>/dev/null || echo`, {
+        timeout: 10_000,
+      })
+      .catch(() => "");
+    try {
+      const arr = JSON.parse(out.trim() || "[]");
+      if (Array.isArray(arr)) {
+        for (const m of arr) {
+          if (m && typeof m.Destination === "string" && typeof m.Source === "string") {
+            mountsByDest.set(m.Destination, m.Source);
+          }
+        }
+      }
+    } catch {
+      // non-JSON (container gone / docker error) → fall back per-volume below
+    }
+  }
+
+  const volumes = await bounded(parsed, VOL_SIZE_CONCURRENCY, async (p): Promise<ServiceVolumeSize> => {
+    const hostPath = p.target ? mountsByDest.get(p.target) : undefined;
+    let bytes: number | null;
+    if (hostPath) {
+      bytes = await duBytes(executor, hostPath);
+    } else if (p.kind === "bind" && p.source) {
+      bytes = await duBytes(executor, p.source);
+    } else if (p.kind === "named" && p.source) {
+      bytes = await namedVolumeBytesByName(executor, project.slug, p.source, !!svc.namespaceVolumes);
+    } else {
+      bytes = null; // anonymous volume with no running container → unknown
+    }
+    return { raw: p.raw, source: p.source, target: p.target, kind: p.kind, readOnly: p.readOnly, bytes };
+  });
+
+  let totalBytes: number | null = null;
+  let partial = false;
+  for (const v of volumes) {
+    if (v.bytes == null) partial = true;
+    else totalBytes = (totalBytes ?? 0) + v.bytes;
+  }
+
+  const value: ServiceVolumeSizes = { measurable: true, volumes, totalBytes, partial };
+  if (volSizeCache.size > 500) volSizeCache.clear();
+  volSizeCache.set(cacheKey, { at: Date.now(), value });
+  return value;
 }
 
 // ─── Per-service container actions ───────────────────────────────────────────

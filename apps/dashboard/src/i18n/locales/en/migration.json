@@ -128,7 +128,7 @@
   },
   "cutover": {
     "title": "Finish migration",
-    "warning": "The new deployment is live on the target server. You can stop & remove the original containers now, or keep them (stopped) as a safety net and remove them later.",
+    "warning": "The new deployment is live on the target server. You can stop & remove the original containers now, or keep them as a safety net and remove them later — on a different target server they're restarted as a live standby; on the same server they stay stopped (the new stack now holds their ports).",
     "stopRemove": "Stop & remove originals",
     "keep": "Keep originals",
     "working": "Working…"
@@ -187,7 +187,7 @@
   "scanFailed": "Docker inspection failed",
   "adoptFailed": "Couldn't create the project",
   "entry": {
-    "cardTitle": "Existing Docker server",
+    "cardTitle": "Existing services",
     "cardDesc": "Migrate a running Docker or Compose deployment into Openship.",
     "action": "Migrate apps",
     "tab": "Existing server",
@@ -242,7 +242,7 @@
     "resuming": "Resuming…",
     "editRetry": "Edit & retry",
     "safetyTitle": "Non-destructive & reversible.",
-    "safetyBody": "Your source keeps running the whole time — data is copied, never moved. Nothing is deleted, even after a successful migration: your original containers stay (stopped as a safety net) until you explicitly remove them at cutover.",
+    "safetyBody": "Data is copied, never moved — your source is only briefly paused for a clean copy. Nothing is deleted, even after a successful migration: if you keep the originals, a cross-server source is restarted as a live standby (same-server stays stopped), and they're removed only when you explicitly cut over.",
     "cleanupTarget": "Remove copied data from target"
   },
   "plan": {

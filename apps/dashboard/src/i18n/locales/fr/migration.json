@@ -181,7 +181,7 @@
   "scanFailed": "Échec de l'inspection Docker",
   "adoptFailed": "Impossible de créer le projet",
   "entry": {
-    "cardTitle": "Serveur Docker existant",
+    "cardTitle": "Services existants",
     "cardDesc": "Migrez un déploiement Docker ou Compose en cours vers Openship.",
     "action": "Migrer Docker",
     "tab": "Serveur existant",

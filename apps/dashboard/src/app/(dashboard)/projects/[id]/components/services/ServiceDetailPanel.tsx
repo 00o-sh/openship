@@ -12,8 +12,10 @@ import {
   type Service,
   type ServiceContainer,
   type ServiceInput,
+  type ServiceVolumeSizes,
 } from "@/lib/api/services";
 import { deployApi } from "@/lib/api/deploy";
+import { formatBytes } from "@/lib/formatBytes";
 import { resolveServiceHostnameLabel, internalServiceAddress } from "@repo/core";
 import {
   Play,
@@ -157,6 +159,37 @@ export function ServiceDetailPanel({
       requestAnimationFrame(() => window.scrollTo(0, scrollY));
     }
   };
+
+  // ── Volume sizes (lazy) ──────────────────────────────────────────────
+  // `du` on the host is slow, so we measure only when the Overview tab is open
+  // (not on every render/poll), cache the result for the mounted service, and
+  // skip cloud workloads (no host to du on).
+  const hasVolumes = !!service.volumes && service.volumes.length > 0;
+  const [volSizes, setVolSizes] = useState<ServiceVolumeSizes | null>(null);
+  const [volSizesLoading, setVolSizesLoading] = useState(false);
+  useEffect(() => {
+    setVolSizes(null); // drop the previous service's measurement on switch
+  }, [service.id]);
+  useEffect(() => {
+    if (activeTab !== "overview" || !hasVolumes || deployTarget === "cloud") return;
+    if (volSizes || volSizesLoading) return;
+    let cancelled = false;
+    setVolSizesLoading(true);
+    servicesApi
+      .volumeSizes(projectId, service.id)
+      .then((res) => {
+        if (!cancelled) setVolSizes(res);
+      })
+      .catch(() => {
+        if (!cancelled) setVolSizes(null);
+      })
+      .finally(() => {
+        if (!cancelled) setVolSizesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, hasVolumes, deployTarget, projectId, service.id, volSizes, volSizesLoading]);
 
   // ── Service switcher ─────────────────────────────────────────────────
   // Jump to another service WITHOUT leaving the current tab (Terminal stays
@@ -577,19 +610,47 @@ export function ServiceDetailPanel({
           {/* Volumes */}
           {service.volumes && service.volumes.length > 0 && (
             <div className="bg-card rounded-2xl border border-border/50 p-5">
-              <SectionHeader title={t.projectDetail.services.detail.volumes} icon={HardDrive} />
+              <SectionHeader
+                title={t.projectDetail.services.detail.volumes}
+                icon={HardDrive}
+                right={
+                  volSizesLoading ? (
+                    <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <Loader2 className="size-3 animate-spin" />
+                      Measuring…
+                    </span>
+                  ) : volSizes?.measurable && volSizes.totalBytes != null ? (
+                    <span className="text-xs font-semibold tabular-nums text-foreground">
+                      {volSizes.partial ? "≥ " : ""}
+                      {formatBytes(volSizes.totalBytes)}
+                    </span>
+                  ) : undefined
+                }
+              />
               <div className="space-y-2">
-                {service.volumes.map((vol) => (
-                  <div key={vol} className="flex items-center justify-between gap-3 group">
-                    <span className="truncate text-xs font-mono text-foreground">{vol}</span>
-                    <button
-                      onClick={() => copy(vol, `vol-${vol}`)}
-                      className="shrink-0 rounded p-1 opacity-0 transition-all hover:bg-muted group-hover:opacity-100"
-                    >
-                      {copied === `vol-${vol}` ? <Check className="size-3 text-success" /> : <Copy className="size-3 text-muted-foreground" />}
-                    </button>
-                  </div>
-                ))}
+                {service.volumes.map((vol, i) => {
+                  const vs = volSizes?.measurable ? volSizes.volumes[i] : undefined;
+                  return (
+                    <div key={vol} className="flex items-center justify-between gap-3 group">
+                      <span className="truncate text-xs font-mono text-foreground">{vol}</span>
+                      <div className="flex shrink-0 items-center gap-2">
+                        {volSizesLoading && !vs ? (
+                          <Loader2 className="size-3 animate-spin text-muted-foreground/60" />
+                        ) : vs && vs.bytes != null ? (
+                          <span className="text-[11px] tabular-nums text-muted-foreground">
+                            {formatBytes(vs.bytes)}
+                          </span>
+                        ) : null}
+                        <button
+                          onClick={() => copy(vol, `vol-${vol}`)}
+                          className="rounded p-1 opacity-0 transition-all hover:bg-muted group-hover:opacity-100"
+                        >
+                          {copied === `vol-${vol}` ? <Check className="size-3 text-success" /> : <Copy className="size-3 text-muted-foreground" />}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -837,12 +898,15 @@ export function ServiceDetailPanel({
 
 /* ── Primitives ─────────────────────────────────────────────────────── */
 
-function SectionHeader({ title, subtitle, icon: Icon }: { title: string; subtitle?: string; icon: React.ComponentType<{ className?: string }> }) {
+function SectionHeader({ title, subtitle, icon: Icon, right }: { title: string; subtitle?: string; icon: React.ComponentType<{ className?: string }>; right?: React.ReactNode }) {
   return (
     <div className="mb-4">
-      <div className="flex items-center gap-2">
-        <Icon className="size-4 text-muted-foreground" />
-        <h3 className="text-base font-semibold text-foreground">{title}</h3>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Icon className="size-4 text-muted-foreground" />
+          <h3 className="text-base font-semibold text-foreground">{title}</h3>
+        </div>
+        {right}
       </div>
       {subtitle && <p className="mt-1 text-xs text-muted-foreground">{subtitle}</p>}
     </div>

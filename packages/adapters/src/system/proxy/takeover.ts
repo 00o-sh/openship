@@ -187,7 +187,17 @@ export async function registerImportedSites(
     for (const domain of domains) {
       try {
         if (site.target.kind === "proxy") {
-          await routing.registerRoute({ domain, tls: site.ssl, targetUrl: site.target.url });
+          // Non-root locations become path-prefix proxy locations ahead of `/`
+          // so a fan-out vhost (`/ → A`, `/v3 → B`) is kept, not collapsed.
+          const proxyLocations = (site.routes ?? [])
+            .filter((r) => r.path !== "/")
+            .map((r) => ({ pathPrefix: r.path, targetUrl: r.url }));
+          await routing.registerRoute({
+            domain,
+            tls: site.ssl,
+            targetUrl: site.target.url,
+            ...(proxyLocations.length ? { proxyLocations } : {}),
+          });
         } else {
           await routing.registerRoute({ domain, tls: site.ssl, staticRoot: site.target.root });
         }

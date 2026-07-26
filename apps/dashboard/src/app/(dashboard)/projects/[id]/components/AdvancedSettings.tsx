@@ -325,7 +325,7 @@ export const AdvancedSettings = ({ onDeleteProject }: Props) => {
         onConfirm={onDeleteProject}
         projectName={projectData?.name || projectData?.domain}
         projectId={projectData?.id}
-        selfHosted={!projectData?.cloudWorkspaceId}
+        selfHosted={projectData?.deployTarget !== "cloud"}
       />
     </div>
   );

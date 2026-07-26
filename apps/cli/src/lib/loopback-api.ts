@@ -33,10 +33,15 @@ export function ensureInternalToken(): string {
   return token;
 }
 
-export async function internalGet(port: string, path: string): Promise<any | null> {
+// The internal token differs by install method: the bare service reads/writes
+// `~/.openship/internal-token` (ensureInternalToken); the Compose stack boots the
+// api container with the token from `compose/.env` (composeInternalToken). Callers
+// provisioning the Compose stack pass that token explicitly so these loopback
+// calls authenticate against the RIGHT api — hence the optional `token` arg.
+export async function internalGet(port: string, path: string, token?: string): Promise<any | null> {
   try {
     const res = await fetch(`http://127.0.0.1:${port}${path}`, {
-      headers: { "X-Internal-Token": ensureInternalToken() },
+      headers: { "X-Internal-Token": token ?? ensureInternalToken() },
       signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) return null;
@@ -50,11 +55,12 @@ export async function internalPost(
   port: string,
   path: string,
   body: unknown,
+  token?: string,
 ): Promise<{ ok: boolean; data: any }> {
   try {
     const res = await fetch(`http://127.0.0.1:${port}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Internal-Token": ensureInternalToken() },
+      headers: { "Content-Type": "application/json", "X-Internal-Token": token ?? ensureInternalToken() },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(30000),
     });
@@ -69,8 +75,9 @@ export async function internalPost(
 export async function bootstrapAdmin(
   apiPort: string,
   admin: { name: string; email: string; password: string },
+  token?: string,
 ): Promise<{ ok: boolean; message?: string }> {
-  const { ok, data } = await internalPost(apiPort, "/api/system/bootstrap-admin", admin);
+  const { ok, data } = await internalPost(apiPort, "/api/system/bootstrap-admin", admin, token);
   if (ok) return { ok: true };
   if (data?.error === "An admin account already exists") return { ok: true, message: "already-exists" };
   return { ok: false, message: data?.error || "failed" };

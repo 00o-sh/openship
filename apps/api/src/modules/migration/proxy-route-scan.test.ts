@@ -6,12 +6,20 @@ const proxySite = (over: Partial<ImportedSite> & { url: string }): ImportedSite 
   serverNames: over.serverNames ?? ["app.example.com"],
   ssl: over.ssl ?? false,
   target: { kind: "proxy", url: over.url },
+  routes: over.routes,
   tls: over.tls,
   source: over.source,
 });
 
+/** Grab the single route indexed at a port (each port now maps to a LIST). */
+const one = (idx: Map<number, ReturnType<typeof buildProxyRouteIndex> extends Map<number, infer V> ? V : never>, port: number) => {
+  const list = idx.get(port);
+  expect(list?.length).toBe(1);
+  return list![0];
+};
+
 describe("buildProxyRouteIndex", () => {
-  it("maps a proxied vhost to its upstream host port with domains + ssl + cert", () => {
+  it("maps a proxied vhost to its upstream host port with path + domains + ssl + cert", () => {
     const idx = buildProxyRouteIndex([
       proxySite({
         url: "http://127.0.0.1:3000",
@@ -21,16 +29,40 @@ describe("buildProxyRouteIndex", () => {
         source: "/etc/nginx/sites-enabled/app",
       }),
     ]);
-    expect(idx.get(3000)).toEqual({
-      port: 3000,
-      domains: ["app.example.com"],
-      ssl: {
-        enabled: true,
-        certPath: "/etc/letsencrypt/live/app/fullchain.pem",
-        keyPath: "/etc/letsencrypt/live/app/privkey.pem",
+    expect(idx.get(3000)).toEqual([
+      {
+        port: 3000,
+        path: "/",
+        domains: ["app.example.com"],
+        ssl: {
+          enabled: true,
+          certPath: "/etc/letsencrypt/live/app/fullchain.pem",
+          keyPath: "/etc/letsencrypt/live/app/privkey.pem",
+        },
+        source: "/etc/nginx/sites-enabled/app",
       },
-      source: "/etc/nginx/sites-enabled/app",
-    });
+    ]);
+  });
+
+  it("indexes a path-fan-out vhost as one entry PER (port,path) so /v3 → :1020 is kept", () => {
+    // api.onvo.me: `/` → :1010, `/v3` → :1020 (the real bug that dropped /v3).
+    const idx = buildProxyRouteIndex([
+      proxySite({
+        url: "http://localhost:1010",
+        serverNames: ["api.onvo.me"],
+        ssl: true,
+        routes: [
+          { path: "/", url: "http://localhost:1010" },
+          { path: "/v3", url: "http://localhost:1020" },
+        ],
+      }),
+    ]);
+    expect(idx.get(1010)).toEqual([
+      { port: 1010, path: "/", domains: ["api.onvo.me"], ssl: { enabled: true, certPath: undefined, keyPath: undefined } },
+    ]);
+    expect(idx.get(1020)).toEqual([
+      { port: 1020, path: "/v3", domains: ["api.onvo.me"], ssl: { enabled: true, certPath: undefined, keyPath: undefined } },
+    ]);
   });
 
   it("skips static docroots (no upstream port)", () => {
@@ -55,13 +87,13 @@ describe("buildProxyRouteIndex", () => {
         tls: { certPath: "/c/fullchain.pem", keyPath: "/c/privkey.pem" },
       }),
     ]);
-    const route = idx.get(8080)!;
+    const route = one(idx, 8080);
     expect(route.domains.sort()).toEqual(["a.example.com", "b.example.com"]);
     expect(route.ssl).toEqual({ enabled: true, certPath: "/c/fullchain.pem", keyPath: "/c/privkey.pem" });
   });
 
   it("reports ssl disabled when no TLS on the vhost", () => {
     const idx = buildProxyRouteIndex([proxySite({ url: "http://127.0.0.1:5000", ssl: false })]);
-    expect(idx.get(5000)?.ssl).toEqual({ enabled: false });
+    expect(one(idx, 5000).ssl).toEqual({ enabled: false });
   });
 });

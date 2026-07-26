@@ -68,8 +68,10 @@ describe("scanNginx", () => {
     expect(res.warnings.some((w) => w.includes("variable"))).toBe(true);
   });
 
-  test("path-routing: migrates the root location, warns about extra upstreams (no silent collapse)", async () => {
-    // `location /` is declared AFTER `/api` — the primary must still be `/`.
+  test("path-routing: keeps EVERY location upstream in `routes`, primary stays `/`", async () => {
+    // `location /` is declared AFTER `/api` — the primary must still be `/`, and
+    // the extra upstream is RETAINED (not dropped to a warning) so the edge can
+    // path-route it.
     const conf = `
       server {
         server_name app.example.com;
@@ -82,11 +84,13 @@ describe("scanNginx", () => {
     expect(res.sites).toHaveLength(1);
     // primary = the root location, not the first-appearing one
     expect(res.sites[0].target).toEqual({ kind: "proxy", url: "http://127.0.0.1:3000" });
-    // the /api upstream is NOT dropped silently — it's surfaced as a warning
-    const w = res.warnings.find((x) => x.includes("path-routes"));
-    expect(w).toBeTruthy();
-    expect(w).toContain("/api");
-    expect(w).toContain("http://127.0.0.1:9000");
+    // both upstreams are retained in source order, each with its path
+    expect(res.sites[0].routes).toEqual([
+      { path: "/api", url: "http://127.0.0.1:9000" },
+      { path: "/", url: "http://127.0.0.1:3000" },
+    ]);
+    // no "re-add manually" warning anymore — nothing is dropped
+    expect(res.warnings.find((x) => x.includes("path-routes"))).toBeUndefined();
   });
 
   test("nested if/location braces don't truncate the block", async () => {

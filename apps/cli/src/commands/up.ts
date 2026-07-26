@@ -167,18 +167,29 @@ export const upCommand = new Command("up")
     // present on Linux — the edge container needs host networking); else bare.
     const method = opts.bare ? "bare" : opts.compose ? "compose" : composeIsViableDefault() ? "compose" : "bare";
     if (method === "compose") {
-      await runCompose(opts);
-      if (headless) {
-        console.warn(
-          chalk.yellow(
-            "\n  Headless admin bootstrap isn't wired for the Compose install yet — open the dashboard to register the first account.\n",
-          ),
-        );
+      const started = await runCompose(opts);
+      if (headless && !opts.dryRun) {
+        // The compose api container boots with the token from compose/.env (NOT
+        // the bare ~/.openship token file) — authenticate the setup calls with it.
+        const token = composeInternalToken();
+        if (!token) {
+          console.warn(
+            chalk.yellow(
+              "\n  Couldn't read the stack's internal token (compose/.env) — create the admin from the dashboard.\n",
+            ),
+          );
+        } else {
+          await runHeadlessProvision(
+            opts,
+            { port: started.apiPort, dashPort: started.dashPort },
+            { token, method: "compose" },
+          );
+        }
       }
       return;
     }
     const started = await startService(opts);
-    if (headless && !opts.dryRun) await runHeadlessProvision(opts, started);
+    if (headless && !opts.dryRun) await runHeadlessProvision(opts, started, { method: "bare" });
   });
 
 /**
@@ -190,6 +201,7 @@ export const upCommand = new Command("up")
 async function runHeadlessProvision(
   opts: UpOpts,
   started: { port: string; dashPort: string },
+  extra?: { token?: string; method?: "bare" | "compose" },
 ): Promise<void> {
   let inputs;
   try {
@@ -217,6 +229,8 @@ async function runHeadlessProvision(
       port: started.port,
       dashPort: started.dashPort,
       inputs,
+      token: extra?.token,
+      method: extra?.method,
       onLog: (m) => console.log(chalk.dim(`  ${m}`)),
     });
     console.log(chalk.green(`\n  ✓ Openship provisioned${result.liveUrl ? `: ${result.liveUrl}` : "."}`));
@@ -233,7 +247,8 @@ async function runHeadlessProvision(
  * heavier, production-shaped profile — Postgres/Redis instead of the bare
  * embedded PGlite. Managed via `docker compose` (openship stop/update/status).
  */
-async function runCompose(opts: UpOpts): Promise<void> {
+async function runCompose(opts: UpOpts & { yes?: boolean }): Promise<{ apiPort: string; dashPort: string }> {
+  const headless = !!(opts.nonInteractive || opts.yes);
   if (!hasDockerCompose()) {
     console.error(
       chalk.red("\n  Docker + `docker compose` are required for the Compose install.\n") +
@@ -306,8 +321,10 @@ async function runCompose(opts: UpOpts): Promise<void> {
     chalk.dim(`  Dashboard: ${dashboardUrl}  (login required)\n`) +
       chalk.dim("  Images:    api + dashboard + edge (OpenResty on :80/:443)\n") +
       chalk.dim("  Manage:    openship stop · openship update · openship status\n") +
-      chalk.dim("  Create an admin: open the dashboard and register the first account.\n"),
+      // In headless mode the admin is bootstrapped below — don't tell the user to do it by hand.
+      (headless ? "" : chalk.dim("  Create an admin: open the dashboard and register the first account.\n")),
   );
+  return { apiPort: res.apiPort, dashPort: res.dashPort };
 }
 
 /** Wait for the compose api container to answer its health stub. */

@@ -5,6 +5,31 @@
  * well-formed to forward, so the orchestrator sees a clean optional field.
  */
 
+/** A per-service route to publish post-verify. `targetPath` (e.g. "/v3") marks a
+ *  service that serves a PATH of a shared domain (path fan-out); its absence
+ *  means the root `/`. */
+export interface MigrationRouteSpec {
+  exposedPort?: string;
+  domainType: "free" | "custom";
+  domain?: string;
+  customDomain?: string;
+  targetPath?: string;
+}
+
+/** Normalize a location path prefix to a leading-slash form (`v3` → `/v3`),
+ *  rejecting `..` traversal; `/` or empty → "/". Inlined (not imported from
+ *  public-endpoints) to keep this module import-light for its unit tests. */
+function normalizePathPrefix(raw: string): string {
+  const segments = raw
+    .trim()
+    .replace(/\\/g, "/")
+    .split("/")
+    .map((s) => s.trim())
+    .filter((s) => s && s !== ".");
+  if (segments.some((s) => s === "..")) return "/";
+  return segments.length > 0 ? `/${segments.join("/")}` : "/";
+}
+
 /** Keep only well-formed serviceName → "reuse"|"copy" entries from client input. */
 export function sanitizeVolumeStrategies(
   input: Record<string, unknown> | undefined,
@@ -86,16 +111,10 @@ export function sanitizeConflictResolution(
 export function sanitizeRoutes(
   input: Record<string, unknown> | undefined,
 ):
-  | Record<
-      string,
-      { exposedPort?: string; domainType: "free" | "custom"; domain?: string; customDomain?: string }
-    >
+  | Record<string, MigrationRouteSpec>
   | undefined {
   if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
-  const out: Record<
-    string,
-    { exposedPort?: string; domainType: "free" | "custom"; domain?: string; customDomain?: string }
-  > = {};
+  const out: Record<string, MigrationRouteSpec> = {};
   for (const [name, raw] of Object.entries(input)) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
     const r = raw as {
@@ -103,6 +122,7 @@ export function sanitizeRoutes(
       domainType?: unknown;
       domain?: unknown;
       customDomain?: unknown;
+      targetPath?: unknown;
     };
     const domainType = r.domainType === "custom" ? "custom" : "free";
     const domain = typeof r.domain === "string" ? r.domain.trim().toLowerCase() : undefined;
@@ -110,12 +130,16 @@ export function sanitizeRoutes(
       typeof r.customDomain === "string" ? r.customDomain.trim().toLowerCase() : undefined;
     const value = domainType === "custom" ? customDomain : domain;
     if (!value) continue; // nothing to publish without a domain
+    // A non-root location prefix (e.g. "/v3") → this service serves a PATH of the
+    // domain (path fan-out); root ("/") is the default and carries no targetPath.
+    const path = typeof r.targetPath === "string" ? normalizePathPrefix(r.targetPath) : undefined;
     out[name] = {
       domainType,
       ...(domainType === "custom" ? { customDomain: value } : { domain: value }),
       ...(r.exposedPort != null && String(r.exposedPort).trim()
         ? { exposedPort: String(r.exposedPort).trim() }
         : {}),
+      ...(path && path !== "/" ? { targetPath: path } : {}),
     };
     if (Object.keys(out).length >= 100) break;
   }

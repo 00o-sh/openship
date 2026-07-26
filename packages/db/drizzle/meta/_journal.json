@@ -484,6 +484,13 @@
       "when": 1785358198651,
       "tag": "0068_add_migration_target_volumes",
       "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1785358298651,
+      "tag": "0069_add_project_composite_routes",
+      "breakpoints": true
     }
   ]
 }

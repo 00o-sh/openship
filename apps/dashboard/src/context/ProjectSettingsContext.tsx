@@ -459,11 +459,21 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
 
   // Fetch git
   const isLoadingGitRef = useRef(false);
+  // True once git info has loaded for the CURRENT project. Re-opening the Source
+  // tab remounts GitSettings and re-calls refreshGit; without this that flashed
+  // the skeleton on every visit even though the context already had the data.
+  // Now a re-open refreshes in the BACKGROUND (data stays visible). Reset on id
+  // change so a different project still shows the skeleton once.
+  const gitLoadedRef = useRef(false);
+  useEffect(() => {
+    gitLoadedRef.current = false;
+  }, [id]);
   const refreshGit = useCallback(async () => {
     try {
       if (isLoadingGitRef.current) return;
       isLoadingGitRef.current = true;
-      setGitData((prev) => ({ ...prev, isLoading: true, error: null }));
+      // Only the first load shows the skeleton; later refreshes update in place.
+      setGitData((prev) => ({ ...prev, isLoading: !gitLoadedRef.current, error: null }));
 
       if (!id) {
         setGitData((prev) => ({ ...prev, isLoading: false }));
@@ -546,6 +556,9 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
       }));
     } finally {
       isLoadingGitRef.current = false;
+      // Fetch attempt completed for this project → subsequent refreshGit calls
+      // (tab re-open, post-action refresh) update in the background, no skeleton.
+      gitLoadedRef.current = true;
     }
   }, [id]);
 

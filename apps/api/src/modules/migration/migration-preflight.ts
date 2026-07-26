@@ -157,10 +157,10 @@ export async function buildMigrationPreview(opts: {
         const seen = new Map<string, boolean>();
         for (const s of chosen) {
           if (s.proxyKind) continue;
-          const r = s.existingRoute;
-          if (!r?.domains?.length) continue;
-          const hasCert = Boolean(r.ssl?.certPath && r.ssl?.keyPath);
-          for (const d of r.domains) if (!seen.has(d)) seen.set(d, hasCert);
+          for (const r of s.existingRoute ?? []) {
+            const hasCert = Boolean(r.ssl?.certPath && r.ssl?.keyPath);
+            for (const d of r.domains) seen.set(d, (seen.get(d) ?? false) || hasCert);
+          }
         }
         return seen.size ? [...seen].map(([domain, hasCert]) => ({ domain, hasCert })) : undefined;
       })();

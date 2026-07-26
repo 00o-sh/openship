@@ -101,7 +101,7 @@ export {
 } from "./runtime/host-port";
 export { type RuntimeMode, type CreateRuntimeOptions, createRuntime } from "./runtime/index";
 export { resolveDockerfileCandidates } from "./runtime/docker-paths";
-export { scopedVolumeName, scopeVolumeBinds } from "./runtime/volume-namespace";
+export { scopedVolumeName, scopeVolumeBinds, isHostPathSource } from "./runtime/volume-namespace";
 
 // ─── Infrastructure layer ────────────────────────────────────────────────────
 export type { RoutingProvider, SslProvider } from "./infra/types";

@@ -65,18 +65,20 @@ function parseVhost(body: string, portHint: string): ImportedSite | { warning: s
     return { warning: "apache: skipped a VirtualHost with no ServerName" };
   }
 
-  // ProxyPass / <path> http://upstream  (take the first non-"!" mapping)
-  const proxyLine = [...body.matchAll(/(?:^|\n)\s*ProxyPass\s+(\S+)\s+(\S+)/gi)]
+  // ProxyPass <path> http://upstream — keep ALL non-"!" mappings (path fan-out);
+  // primary = the "/" mapping if present, else the first.
+  const routes = [...body.matchAll(/(?:^|\n)\s*ProxyPass\s+(\S+)\s+(\S+)/gi)]
     .map((m) => ({ path: m[1], url: m[2] }))
-    .find((p) => p.url && p.url !== "!");
+    .filter((p) => p.url && p.url !== "!");
   const docRoot = directive(body, "DocumentRoot")?.replace(/^["']|["']$/g, "");
   const certPath = directive(body, "SSLCertificateFile");
   const keyPath = directive(body, "SSLCertificateKeyFile");
   const ssl = /:443/.test(portHint) || /SSLEngine\s+on/i.test(body) || Boolean(certPath);
 
   let target: ImportedSite["target"];
-  if (proxyLine) {
-    target = { kind: "proxy", url: proxyLine.url };
+  if (routes.length > 0) {
+    const primary = routes.find((r) => r.path === "/") ?? routes[0];
+    target = { kind: "proxy", url: primary.url };
   } else if (docRoot) {
     target = { kind: "static", root: docRoot };
   } else {
@@ -84,6 +86,7 @@ function parseVhost(body: string, portHint: string): ImportedSite | { warning: s
   }
 
   const site: ImportedSite = { serverNames: names, ssl, target, source: "apache" };
+  if (routes.length > 0) site.routes = routes;
   if (certPath && keyPath) site.tls = { certPath, keyPath };
   return site;
 }

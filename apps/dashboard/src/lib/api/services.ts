@@ -125,6 +125,27 @@ export interface ServiceContainer {
   imageRef: string | null;
 }
 
+export interface ServiceVolumeSize {
+  /** The compose volume string, verbatim — aligned by index to service.volumes. */
+  raw: string;
+  source: string;
+  target: string | null;
+  kind: "named" | "bind" | "anonymous";
+  readOnly: boolean;
+  /** On-disk size in bytes (apparent), or null when it couldn't be measured. */
+  bytes: number | null;
+}
+
+export interface ServiceVolumeSizes {
+  /** False for cloud/undeployed services (no host to `du` on) → hide sizes. */
+  measurable: boolean;
+  volumes: ServiceVolumeSize[];
+  /** Sum of measured volumes, or null if none measured. */
+  totalBytes: number | null;
+  /** True when a volume couldn't be measured → totalBytes is a lower bound (≥). */
+  partial: boolean;
+}
+
 export interface ServiceEnvVar {
   id: string;
   key: string;
@@ -190,6 +211,14 @@ export const servicesApi = {
   /** Get a single service */
   get: (projectId: string | number, serviceId: string) =>
     api.get<{ success: boolean; service: Service }>(endpoints.services.get(projectId, serviceId)),
+
+  /** Measure the on-disk size of a service's volumes (runs `du` on the host —
+   *  loaded lazily from the Overview tab, not polled). Aligned by index to
+   *  `service.volumes`. `measurable:false` for cloud/undeployed → no sizes. */
+  volumeSizes: (projectId: string | number, serviceId: string) =>
+    api.get<{ success: boolean } & ServiceVolumeSizes>(
+      endpoints.services.volumeSizes(projectId, serviceId),
+    ),
 
   /** Create a service manually */
   create: (projectId: string | number, data: ServiceInput) =>

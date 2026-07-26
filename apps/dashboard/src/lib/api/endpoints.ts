@@ -82,6 +82,8 @@ export const endpoints = {
     create: (projectId: string | number) => `projects/${projectId}/services`,
     get: (projectId: string | number, serviceId: string) =>
       `projects/${projectId}/services/${serviceId}`,
+    volumeSizes: (projectId: string | number, serviceId: string) =>
+      `projects/${projectId}/services/${serviceId}/volume-sizes`,
     update: (projectId: string | number, serviceId: string) =>
       `projects/${projectId}/services/${serviceId}`,
     delete: (projectId: string | number, serviceId: string) =>
@@ -134,6 +136,7 @@ export const endpoints = {
   /* ---------------------------------------------------------------- */
   domains: {
     preview: "domains/preview",
+    byId: (id: string) => `domains/${encodeURIComponent(id)}`,
     verify: (id: string) => `domains/${encodeURIComponent(id)}/verify`,
     verifySsl: (id: string) => `domains/${encodeURIComponent(id)}/verify-ssl`,
     certificate: (id: string) => `domains/${encodeURIComponent(id)}/certificate`,

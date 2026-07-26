@@ -52,7 +52,7 @@ const INSPECT_TIMEOUT_MS = 10_000;
 const SIZE_CONCURRENCY = 4;
 
 /** Minimal bounded-concurrency map (no dep), order-preserving. */
-async function bounded<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+export async function bounded<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let next = 0;
   const worker = async () => {
@@ -65,7 +65,7 @@ async function bounded<T, R>(items: T[], limit: number, fn: (item: T) => Promise
   return results;
 }
 
-async function duBytes(exec: CommandExecutor, path: string): Promise<number | null> {
+export async function duBytes(exec: CommandExecutor, path: string): Promise<number | null> {
   // -s summarize, -b apparent bytes (matches rsync's transferred bytes).
   const out = await exec
     .exec(`du -sb ${sq(path)} 2>/dev/null | cut -f1`, { timeout: PROBE_TIMEOUT_MS })
@@ -74,7 +74,7 @@ async function duBytes(exec: CommandExecutor, path: string): Promise<number | nu
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-async function volumeBytes(exec: CommandExecutor, name: string): Promise<number | null> {
+export async function volumeBytes(exec: CommandExecutor, name: string): Promise<number | null> {
   const mp = (
     await exec
       .exec(`docker volume inspect ${sq(name)} --format '{{.Mountpoint}}' 2>/dev/null`, {

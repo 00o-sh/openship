@@ -11,7 +11,10 @@
  *   deploying → deploy the adopted project on the target server
  *   verifying → wait for the target deployment to reach `ready`
  *   awaiting_cutover → success; wait for the user to confirm the destructive
- *                 teardown of the originals (opt-in)
+ *                 teardown of the originals — OR keep, which (cross-server)
+ *                 RESTARTS the quiesced originals so the old server runs as a
+ *                 live standby. Same-server keep leaves them stopped (the target
+ *                 now holds their ports/volumes).
  *   cutover → stop + remove the originals on the source (by scanned container
  *             id — they carry no openship.* labels). Never removes A volumes.
  *   rolled_back → any pre-cutover failure: tear down the target deployment and
@@ -41,11 +44,14 @@ import {
   createServerCommandExecutor,
 } from "../../lib/deployment-runtime";
 import { establishDirectLink, PathMissingError, statPath, sq } from "./direct-transfer";
+import type { MigrationRouteSpec } from "./migration-input";
 import { sizeOfMoveSet } from "./migration-size";
 import { withKeyedMutex } from "../../lib/provision-lock";
 import { requestBuildAccess } from "../deployments/build.service";
 import { restartServiceContainer, updateService } from "../services/service.service";
+import { applyProjectRouting } from "../domains/routing-apply.service";
 import { linkProjectRepo } from "../projects/project-crud.service";
+import type { ProjectCompositeRoute } from "@repo/core";
 import { teardownProject } from "../projects/project-teardown";
 import { discoverServerStack } from "./docker-inspect.service";
 import { adoptServerStack, attachLiveRuntime } from "./migrate.service";
@@ -100,11 +106,9 @@ export interface StartMigrationInput {
   conflictResolution?: Record<string, "override" | "clone" | "keep">;
   /** serviceName → the domain/route to publish once the target is verified.
    *  Published SERVER-SIDE post-verify (was client-only, so it was lost when the
-   *  wizard unmounted or a run was opened from the list). */
-  routesByServiceName?: Record<
-    string,
-    { exposedPort?: string; domainType: "free" | "custom"; domain?: string; customDomain?: string }
-  >;
+   *  wizard unmounted or a run was opened from the list). `targetPath` marks a
+   *  service that serves a PATH of a shared domain (path fan-out). */
+  routesByServiceName?: Record<string, MigrationRouteSpec>;
   /** Adopt in flat-docker mode — MUST match the scan the user selected from, or
    *  openship-labeled containers get treated as managed and "none are found". */
   flatDocker?: boolean;
@@ -1223,22 +1227,81 @@ class MigrationOrchestratorImpl {
     if (!routes || Object.keys(routes).length === 0) return;
     const services = await repos.service.listByProject(projectId).catch(() => []);
     const byName = new Map(services.map((s) => [s.name, s]));
+
+    // Group by DOMAIN: a domain can be shared by several services at different
+    // paths (path fan-out, e.g. api.onvo.me `/` → web, `/v3` → api). `domain` is
+    // globally unique, so exactly one service can own its row.
+    type Entry = { name: string; svcId: string; spec: MigrationRouteSpec; domain: string };
+    const byDomain = new Map<string, Entry[]>();
     for (const [name, spec] of Object.entries(routes)) {
       const svc = byName.get(name);
       const domain = (spec.domainType === "custom" ? spec.customDomain : spec.domain)
         ?.trim()
         .toLowerCase();
       if (!svc || !domain) continue;
+      const list = byDomain.get(domain) ?? [];
+      list.push({ name, svcId: svc.id, spec, domain });
+      byDomain.set(domain, list);
+    }
+
+    const composites: ProjectCompositeRoute[] = [];
+    for (const [domain, entries] of byDomain) {
+      // Root = the `/` entry (no targetPath), else the shortest path, else first.
+      const root =
+        entries.find((e) => !e.spec.targetPath) ??
+        [...entries].sort(
+          (a, b) => (a.spec.targetPath ?? "/").length - (b.spec.targetPath ?? "/").length,
+        )[0];
+      const extras = entries.filter((e) => e !== root && e.spec.targetPath);
+
+      // Root mints the domain row + exposes.
       try {
-        await updateService(ctx, projectId, svc.id, {
+        await updateService(ctx, projectId, root.svcId, {
           exposed: true,
-          ...(spec.exposedPort ? { exposedPort: spec.exposedPort } : {}),
-          domainType: spec.domainType,
-          ...(spec.domainType === "custom" ? { customDomain: domain } : { domain }),
+          ...(root.spec.exposedPort ? { exposedPort: root.spec.exposedPort } : {}),
+          domainType: root.spec.domainType,
+          ...(root.spec.domainType === "custom" ? { customDomain: domain } : { domain }),
         });
-        log(`published route ${name} → ${domain}`);
+        log(`published route ${root.name} → ${domain}${root.spec.targetPath ?? ""}`);
       } catch (err) {
-        log(`route ${name} skipped: ${safeErrorMessage(err)}`);
+        log(`route ${root.name} skipped: ${safeErrorMessage(err)}`);
+        continue; // couldn't publish the domain at all
+      }
+
+      // Extras share the domain at a path — just EXPOSE them (no own domain) so
+      // their upstream resolves for the fan-out proxy locations.
+      for (const e of extras) {
+        try {
+          await updateService(ctx, projectId, e.svcId, {
+            exposed: true,
+            ...(e.spec.exposedPort ? { exposedPort: e.spec.exposedPort } : {}),
+          });
+          log(`published fan-out ${e.name} → ${domain}${e.spec.targetPath}`);
+        } catch (err) {
+          log(`fan-out ${e.name} skipped: ${safeErrorMessage(err)}`);
+        }
+      }
+
+      if (extras.length > 0) {
+        composites.push({
+          hostname: domain,
+          isCustomDomain: root.spec.domainType === "custom",
+          rootServiceId: root.svcId,
+          locations: extras.map((e) => ({ pathPrefix: e.spec.targetPath!, serviceId: e.svcId })),
+        });
+      }
+    }
+
+    // Persist the fan-out map + apply it NOW (proxyLocations, last so it wins over
+    // the root's plain route). Persistence makes every future redeploy re-emit it
+    // (deploy.service + routing-apply read project.compositeRoutes). Best-effort.
+    if (composites.length > 0) {
+      try {
+        await repos.project.update(projectId, { compositeRoutes: composites });
+        await applyProjectRouting(projectId);
+        log(`published ${composites.length} path-routed domain(s)`);
+      } catch (err) {
+        log(`path-routing apply skipped: ${safeErrorMessage(err)}`);
       }
     }
   }
@@ -1248,20 +1311,21 @@ class MigrationOrchestratorImpl {
     targetServerId: string,
     organizationId: string,
     chosen: Array<{
-      existingRoute?: { domains: string[]; ssl: { certPath?: string; keyPath?: string } };
+      existingRoute?: Array<{ domains: string[]; ssl: { certPath?: string; keyPath?: string } }>;
     }>,
   ): Promise<void> {
     // domain → source cert/key file paths, from the proxy scan attached to each
-    // discovered service. First writer wins per domain.
+    // discovered service (one entry per proxied path). First writer wins per domain.
     const domainCerts = new Map<string, { certPath: string; keyPath: string }>();
     for (const s of chosen) {
-      const r = s.existingRoute;
-      if (!r?.ssl?.certPath || !r.ssl.keyPath) continue;
-      for (const domain of r.domains) {
-        // Hostname-only guard — the domain becomes a filesystem path segment.
-        if (!/^[a-z0-9.-]+$/i.test(domain) || domain.includes("..")) continue;
-        if (!domainCerts.has(domain)) {
-          domainCerts.set(domain, { certPath: r.ssl.certPath, keyPath: r.ssl.keyPath });
+      for (const r of s.existingRoute ?? []) {
+        if (!r.ssl?.certPath || !r.ssl.keyPath) continue;
+        for (const domain of r.domains) {
+          // Hostname-only guard — the domain becomes a filesystem path segment.
+          if (!/^[a-z0-9.-]+$/i.test(domain) || domain.includes("..")) continue;
+          if (!domainCerts.has(domain)) {
+            domainCerts.set(domain, { certPath: r.ssl.certPath, keyPath: r.ssl.keyPath });
+          }
         }
       }
     }
@@ -1432,6 +1496,17 @@ class MigrationOrchestratorImpl {
     if (kill && run.sourceServerId) {
       await this.transition(id, "cutover");
       await this.cutover(
+        run.sourceServerId,
+        organizationId,
+        (run.scannedContainerIds ?? {}) as Record<string, string>,
+      );
+    } else if (!kill && run.sourceServerId && run.sourceServerId !== run.targetServerId) {
+      // Keep + cross-server: moveData quiesced the source for a consistent copy,
+      // so bring the originals back UP — the old server returns to running as a
+      // live standby until the user manually cleans it up (nothing is removed).
+      // Same-server keep leaves them stopped: the target now holds the same
+      // ports/volumes, so both can't run at once.
+      await this.restartSourceOriginals(
         run.sourceServerId,
         organizationId,
         (run.scannedContainerIds ?? {}) as Record<string, string>,
@@ -1648,8 +1723,22 @@ class MigrationOrchestratorImpl {
         console.warn(`[migration] target teardown failed:`, safeErrorMessage(err));
       }
     }
+    await this.restartSourceOriginals(ctx.sourceServerId, ctx.organizationId, scannedContainerIds);
+  }
+
+  /**
+   * Start the (quiesced) source originals back up by their scanned container ids.
+   * `moveData` stops them for a consistent volume copy; this restores them.
+   * Shared by the rollback/boot-recovery restore and the keep-source cutover
+   * decision. Best-effort per container; never throws.
+   */
+  private async restartSourceOriginals(
+    sourceServerId: string,
+    organizationId: string,
+    scannedContainerIds: Record<string, string>,
+  ): Promise<void> {
     try {
-      const rtA = await createServerDockerRuntime(ctx.sourceServerId, ctx.organizationId);
+      const rtA = await createServerDockerRuntime(sourceServerId, organizationId);
       try {
         for (const cid of Object.values(scannedContainerIds)) {
           await rtA.start(cid).catch(() => {});

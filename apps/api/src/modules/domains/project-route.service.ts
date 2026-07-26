@@ -9,7 +9,7 @@ import {
   type StoredPublicEndpoint,
 } from "../../lib/public-endpoints";
 import { resolveUpstreamUrl, resolveRouteStrategy } from "../../lib/upstream-url";
-import { deregisterManagedEdgeRoutes } from "../../lib/managed-edge-proxy";
+import { deregisterManagedEdgeRoutes, syncManagedEdgeRoutes } from "../../lib/managed-edge-proxy";
 import { syncProjectPublicRoutes } from "../../lib/project-route-store";
 import { resolveDeploymentRuntime } from "../../lib/deployment-runtime";
 import { pushProjectRules } from "../route-rules/route-rule.service";
@@ -338,6 +338,37 @@ export async function reapplyProjectLiveRoutes(
   const { routing, runtime, effectiveTarget, serverId } =
     await resolveDeploymentRuntime(deployment);
 
+  // Register the managed (*.opsh.io) hostnames that are NEW in this edit on
+  // Openship Cloud's edge — the "add" half. Oblien's edge has NO route EDIT
+  // (only sync + deregister), so a slug change is drop-old (deregistered above)
+  // + add-new (here). PER-ROUTE by design: only hostnames absent from
+  // `previousHostnames` are synced — symmetric with the dropped-slug deregister
+  // above — so editing ONE route never re-hits Oblien (or re-resolves the target
+  // host) for the project's OTHER, unchanged routes. A target-host change on an
+  // UNCHANGED hostname (e.g. a server move) is re-synced by the deploy path, not
+  // here. Best-effort/fire-and-forget: the app is live locally; a failure only
+  // delays the free URL (same contract as the deploy path's sync).
+  const previouslyPresent = new Set(previousHostnames.map((h) => h.toLowerCase()));
+  const syncAddedManagedEdge = () => {
+    const addedTargets = current
+      .filter((d) => !d.targetPath && !previouslyPresent.has(d.hostname.toLowerCase()))
+      .map((d) => ({ hostname: d.hostname, subdomain: managedHostnameToSlug(d.hostname) }))
+      .filter((t): t is { hostname: string; subdomain: string } => !!t.subdomain);
+    if (addedTargets.length === 0) return;
+    void syncManagedEdgeRoutes(addedTargets, {
+      organizationId: project.organizationId,
+      serverId: serverId ?? undefined,
+    })
+      .then(({ failures }) => {
+        if (failures.length > 0) {
+          console.warn(
+            `[project-route] ${project.slug}: managed edge sync failed for ${failures.join(", ")}`,
+          );
+        }
+      })
+      .catch(() => {});
+  };
+
   const containerId = deployment.containerId;
   if (!containerId) {
     // Compose/multi-service deployments track containers per-service, so the
@@ -349,6 +380,7 @@ export async function reapplyProjectLiveRoutes(
     );
     await reconcileProjectRoutes(project, { routing, removes });
     await pushProjectRules(project.id, serverId ?? null, previousHostnames).catch(() => {});
+    syncAddedManagedEdge();
     return;
   }
 
@@ -407,4 +439,9 @@ export async function reapplyProjectLiveRoutes(
   // hostnames. Best-effort — the DB is the source of truth; a failure defers to
   // the next reconcile. previousHostnames clears rules for any dropped hostname.
   await pushProjectRules(project.id, serverId ?? null, previousHostnames).catch(() => {});
+
+  // Register the newly-added managed slug(s) on the cloud edge (the "add" half
+  // of the edit; dropped slugs were deregistered above). Per-route — unchanged
+  // hostnames are not re-synced.
+  syncAddedManagedEdge();
 }

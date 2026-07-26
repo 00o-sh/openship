@@ -85,9 +85,12 @@ openship up --dry-run
 
 | Flag | Purpose | Default |
 |---|---|---|
+| `--compose` | Install via Docker Compose (published images: postgres + redis + api + dashboard + edge on `:80/:443`). | default when Docker is present on Linux |
+| `--bare` | Install as the bare process service (embedded DB, no Docker). Required today for a fully headless **custom**-domain install. | default off Linux / without Docker |
 | `--port <port>` | API port to listen on. | `4000` |
 | `--data-dir <dir>` | Directory for the embedded database. | `~/.openship/data` |
 | `--dashboard-port <port>` | Dashboard port. | `3001` |
+| `--host <addr>` | Bind the dashboard to this interface so an upstream reverse proxy or another LAN host can reach it (e.g. `0.0.0.0` or a LAN IP). The API stays on loopback. A concrete IP auto-trusts that browser origin for login; for `0.0.0.0` or a domain also pass `--public-url` (or set `OPENSHIP_EXTRA_TRUSTED_ORIGINS`). | `127.0.0.1` |
 | `--no-ui` | Run the API only — don't download or serve the dashboard. | — |
 | `--ui-version <tag>` | Dashboard release tag to run. | this CLI's version |
 | `-f`, `--foreground` | Run attached in this terminal instead of as a background service. | — |
@@ -116,6 +119,14 @@ retry `openship up`, pass `--no-ui`, or use `openship install` for the desktop a
 bound to loopback (only the dashboard's same-origin proxy reaches it — nothing but the dashboard is exposed).
 Put an HTTPS reverse proxy (Caddy, nginx, Cloudflare) in front of the dashboard port and add `--trust-proxy`.
 The guided `openship` setup walks you through all of this.
+</Callout>
+
+<Callout title="Login rejected after binding remotely?" type="warn">
+Openship checks the browser's `Origin` against a trusted list. When you bind to `0.0.0.0` or a domain **without**
+`--public-url`, the login `POST` is rejected (403) because that origin isn't trusted. Fix it by passing
+`--public-url` (its origin is trusted automatically), binding `--host` to a **concrete** LAN IP (that exact
+`http://IP:port` origin is trusted automatically), or setting `OPENSHIP_EXTRA_TRUSTED_ORIGINS` to the exact
+browser origin(s) you use, comma-separated.
 </Callout>
 
 ## `openship stop`

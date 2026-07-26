@@ -444,7 +444,7 @@ export async function reuseServerCertForDomain(ctx: RequestContext, domainId: st
     const host = domain.hostname.toLowerCase();
     const cert = await withServerHostExecutor(ctx, project, async (exec) => {
       const routes = await scanProxyRoutesWithExecutor(exec);
-      const match = [...routes.values()].find(
+      const match = [...routes.values()].flat().find(
         (r) => r.ssl.enabled && r.ssl.certPath && r.ssl.keyPath && r.domains.some((d) => d.toLowerCase() === host),
       );
       if (!match?.ssl.certPath || !match.ssl.keyPath) return null;

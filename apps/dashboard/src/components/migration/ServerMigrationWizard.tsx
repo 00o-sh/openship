@@ -166,6 +166,10 @@ interface MigrateItem {
 
 const normalizeName = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
 
+/** A discovered service has a foreign-proxy route worth keeping (≥1 domain). */
+const hasKeepableRoute = (s: Pick<DiscoveredService, "existingRoute">) =>
+  !!s.existingRoute?.some((r) => r.domains.length > 0);
+
 /** Best-effort auto-match a discovered container name to a repo compose service:
  *  exact normalized match, else the discovered name ending with / containing the
  *  compose name (handles the `openship-<group>-<svc>` prefix). null = no match. */
@@ -190,30 +194,32 @@ const rowsToEnv = (rows: Array<{ key: string; value: string }>) => {
 };
 
 /** Map the wizard's per-service endpoints → the server route spec sent to
- *  migrate() (published SERVER-SIDE post-verify). Only the first endpoint with a
- *  resolved domain is taken per service. */
+ *  migrate() (published SERVER-SIDE post-verify). Takes the first endpoint with a
+ *  resolved domain per service and carries its `targetPath` so a path-fan-out
+ *  domain (e.g. `/v3` → this service) is preserved; the server groups by domain. */
+type ServerRouteSpec = {
+  exposedPort?: string;
+  domainType: "free" | "custom";
+  domain?: string;
+  customDomain?: string;
+  targetPath?: string;
+};
 function toServerRoutes(
   routes: Record<string, PublicEndpoint[]> | undefined,
-):
-  | Record<
-      string,
-      { exposedPort?: string; domainType: "free" | "custom"; domain?: string; customDomain?: string }
-    >
-  | undefined {
+): Record<string, ServerRouteSpec> | undefined {
   if (!routes) return undefined;
-  const out: Record<
-    string,
-    { exposedPort?: string; domainType: "free" | "custom"; domain?: string; customDomain?: string }
-  > = {};
+  const out: Record<string, ServerRouteSpec> = {};
   for (const [name, endpoints] of Object.entries(routes)) {
     const ep = endpoints[0];
     if (!ep) continue;
     const domain = (ep.domainType === "custom" ? ep.customDomain : ep.domain)?.trim().toLowerCase();
     if (!domain) continue;
+    const targetPath = ep.targetPath?.trim();
     out[name] = {
       domainType: ep.domainType === "custom" ? "custom" : "free",
       ...(ep.domainType === "custom" ? { customDomain: domain } : { domain }),
       ...(ep.port ? { exposedPort: String(ep.port) } : {}),
+      ...(targetPath && targetPath !== "/" ? { targetPath } : {}),
     };
   }
   return Object.keys(out).length > 0 ? out : undefined;
@@ -739,16 +745,21 @@ export function ServerMigrationWizard({
         // the foreign proxy already served; free/custom take the editor value
         // (domain-less placeholders filtered here, not mid-edit); none → skip.
         const uid = svcUid(s);
-        const mode: RouteMode = p.serviceRouteMode[uid] ?? (s.existingRoute?.domains.length ? "keep" : "none");
+        const mode: RouteMode = p.serviceRouteMode[uid] ?? (hasKeepableRoute(s) ? "keep" : "none");
         let routes: PublicEndpoint[] = [];
-        if (mode === "keep" && s.existingRoute?.domains.length) {
-          routes = [
-            createPublicEndpoint({
-              port: firstContainerPort(s),
-              domainType: "custom",
-              customDomain: s.existingRoute.domains[0],
-            }),
-          ];
+        if (mode === "keep" && hasKeepableRoute(s)) {
+          // One endpoint per detected route so a path-fan-out domain is kept:
+          // each entry carries its location path (→ targetPath, root omitted).
+          routes = (s.existingRoute ?? [])
+            .filter((r) => r.domains.length > 0)
+            .map((r) =>
+              createPublicEndpoint({
+                port: firstContainerPort(s),
+                domainType: "custom",
+                customDomain: r.domains[0],
+                ...(r.path && r.path !== "/" ? { targetPath: r.path } : {}),
+              }),
+            );
         } else if (mode === "free" || mode === "custom") {
           routes = (p.serviceRoutes[uid] ?? []).filter(routeHasDomain);
         }
@@ -1314,7 +1325,7 @@ export function ServerMigrationWizard({
                               volumeStrategy={volumeStrategy[svcUid(sv)]}
                               routeMode={
                                 active.serviceRouteMode[svcUid(sv)] ??
-                                (sv.existingRoute?.domains.length ? "keep" : "none")
+                                (hasKeepableRoute(sv) ? "keep" : "none")
                               }
                               onSetRoutes={(r) => setServiceRoutes(active.id, svcUid(sv), r)}
                               onSetEnv={(env) => setServiceEnv(active.id, svcUid(sv), env)}
@@ -1794,7 +1805,7 @@ export function ServerMigrationWizard({
                     envOverride={active.serviceEnvs[svcUid(sv)]}
                     sameServer={sameServer}
                     volumeStrategy={volumeStrategy[svcUid(sv)]}
-                    routeMode={active.serviceRouteMode[svcUid(sv)] ?? (sv.existingRoute?.domains.length ? "keep" : "none")}
+                    routeMode={active.serviceRouteMode[svcUid(sv)] ?? (hasKeepableRoute(sv) ? "keep" : "none")}
                     onSetRoutes={(r) => setServiceRoutes(active.id, svcUid(sv), r)}
                     onSetEnv={(env) => setServiceEnv(active.id, svcUid(sv), env)}
                     onSetStrategy={(strat) => setVolumeStrategy((prev) => ({ ...prev, [svcUid(sv)]: strat }))}
@@ -2057,7 +2068,7 @@ export function ServerMigrationWizard({
                           envOverride={active.serviceEnvs[svcUid(sv)]}
                           sameServer={sameServer}
                           volumeStrategy={volumeStrategy[svcUid(sv)]}
-                          routeMode={active.serviceRouteMode[svcUid(sv)] ?? (sv.existingRoute?.domains.length ? "keep" : "none")}
+                          routeMode={active.serviceRouteMode[svcUid(sv)] ?? (hasKeepableRoute(sv) ? "keep" : "none")}
                           onSetRoutes={(r) => setServiceRoutes(active.id, svcUid(sv), r)}
                           onSetEnv={(env) => setServiceEnv(active.id, svcUid(sv), env)}
                           onSetStrategy={(strat) => setVolumeStrategy((prev) => ({ ...prev, [svcUid(sv)]: strat }))}
@@ -2172,8 +2183,8 @@ export function ServerMigrationWizard({
               {server && <ServerConnectionCard server={server} />}
               <div className="rounded-2xl border border-border/50 bg-card p-5 space-y-3.5">
                 <div className="flex items-center gap-2.5">
-                  <div className="size-9 rounded-xl bg-primary/10 ring-1 ring-inset ring-primary/20 flex items-center justify-center shrink-0">
-                    <Boxes className="size-[18px] text-primary" />
+                  <div className="size-9 rounded-xl bg-info/10 flex items-center justify-center shrink-0">
+                    <Boxes className="size-[18px] text-info" />
                   </div>
                   <h3 className="text-sm font-semibold text-foreground leading-tight">{m.entry.cardTitle}</h3>
                 </div>
@@ -2968,6 +2979,12 @@ function ServiceConfigCard({
   const port = routes?.[0]?.port ?? firstContainerPort(service);
   const [envModalOpen, setEnvModalOpen] = useState(false);
   const existing = service.existingRoute;
+  // Flat {domain, path} pairs the foreign proxy already serves for this service —
+  // a path-fan-out vhost yields several (e.g. api.onvo.me `/`, api.onvo.me `/v3`).
+  const keptRoutes = (existing ?? []).flatMap((r) =>
+    r.domains.map((domain) => ({ domain, path: r.path })),
+  );
+  const keptDomain0 = keptRoutes[0]?.domain;
   const volumeNames = service.volumes
     .filter((v) => v.type === "volume" && v.source)
     .map((v) => v.source!);
@@ -2986,8 +3003,8 @@ function ServiceConfigCard({
     if (mode === "free" || mode === "custom") {
       const base = routes?.[0] ?? placeholderRef.current!;
       onSetRoutes([
-        mode === "custom" && routeMode === "keep" && existing?.domains[0]
-          ? { ...base, domainType: "custom", customDomain: existing.domains[0] }
+        mode === "custom" && routeMode === "keep" && keptDomain0
+          ? { ...base, domainType: "custom", customDomain: keptDomain0 }
           : { ...base, domainType: mode },
       ]);
     }
@@ -3025,13 +3042,13 @@ function ServiceConfigCard({
         <div className="flex items-center gap-2">
           <Globe className="size-3.5 text-muted-foreground" />
           <span className="text-[13px] font-medium text-muted-foreground">{s.routeTitle}</span>
-          {existing && (
+          {existing && existing.length > 0 && (
             <span
               className={`ms-auto rounded-md px-1.5 py-0.5 text-[10px] font-medium ${
-                existing.ssl.enabled ? "bg-success-bg text-success" : "bg-muted/60 text-muted-foreground"
+                existing.some((r) => r.ssl.enabled) ? "bg-success-bg text-success" : "bg-muted/60 text-muted-foreground"
               }`}
             >
-              {existing.ssl.enabled ? s.sslOn : s.sslOff}
+              {existing.some((r) => r.ssl.enabled) ? s.sslOn : s.sslOff}
             </span>
           )}
         </div>
@@ -3059,19 +3076,25 @@ function ServiceConfigCard({
             box + slug editor from jumping when switching Keep/Free/Custom. */}
         {routeMode !== "none" && (
           <div className="flex min-h-[3rem] flex-col justify-center">
-            {routeMode === "keep" && existing && (
-              <div className="rounded-lg border border-border/50 bg-card/40 px-3 py-2">
-                <a
-                  href={`https://${existing.domains[0]}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="block truncate text-sm text-foreground hover:text-primary transition-colors"
-                >
-                  {existing.domains[0]}
-                </a>
-                {existing.domains.length > 1 && (
-                  <p className="mt-0.5 text-[11px] text-muted-foreground">+{existing.domains.length - 1}</p>
-                )}
+            {routeMode === "keep" && keptRoutes.length > 0 && (
+              <div className="space-y-1 rounded-lg border border-border/50 bg-card/40 px-3 py-2">
+                {keptRoutes.map((r, i) => (
+                  <div key={`${r.domain}${r.path}${i}`} className="flex items-center gap-1.5">
+                    <a
+                      href={`https://${r.domain}${r.path === "/" ? "" : r.path}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="block truncate text-sm text-foreground hover:text-primary transition-colors"
+                    >
+                      {r.domain}
+                    </a>
+                    {r.path !== "/" && (
+                      <span className="rounded bg-muted px-1 py-px text-[11px] font-mono text-muted-foreground">
+                        {r.path}
+                      </span>
+                    )}
+                  </div>
+                ))}
               </div>
             )}
 

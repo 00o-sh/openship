@@ -1,6 +1,6 @@
 ---
 title: Database migrations & stateful safety
-description: Safely back up and migrate a persistent database (MySQL/Postgres) volume around a deploy — using OpenShip's pre-deploy backup trigger and post-deploy jobs.
+description: Safely back up and migrate a persistent database (MySQL/Postgres) volume around a deploy — using Openship's pre-deploy backup trigger and post-deploy jobs.
 ---
 
 If a service in your project has a **Docker volume** (MySQL, Postgres, Redis, Qdrant…), two things about
@@ -12,7 +12,7 @@ deploys are worth understanding:
 2. On a full-stack deploy, a stateful container may be **recreated**. Its named volume is preserved (the
    data survives), but recreate is still a high-stakes moment for production.
 
-OpenShip gives you two building blocks to make this safe — a backup *before* the deploy and a migration
+Openship gives you two building blocks to make this safe — a backup *before* the deploy and a migration
 *after* it — plus a way to avoid touching the database at all.
 
 ## Don't touch the database on an unrelated change
@@ -30,7 +30,7 @@ Services you don't name carry forward on their existing containers, untouched. S
 ## Back up before every deploy (rollback safety net)
 
 Create a **backup policy** for the stateful service and enable its **“trigger on pre-deploy”** option. On
-every deploy, OpenShip runs that backup **after the new build succeeds but before the destructive cutover**,
+every deploy, Openship runs that backup **after the new build succeeds but before the destructive cutover**,
 so the snapshot captures the *old* container's data — exactly the state you'd want to restore if the new
 version misbehaves.
 
@@ -70,7 +70,7 @@ The safe sequence is: **pre-deploy backup** (automatic, if the policy toggle is 
 `pre_deploy` snapshot from the backup history.
 </Callout>
 
-## What OpenShip does NOT do (yet)
+## What Openship does NOT do (yet)
 
 There is no built-in **gating** pre-deploy migration step that blocks the app from starting until a
 migration completes — the post-deploy job runs *after* the new container is live. If your app strictly

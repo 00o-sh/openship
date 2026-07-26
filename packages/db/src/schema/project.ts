@@ -9,7 +9,7 @@ import {
   index,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import type { RoutingConfig, ReleaseSource } from "@repo/core";
+import type { RoutingConfig, ProjectCompositeRoute, ReleaseSource } from "@repo/core";
 import { organization } from "./organization";
 import { service } from "./service";
 
@@ -276,6 +276,15 @@ export const project = pgTable(
      * routing config. Widening the shape needs no migration (jsonb).
      */
     routingConfig: jsonb("routing_config").$type<RoutingConfig | null>(),
+    /**
+     * Path-fan-out domains: a domain whose paths route to DIFFERENT services
+     * (one root at `/` + extra path-prefix locations). Set by a cross-server
+     * migration that adopted a multi-upstream vhost (`api.onvo.me` `/` → web,
+     * `/v3` → api). Re-emitted from live upstreams on every deploy — the vhost
+     * model stores one domain per service, so this is where the extra path→service
+     * upstreams live. Null/[] = no fan-out. Widening needs no migration (jsonb).
+     */
+    compositeRoutes: jsonb("composite_routes").$type<ProjectCompositeRoute[] | null>(),
     /**
      * How Cloud deployments preserve their rollback artifact:
      *   - "inplace"  → Oblien `snapshots.createArchive` + `workspace.stop`.

@@ -166,42 +166,50 @@ export const GitSettings = () => {
     // Mirror the real SectionCard layout below (header → repository sub-card with
     // its inline auto-deploy toggle → rollback grid → recent commits) so the page
     // doesn't reflow when data lands.
+    // Discrete block placeholders inside a transparent outline — NOT a solid
+    // full-card fill — so the tab reads as "content loading in blocks" and
+    // roughly reserves the real layout (header → repository row → rollback pair
+    // → recent commits) to avoid a reflow when data lands.
     return (
-      <div className="space-y-5">
-        <div className="overflow-hidden rounded-2xl border border-border/50 bg-card animate-pulse">
-          {/* header (icon + title + subtitle) */}
-          <div className="flex items-start gap-3 border-b border-border/40 px-5 py-4">
-            <div className="h-9 w-9 shrink-0 rounded-xl bg-muted/50" />
-            <div className="min-w-0 flex-1 space-y-2 pt-0.5">
-              <div className="h-3.5 w-40 rounded bg-muted/50" />
-              <div className="h-3 w-64 max-w-full rounded bg-muted/40" />
-            </div>
+      <div className="animate-pulse space-y-4 rounded-2xl border border-border/50 p-5">
+        {/* header (icon + title + subtitle) */}
+        <div className="flex items-center gap-3">
+          <div className="h-9 w-9 shrink-0 rounded-xl bg-muted/50" />
+          <div className="min-w-0 flex-1 space-y-2">
+            <div className="h-3.5 w-40 rounded bg-muted/50" />
+            <div className="h-3 w-64 max-w-full rounded bg-muted/30" />
           </div>
-          <div className="space-y-4 px-5 py-4">
-            {/* repository sub-card + inline auto-deploy toggle */}
-            <div className="rounded-xl border border-border/50 bg-muted/20 px-4 py-3.5">
-              <div className="flex items-start justify-between gap-4">
-                <div className="min-w-0 space-y-2">
-                  <div className="h-2.5 w-24 rounded bg-muted/40" />
-                  <div className="h-4 w-44 rounded bg-muted/50" />
-                  <div className="h-3 w-32 rounded bg-muted/40" />
-                </div>
-                <div className="h-6 w-11 shrink-0 rounded-full bg-muted/40" />
-              </div>
-            </div>
-            {/* rollback strategy + history grid */}
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="h-24 rounded-xl border border-border/50 bg-muted/20" />
-              <div className="h-24 rounded-xl border border-border/50 bg-muted/20" />
-            </div>
-            {/* recent commits */}
-            <div className="space-y-2 pt-1">
-              <div className="h-3 w-28 rounded bg-muted/40" />
-              {[0, 1, 2, 3].map((i) => (
-                <div key={i} className="h-10 rounded-lg bg-muted/20" />
-              ))}
-            </div>
+        </div>
+        {/* repository row + inline auto-deploy toggle */}
+        <div className="flex items-center justify-between gap-4 rounded-xl border border-border/50 px-4 py-3.5">
+          <div className="min-w-0 space-y-2">
+            <div className="h-2.5 w-24 rounded bg-muted/30" />
+            <div className="h-4 w-44 rounded bg-muted/50" />
+            <div className="h-3 w-32 rounded bg-muted/30" />
           </div>
+          <div className="h-6 w-11 shrink-0 rounded-full bg-muted/50" />
+        </div>
+        {/* rollback strategy + history pair */}
+        <div className="grid gap-3 sm:grid-cols-2">
+          {[0, 1].map((i) => (
+            <div key={i} className="space-y-2 rounded-xl border border-border/50 p-3">
+              <div className="h-3 w-20 rounded bg-muted/50" />
+              <div className="h-2.5 w-28 rounded bg-muted/30" />
+            </div>
+          ))}
+        </div>
+        {/* recent commits */}
+        <div className="space-y-2 pt-1">
+          <div className="h-3 w-28 rounded bg-muted/30" />
+          {[0, 1, 2, 3].map((i) => (
+            <div
+              key={i}
+              className="flex items-center gap-3 rounded-lg border border-border/40 px-3 py-2"
+            >
+              <div className="h-6 w-6 shrink-0 rounded-full bg-muted/40" />
+              <div className="h-3 w-40 max-w-full rounded bg-muted/40" />
+            </div>
+          ))}
         </div>
       </div>
     );
@@ -406,10 +414,8 @@ export const GitSettings = () => {
                 const cannotReceive = gitData.webhookStrategy === "none";
                 const disabled = togglingAuto || (cannotReceive && !gitData.autoDeployEnabled);
                 return (
-                  <div
-                    className="flex shrink-0 items-center gap-2 pt-0.5"
-                    title={cannotReceive ? t.projectSettings.git.webhookBanner.description : undefined}
-                  >
+                  <div className="flex shrink-0 flex-col items-end gap-1.5 pt-0.5">
+                    <div className="flex items-center gap-2">
                     <span className="text-[12px] font-medium text-muted-foreground">{t.projectSettings.gitInfo.autoDeploy}</span>
                     <button
                       type="button"
@@ -432,6 +438,14 @@ export const GitSettings = () => {
                         />
                       )}
                     </button>
+                    </div>
+                    {/* When there's no public endpoint the toggle is disabled — show WHY
+                        inline (was hover-tooltip-only), using the space under the switch. */}
+                    {cannotReceive && (
+                      <p className="max-w-[220px] text-end text-[11px] leading-snug text-muted-foreground/70">
+                        {t.projectSettings.git.webhookBanner.description}
+                      </p>
+                    )}
                   </div>
                 );
               })()}
