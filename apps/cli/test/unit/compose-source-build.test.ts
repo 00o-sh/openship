@@ -19,6 +19,10 @@ const h = vi.hoisted(() => ({
 vi.mock("node:child_process", () => ({
   spawnSync: (cmd: string, args: string[] = []) => {
     if (cmd === "docker" && args[0] === "compose") h.composeCalls.push(args);
+    // Fresh install: no pre-existing postgres volume, so the password-reconcile
+    // path (which would add its own `up -d --wait postgres`) stays out of the
+    // pull/build sequence these tests pin.
+    if (cmd === "docker" && args[0] === "volume") return { status: 1, stdout: "", stderr: "" };
     return { status: 0, stdout: "", stderr: "" };
   },
 }));

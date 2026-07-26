@@ -12,7 +12,9 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "turbo run build",
+    "build": "turbo run build --filter=@repo/api --filter=@repo/dashboard",
+    "build:all": "turbo run build",
+    "start": "turbo run start --filter=@repo/api --filter=@repo/dashboard --concurrency=10",
     "build:desktop": "bun run --cwd apps/desktop make",
     "build:cli": "bun run --cwd apps/cli build",
     "cli": "bun run --cwd apps/cli cli",

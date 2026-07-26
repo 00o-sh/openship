@@ -210,17 +210,19 @@ export async function selfRegister(c: Context) {
     if (!host) {
       return c.json({ error: "Could not resolve this server's public address for the edge proxy" }, 400);
     }
-    // Oblien's edge validates `target` as a full URL (not `host:port`) and
-    // terminates TLS itself, forwarding to the origin box over plain HTTP.
+    // Bare public host — the SAME shape `managed-edge-proxy` sends for a deployed
+    // app's free subdomain (the shipped, proven path), and what the SaaS handler
+    // documents ("slug + target IP"). It schemes it to `http://<host>` itself, so
+    // Oblien always proxies to :80 = OUR EDGE.
     //
-    // Target :80 — OUR EDGE — not the dashboard port. Pointing Cloud straight at
-    // :3001 meant the free domain only worked if that port was open to the
-    // internet, put the dashboard on a public port in plain HTTP (bypassable:
-    // anyone hitting <ip>:3001 skipped the edge, its TLS, rate limits and rules),
-    // and left the local edge with no vhost for the hostname at all. Now the box
-    // needs nothing but :80/:443 open, and the free domain routes exactly like a
-    // custom one — through the edge, by Host header, to the dashboard on loopback.
-    const target = `http://${host}`;
+    // NOT `:${dashPort}`: pointing Cloud straight at :3001 meant the free domain
+    // only worked with that port open to the internet, put the dashboard on a
+    // public port in plain HTTP (bypassable — anyone hitting <ip>:3001 skipped the
+    // edge, its TLS, rate limits and rules), and left the local edge with no vhost
+    // for the hostname at all, so every request fell to default_server. Now the box
+    // needs nothing but :80/:443, and a free domain routes exactly like a custom
+    // one: through the edge, matched on Host, to the dashboard on loopback.
+    const target = host;
     try {
       const result = await cloudClient({ organizationId }).edgeProxy.sync({ slug, target });
       if (!result) {

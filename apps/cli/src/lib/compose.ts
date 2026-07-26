@@ -135,7 +135,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: \${POSTGRES_USER:-openship}
-      POSTGRES_PASSWORD: \${POSTGRES_PASSWORD:-openship}
+      POSTGRES_PASSWORD: \${POSTGRES_PASSWORD:?missing from .env — re-run openship up to regenerate it}
       POSTGRES_DB: \${POSTGRES_DB:-openship}
     expose: ["5432"]
     volumes: [postgres_data:/var/lib/postgresql/data]
@@ -177,7 +177,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: "\${API_PORT:-4000}"
-      DATABASE_URL: postgresql://\${POSTGRES_USER:-openship}:\${POSTGRES_PASSWORD:-openship}@postgres:5432/\${POSTGRES_DB:-openship}
+      DATABASE_URL: postgresql://\${POSTGRES_USER:-openship}:\${POSTGRES_PASSWORD:?missing from .env — re-run openship up to regenerate it}@postgres:5432/\${POSTGRES_DB:-openship}
       REDIS_URL: redis://redis:6379
       OPENSHIP_EDGE_MODE: docker
       OPENSHIP_EDGE_CONTAINER: openship-edge
@@ -364,6 +364,66 @@ function orphanedStackContainers(project: string): Array<{ name: string; project
     .map(({ name, project: proj }) => ({ name, project: proj }));
 }
 
+/**
+ * Reconcile the DB password against a data volume that PREDATES this `.env`.
+ *
+ * Postgres only applies `POSTGRES_PASSWORD` when it initializes an EMPTY data
+ * dir. So an install that regenerated its secrets (a wiped `~/.openship`, a
+ * restored backup, a manually deleted `.env`) while `<project>_postgres_data`
+ * survived leaves the volume on the OLD password and the api presenting the new
+ * one — the api then crash-loops on `password authentication failed for user`
+ * (28P01) and compose reports only "dependency failed to start", which points at
+ * the wrong thing entirely.
+ *
+ * Fix it where the authority is: bring postgres up alone, set the role's password
+ * to what this `.env` says (over the container's trusted local socket, so no
+ * password is needed to do it), then let the rest of the stack start. Idempotent —
+ * on a normal run the password already matches and this is a no-op ALTER.
+ */
+function reconcileDbPassword(user: string, password: string): void {
+  if (!password) return;
+  // Postgres must be RUNNING to accept the ALTER, and healthy before the api
+  // needs it — bring up just this one service first.
+  if (compose(["up", "-d", "--wait", "postgres"], { quiet: true }) !== 0) return;
+  const r = spawnSync(
+    "docker",
+    [
+      "compose",
+      "-f",
+      COMPOSE_FILE,
+      "exec",
+      "-T",
+      "postgres",
+      "psql",
+      "-U",
+      user,
+      "-d",
+      "postgres",
+      "-v",
+      "ON_ERROR_STOP=1",
+      // Read the statement from STDIN, not `-c`: psql has no bind parameters for
+      // ALTER USER, so the password has to be inlined in SQL — and an argv copy
+      // would be readable in `ps` for the life of the call. stdin keeps it to this
+      // process and the socket. Our generated password is hex, so it cannot break
+      // out of the quoted literal either.
+      "-f",
+      "-",
+    ],
+    {
+      cwd: COMPOSE_DIR,
+      encoding: "utf8",
+      input: `ALTER USER "${user}" WITH PASSWORD '${password}';\n`,
+    },
+  );
+  if (r.status !== 0) {
+    console.log(
+      `  Note: couldn't reconcile the database password (${(r.stderr ?? "").trim() || "psql failed"}).\n` +
+        `  If the api reports "password authentication failed", the data volume predates this install —\n` +
+        `  either restore the old .env or remove the volume to start fresh.`,
+    );
+  }
+}
+
 /** Remove orphaned containers from a previous project so the new stack can bind. */
 function removeOrphanedStack(project: string): void {
   const orphans = orphanedStackContainers(project);
@@ -465,15 +525,31 @@ services:
 ${services}`;
 }
 
-function materialize(opts: ComposeUpOpts): string | null {
+function materialize(opts: ComposeUpOpts): {
+  buildDir: string | null;
+  /** True when this run MINTED the db password (no prior .env to preserve it from). */
+  regeneratedSecrets: boolean;
+} {
   mkdirSync(COMPOSE_DIR, { recursive: true, mode: 0o700 });
+  // Read BEFORE the write: a missing POSTGRES_PASSWORD here means the one we're
+  // about to write is brand new, which is the case that can mismatch a surviving
+  // data volume (see reconcileDbPassword).
+  const regeneratedSecrets = !readEnvFile().POSTGRES_PASSWORD;
   const host = provisionHostSshChannel(); // best-effort; null → LocalExecutor fallback
   writeFileSync(COMPOSE_FILE, COMPOSE_YAML);
   writeFileSync(ENV_FILE, renderEnv(opts, host), { mode: 0o600 });
 
   const buildDir = opts.build === false ? null : sourceBuildDir();
   if (buildDir) writeFileSync(BUILD_FILE, renderBuildOverride(buildDir));
-  return buildDir;
+  return { buildDir, regeneratedSecrets };
+}
+
+/** Does this project's postgres data volume already exist (i.e. predate this run)? */
+function dbVolumeExists(project: string): boolean {
+  const r = spawnSync("docker", ["volume", "inspect", `${project}_postgres_data`], {
+    stdio: "ignore",
+  });
+  return r.status === 0;
 }
 
 /** Run `docker compose <args>` in the compose dir, inheriting stdio. */
@@ -493,16 +569,25 @@ function compose(args: string[], opts?: { quiet?: boolean; withBuildOverride?: b
  * install). Postgres/redis are upstream images and are pulled either way.
  */
 export function composeUp(opts: ComposeUpOpts): { ok: boolean; apiPort: string; dashPort: string } {
-  const buildDir = materialize(opts);
+  const { buildDir, regeneratedSecrets } = materialize(opts);
   const apiPort = opts.apiPort || "4000";
   const dashPort = opts.dashboardPort || "3001";
 
   // A previous stack under a different project name would still hold :80/:443
   // (host-networked edge) and 4000/3001, leaving the new edge in a bind() crash
   // loop while the old one serves stale vhosts. Clear it before bringing ours up.
-  const project = readEnvFile().COMPOSE_PROJECT_NAME || "openship";
+  const env = readEnvFile();
+  const project = env.COMPOSE_PROJECT_NAME || "openship";
   removeOrphanedStack(project);
   warnOrphanedVolumes(project);
+
+  // Freshly minted secrets + a surviving data volume = the api will fail auth
+  // against a password only the volume knows. Realign it before anything depends
+  // on the db (see reconcileDbPassword).
+  if (regeneratedSecrets && dbVolumeExists(project)) {
+    console.log("  Existing database volume with regenerated credentials — realigning the password...");
+    reconcileDbPassword(env.POSTGRES_USER || "openship", env.POSTGRES_PASSWORD ?? "");
+  }
 
   if (buildDir) {
     // Only the upstream images can be pulled; ours don't exist in a registry for
