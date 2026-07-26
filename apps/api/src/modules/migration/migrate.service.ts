@@ -369,7 +369,12 @@ async function reattachRuntime(opts: {
       containerId: "compose", // multi-service sentinel (single-app modeled as 1 service)
       imageRef: chosen.find((c) => c.image)?.image ?? null,
       trigger: "manual",
-      meta: { serverId, runtimeMode: "docker", adopt: true, serviceDeploymentMode: "services" },
+      // deployTarget:"server" is REQUIRED, not implied by serverId: target
+      // re-derivation (resolveSnapshotTarget) drops serverId unless the meta
+      // says deployTarget==="server", so without it a redeploy re-resolves to
+      // the desktop cloud default and misroutes to Oblien. These reattach paths
+      // always run against a migration serverId, so the target is always server.
+      meta: { deployTarget: "server", serverId, runtimeMode: "docker", adopt: true, serviceDeploymentMode: "services" },
     });
     if (!dep) return null;
 
@@ -453,7 +458,9 @@ export async function attachLiveRuntime(opts: {
         containerId: "compose", // multi-service sentinel
         imageRef: attach.find((c) => c.image)?.image ?? null,
         trigger: "manual",
-        meta: { serverId, runtimeMode: "docker", adopt: true, adoptLive: true, serviceDeploymentMode: "services" },
+        // deployTarget:"server" required — see reattachRuntime above; without it a
+        // later redeploy of this migrated project re-resolves to the cloud default.
+        meta: { deployTarget: "server", serverId, runtimeMode: "docker", adopt: true, adoptLive: true, serviceDeploymentMode: "services" },
       });
       if (!dep) return;
     }

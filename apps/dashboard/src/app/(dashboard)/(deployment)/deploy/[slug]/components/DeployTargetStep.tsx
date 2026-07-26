@@ -269,6 +269,11 @@ interface CompactSummaryProps {
    *  sandboxed (Docker) or directly on the host ("bare"), the latter carrying a
    *  warning. Ignored for cloud (tier chip) and static (edge-served chip). */
   runtimeMode?: RuntimeMode;
+  /** True when the project deploys as a multi-service stack (compose). A stack
+   *  runs sandboxed containers — never static edge-served files — so it must
+   *  never show the Static chip even when the project-level hasServer/framework
+   *  is unset (those live per-service). */
+  isServices?: boolean;
   onEdit: () => void;
 }
 
@@ -280,6 +285,7 @@ export const DeployTargetSummary: React.FC<CompactSummaryProps> = ({
   cloudResourceTier,
   hasServer = true,
   runtimeMode,
+  isServices = false,
   onEdit,
 }) => {
   const { t } = useI18n();
@@ -332,7 +338,22 @@ export const DeployTargetSummary: React.FC<CompactSummaryProps> = ({
   //   - Self-hosted server: the runtime — "bare" carries a persistent WARNING
   //     (runs directly on the host, unsandboxed) so it's visible even when the
   //     user never opens Advanced; "docker" a neutral Sandboxed chip.
-  const runtimeChip = !hasServer ? (
+  const runtimeChip = isServices ? (
+    // A service stack (compose) always runs sandboxed containers — never static
+    // edge-served files — regardless of the project-level hasServer/framework
+    // (which are unset for compose). Show the tier on cloud, else Sandboxed.
+    deployTarget === "cloud" && cloudResourceTier ? (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-warning-bg text-[11px] font-medium text-warning shrink-0">
+        <Zap className="size-3" />
+        <span>{tierLabels[cloudResourceTier] ?? cloudResourceTier}</span>
+      </span>
+    ) : (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-success-bg text-[11px] font-medium text-success shrink-0">
+        <ShieldCheck className="size-3" />
+        {t.deploy.summary.runtimeSandboxed}
+      </span>
+    )
+  ) : !hasServer ? (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-info-bg text-[11px] font-medium text-info shrink-0">
       <Globe className="size-3" />
       {t.deploy.summary.runtimeStatic}
@@ -1503,6 +1524,7 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
           showBuildStrategy={showBuildStrategy}
           hasServer={config.options.hasServer}
           runtimeMode={config.runtimeMode}
+          isServices={config.projectType === "services" || config.serviceDeploymentMode === "services"}
           onEdit={() => setExpanded(true)}
         />
       )}

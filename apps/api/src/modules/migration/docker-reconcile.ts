@@ -306,7 +306,15 @@ export function toDiscoveredService(
     declared?.advanced?.healthcheck ??
     (detail.healthcheck ? inspectHealthcheckToCompose(detail.healthcheck) : undefined);
 
-  const name = declared?.name ?? detail.composeService ?? detail.name;
+  // Prefer the compose-service identity over the container name. Openship
+  // deploys compose services as plain dockerode containers named
+  // `openship-<slug>-<svc>` WITHOUT a `com.docker.compose.service` label — they
+  // carry `openship.service=<svc>` instead. Without this fallback the generic
+  // adopt path named the moved service after the container (`openship-openship-web`),
+  // which no longer matched its git-compose definition (`web`) → the reconcile
+  // created a DUPLICATE bare-name row instead of updating the moved one in place.
+  const name =
+    declared?.name ?? detail.composeService ?? detail.labels?.["openship.service"] ?? detail.name;
   const image = detail.image || declared?.image;
   const ports = portsToComposeStrings(detail.ports);
 

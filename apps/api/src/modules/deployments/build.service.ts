@@ -525,10 +525,20 @@ export async function resolveSnapshotTarget(
         ?.meta as DeploymentConfigSnapshot | null)
     : null;
 
-  const deployTarget: DeployTarget | undefined =
-    override?.deployTarget ??
-    (project.cloudWorkspaceId ? "cloud" : (activeMeta?.deployTarget ?? undefined)) ??
-    undefined;
+  // Target priority, highest first:
+  //   1. explicit override (the caller chose a target for this deploy)
+  //   2. cloud — a promoted project (canonical on the SaaS)
+  //   3. the active deployment's stamped target
+  //   4. inferred "server" when the active meta carries a serverId
+  // Step 4 matches resolveEffectiveTarget (which routes ANY serverId over SSH)
+  // and repairs migrated (adopt/reattach) metas that set serverId but historically
+  // omitted deployTarget — without it this resolver dropped the serverId (gate
+  // below) and redeploy fell back to the desktop cloud default.
+  let deployTarget: DeployTarget | undefined;
+  if (override?.deployTarget) deployTarget = override.deployTarget;
+  else if (project.cloudWorkspaceId) deployTarget = "cloud";
+  else if (activeMeta?.deployTarget) deployTarget = activeMeta.deployTarget;
+  else if (activeMeta?.serverId) deployTarget = "server";
 
   const serverId =
     deployTarget === "server"

@@ -581,7 +581,12 @@ export function useDeploymentBuild(
       return null;
     }
 
-    if (!config.framework || config.framework === "unknown") {
+    // Framework is only meaningful for a single framework app. Docker, compose
+    // "services", and monorepo projects carry a project-level framework of
+    // "unknown" by design (the real stack lives on each service / sub-app row),
+    // so don't block Save/Deploy on it there — that wrongly rejected migrated
+    // and compose projects with "Please select a framework".
+    if (config.projectType === "app" && (!config.framework || config.framework === "unknown")) {
       showToast("Please select a framework", "error", "Error");
       return null;
     }
