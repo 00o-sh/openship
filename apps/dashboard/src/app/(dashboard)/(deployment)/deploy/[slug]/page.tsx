@@ -344,6 +344,7 @@ const DeployRepository: React.FC = () => {
                                     cloudResourceTier={config.cloudResourceTier}
                                     hasServer={config.options.hasServer}
                                     runtimeMode={config.runtimeMode}
+                                    isServices={usesServiceDeployment(config)}
                                     serverName={(() => {
                                         // Resolve the selected server by id; if id isn't set yet but
                                         // there's exactly one server, use it (covers the paint before

@@ -78,10 +78,40 @@ export async function importMigratedSites(
       return { ok: false, registered: [], error };
     }
     const registered = data.registered ?? [];
+    const warnings = data.warnings ?? [];
+    const missed = sites.length - registered.length;
+
+    // A 200 with an empty `registered` is a TOTAL failure, not a success: the
+    // operator's proxy is already stopped and we now hold :80/:443, so every one
+    // of those hostnames is dark. This used to `spinner.succeed("Migrated 0
+    // sites")` with the per-site errors dimmed underneath, which read as "fine".
+    if (sites.length > 0 && registered.length === 0) {
+      spinner.fail(
+        `Migrated NONE of the ${sites.length} site${sites.length === 1 ? "" : "s"} — ` +
+          `Openship holds :80/:443 and ${sites.length === 1 ? "that hostname is" : "those hostnames are"} NOT being served.`,
+      );
+      for (const w of warnings.slice(0, 8)) console.log(chalk.red(`    • ${w}`));
+      console.log(
+        chalk.yellow(
+          `\n  Retry the import with \`openship up\` once the cause above is fixed, or put your\n` +
+            `  previous proxy back:  docker stop openship-edge && sudo systemctl enable --now nginx\n`,
+        ),
+      );
+      return { ok: false, registered, error: warnings[0] ?? "no sites were registered" };
+    }
+
+    if (missed > 0) {
+      spinner.warn(
+        `Migrated ${registered.length}/${sites.length} sites — ${missed} not served (see below).`,
+      );
+      for (const w of warnings.slice(0, 8)) console.log(chalk.yellow(`    • ${w}`));
+      return { ok: false, registered, error: `${missed} site(s) not registered` };
+    }
+
     spinner.succeed(
       `Migrated ${registered.length} site${registered.length === 1 ? "" : "s"} into Openship's edge.`,
     );
-    for (const w of (data.warnings ?? []).slice(0, 8)) console.log(chalk.dim(`    • ${w}`));
+    for (const w of warnings.slice(0, 8)) console.log(chalk.dim(`    • ${w}`));
     return { ok: true, registered };
   } catch (e) {
     const error = (e as Error).message;

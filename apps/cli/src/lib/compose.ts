@@ -205,6 +205,14 @@ services:
 
   edge:
     image: \${OPENSHIP_IMAGE_REGISTRY:-ghcr.io/oblien}/openship-edge:\${OPENSHIP_VERSION:-latest}
+    # PINNED, and it must stay pinned: the api reaches the edge by NAME through
+    # DockerEdgeExecutor (OPENSHIP_EDGE_CONTAINER above), and "ours" edge
+    # detection greps \`docker ps --filter name=openship-edge\`. Without this,
+    # compose derives \`<project>-edge-1\` from the directory and every
+    # \`docker exec\` into the edge fails with "No such container: openship-edge" —
+    # which silently migrated 0 sites after the operator's proxy was stopped.
+    # Safe here: the edge is a singleton (host networking, one per box).
+    container_name: openship-edge
     restart: unless-stopped
     network_mode: host
     volumes:
@@ -288,10 +296,32 @@ function provisionHostSshChannel(): { user: string; keyPath: string } | null {
   }
 }
 
+/**
+ * The compose project name — the prefix on every container, volume and network.
+ *
+ * Unset, compose derives it from the project DIRECTORY (`~/.openship/compose`),
+ * which is why the stack read `compose-api-1` / `compose_postgres_data` instead of
+ * naming itself. Pinned to `openship` so it does.
+ *
+ * But the project name is also the volume prefix, so changing it on a LIVE install
+ * would repoint `postgres_data` and `certs` at fresh empty volumes — the database
+ * and issued certificates would look wiped (they'd still be on disk under the old
+ * prefix, but nothing would mount them). So: an install that already has a `.env`
+ * without this key predates the pin and keeps its directory-derived `compose` name;
+ * only fresh installs get `openship`. Docker Compose reads COMPOSE_PROJECT_NAME
+ * from the project dir's .env, so pinning it here needs no flag at the call site.
+ */
+function composeProjectName(prev: Record<string, string>): string {
+  if (prev.COMPOSE_PROJECT_NAME) return prev.COMPOSE_PROJECT_NAME;
+  return Object.keys(prev).length > 0 ? "compose" : "openship";
+}
+
 function renderEnv(opts: ComposeUpOpts, host: { user: string; keyPath: string } | null): string {
   const prev = readEnvFile();
   const lines: string[] = [
     "# Managed by `openship up`. Secrets are generated once and preserved.",
+    // Do NOT edit on a live install — it is the volume prefix (see composeProjectName).
+    `COMPOSE_PROJECT_NAME=${composeProjectName(prev)}`,
     "CLOUD_MODE=false",
     "OPENSHIP_TARGET=local",
     "OPENSHIP_REQUIRE_AUTH=true",

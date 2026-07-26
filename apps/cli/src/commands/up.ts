@@ -330,14 +330,21 @@ async function runCompose(opts: UpOpts & { yes?: boolean }): Promise<{ apiPort: 
 
   // Migrate: the container edge is up now, so re-register the foreign proxy's
   // sites into it. The api drives the DockerEdgeExecutor (the host CLI can't), so
-  // we hand it the parsed sites + host-read cert PEMs. Best-effort — the stack is
-  // already live; a failed import only affects those migrated sites.
+  // we hand it the parsed sites + host-read cert PEMs.
+  //
+  // NOT best-effort: we already stopped the operator's proxy, so an import that
+  // registers nothing means their hostnames are dark. Keep the takeover journal
+  // OPEN in that case — it is the only record of how to restart their proxy
+  // (unit + wasEnabled), and completing it throws that away. `importMigratedSites`
+  // has already printed the failure and the restore command.
+  let importedOk = true;
   if (edgePlan.action === "migrate" && edgePlan.sites?.length) {
-    await importMigratedSites(res.apiPort, edgePlan.sites, edgePlan.certPems);
+    const outcome = await importMigratedSites(res.apiPort, edgePlan.sites, edgePlan.certPems);
+    importedOk = outcome.registered.length > 0;
   }
   // Edge is serving — close the takeover journal so the next run's recovery
   // doesn't mistake it for an interrupted one and restart the old proxy.
-  if (edgePlan.action) await completeHostEdge();
+  if (edgePlan.action && importedOk) await completeHostEdge();
 
   const dashboardUrl = publicUrl ?? `http://localhost:${res.dashPort}`;
   console.log(
