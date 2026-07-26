@@ -1691,6 +1691,46 @@ export class DockerRuntime implements RuntimeAdapter {
   }
 
   /**
+   * Built images that belong to this project — the label `openship.project=<id>`
+   * that `labels()` stamps on every FINAL build image. Base/third-party images
+   * (postgres, redis, …) are PULLED, never labeled, so they can never appear
+   * here — that label filter is the primary guardrail for the image GC, which
+   * reconciles this on-host set against the DB keep-set. Includes untagged
+   * (dangling) superseded finals: labels persist after the tag is removed.
+   */
+  async listProjectImages(
+    projectId: string,
+  ): Promise<Array<{ id: string; repoTags: string[]; buildId?: string; deploymentId?: string; size: number }>> {
+    const images = await this.docker.listImages({
+      filters: { label: [`openship.project=${projectId}`] },
+    });
+    return images.map((img) => ({
+      id: img.Id,
+      repoTags: (img.RepoTags ?? []).filter((t) => t && t !== "<none>:<none>"),
+      buildId: img.Labels?.["openship.build"],
+      deploymentId: img.Labels?.["openship.deployment"],
+      size: img.Size ?? 0,
+    }));
+  }
+
+  /**
+   * Reclaim dangling (untagged) images carrying THIS project's label — the
+   * superseded final-stage layers a rebuild leaves behind. NEVER a bare
+   * `docker image prune`: the label filter guarantees base/other-project/other-
+   * tool dangling layers are untouched. (Unlabeled multi-stage intermediate
+   * layers under the classic builder aren't caught — BuildKit avoids them.)
+   */
+  async pruneProjectDanglingImages(projectId: string): Promise<void> {
+    try {
+      await this.docker.pruneImages({
+        filters: { dangling: ["true"], label: [`openship.project=${projectId}`] },
+      });
+    } catch {
+      /* best-effort — a prune failure must never fail a build/deploy */
+    }
+  }
+
+  /**
    * Containers labeled for this deployment, with live state — the reconcile
    * read-back. `State` is dockerode's `running | exited | paused | ...`; map it
    * to ContainerStatus the same way getContainerInfo does. Absence is conveyed

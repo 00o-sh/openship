@@ -6,6 +6,7 @@ import { normalizeRoutingFields, repos, composeSpecDiff, type Service, type Serv
 import { serviceStatusToContainerState, isValidCustomHostname, ValidationError, type ServiceContainerState } from "@repo/core";
 import {
   BuildLogger,
+  DockerRuntime,
   isMultiServiceRuntime,
   type LogEntry,
   type ContainerStatus,
@@ -516,6 +517,21 @@ export async function deleteService(
           err,
         );
       });
+      // Reclaim this service's built image NOW — the FK cascade in
+      // repos.service.remove() below erases the imageRef record, so a later
+      // teardown could never enumerate it. Guarded to `openship/…` build tags:
+      // a base/third-party image (postgres:16-alpine, redis:7-alpine) is PULLED,
+      // shared, and must never be removed. Best-effort; images:gc is the backstop
+      // for older builds (which stay label-scoped and drop out of the keep-set
+      // once this service's rows are gone).
+      if (
+        serviceDeployment.imageRef?.startsWith("openship/") &&
+        platform.runtime instanceof DockerRuntime
+      ) {
+        await platform.runtime.removeImage(serviceDeployment.imageRef).catch((err: unknown) => {
+          console.error(`[SERVICE] Failed to remove image for ${svc.name}:`, err);
+        });
+      }
       await platform.runtime.dispose?.();
     }
   }

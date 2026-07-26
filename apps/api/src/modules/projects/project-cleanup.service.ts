@@ -326,6 +326,32 @@ export async function collectProjectManifest(
     }
   }
 
+  // ── Orphan image sweep (label-based, authoritative per host) ──────
+  // Reclaim images labeled `openship.project=<id>` that NO DB row references —
+  // e.g. a service was deleted (its imageRef row cascade-dropped) or a build
+  // crashed after `docker build` but before persisting imageRef. The DB-tracked
+  // pushes above miss these; this label sweep is the authoritative backstop on
+  // hard delete. Deduped via `seenImages`. Base/third-party images are PULLED
+  // (unlabeled) so they can never be selected. Best-effort + bounded.
+  for (const docker of sweepRuntimes) {
+    const imgs = await withTimeout(
+      docker.listProjectImages(project.id),
+      INSPECT_TIMEOUT_MS,
+      `sweep images ${project.id}`,
+    ).catch(() => [] as Awaited<ReturnType<DockerRuntime["listProjectImages"]>>);
+    for (const img of imgs) {
+      const ref = img.repoTags[0] ?? img.id; // readable tag if present, else id
+      if (seenImages.has(ref) || seenImages.has(img.id)) continue;
+      seenImages.add(ref);
+      resources.push({
+        type: "image",
+        ref,
+        label: `orphan image ${ref.slice(0, 24)}`,
+        runtime: docker,
+      });
+    }
+  }
+
   // ── Cloud workspace (the canonical Oblien binding) ────────────────
   // `project.cloudWorkspaceId` is the CURRENT workspace this project
   // deploys to. Deployment rows may reference OLD workspaces (re-provisioned)

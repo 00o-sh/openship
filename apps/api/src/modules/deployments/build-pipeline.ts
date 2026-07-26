@@ -258,6 +258,11 @@ async function archivePreviousDeployment(
     logger.log(
       "Skipping snapshot/artifact archive — rollback strategy is 'git' (rollback re-clones at commit_sha_before).",
     );
+    // Archive is skipped, but old BUILT IMAGES must still be reclaimed — this is
+    // the one path that never reached onDeploymentReady's image reap, so
+    // git-strategy projects leaked every prior build. Best-effort; images:gc backstops.
+    const { reapProjectImagesSafe } = await import("./image-gc");
+    await reapProjectImagesSafe(project, (m) => logger.log(`${m}\n`, "warn"));
     return;
   }
   try {
