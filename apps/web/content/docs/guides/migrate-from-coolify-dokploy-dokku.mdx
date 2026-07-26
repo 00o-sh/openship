@@ -163,6 +163,7 @@ buildpack breadth), it's marked honestly.
 |---|:---:|:---:|:---:|:---:|
 | Git push / webhook auto-deploy | ✓ | ✓ | ✓ | ✓ |
 | Dockerfile & prebuilt-image deploy | ✓ | ✓ | ✓ | ✓ |
+| **Source never passes through an always-on control plane** | ✗ cloned on the server | ✗ zip → server | ✗ push → host | **✓ desktop → target direct** |
 | Docker Compose / multi-service | ✓ | ✓ | ✗ | ✓ |
 | Buildpacks (Nixpacks / Heroku) | ✓ | ✓ | ✓ | ~ auto stack-detect |
 | Rollback to a previous release | ✓ | ✓ | ✓ | ✓ |
@@ -178,6 +179,8 @@ buildpack breadth), it's marked honestly.
 | Fine-grained server access grants | ✗ | ~ ent. | ✗ | ✓ |
 | **Adopt existing running containers** | ✗ | ✗ | ✗ | **✓** |
 | **Server-to-server move (with data)** | ✗ | ✗ | ✗ | **✓** |
+| **Leave management, keep apps + data running (re-importable)** | ✗ delete prunes managed containers | ✗ delete tears down | ✗ `apps:destroy` removes | **✓ record-only, re-adoptable** |
+| **Relocate the whole instance into managed cloud — and back** | ✗ control-plane only | ✗ control-plane only | ✗ no managed cloud | **✓ instance dump → Cloud, reversible switch-back** |
 | **Take over an existing reverse proxy** | ✗ | ✗ | ✗ | **✓** |
 
 **Networking & edge**
@@ -217,14 +220,27 @@ HTTP/3, caching, or OWASP rules.)
 | Scheduled jobs / cron | ✓ | ✓ | ~ plugin | ✓ |
 | Web dashboard | ✓ | ✓ | ✗ Pro | ✓ |
 | MCP for AI agents | ✓ read-only | ✓ full-API | ~ community | ✓ write + re-auth |
-| **Native desktop app (loopback isolation)** | ✗ | ✗ | ✗ | **✓** |
+| **Native desktop app — no always-on daemon, loopback isolation** | ✗ | ✗ | ✗ | **✓** |
 | **Built-in full mail server** | ✗ | ✗ | ~ community | **✓** |
-| **Self-hosted + managed-cloud from one instance** | ~ Cloud = your servers | ✗ | ✗ | **✓ runs the workload** |
+| **Self-hosted + managed-cloud from one instance** | ✗ control-plane only | ✗ | ✗ | **✓ Cloud runs the workload** |
 
 The defensible reasons to move are the bold rows: **adopting what's already running**, **moving stacks between
-servers with their data**, **taking over your existing proxy**, the **programmable edge**, **desktop-mode
-isolation**, the **built-in mail server**, and the **self-hosted + cloud hybrid** where the cloud target
-actually runs your workload (unlike a managed control plane that still leans on your own servers).
+servers with their data**, **leaving without lock-in** (a record-only removal drops just Openship's record and
+leaves your apps + data running on your box, re-importable later) or **relocating the whole instance into
+Openship Cloud and back**, **taking over your existing proxy**, the **programmable edge**, the **built-in mail
+server**, and the **self-hosted + cloud hybrid** where the cloud target actually runs your workload (unlike a
+managed control plane that still leans on your own servers). None of the other three can adopt a running stack,
+move one with its data, or hand it back to you still running — every "migration" is a manual rsync-and-redeploy
+or a community script.
+
+Two more are structural rather than feature checkboxes. **Desktop mode has no always-on daemon** — the control
+plane runs on your laptop only while the app is open, so nothing sits in the background burning resources; the
+other three all need a control-plane server running around the clock. And in that mode **your source is never
+uploaded to a control plane**: the desktop reads your folder straight off disk, or the target server clones from
+your git using your forwarded credentials, so the code goes disk-or-git → server directly. Coolify clones on the
+Coolify server, Dokploy takes a zip upload, and Dokku takes a `git push` — in every case your code lands on a
+long-lived control-plane box first. (For a self-hosted Openship instance the trade-off is the same as theirs —
+this edge is specific to desktop mode.)
 
 ## Honest caveats
 

@@ -92,6 +92,57 @@ describe("probeEdge classification", () => {
     expect(status.canProceedClean).toBe(true);
   });
 
+  test("REGRESSION: host-net edge container is OURS even when the host can't prove the listener binary", async () => {
+    // The self-takeover bug: our openship-edge runs host-networked, but the host
+    // renders the master as a bare `nginx: master process nginx …` (no openresty
+    // prefix) and `readlink /proc/<pid>/exe` is denied — so listenerIsOurOpenResty
+    // returns false. The RUNNING edge container must STILL make the edge ours;
+    // otherwise ensureEdgeClear takes over (kills) our own edge and installs a rival.
+    const status = await probeEdge(
+      makeExecutor([
+        ["docker ps --filter name=openship-edge", "openship-edge"],
+        ["sport = :80", 'LISTEN 0 511 *:80 *:* users:(("nginx",pid=777,fd=6))'],
+        ["sport = :443", 'LISTEN 0 511 *:443 *:* users:(("nginx",pid=777,fd=8))'],
+        ["-p 777 -o args=", "nginx: master process nginx -g daemon off;"], // no openresty prefix
+        // /proc/777/exe intentionally unmocked → readlink returns "" (denied)
+      ]),
+    );
+    expect(status.classification).toBe("ours");
+    expect(status.occupants).toHaveLength(0);
+    expect(status.canProceedClean).toBe(true);
+  });
+
+  test("ours when a RENAMED edge container runs our image (OPENSHIP_EDGE_CONTAINER)", async () => {
+    // Default-name filter misses a renamed container; the full listing matches by
+    // image, so a custom-named edge is still ours (never a self-takeover target).
+    const status = await probeEdge(
+      makeExecutor([
+        ["docker ps --format '{{.Names}}\t{{.Image}}'", "my-edge\tghcr.io/oblien/openship-edge:latest"],
+        ["sport = :80", 'LISTEN 0 511 *:80 *:* users:(("nginx",pid=777,fd=6))'],
+        ["sport = :443", 'LISTEN 0 511 *:443 *:* users:(("nginx",pid=777,fd=8))'],
+        ["-p 777 -o args=", "nginx: master process nginx -g daemon off;"],
+      ]),
+    );
+    expect(status.classification).toBe("ours");
+    expect(status.occupants).toHaveLength(0);
+    expect(status.canProceedClean).toBe(true);
+  });
+
+  test("still 'known' when a foreign DOCKER proxy holds the ports even if our edge container also appears", async () => {
+    // Defense: containerRunning must NOT claim a DIFFERENT docker proxy that
+    // publishes the port — only our own host-net process. A foreign traefik on
+    // the port stays a takeover target (can't co-bind with our edge anyway).
+    const status = await probeEdge(
+      makeExecutor([
+        ["docker ps --filter name=openship-edge", "openship-edge"],
+        ["docker ps --filter publish=80", "traefik-1\ttraefik:v3.0"],
+        ["docker ps --filter publish=443", "traefik-1\ttraefik:v3.0"],
+      ]),
+    );
+    expect(status.classification).toBe("known");
+    expect(status.occupants.every((o) => o.managedByOpenship === false)).toBe(true);
+  });
+
   test("ours when a BRIDGED openship-edge container publishes 80/443", async () => {
     // Bridge mode: the edge container publishes the ports, so `docker ps --filter
     // publish` matches it. Recognized as ours by the openship-edge image name.

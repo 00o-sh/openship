@@ -60,7 +60,7 @@
     "servers": "サーバー",
     "emails": "メール",
     "settings": "設定",
-    "billing": "請求",
+    "billing": "請求と使用状況",
     "sections": {
       "main": "メイン",
       "settings": "設定",
@@ -134,7 +134,7 @@
       "description": "アカウント、チーム、プラットフォームの設定。"
     },
     "billing": {
-      "title": "請求",
+      "title": "請求と使用状況",
       "description": "サブスクリプション、使用量、支払い方法を管理します。"
     }
   },
@@ -162,7 +162,7 @@
       "description": "カスタムドメイン"
     },
     "billing": {
-      "title": "請求",
+      "title": "請求と使用状況",
       "description": "使用量とプラン"
     }
   }

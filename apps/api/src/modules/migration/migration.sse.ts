@@ -13,6 +13,7 @@ export type MigrationRunEvent =
       deploymentId?: string | null;
     }
   | { type: "snapshot"; run: DockerMigrationRun }
+  | { type: "log"; line: string }
   | {
       /** Live data-move progress during `moving_data`. `movedBytes` is the
        *  aggregate across all tasks; `totalBytes` the scanned payload size (null

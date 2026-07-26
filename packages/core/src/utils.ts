@@ -116,3 +116,12 @@ export function withTimeout<T>(promise: Promise<T>, ms: number | undefined, mess
     );
   });
 }
+
+/**
+ * A POSIX-style environment variable NAME (letter/underscore, then
+ * alphanumerics/underscores). Single source for the rule that was duplicated
+ * across the connection service, the jobs runner, and the compose parser.
+ */
+export function isValidEnvKey(key: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key);
+}

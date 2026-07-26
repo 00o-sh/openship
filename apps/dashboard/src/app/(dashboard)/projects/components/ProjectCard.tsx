@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
 import {
   ArrowRight,
   GitBranch,
@@ -72,7 +72,6 @@ interface Props {
 }
 
 const ProjectCard: React.FC<Props> = ({ project, preferAppLogo, updateAvailable, onChanged }) => {
-  const router = useRouter();
   const { t } = useI18n();
   const { baseDomain } = usePlatform();
   const { showModal, hideModal } = useModal();
@@ -127,10 +126,13 @@ const ProjectCard: React.FC<Props> = ({ project, preferAppLogo, updateAvailable,
   };
 
   return (
-    <div
-      onClick={() => router.push(clickTarget)}
-      className="flex items-center gap-4 px-5 py-3.5 hover:bg-muted/40 transition-colors cursor-pointer group"
-    >
+    <div className="relative flex items-center gap-4 px-5 py-3.5 hover:bg-muted/40 transition-colors group">
+      {/* Stretched-link overlay: the whole row is a real anchor (cmd/middle-click
+          → open in new tab) without nesting a <button> inside an <a>. It sits
+          above the static content (captures row clicks) but below the draft menu
+          (lifted with z-10), which stays independently clickable. */}
+      <Link href={clickTarget} aria-label={project.name} className="absolute inset-0 z-0" />
+
       {/* Icon — on the Apps page show the catalog app's brand logo; otherwise
           the project favicon, falling back to the framework/service glyph. */}
       <div className="w-10 h-10 rounded-xl bg-muted/60 flex items-center justify-center shrink-0 group-hover:bg-muted transition-colors overflow-hidden">
@@ -242,7 +244,7 @@ const ProjectCard: React.FC<Props> = ({ project, preferAppLogo, updateAvailable,
         {/* Draft apps get a "delete app" menu (deployed apps delete from the
             project page). Stops row navigation. */}
         {isDraftApp && (
-          <div className="relative" onClick={(e) => e.stopPropagation()}>
+          <div className="relative z-10" onClick={(e) => e.stopPropagation()}>
             <button
               type="button"
               onClick={() => setMenuOpen((v) => !v)}

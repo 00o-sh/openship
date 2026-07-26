@@ -9,6 +9,7 @@ import {
   type StoredPublicEndpoint,
 } from "../../lib/public-endpoints";
 import { resolveUpstreamUrl, resolveRouteStrategy } from "../../lib/upstream-url";
+import { deregisterManagedEdgeRoutes } from "../../lib/managed-edge-proxy";
 import { syncProjectPublicRoutes } from "../../lib/project-route-store";
 import { resolveDeploymentRuntime } from "../../lib/deployment-runtime";
 import { pushProjectRules } from "../route-rules/route-rule.service";
@@ -285,6 +286,30 @@ export async function reapplyProjectLiveRoutes(
   const removes: RouteRemove[] = previousHostnames
     .filter((h) => !currentHostnames.has(h.toLowerCase()))
     .map((hostname) => ({ hostname, isCustomDomain: !managedHostnameToSlug(hostname) }));
+
+  // Self-hosted: a dropped free (*.opsh.io) hostname leaves a stale slug→target
+  // route on Openship Cloud's edge. Deregister it (best-effort) so the freed
+  // slug is reusable and the old URL stops resolving. Cloud projects route their
+  // managed subdomain INTERNALLY (page/workspace), reconciled by the cloud
+  // branch below — so this teardown is self-hosted only.
+  if (!isCloud) {
+    const droppedSlugs = removes
+      .map((r) => managedHostnameToSlug(r.hostname))
+      .filter((s): s is string => !!s);
+    if (droppedSlugs.length > 0) {
+      void deregisterManagedEdgeRoutes(droppedSlugs, {
+        organizationId: project.organizationId,
+      })
+        .then(({ failures }) => {
+          if (failures.length > 0) {
+            console.warn(
+              `[project-route] ${project.slug}: managed edge deregister failed for ${failures.join(", ")}`,
+            );
+          }
+        })
+        .catch(() => {});
+    }
+  }
 
   // Cloud: no upstream resolution — the workspace/page owns routing by port.
   if (isCloud) {

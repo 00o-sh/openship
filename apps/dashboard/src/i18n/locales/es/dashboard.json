@@ -60,7 +60,7 @@
     "servers": "Servidores",
     "emails": "Correos",
     "settings": "Configuración",
-    "billing": "Facturación",
+    "billing": "Facturación y uso",
     "sections": {
       "main": "Principal",
       "settings": "Configuración",
@@ -134,7 +134,7 @@
       "description": "Configuración de cuenta, equipo y plataforma."
     },
     "billing": {
-      "title": "Facturación",
+      "title": "Facturación y uso",
       "description": "Gestiona tu suscripción, uso y métodos de pago."
     }
   },
@@ -162,7 +162,7 @@
       "description": "Dominios personalizados"
     },
     "billing": {
-      "title": "Facturación",
+      "title": "Facturación y uso",
       "description": "Uso y planes"
     }
   }

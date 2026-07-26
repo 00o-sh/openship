@@ -486,6 +486,10 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
         setGitData({
           repository: {
             name: `${response.owner}/${response.repo}`,
+            // `full_name` is the GitHub-canonical field the Source tab's
+            // auto-deploy switch gates on; without it that control was hidden
+            // for every git project.
+            full_name: `${response.owner}/${response.repo}`,
             provider: "GitHub",
             url: `https://github.com/${response.owner}/${response.repo}`,
           },

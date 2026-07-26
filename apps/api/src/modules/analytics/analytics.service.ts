@@ -15,7 +15,7 @@
  */
 
 import { repos } from "@repo/db";
-import { NotFoundError } from "@repo/core";
+import { NotFoundError, AppError, safeErrorMessage } from "@repo/core";
 import type { ResourceUsage } from "@repo/adapters";
 import { resolveDeploymentRuntime } from "../../lib/deployment-runtime";
 import {
@@ -293,6 +293,36 @@ function extractCloudBuckets(result: unknown): CloudAnalyticsBucket[] {
   return Array.isArray(result) ? (result as CloudAnalyticsBucket[]) : [];
 }
 
+/**
+ * Surface an EXPLICIT Oblien failure envelope (`{ success: false, … }`) as a
+ * thrown error so the caller returns a clean upstream error instead of parsing
+ * it to an empty bucket list and rendering a misleading 0/0/0 summary.
+ *
+ * Deliberately conservative: it throws ONLY on an explicit `success: false`.
+ * A genuine success (empty `data` = no traffic) OR any shape without that flag
+ * falls through to `extractCloudBuckets` exactly as before — so this can never
+ * turn a benign/empty response into a false error, only unmask a declared one.
+ * (Thrown transport errors are already handled by the caller's all-failed 502.)
+ *
+ * Envelope: `{ success, data, meta }`, sometimes wrapped again as `{ data: … }`
+ * on the proxied path (same nesting extractCloudBuckets walks).
+ */
+function assertCloudTimeseriesOk(raw: unknown): void {
+  let node: unknown = raw;
+  for (let depth = 0; depth < 4 && node && typeof node === "object"; depth++) {
+    const obj = node as Record<string, unknown>;
+    if (obj.success === false) {
+      const detail =
+        (typeof obj.error === "string" && obj.error) ||
+        (typeof obj.message === "string" && obj.message) ||
+        "request rejected";
+      throw new Error(`Openship Cloud analytics: ${detail}`);
+    }
+    if (Array.isArray(obj.data)) return; // reached the bucket array — done
+    node = obj.data ?? obj.result;
+  }
+}
+
 async function fetchCloudTimeseries(
   organizationId: string,
   domain: string,
@@ -304,8 +334,9 @@ async function fetchCloudTimeseries(
   const raw = client
     ? await client.analytics.timeseries(domain, params)
     : await cloudClient({ organizationId }).analytics.timeseries(domain, params);
-  // extractCloudBuckets is response PARSING (unwrap the SaaS envelope), not a
-  // cache — it just turns the wire shape into { data: bucket[] }.
+  // Surface a failed fetch as an error (caller → 502) instead of masking it as
+  // an empty summary; only a genuine no-traffic success falls through to [].
+  assertCloudTimeseriesOk(raw);
   return { data: extractCloudBuckets(raw) };
 }
 
@@ -389,18 +420,35 @@ export async function getAnalyticsOverview(
   // when untracked — never fetches an arbitrary cross-tenant host). Without it,
   // aggregate every tracked domain. Both handled by the one resolver.
   const sources = await resolveProjectTrafficSources(projectId, { domain });
+  // No resolvable traffic source (no tracked domain / no primary / no server) is
+  // a legitimate "nothing to show", NOT an error — keep the honest empty summary
+  // so a fresh or domain-less project renders a clean 0-state, not an error.
   if (sources.length === 0) return { summary: EMPTY_SUMMARY, periods: [] };
 
   if (sources.every((source) => source.kind === "cloud")) {
     const toMs = to ? new Date(to).getTime() : Date.now();
     const fromMs = from ? new Date(from).getTime() : toMs - 24 * 60 * 60 * 1000;
     const params = { from: fromMs, to: toMs, interval: "hour" as const };
-    const responses = await Promise.all(
-      sources.map((source) =>
-        fetchCloudTimeseries(ctx.organizationId, source.domain, params).catch(() => null),
-      ),
+    // Do NOT swallow a cloud fetch failure into an empty summary — that made an
+    // upstream outage look identical to "no traffic" (zeros with a 200). Settle
+    // per-domain: use whatever succeeded, but if EVERY cloud fetch failed,
+    // surface a real upstream error so the client can tell "broken" from "idle".
+    const settled = await Promise.allSettled(
+      sources.map((source) => fetchCloudTimeseries(ctx.organizationId, source.domain, params)),
     );
-    const buckets = responses.flatMap((response) => response?.data ?? []);
+    const ok = settled.filter(
+      (r): r is PromiseFulfilledResult<CloudTimeseriesResponse | null> => r.status === "fulfilled",
+    );
+    if (ok.length === 0) {
+      const reason = settled.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
+      throw new AppError(
+        `Analytics upstream (Openship Cloud) is unavailable${reason ? `: ${safeErrorMessage(reason.reason)}` : ""}`,
+        502,
+        "ANALYTICS_UPSTREAM_UNAVAILABLE",
+      );
+    }
+    const buckets = ok.flatMap((r) => r.value?.data ?? []);
+    // Reached the cloud, but it reported no traffic → genuine empty (200).
     if (buckets.length === 0) return { summary: EMPTY_SUMMARY, periods: [] };
     return {
       summary: summariseCloudBuckets(buckets, new Date(toMs).toISOString()),

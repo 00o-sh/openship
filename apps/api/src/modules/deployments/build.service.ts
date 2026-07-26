@@ -813,6 +813,8 @@ export async function requestBuildAccess(ctx: RequestContext, input: BuildAccess
     runtimeMode,
     serviceDeploymentMode,
     services,
+    serviceIds,
+    refreshServiceIds,
     cloudResourceTier,
     cloudResourceCustom,
     forwardGitCredentials,
@@ -1040,6 +1042,12 @@ export async function requestBuildAccess(ctx: RequestContext, input: BuildAccess
     envVars: deploymentEnvVars,
     rollbackStrategy,
     commitShaBefore,
+    // Service-scoped folder-upload/MCP deploy: only these services are (re)built;
+    // the rest carry forward on their existing containers. Without this a
+    // folder-upload deploy rebuilt the WHOLE stack and needlessly recreated
+    // stateful services (DBs/caches) on an unrelated change.
+    serviceIds,
+    refreshServiceIds,
   });
 
   // Store env vars on project as "latest defaults"

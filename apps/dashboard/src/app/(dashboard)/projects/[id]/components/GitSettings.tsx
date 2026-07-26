@@ -35,7 +35,25 @@ export const GitSettings = () => {
   const [savingRollbackWindow, setSavingRollbackWindow] = useState(false);
   const [isLinking, setIsLinking] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
+  const [togglingAuto, setTogglingAuto] = useState(false);
   const hasRefreshed = useRef(false);
+
+  // Auto-deploy on push: one toggle → the API registers/removes the GitHub repo
+  // webhook at this instance's public URL (repo strategy), or just flips the flag
+  // for the GitHub App (cloud). No domain choice — the webhook gate is the
+  // endpoint. Disabled when there's no public endpoint to receive pushes.
+  const toggleAutoDeploy = async () => {
+    setTogglingAuto(true);
+    try {
+      const res = await projectsApi.setAutoDeploy(id, !gitData.autoDeployEnabled);
+      if (res.success) await refreshGit();
+      else showToast(res.error || t.projectSettings.git.toast.autoDeployFailed, "error");
+    } catch (err) {
+      showToast(getApiErrorMessage(err, t.projectSettings.git.toast.autoDeployFailed), "error");
+    } finally {
+      setTogglingAuto(false);
+    }
+  };
 
   /* ── Per-project clone-token override ─────────────────────────── */
   const [cloneToken, setCloneToken] = useState<{ hasToken: boolean; setAt: string | null } | null>(null);
@@ -145,14 +163,45 @@ export const GitSettings = () => {
   };
 
   if (gitData.isLoading) {
+    // Mirror the real SectionCard layout below (header → repository sub-card with
+    // its inline auto-deploy toggle → rollback grid → recent commits) so the page
+    // doesn't reflow when data lands.
     return (
-      <div className="grid grid-cols-1 gap-5 xl:grid-cols-[1fr_320px]">
-        <div className="space-y-5">
-          <LoadingCard />
-          <LoadingCard />
-        </div>
-        <div>
-          <LoadingCard />
+      <div className="space-y-5">
+        <div className="overflow-hidden rounded-2xl border border-border/50 bg-card animate-pulse">
+          {/* header (icon + title + subtitle) */}
+          <div className="flex items-start gap-3 border-b border-border/40 px-5 py-4">
+            <div className="h-9 w-9 shrink-0 rounded-xl bg-muted/50" />
+            <div className="min-w-0 flex-1 space-y-2 pt-0.5">
+              <div className="h-3.5 w-40 rounded bg-muted/50" />
+              <div className="h-3 w-64 max-w-full rounded bg-muted/40" />
+            </div>
+          </div>
+          <div className="space-y-4 px-5 py-4">
+            {/* repository sub-card + inline auto-deploy toggle */}
+            <div className="rounded-xl border border-border/50 bg-muted/20 px-4 py-3.5">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0 space-y-2">
+                  <div className="h-2.5 w-24 rounded bg-muted/40" />
+                  <div className="h-4 w-44 rounded bg-muted/50" />
+                  <div className="h-3 w-32 rounded bg-muted/40" />
+                </div>
+                <div className="h-6 w-11 shrink-0 rounded-full bg-muted/40" />
+              </div>
+            </div>
+            {/* rollback strategy + history grid */}
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="h-24 rounded-xl border border-border/50 bg-muted/20" />
+              <div className="h-24 rounded-xl border border-border/50 bg-muted/20" />
+            </div>
+            {/* recent commits */}
+            <div className="space-y-2 pt-1">
+              <div className="h-3 w-28 rounded bg-muted/40" />
+              {[0, 1, 2, 3].map((i) => (
+                <div key={i} className="h-10 rounded-lg bg-muted/20" />
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     );
@@ -313,42 +362,83 @@ export const GitSettings = () => {
           iconTone="primary"
         >
           <div className="rounded-xl border border-border/50 bg-muted/20 px-4 py-3.5">
-            <div className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground/70">{t.projectSettings.git.source.repository}</div>
-            {/* owner/repo as the prominent, clickable identity (opens on GitHub). */}
-            <a
-              href={gitData.repository.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="group mt-1.5 inline-flex max-w-full items-center gap-2 underline-offset-4"
-            >
-              <span className="truncate text-[15px] font-semibold text-foreground transition-colors group-hover:text-primary group-hover:underline">
-                {gitData.repository.full_name || gitData.repository.name}
-              </span>
-              <ExternalLink className="size-3.5 shrink-0 text-muted-foreground transition-colors group-hover:text-primary" />
-            </a>
-            {/* Branch + latest commit at a glance — what's actually connected. */}
-            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-muted-foreground">
-              <span className="inline-flex items-center gap-1.5">
-                <GitBranch className="size-3.5 shrink-0" />
-                {gitData.branch || "main"}
-              </span>
-              {gitData.recentCommits?.[0] && (
-                <>
-                  <span className="text-muted-foreground/40">·</span>
-                  <span className="inline-flex min-w-0 items-center gap-1.5">
-                    <GitCommit className="size-3.5 shrink-0" />
-                    <code className="rounded bg-muted/50 px-1 py-px text-[10px] font-medium">
-                      {gitData.recentCommits[0].id?.slice(0, 7)}
-                    </code>
-                    <span className="truncate">{gitData.recentCommits[0].message?.split("\n")[0]}</span>
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <div className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground/70">{t.projectSettings.git.source.repository}</div>
+                {/* owner/repo as the prominent, clickable identity (opens on GitHub). */}
+                <a
+                  href={gitData.repository.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="group mt-1.5 inline-flex max-w-full items-center gap-2 underline-offset-4"
+                >
+                  <span className="truncate text-[15px] font-semibold text-foreground transition-colors group-hover:text-primary group-hover:underline">
+                    {gitData.repository.full_name || gitData.repository.name}
                   </span>
-                </>
-              )}
+                  <ExternalLink className="size-3.5 shrink-0 text-muted-foreground transition-colors group-hover:text-primary" />
+                </a>
+                {/* Branch + latest commit at a glance — what's actually connected. */}
+                <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-muted-foreground">
+                  <span className="inline-flex items-center gap-1.5">
+                    <GitBranch className="size-3.5 shrink-0" />
+                    {gitData.branch || "main"}
+                  </span>
+                  {gitData.recentCommits?.[0] && (
+                    <>
+                      <span className="text-muted-foreground/40">·</span>
+                      <span className="inline-flex min-w-0 items-center gap-1.5">
+                        <GitCommit className="size-3.5 shrink-0" />
+                        <code className="rounded bg-muted/50 px-1 py-px text-[10px] font-medium">
+                          {gitData.recentCommits[0].id?.slice(0, 7)}
+                        </code>
+                        <span className="truncate">{gitData.recentCommits[0].message?.split("\n")[0]}</span>
+                      </span>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Auto-deploy on push — inline with the repo identity. Enabling
+                  registers the GitHub repo webhook at this instance's public URL
+                  (or uses the GitHub App on cloud); no domain picker. Disabled
+                  with a hover tooltip when there's no public endpoint. */}
+              {gitData.repository?.full_name && (() => {
+                const cannotReceive = gitData.webhookStrategy === "none";
+                const disabled = togglingAuto || (cannotReceive && !gitData.autoDeployEnabled);
+                return (
+                  <div
+                    className="flex shrink-0 items-center gap-2 pt-0.5"
+                    title={cannotReceive ? t.projectSettings.git.webhookBanner.description : undefined}
+                  >
+                    <span className="text-[12px] font-medium text-muted-foreground">{t.projectSettings.gitInfo.autoDeploy}</span>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={!!gitData.autoDeployEnabled}
+                      aria-label={t.projectSettings.gitInfo.autoDeploy}
+                      onClick={toggleAutoDeploy}
+                      disabled={disabled}
+                      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                        gitData.autoDeployEnabled ? "bg-primary" : "bg-muted"
+                      } ${disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer"}`}
+                    >
+                      {togglingAuto ? (
+                        <Loader2 className="mx-auto size-3.5 animate-spin text-background" />
+                      ) : (
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-background transition-transform ${
+                            gitData.autoDeployEnabled ? "translate-x-6 rtl:-translate-x-6" : "translate-x-1 rtl:-translate-x-1"
+                          }`}
+                        />
+                      )}
+                    </button>
+                  </div>
+                );
+              })()}
             </div>
           </div>
 
-          {/* Rollback strategy + history (independent of the webhook — the GitHub
-              push→deploy hook + its route/status now live in the Webhooks tab). */}
+          {/* Rollback strategy + history (independent of the auto-deploy hook). */}
           <div className="grid gap-3 sm:grid-cols-2">
                 <InfoCard
                   icon={RotateCcw}
@@ -610,19 +700,6 @@ function SectionCard({
         </div>
       </div>
       <div className="space-y-4 px-5 py-4">{children}</div>
-    </div>
-  );
-}
-
-function LoadingCard() {
-  return (
-    <div className="rounded-2xl border border-border/50 bg-card p-5 animate-pulse">
-      <div className="h-4 w-28 rounded bg-muted/50" />
-      <div className="mt-4 space-y-3">
-        <div className="h-10 rounded-xl bg-muted/40" />
-        <div className="h-10 rounded-xl bg-muted/40" />
-        <div className="h-10 rounded-xl bg-muted/40" />
-      </div>
     </div>
   );
 }

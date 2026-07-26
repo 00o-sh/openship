@@ -106,6 +106,24 @@ const envSchema = z.object({
   /* ---------- Mode ---------- */
   CLOUD_MODE: envBool("false"),
   /**
+   * MASTER switch for the whole Openship Cloud billing feature (subscriptions,
+   * top-ups, Stripe portal). OFF by default → the billing state reports
+   * `billing.status = "coming_soon"` and every Stripe-mutating endpoint fails
+   * closed with a `BILLING_NOT_ENABLED` 403. Flip to `true` on the SaaS to make
+   * billing live — no dashboard release, no self-hosted change (self-hosted +
+   * local proxy their billing to the cloud, so the cloud alone owns this flag).
+   * Reads (state, usage, plans) stay open regardless so the UI can render the
+   * "coming soon" surface and live usage/capacity.
+   */
+  BILLING_ENABLED: envBool("false"),
+  /**
+   * Sub-switch for one-time credit top-ups WITHIN billing. Top-ups are
+   * available only when BILLING_ENABLED is also on. OFF by default → the state
+   * reports `topups.status = "coming_soon"` and `POST /topup` fails closed with
+   * `BILLING_TOPUPS_NOT_ENABLED`. Lets subscriptions launch before top-ups.
+   */
+  BILLING_TOPUPS_ENABLED: envBool("false"),
+  /**
    * Openship Cloud only: hard cap on projects per user (a cloud org maps 1:1
    * to its owning SaaS user, so per-org == per-user here). Enforced at project
    * create + ensure. Self-hosted ignores this and uses the high

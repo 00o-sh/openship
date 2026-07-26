@@ -203,6 +203,35 @@ On a Linux box without systemd, `openship up` can't install a persistent service
 `openship up --foreground` instead, or use the Docker Compose stack for always-on.
 </Callout>
 
+### Fully unattended install (headless)
+
+`openship up` on its own installs only the *service* — you still create the first admin in the dashboard (or
+via the interactive `openship` wizard). To provision a box **end-to-end with no prompts** — admin account and
+domain included — add `--non-interactive` (alias `--yes`) plus the install flags. Ideal for CI, cloud-init, or
+scripted fleets:
+
+```bash
+OPENSHIP_ADMIN_PASSWORD='a-strong-password' openship up --non-interactive \
+  --admin-email you@example.com --admin-name "You" \
+  --public-url https://ops.example.com \
+  --domain-kind custom --acme-email you@example.com --edge takeover
+```
+
+- **Admin** — `--admin-email` (required) + optional `--admin-name`. The password comes from
+  `--admin-password` or, preferably, the **`OPENSHIP_ADMIN_PASSWORD`** env var (keeps it out of your shell
+  history). Idempotent: re-running resets the existing admin's password instead of failing.
+- **Domain** — `--domain-kind`:
+  - `byo` — front Openship with your own reverse proxy (`--hostname`, or derived from `--public-url`).
+  - `custom` — the managed edge issues a Let's Encrypt cert for `--hostname`; `--acme-email` and
+    `--edge migrate|takeover|cancel` pre-answer the `:80/:443` takeover.
+  - `free` — a `<slug>.opsh.io` subdomain (`--slug`). **Requires the box to already be connected to Openship
+    Cloud** (the free-domain connect is an interactive browser step) — connect first, then run the headless
+    install, or use `byo`/`custom`.
+  - `none` (default when no domain flags) — a private box with no public domain.
+
+Any missing or invalid flag exits non-zero with a precise message, so it's safe to script. Add `--dry-run` to
+preview the installed service without provisioning.
+
 ## Open it and check it's working
 
 With a local instance running, open the dashboard in your browser:

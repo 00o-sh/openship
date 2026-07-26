@@ -18,6 +18,7 @@ import {
   type ComposeAdvanced,
 } from "@repo/core";
 import { getTemplateForOrg } from "../../apps/catalog-source";
+import { attachLinkedNetworks } from "../attach-linked-networks";
 import {
   BuildLogger,
   DEFAULT_RESOURCE_CONFIG,
@@ -1284,30 +1285,10 @@ export async function deployComposeServices(
   }
 
   // ── Cross-project service links (internal / shared-network mode) ────────────
-  // If this project consumes database apps over the INTERNAL mode, attach its
-  // containers to each source app's `openship-<slug>` network so they resolve
-  // the DB service alias (e.g. mongo:27017) with no public port. Advisory —
-  // mirrors routing/prepare; a link networking failure never fails the deploy.
-  if (runtime.attachToExternalNetworks) {
-    try {
-      const links = await repos.projectConnection.listByTarget(project.id);
-      const nets: string[] = [];
-      for (const link of links) {
-        if (link.mode !== "internal") continue;
-        const src = await repos.project.findById(link.sourceProjectId);
-        if (src?.slug) nets.push(`openship-${src.slug}`);
-      }
-      if (nets.length > 0) {
-        await runtime.attachToExternalNetworks(project.id, nets);
-        logger.log(`Attached to ${nets.length} connected service network(s).\n`, "info");
-      }
-    } catch (err) {
-      logger.log(
-        `Warning: could not attach linked service networks: ${err instanceof Error ? err.message : String(err)}\n`,
-        "warn",
-      );
-    }
-  }
+  // Attach this consumer's containers to each internally-linked source app's
+  // `openship-<slug>` network so injected internal hosts resolve (see the shared
+  // helper). Advisory — a link-networking failure never fails the deploy.
+  await attachLinkedNetworks(project.id, runtime, (m, level) => logger.log(`${m}\n`, level));
 
   // ── App prepare steps (in-container lifecycle hooks) ────────────────────────
   // Run template-declared prepare commands INSIDE the target service's container

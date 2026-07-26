@@ -302,8 +302,10 @@
     "serverDesc": "Start a long-running process (needs a start command and port).",
     "staticNote": "Built in an isolated Docker sandbox, then served as static files by the edge.",
     "startCommandLabel": "Start command",
-    "startCommandPlaceholder": "npx serve -s dist -l $PORT",
-    "startCommandHint": "The command that starts your server. For a static bundle, use a static file server (e.g. npx serve).",
+    "startCommandPlaceholder": "npm start",
+    "startCommandHint": "Leave empty to serve the build output as static files from the edge (nothing runs). Enter a command to run it as a live server process.",
+    "modeStatic": "Static",
+    "modeProcess": "Server process",
     "portLabel": "Port"
   }
 }

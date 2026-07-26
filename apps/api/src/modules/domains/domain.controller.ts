@@ -267,15 +267,20 @@ export async function renewAllSsl(c: Context) {
  * Body: { minAgeMinutes?: number; limit?: number }
  */
 export async function verifyPending(c: Context) {
-  // Auth is the standard authMiddleware applied at the routes file —
-  // any logged-in user can trigger a run; the work itself runs against
-  // each domain's own project owner via verifyDomain, so the requester
-  // can only kick off the sweep, not cross-tenant verify.
+  // SCOPED to the caller's org: pass ctx.organizationId so the sweep only sees
+  // and re-verifies THIS org's pending domains. Without it the handler returned
+  // every tenant's pending hostnames and triggered their DNS/SSL — a member of
+  // one org has domain:write only in their OWN org, which must bound the WORK,
+  // not just admit the request. The instance-wide sweep is the trusted system
+  // `domains:verify-pending` cron (job.registry.ts), which calls the service
+  // with no organizationId.
+  const ctx = getRequestContext(c);
   type Body = { minAgeMinutes?: number; limit?: number };
   const body: Body = await c.req.json<Body>().catch(() => ({} as Body));
   const result = await domainService.verifyPendingDomains({
     minAgeMinutes: typeof body.minAgeMinutes === "number" ? body.minAgeMinutes : undefined,
     limit: typeof body.limit === "number" ? body.limit : undefined,
+    organizationId: ctx.organizationId,
   });
   return c.json({ data: result });
 }

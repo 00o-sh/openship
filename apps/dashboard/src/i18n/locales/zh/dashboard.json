@@ -60,7 +60,7 @@
     "servers": "服务器",
     "emails": "邮件",
     "settings": "设置",
-    "billing": "账单",
+    "billing": "账单与用量",
     "sections": {
       "main": "主要",
       "settings": "设置",
@@ -134,7 +134,7 @@
       "description": "账户、团队和平台设置。"
     },
     "billing": {
-      "title": "账单",
+      "title": "账单与用量",
       "description": "管理你的订阅、用量和支付方式。"
     }
   },
@@ -162,7 +162,7 @@
       "description": "自定义域名"
     },
     "billing": {
-      "title": "账单",
+      "title": "账单与用量",
       "description": "用量与套餐"
     }
   }

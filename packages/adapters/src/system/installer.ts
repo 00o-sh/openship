@@ -23,7 +23,7 @@ import {
 import {
   EdgeMigrateRequested,
   freeEdgeTargets,
-  isOpenshipManagedEdge,
+  ourLuaOnHost,
   probeEdge,
   stopTargetsForStatus,
 } from "./proxy/detect";
@@ -266,10 +266,12 @@ export async function installOpenResty(
     // EdgeConflictError (no consent).
     const { tookOver } = await ensureEdgeClear(executor, config, onLog);
 
-    // Stop an existing OpenResty only if it's OURS (reinstall/upgrade). A
-    // foreign OpenResty was already handled by the consent gate above.
+    // Stop an existing HOST OpenResty only if it's OUR bare-host edge
+    // (reinstall/upgrade). A foreign OpenResty was already handled by the consent
+    // gate above. Key on ourLuaOnHost, NOT a running container: the pkill below
+    // matches by process name and would kill a host-networked container edge too.
     const hasIt = await executor.exec("command -v openresty >/dev/null 2>&1 && echo y || echo n").then((r) => r.trim() === "y");
-    if (hasIt && (await isOpenshipManagedEdge(executor))) {
+    if (hasIt && (await ourLuaOnHost(executor))) {
       onLog(log("Stopping existing OpenResty..."));
       await execSafe(executor, "systemctl stop openresty 2>/dev/null || true");
       await execSafe(executor, "pkill -f '[o]penresty' 2>/dev/null || true");

@@ -271,9 +271,35 @@ async function triggerBranchDeployments(
   // Dedup lives upstream now (delivery-id claim + commit-sha guard) — no Set here.
   const projects = await repos.project.findByGitRepo(input.owner, input.repo);
   const defaultBranch = await resolveDefaultBranch(input, projects);
-  const autoDeployProjects = projects.filter(
+  const branchProjects = projects.filter(
     (p) => p.autoDeploy && projectWebhookBranch(p, defaultBranch) === input.branch,
   );
+
+  // Tenant binding (multi-tenant safety): a GitHub App push is signed with the
+  // single App secret — identical for every org — so the signature proves the
+  // push came from GitHub, NOT which tenant it belongs to. findByGitRepo matches
+  // by repo STRING alone, so without this a tenant who created a project
+  // pointing at another org's repo would be fanned into that org's pushes and
+  // receive the repo's commit metadata (and trigger unauthorized deploys). Bind
+  // the fan-out to the DELIVERING installation: only projects whose
+  // installationId matches the delivery's installation.id deploy. createProject
+  // resolves installationId from the caller's own org, so a squatter's project
+  // can never carry the victim's installation id. Repo-webhook / PAT deliveries
+  // carry no installation id (an App-only payload field) and are already scoped
+  // by their per-project secret → left unfiltered.
+  const deliveredInstallationId = input.payload?.installation?.id ?? null;
+  const autoDeployProjects =
+    deliveredInstallationId != null
+      ? branchProjects.filter((p) => p.installationId === deliveredInstallationId)
+      : branchProjects;
+  const droppedForInstallation = branchProjects.length - autoDeployProjects.length;
+  if (droppedForInstallation > 0) {
+    console.warn(
+      `[GitHub Webhook] ${input.event} ${input.owner}/${input.repo}#${input.branch}: skipped ` +
+        `${droppedForInstallation} branch-matched project(s) not bound to delivering installation ` +
+        `${deliveredInstallationId} (cross-tenant fan-out guard)`,
+    );
+  }
 
   if (autoDeployProjects.length === 0) {
     // No matching LOCAL project. It may be a CLOUD project whose webhook still

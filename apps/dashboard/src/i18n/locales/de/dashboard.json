@@ -60,7 +60,7 @@
     "servers": "Server",
     "emails": "E-Mails",
     "settings": "Einstellungen",
-    "billing": "Abrechnung",
+    "billing": "Abrechnung & Nutzung",
     "sections": {
       "main": "Allgemein",
       "settings": "Einstellungen",
@@ -134,7 +134,7 @@
       "description": "Konto-, Team- und Plattformeinstellungen."
     },
     "billing": {
-      "title": "Abrechnung",
+      "title": "Abrechnung & Nutzung",
       "description": "Verwalten Sie Ihr Abonnement, Ihre Nutzung und Ihre Zahlungsmethoden."
     }
   },
@@ -162,7 +162,7 @@
       "description": "Benutzerdefinierte Domains"
     },
     "billing": {
-      "title": "Abrechnung",
+      "title": "Abrechnung & Nutzung",
       "description": "Nutzung & Tarife"
     }
   }

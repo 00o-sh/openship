@@ -19,9 +19,13 @@ function fakeSource(chunks: Buffer[], code = 0, stderr = ""): DockerRuntime {
   } as unknown as DockerRuntime;
 }
 
-/** A fake target: `loadImage` drains the body into `sink`; `tagImage` records
- *  the re-tag applied after a save-by-id load. */
-function fakeTarget(sink: Buffer[], tags?: Array<[string, string]>): DockerRuntime {
+/** A fake target: `loadImage` drains the body into `sink` and reports
+ *  `loadedRef` (as `docker load` would); `tagImage` records the re-tag. */
+function fakeTarget(
+  sink: Buffer[],
+  tags?: Array<[string, string]>,
+  loadedRef?: string,
+): DockerRuntime {
   return {
     async loadImage(body: Readable) {
       await pipeline(
@@ -33,6 +37,7 @@ function fakeTarget(sink: Buffer[], tags?: Array<[string, string]>): DockerRunti
           },
         }),
       );
+      return loadedRef;
     },
     async tagImage(source: string, target: string) {
       tags?.push([source, target]);
@@ -62,6 +67,18 @@ describe("transferImage", () => {
     expect([...progress]).toEqual([...progress].sort((a, b) => a - b));
     // The tag is re-applied on the target (loaded untagged when saved by id).
     expect(tags).toEqual([[IMG.id, IMG.tag]]);
+  });
+
+  test("retags from the ref docker load actually restored (not the source id)", async () => {
+    // `image.id` is a RepoDigest that does NOT resolve on the target; the load
+    // restores under the config id — retag must use THAT, or it'd fail on box.
+    const sink: Buffer[] = [];
+    const tags: Array<[string, string]> = [];
+    const loadedConfigId = "sha256:deadbeefcafe";
+
+    await transferImage(fakeSource([Buffer.from("x")]), fakeTarget(sink, tags, loadedConfigId), IMG);
+
+    expect(tags).toEqual([[loadedConfigId, IMG.tag]]);
   });
 
   test("throws when docker save exits non-zero (never a silent truncation)", async () => {

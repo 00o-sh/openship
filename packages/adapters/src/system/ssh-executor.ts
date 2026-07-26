@@ -420,10 +420,10 @@ export class SshExecutor implements CommandExecutor {
    * staging the (multi-GB) image to a temp file. Bounded stderr tail for
    * diagnostics; registered for transport-drop abort like _exec/_streamExec.
    */
-  execWithInput(command: string, body: Readable): Promise<{ code: number; stderr: string }> {
+  execWithInput(command: string, body: Readable): Promise<{ code: number; stderr: string; stdout: string }> {
     return (async () => {
       const client = await this.connect();
-      return new Promise<{ code: number; stderr: string }>((resolve, reject) => {
+      return new Promise<{ code: number; stderr: string; stdout: string }>((resolve, reject) => {
         let settled = false;
         const abort = (err: Error) => finish(() => reject(err));
         const finish = (act: () => void) => {
@@ -442,9 +442,14 @@ export class SshExecutor implements CommandExecutor {
             stderr += d.toString();
             if (stderr.length > 16 * 1024) stderr = stderr.slice(-16 * 1024);
           });
-          // Drain stdout (docker load prints "Loaded image:" lines) so the
-          // channel's flow doesn't stall on an unread buffer.
-          stream.on("data", () => {});
+          // Capture stdout (docker load prints "Loaded image( ID)?: <ref>", which
+          // the caller needs to retag) AND keep the channel flowing so it doesn't
+          // stall on an unread buffer.
+          let stdout = "";
+          stream.on("data", (d: Buffer) => {
+            stdout += d.toString();
+            if (stdout.length > 16 * 1024) stdout = stdout.slice(-16 * 1024);
+          });
 
           let exitCode: number | null = null;
           stream.on("exit", (code: number | null) => {
@@ -460,7 +465,7 @@ export class SshExecutor implements CommandExecutor {
                   ),
                 );
               } else {
-                resolve({ code: final, stderr: stderr.trim() });
+                resolve({ code: final, stderr: stderr.trim(), stdout: stdout.trim() });
               }
             });
           });

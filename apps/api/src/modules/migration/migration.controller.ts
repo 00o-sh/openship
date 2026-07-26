@@ -461,6 +461,19 @@ export async function cancelMigration(c: Context) {
 }
 
 /**
+ * POST /migration/migrations/:id/cleanup-target
+ *
+ * Remove the volumes a FAILED run copied to the target (orphaned after rollback),
+ * so a retry starts clean. Source untouched; succeeded runs are rejected.
+ */
+export async function cleanupTargetData(c: Context) {
+  const ctx = getRequestContext(c);
+  const result = await migrationOrchestrator.cleanupTargetData(param(c, "id"), ctx.organizationId);
+  if (!result.ok) return c.json({ error: result.error }, result.status as 400);
+  return c.json({ success: true, removed: result.removed });
+}
+
+/**
  * POST /migration/migrations/:id/resume  { overrides?, skip? }
  *
  * Resume a `partial` run: re-transfer the pending paths (per-item source

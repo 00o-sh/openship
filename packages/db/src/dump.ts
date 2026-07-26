@@ -328,13 +328,19 @@ const TABLES: ReadonlyArray<TableSpec> = [
     scopes: [{ in: "instance", via: "all-rows" }],
     hasOrganizationId: false,
   },
+  // notification_subscription / notification_delivery reference
+  // notification_channel (INSTANCE-scope only, above) via channelId, which never
+  // travels on an org/project (remap) dump. Carrying them there would create
+  // dangling channel FKs on the target AND let a crafted ingest attach a
+  // subscription/delivery to a VICTIM tenant's channel (self-containment can
+  // never hold for channelId in these scopes). So — exactly like backup_run for
+  // project scope — they are organization-scope EXCLUDED: a full instance
+  // migration still carries them (the channel travels alongside), but a
+  // cross-org remap does not. notification_default has no channel FK and stays.
   {
     sqlName: "notification_subscription",
     table: schema.notificationSubscription,
-    scopes: [
-      { in: "instance", via: "all-rows" },
-      { in: "organization", via: "organizationId" },
-    ],
+    scopes: [{ in: "instance", via: "all-rows" }],
     hasOrganizationId: true,
   },
   {
@@ -349,10 +355,7 @@ const TABLES: ReadonlyArray<TableSpec> = [
   {
     sqlName: "notification_delivery",
     table: schema.notificationDelivery,
-    scopes: [
-      { in: "instance", via: "all-rows" },
-      { in: "organization", via: "organizationId" },
-    ],
+    scopes: [{ in: "instance", via: "all-rows" }],
     hasOrganizationId: true,
   },
 
@@ -651,25 +654,46 @@ export interface RestoreOptions {
 /**
  * Cross-tenant ingest guard for the REMAP path (cloud ingest + project transfer,
  * where `remapOrgId` rewrites organizationId on org-owned rows). A CHILD row's
- * parent FK (projectId / deploymentId / serviceId / groupId) is NOT remapped, so
- * a crafted dump could point e.g. `service.projectId` at a VICTIM's project id
- * and attach the row to another tenant's project — cross-tenant write, and RCE
- * via a planted service.image/command or routing/SSL hijack via a planted
- * domain (SaaS audit, critical). Require the dump to be SELF-CONTAINED: every
- * such FK must reference a parent row PRESENT IN THE DUMP (which is org-remapped
- * on insert), never a pre-existing row that may belong to another tenant.
- * dumpSubgraph always emits self-contained subgraphs, so legitimate transfers
- * pass; a malicious partial dump is rejected. Throws on the first violation.
- * Exported for testing. Pure — no DB access.
+ * parent FK (projectId / deploymentId / serviceId / groupId / destinationId /
+ * runId / channelId) is NOT remapped, so a crafted dump could point e.g.
+ * `service.projectId` at a VICTIM's project id and attach the row to another
+ * tenant's project — cross-tenant write, and RCE via a planted
+ * service.image/command or routing/SSL hijack via a planted domain (SaaS audit,
+ * critical); or point `backup_run.destinationId` at a victim's backup
+ * destination (→ their decrypted credentials adopted on restore). Require the
+ * dump to be SELF-CONTAINED: every such FK must reference a parent row PRESENT
+ * IN THE DUMP (which is org-remapped on insert), never a pre-existing row that
+ * may belong to another tenant. dumpSubgraph always emits self-contained
+ * subgraphs (tables whose NOT-NULL FK parent does not travel in a given scope —
+ * e.g. notification_subscription.channelId, backup rows in project scope — are
+ * excluded from that scope in TABLES), so legitimate transfers pass; a malicious
+ * partial dump is rejected. Throws on the first violation. Exported for testing.
+ * Pure — no DB access.
  */
 export function assertDumpSelfContained(dump: DatabaseDump): void {
-  // Column → parent table (sqlName). These are exactly the FK columns the TABLES
-  // scope resolvers use (`via:"fk"` columns + the from-root-project sourceColumn).
+  // Column → parent table (sqlName). Every ownership/reference FK that a remap
+  // leaves un-rewritten must be self-contained, or a crafted dump can attach a
+  // remapped row to a pre-existing (cross-tenant) parent. Column names are
+  // unambiguous across the schema, so a name→table map is sufficient.
   const FK_PARENT: Record<string, string> = {
     projectId: "project",
     deploymentId: "deployment",
     serviceId: "service",
     groupId: "project_app",
+    // Backups: destinationId/runId reference org-scoped parents that DO travel
+    // in an organization dump (backup_destination is org-shared, backup_run is
+    // org-scoped), so a legitimate dump carries them and stays self-contained.
+    // A crafted dump pointing destinationId at a VICTIM's backup_destination
+    // (→ credential adoption on restore) or runId at a foreign run is rejected.
+    destinationId: "backup_destination",
+    runId: "backup_run",
+    // Notifications: channelId references notification_channel, which is
+    // INSTANCE-scope-only and never travels on a remap (org/project) dump, so
+    // any channelId here could only be a pre-existing cross-tenant channel.
+    // notification_subscription/notification_delivery are excluded from the
+    // organization scope (see TABLES) so legit remap dumps never carry them;
+    // this entry rejects such a row defensively if that scope is ever restored.
+    channelId: "notification_channel",
   };
   const dumpedIds: Record<string, Set<string>> = {};
   for (const [sqlName, rows] of Object.entries(dump.tables)) {
@@ -716,6 +740,16 @@ export async function restoreSubgraph(
     await tx.execute(sql`SET CONSTRAINTS ALL DEFERRED`);
 
     if (opts.mode === "wipe") {
+      // Engine-level last-resort gate: a whole-instance TRUNCATE must NEVER run
+      // on the multi-tenant SaaS. The API route is unmounted in CLOUD_MODE and
+      // exportInstance/importInstance refuse too, but this stops even a stray
+      // in-process restoreSubgraph({mode:'wipe'}) from truncating every tenant if
+      // those layers are ever bypassed. packages/db has no apps/api env → read raw.
+      if (process.env.CLOUD_MODE === "true") {
+        throw new Error(
+          "Refusing a wipe restore on a multi-tenant (CLOUD_MODE) instance — this would truncate every tenant.",
+        );
+      }
       // Truncate only the tables this scope claims, in reverse order.
       // For project / organization scope we don't TRUNCATE because that
       // would wipe other tenants — `wipe` mode is conceptually a "this

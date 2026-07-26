@@ -10,7 +10,7 @@
  */
 
 import { repos } from "@repo/db";
-import { ValidationError } from "@repo/core";
+import { ValidationError, isValidEnvKey, getAppEndpoints } from "@repo/core";
 import { getTemplateForOrg } from "../apps/catalog-source";
 import type { RequestContext } from "../../lib/request-context";
 import { assertResourceInOrg } from "../../lib/controller-helpers";
@@ -20,7 +20,6 @@ import { mergeEnvVars } from "./project-env.service";
 import { toInternalUrl } from "./project-connection.util";
 
 const ENVIRONMENT = "production";
-const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export type ConnectionMode = "internal" | "public";
 
@@ -89,16 +88,44 @@ export interface CreateConnectionInput {
   mode?: ConnectionMode;
 }
 
+/**
+ * Best-effort: redeploy the consumer so a just-changed connection env actually
+ * reaches the RUNNING container (env is baked at deploy time, and internal mode
+ * also (re)joins the source network on deploy via attachLinkedNetworks). Non-
+ * fatal — mirrors "domains never fail a deploy"; if the target was never
+ * deployed there's nothing running to refresh, so it just applies on the first
+ * deploy. Dynamic import of the build service avoids a static import cycle.
+ */
+async function applyConnectionToTarget(
+  ctx: RequestContext,
+  targetProjectId: string,
+): Promise<void> {
+  const target = await repos.project.findById(targetProjectId).catch(() => null);
+  if (!target?.activeDeploymentId) return;
+  try {
+    const { triggerDeployment } = await import("../deployments/build.service");
+    await triggerDeployment(ctx, { projectId: targetProjectId, trigger: "service-connection" });
+  } catch (err) {
+    console.warn(
+      `[service-connection] apply-redeploy of ${targetProjectId} failed (non-fatal): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
 export async function createConnection(
   ctx: RequestContext,
   targetProjectId: string,
   input: CreateConnectionInput,
+  /** `defer` skips the best-effort apply-redeploy so a bundle redeploys ONCE at
+   *  the end instead of per-item. */
+  opts?: { defer?: boolean },
 ): Promise<{ connection: ConnectionView; requiresRedeploy: true }> {
   const envKey = input.envKey.trim();
-  if (!ENV_KEY_RE.test(envKey)) {
+  if (!isValidEnvKey(envKey)) {
     throw new ValidationError("Enter a valid environment variable name (letters, digits, _).");
   }
-  const mode: ConnectionMode = input.mode === "internal" ? "internal" : "public";
 
   // Both projects must exist, be in the SAME org (no cross-tenant flow), and the
   // caller must be able to read the source + write the target.
@@ -127,15 +154,43 @@ export async function createConnection(
     throw new ValidationError("That connection value isn't available yet on the source app.");
   }
 
+  // Resolve the source app template ONCE — used both to default the reach mode
+  // from the endpoint's declared scope and to rewrite the internal host below.
+  const template = await getTemplateForOrg(source.organizationId, source.appTemplateId ?? "");
+
+  // Default the reach mode from the source endpoint's declared `scope` when the
+  // caller didn't choose: a DB endpoint (scope "internal") wires internal, a
+  // UI/API ("public") wires public. An explicit input.mode always wins.
+  let mode: ConnectionMode;
+  if (input.mode === "internal" || input.mode === "public") {
+    mode = input.mode;
+  } else {
+    const scope =
+      output.service && template
+        ? getAppEndpoints(template).find((e) => e.service === output.service)?.scope
+        : undefined;
+    mode = scope === "internal" ? "internal" : "public";
+  }
+
   let value = output.value;
   if (mode === "internal") {
-    // Rewrite host → the source app's internal service alias (needs an app
-    // template with a matching endpoint — i.e. a services-type DB app on its own
-    // `openship-<slug>` network). If it can't, internal isn't viable here.
-    const internal = toInternalUrl(
-      value,
-      await getTemplateForOrg(source.organizationId, source.appTemplateId ?? ""),
-    );
+    // Internal reachability rides on joining the source app's docker network at
+    // deploy (attachLinkedNetworks). A cloud-hosted source (Oblien) has no
+    // attachable shared network on this pipe yet, so an internal alias would be
+    // unreachable — steer to Public instead of injecting a dead host.
+    const srcDep = source.activeDeploymentId
+      ? await repos.deployment.findById(source.activeDeploymentId).catch(() => null)
+      : null;
+    const srcTarget = (srcDep?.meta as { deployTarget?: string } | null)?.deployTarget;
+    if (srcTarget === "cloud") {
+      throw new ValidationError(
+        "Internal mode isn't available for a cloud-hosted app yet — use Public.",
+      );
+    }
+    // Rewrite host → the source app's internal service alias. The output's
+    // declared/derived `service` is authoritative for which alias+port to
+    // target; if it can't resolve, internal isn't viable here.
+    const internal = toInternalUrl(value, template, output.service);
     if (!internal) {
       throw new ValidationError(
         "Internal mode isn't available for this connection — use Public, or pick a database app's URL.",
@@ -193,6 +248,10 @@ export async function createConnection(
     throw err;
   }
 
+  // Apply immediately to the running consumer (best-effort). A bundle defers so
+  // it redeploys once at the end rather than per item.
+  if (!opts?.defer) await applyConnectionToTarget(ctx, targetProjectId);
+
   return {
     connection: toConnectionView(row, source),
     requiresRedeploy: true,
@@ -219,21 +278,29 @@ export async function connectBundle(
   const created: ConnectionView[] = [];
   try {
     for (const item of input.items) {
-      const { connection } = await createConnection(ctx, targetProjectId, {
-        sourceProjectId: input.sourceProjectId,
-        outputId: item.outputId,
-        envKey: item.envKey,
-        mode: input.mode,
-      });
+      const { connection } = await createConnection(
+        ctx,
+        targetProjectId,
+        {
+          sourceProjectId: input.sourceProjectId,
+          outputId: item.outputId,
+          envKey: item.envKey,
+          mode: input.mode,
+        },
+        // Defer the apply-redeploy — we do it ONCE below after all items land,
+        // so a multi-output bundle triggers a single consumer redeploy.
+        { defer: true },
+      );
       created.push(connection);
     }
   } catch (err) {
     // Roll back every link made in this bundle (best-effort) before surfacing.
     for (const c of created) {
-      await deleteConnection(ctx, targetProjectId, c.id).catch(() => {});
+      await deleteConnection(ctx, targetProjectId, c.id, { defer: true }).catch(() => {});
     }
     throw err;
   }
+  await applyConnectionToTarget(ctx, targetProjectId);
   return { connections: created, requiresRedeploy: true };
 }
 
@@ -241,6 +308,9 @@ export async function deleteConnection(
   ctx: RequestContext,
   targetProjectId: string,
   linkId: string,
+  /** `defer` skips the apply-redeploy — used by bundle rollback so a failed
+   *  bundle doesn't fire a redeploy per rolled-back item. */
+  opts?: { defer?: boolean },
 ): Promise<{ requiresRedeploy: true }> {
   await permission.assert(ctx, {
     resourceType: "project",
@@ -260,5 +330,7 @@ export async function deleteConnection(
     deletes: [link.envKey],
   });
   await repos.projectConnection.delete(linkId);
+  // Refresh the running consumer so the removed env leaves the live container.
+  if (!opts?.defer) await applyConnectionToTarget(ctx, targetProjectId);
   return { requiresRedeploy: true };
 }

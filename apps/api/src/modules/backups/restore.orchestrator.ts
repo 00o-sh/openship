@@ -72,6 +72,15 @@ export class RestoreOrchestrator {
       throw new Error("This backup has been purged — nothing to restore");
     }
 
+    // Cross-tenant guard (fail fast): the run's destination MUST belong to the
+    // run's own org. A run whose destinationId was planted (e.g. via a crafted
+    // ingest dump) to point at another tenant's backup_destination would
+    // otherwise cause us to load + decrypt that victim's storage credentials.
+    // Re-checked at every credential-load site below (assertDestinationOrg).
+    const destForOrgCheck = await repos.backupDestination.findById(sourceRun.destinationId!);
+    if (!destForOrgCheck) throw new Error("Backup destination not found");
+    this.assertDestinationOrg(destForOrgCheck, sourceRun.organizationId);
+
     const mode = opts.mode ?? "in_place";
     if (mode === "to_fork" && !opts.forkMailServerId) {
       throw new Error("A migration (to_fork) restore requires a target mail server");
@@ -175,6 +184,25 @@ export class RestoreOrchestrator {
 
   // ── Internal phases ──────────────────────────────────────────────
 
+  /**
+   * Defense-in-depth cross-tenant guard: a backup destination may only be used
+   * by a run/restore in the SAME org. Mirrors the backup orchestrator's
+   * project.org === destination.org invariant (backup.orchestrator.ts). Throws
+   * a generic "not found" so a foreign destinationId can't be probed. Guards the
+   * credential-decrypt sites (toAdapterRow → resolveDestination) against a
+   * planted cross-tenant destinationId that the dump self-containment check
+   * (assertDumpSelfContained) would already reject at ingest — this is the
+   * runtime backstop.
+   */
+  private assertDestinationOrg(
+    destinationRow: { organizationId: string },
+    expectedOrgId: string,
+  ): void {
+    if (destinationRow.organizationId !== expectedOrgId) {
+      throw new Error("Backup destination not found");
+    }
+  }
+
   private async runPrepare(restoreId: string): Promise<void> {
     try {
       const restore = await repos.backupRestore.findById(restoreId);
@@ -189,6 +217,7 @@ export class RestoreOrchestrator {
         restore.destinationId,
       );
       if (!destinationRow) throw new Error("Destination disappeared");
+      this.assertDestinationOrg(destinationRow, restore.organizationId);
 
       const adapterRow = await toAdapterRow(destinationRow);
       const destination = resolveDestination(adapterRow);
@@ -252,6 +281,7 @@ export class RestoreOrchestrator {
 
       const destinationRow = await repos.backupDestination.findById(restore.destinationId);
       if (!destinationRow) throw new Error("Destination disappeared");
+      this.assertDestinationOrg(destinationRow, restore.organizationId);
 
       const adapterRow = await toAdapterRow(destinationRow);
       const destination = resolveDestination(adapterRow);

@@ -57,7 +57,8 @@
       "conflictClone": "Clone",
       "conflictCloneHint": "New volume, keep old",
       "conflictKeep": "Keep",
-      "conflictKeepHint": "Use existing data"
+      "conflictKeepHint": "Use existing data",
+      "measuring": "Measuring transfer size…"
     },
     "steps": {
       "select": "Select",
@@ -241,7 +242,8 @@
     "resuming": "Resuming…",
     "editRetry": "Edit & retry",
     "safetyTitle": "Non-destructive & reversible.",
-    "safetyBody": "Your source keeps running the whole time — data is copied, never moved. Nothing is deleted, even after a successful migration: your original containers stay (stopped as a safety net) until you explicitly remove them at cutover."
+    "safetyBody": "Your source keeps running the whole time — data is copied, never moved. Nothing is deleted, even after a successful migration: your original containers stay (stopped as a safety net) until you explicitly remove them at cutover.",
+    "cleanupTarget": "Remove copied data from target"
   },
   "plan": {
     "missing": "not found"

@@ -27,6 +27,12 @@ const ROWS: Row[] = [
     selfhost: { text: "Redeploy, migrate volumes by hand",  status: "loss" },
   },
   {
+    feature: "Leave anytime, keep running",
+    openship: { text: "'Remove from Openship' drops only our record - your containers, data and manifest keep running, re-importable later", status: "win" },
+    managed:  { text: "Nothing stays on your side - the workload only ever lived in their cloud", status: "loss" },
+    selfhost: { text: "Delete tears the app down; a surviving container is a bug, not a detach - and none can re-adopt a running app", status: "loss" },
+  },
+  {
     feature: "Take over your proxy",
     openship: { text: "Adopt Traefik / nginx / Caddy on :80/:443, rollback-safe", status: "win" },
     managed:  { text: "Not applicable",                     status: "neutral" },
@@ -45,10 +51,16 @@ const ROWS: Row[] = [
     selfhost: { text: "Bolt on Grafana or Plausible",       status: "loss" },
   },
   {
-    feature: "Desktop app",
-    openship: { text: "Whole control plane on your laptop, loopback-only, nothing always-on", status: "win" },
-    managed:  { text: "Cloud account, always remote",       status: "neutral" },
-    selfhost: { text: "Browser-only; needs an always-on server", status: "loss" },
+    feature: "Your code skips the control plane",
+    openship: { text: "Desktop reads your folder off disk or clones your repo and deploys straight to the target - no control-plane server in between", status: "win" },
+    managed:  { text: "Source uploaded to and built on their cloud", status: "loss" },
+    selfhost: { text: "Source clones or zip-uploads onto an always-on control-plane server first, even on your own box", status: "loss" },
+  },
+  {
+    feature: "Native desktop app, no daemon",
+    openship: { text: "macOS / Windows / Linux app; the control plane runs on your machine only while it's open - nothing always-on, full local power", status: "win" },
+    managed:  { text: "No desktop app - browser or CLI, everything runs in their cloud", status: "loss" },
+    selfhost: { text: "No desktop app - browser dashboard or CLI, backed by an always-on server", status: "loss" },
   },
   {
     feature: "Built-in mail server",
@@ -58,9 +70,9 @@ const ROWS: Row[] = [
   },
   {
     feature: "Cloud + self-host, one plane",
-    openship: { text: "Deploy to your servers or managed cloud, switch anytime", status: "win" },
-    managed:  { text: "Their runtime only",                 status: "loss" },
-    selfhost: { text: "Your boxes only",                    status: "loss" },
+    openship: { text: "Openship Cloud runs your workload (Micro to High), or self-host free - same tool, same dashboard", status: "win" },
+    managed:  { text: "Runs your workload, but managed-only - you can't self-host it", status: "neutral" },
+    selfhost: { text: "Their 'cloud' hosts only the control plane; you still bring and pay for your own servers", status: "loss" },
   },
   {
     feature: "Audit log",

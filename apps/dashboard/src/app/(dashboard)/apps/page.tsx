@@ -275,10 +275,9 @@ export default function AppsPage() {
                   </p>
                   <div className="space-y-2">
                     {suggestions.map((a) => (
-                      <button
+                      <Link
                         key={a.id}
-                        type="button"
-                        onClick={() => router.push(`/apps/new/${a.id}`)}
+                        href={`/apps/new/${a.id}`}
                         className="group flex w-full items-center gap-3 rounded-xl border border-border/50 p-3 text-left transition-all hover:border-primary/40 hover:bg-muted/30"
                       >
                         <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted/60">
@@ -289,7 +288,7 @@ export default function AppsPage() {
                           <p className="truncate text-[11px] text-muted-foreground">{a.desc}</p>
                         </div>
                         <ArrowRight className="size-4 shrink-0 text-muted-foreground/40 transition-colors group-hover:text-foreground rtl:rotate-180" />
-                      </button>
+                      </Link>
                     ))}
                   </div>
                   <Link

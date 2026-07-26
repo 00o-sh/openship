@@ -22,7 +22,7 @@ export {
   EdgeConflictError,
   EdgeMigrateRequested,
   freeEdgeTargets,
-  isOpenshipManagedEdge,
+  ourLuaOnHost,
   probeEdge,
   stopTargetsForStatus,
 } from "./detect";

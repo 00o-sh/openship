@@ -39,7 +39,7 @@ import {
   type CloudAnalyticsOperation,
 } from "./cloud-analytics.service";
 import { revokeCloudSession } from "./cloud-session.service";
-import { syncCloudEdgeProxy } from "./cloud-edge-proxy.service";
+import { syncCloudEdgeProxy, deleteCloudEdgeProxy } from "./cloud-edge-proxy.service";
 import {
   createCloudPage,
   dispatchCloudPageAction,
@@ -435,6 +435,28 @@ export async function syncEdgeProxy(c: Context) {
     return c.json({ ok: true, hostname: result.hostname });
   } catch (err) {
     return oblienErrorResponse(c, err, "Failed to sync edge proxy");
+  }
+}
+
+/**
+ * POST /api/cloud/edge-proxy/delete  { slug }
+ *
+ * Tear down the caller's managed edge proxy for a freed slug (a dropped free
+ * *.opsh.io domain). Namespace-scoped, so a caller can only remove its own
+ * proxy. Idempotent — an unknown slug returns `removed:false`, not an error.
+ */
+export async function deleteEdgeProxy(c: Context) {
+  const ctx = getRequestContext(c);
+  const body = await c.req.json<{ slug?: string }>();
+  if (!body.slug) {
+    return c.json({ error: "slug is required" }, 400);
+  }
+  try {
+    const result = await deleteCloudEdgeProxy(ctx.organizationId, { slug: body.slug });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json({ ok: true, removed: result.removed });
+  } catch (err) {
+    return oblienErrorResponse(c, err, "Failed to delete edge proxy");
   }
 }
 

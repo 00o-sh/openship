@@ -45,6 +45,7 @@ import {
   type ProjectRouteState,
 } from "../domains/project-route.service";
 import { applyProjectRouting } from "../domains/routing-apply.service";
+import { syncProjectManagedEdge } from "./project-runtime.service";
 import { normalizeStoredPublicEndpoints } from "../../lib/public-endpoints";
 import { assertFreeEndpointsAllowed } from "../../lib/free-domain-guard";
 import type {
@@ -381,6 +382,18 @@ async function createProductionProject(
   slug: string,
   organizationId: string,
 ) {
+  // Atomic free-domain gate — same rule and shape as updateProject. When the
+  // caller EXPLICITLY sends endpoints, a free (*.opsh.io) route only resolves
+  // behind the Openship Cloud edge, so refuse BEFORE any group/project row is
+  // written on a disconnected instance (no dead "Pending" route persisted). The
+  // auto-derived default (data.publicEndpoints undefined) is deliberately NOT
+  // gated — that path must keep working on a self-hosted instance.
+  if (data.publicEndpoints !== undefined) {
+    await assertFreeEndpointsAllowed(
+      organizationId,
+      normalizeStoredPublicEndpoints(data.publicEndpoints),
+    );
+  }
   const { app, created: appCreated } = await ensureProjectApp(data, slug, organizationId);
   const routing = deriveNextProjectRouteState({
     slug,
@@ -877,6 +890,24 @@ export async function createProject(
   const existing = await findProjectByAppSlug(organizationId, slug);
   if (existing) throw new ConflictError(`Project "${data.name}" already exists`);
 
+  // Multi-tenant SaaS: never trust a client-supplied installationId. It binds
+  // the project to a GitHub App installation, and the push-webhook fan-out
+  // deploys by matching project.installationId to the DELIVERY's installation
+  // (webhook-push.ts triggerBranchDeployments). A tenant could otherwise claim
+  // another org's installation id (or just reference another org's repo string)
+  // and get fanned into that org's pushes — leaking the repo's commit metadata
+  // into their delivery feed and triggering unauthorized deploys. Resolve the
+  // installation from the caller's OWN org + owner; if this org hasn't installed
+  // the App on that owner, drop it (null) so the project can never match — and
+  // thus never join — another org's push delivery. (linkProjectRepo already
+  // resolves it server-side; this closes the direct-create path.)
+  if (env.CLOUD_MODE) {
+    const owner = data.gitOwner?.trim();
+    data.installationId = owner
+      ? ((await getInstallationIdByOrg(organizationId, owner)) ?? undefined)
+      : undefined;
+  }
+
   const p = await createProductionProject(data, slug, organizationId);
 
   return enrichProject(p);
@@ -1027,11 +1058,29 @@ export async function updateProject(
     // complete instead of surfacing a false client-side timeout.
     const refreshed = await repos.project.findById(projectId);
     if (refreshed) {
-      void reapplyProjectLiveRoutes(refreshed, previousHostnames).catch((err) =>
-        console.warn(
-          `[updateProject] live route re-apply failed (non-fatal): ${safeErrorMessage(err)}`,
-        ),
-      );
+      void (async () => {
+        await reapplyProjectLiveRoutes(refreshed, previousHostnames).catch((err) =>
+          console.warn(
+            `[updateProject] live route re-apply failed (non-fatal): ${safeErrorMessage(err)}`,
+          ),
+        );
+        // A free (*.opsh.io) domain resolves only through Openship Cloud's edge.
+        // reapplyProjectLiveRoutes handles the self-hosted OpenResty side; the
+        // managed edge must be re-registered too or an edited/added free URL
+        // 404s with no signal. Only meaningful once deployed (no live target
+        // otherwise — the next deploy syncs). On failure this sets
+        // meta.edgeUnsynced so the project surfaces "Retry routing" instead of
+        // silently returning a dead URL.
+        if (refreshed.activeDeploymentId) {
+          await syncProjectManagedEdge(refreshed, organizationId, {
+            markOnFailure: true,
+          }).catch((err) =>
+            console.warn(
+              `[updateProject] managed edge sync failed (non-fatal): ${safeErrorMessage(err)}`,
+            ),
+          );
+        }
+      })();
     }
   }
 

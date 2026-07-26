@@ -15,8 +15,13 @@
  * No client-side cookies or tokens are ever involved.
  */
 import { repos } from "@repo/db";
-import { cloudRuntimeTarget, cloudRuntimeTargetId } from "../../config/env";
+import { cloudRuntimeTarget, cloudRuntimeTargetId, env } from "../../config/env";
 import { decrypt } from "../encryption";
+import {
+  APP_VERSION,
+  OPENSHIP_VERSION_HEADER,
+  OPENSHIP_PLATFORM_HEADER,
+} from "../app-version";
 
 /** Max wait for the SaaS to send response headers before we give up (503).
  *  Bounds every proxied call; body streaming continues past this once headers land. */
@@ -71,6 +76,13 @@ export async function cloudFetch(
       headers: {
         "Content-Type": "application/json",
         ...init?.headers,
+        // Identify THIS self-hosted instance's version + platform to the cloud
+        // on every call, so the SaaS can gate on an outdated client (deprecate
+        // old wire formats, nudge/force upgrades, etc.). Set AFTER the caller's
+        // headers so they can't be spoofed/overridden by a request, and BEFORE
+        // Authorization which is likewise authoritative.
+        [OPENSHIP_VERSION_HEADER]: APP_VERSION,
+        [OPENSHIP_PLATFORM_HEADER]: env.DEPLOY_MODE,
         Authorization: `Bearer ${sessionToken}`,
       },
       signal: controller.signal,

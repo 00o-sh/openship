@@ -92,10 +92,11 @@ export interface StartMigrationInput {
   /** User-selected extra paths to move (cross-server): each a source path on the
    *  source host → a destination path on the target host (file or folder). */
   customPaths?: Array<{ source: string; dest: string }>;
-  /** serviceName → how to resolve a target-volume conflict (target already has
-   *  data): "override" (overwrite it), "clone" (new namespaced volume, service
-   *  mounts it), "keep" (use the existing target data as-is). Chosen at the plan
-   *  step; a resolved service's conflict no longer hard-fails the move. */
+  /** volumeName → how to resolve a target-volume conflict (target already has
+   *  data): "override" (overwrite it), "clone" (copy into a fresh scoped volume
+   *  the service then mounts), "keep" (use the existing target data as-is). Keyed
+   *  by the unique VOLUME name (two services can share a display name). Chosen at
+   *  the plan step; a resolved volume no longer hard-fails the move. */
   conflictResolution?: Record<string, "override" | "clone" | "keep">;
   /** serviceName → the domain/route to publish once the target is verified.
    *  Published SERVER-SIDE post-verify (was client-only, so it was lost when the
@@ -128,10 +129,24 @@ export interface PendingItem {
   message?: string;
 }
 
-/** moveData result: bytes written + the items that didn't make it. */
+/** moveData result: bytes written + the items that didn't make it + the volume
+ *  names actually WRITTEN on the target (for optional cleanup after a failed
+ *  deploy; excludes "keep"-resolved pre-existing volumes). */
 interface MoveResult {
   bytesMoved: number;
   pendingItems: PendingItem[];
+  targetVolumes: string[];
+}
+
+/** The single action the user picked for EVERY resolved conflict, or undefined
+ *  if they mixed choices. A runtime conflict that the preview didn't surface
+ *  (probe flake, reused-project row drift) inherits this — so "I chose Override
+ *  for everything" applies to a straggler volume too, instead of dead-failing. */
+function unanimousConflictAction(
+  res: Record<string, "override" | "clone" | "keep">,
+): "override" | "clone" | "keep" | undefined {
+  const vals = Object.values(res);
+  return vals.length > 0 && vals.every((v) => v === vals[0]) ? vals[0] : undefined;
 }
 
 const VERIFY_TIMEOUT_MS = 20 * 60 * 1000; // 20 min for the target deploy
@@ -192,12 +207,15 @@ class MigrationOrchestratorImpl {
     return buf && buf.length > 0 ? buf.join("\n") : null;
   }
 
-  /** Append one line to a run's session log; console + buffer + throttled flush. */
+  /** Append one line to a run's session log; console + buffer + throttled flush
+   *  + live SSE publish (so the client streams logs in real time, like a deploy). */
   private appendLog(id: string, message: string): void {
     console.log(`[migration] ${id}: ${message}`);
+    const line = `[${new Date().toISOString()}] ${message}`;
     const buf = this.logsByRun.get(id) ?? [];
-    buf.push(`[${new Date().toISOString()}] ${message}`);
+    buf.push(line);
     this.logsByRun.set(id, buf);
+    migrationRunBus.publish(id, { type: "log", line });
     const now = Date.now();
     if (now - (this.logFlushAt.get(id) ?? 0) < 2000) return;
     this.logFlushAt.set(id, now);
@@ -411,17 +429,21 @@ class MigrationOrchestratorImpl {
         // ── moving_data: quiesce the deploy set's originals + copy volumes ──
         this.throwIfCancelled(id);
         await this.transition(id, "moving_data");
-        // Cross-server: the locally-built images (compose `build:`) move as data
-        // (docker save|load). Registry-only images are pulled by the target, so
-        // they're never transferred. Saved/probed by IMAGE ID (a create-time tag
-        // can fail to resolve → silent drop); re-tagged on the target. Deduped by
-        // id — services often share an image.
+        // Cross-server: move EVERY image the source has locally as data
+        // (docker save|load) — not just compose `build:` ones. A locally-built
+        // image referenced only by tag (e.g. `onvo-new-api:latest`, no build
+        // context) isn't in any registry, so the target's pull would fail with
+        // "pull access denied … requires docker login". moveDataDirect filters
+        // this set by `imageExistsLocally`, so a pure-registry image (not present
+        // on the source) is skipped and the target pulls it normally. Saved/probed
+        // by IMAGE ID (a create-time tag can fail to resolve → silent drop);
+        // re-tagged on the target. Deduped by id — services often share an image.
         const builtImages: BuiltImage[] = sameServer
           ? []
           : [
               ...new Map(
                 deployChosen
-                  .filter((s) => Boolean(s.build) && s.image)
+                  .filter((s) => s.image)
                   .map((s) => {
                     const tag = s.image as string;
                     const id = s.imageId ?? tag;
@@ -457,26 +479,47 @@ class MigrationOrchestratorImpl {
           id,
         );
         pendingItems = move.pendingItems;
-        await this.transition(id, "moving_data", { bytesMoved: move.bytesMoved });
+        await this.transition(id, "moving_data", {
+          bytesMoved: move.bytesMoved,
+          targetVolumes: move.targetVolumes,
+        });
         log(
           `data move complete: ${move.bytesMoved} bytes` +
             (pendingItems.length ? ` · ${pendingItems.length} path(s) pending` : ""),
         );
 
-        // A "clone"-resolved conflict landed the data in a scoped volume; flip
-        // the service to namespaced so the deploy MOUNTS the clone (not the bare
-        // volume that held the pre-existing data). Done AFTER the move (which
-        // enumerates the source bare) and BEFORE the deploy (which reads the row).
-        const cloneServices = Object.entries(input.conflictResolution ?? {})
+        // A "clone"-resolved conflict landed the data in a SCOPED volume; rewrite
+        // that volume's source in the owning service's spec so the deploy MOUNTS
+        // the clone (not the bare volume that held pre-existing data). Per-VOLUME
+        // (matched by membership, not name) so two same-named services stay
+        // isolated; keeps namespaceVolumes untouched so sibling volumes are
+        // unaffected. Done AFTER the move (source enumerated bare) and BEFORE the
+        // deploy (which reads the row).
+        const cloneVolumes = Object.entries(input.conflictResolution ?? {})
           .filter(([, a]) => a === "clone")
-          .map(([name]) => name);
-        if (cloneServices.length > 0) {
+          .map(([vol]) => vol);
+        if (cloneVolumes.length > 0) {
           const rows = await repos.service.listByProject(projectId);
-          for (const name of cloneServices) {
-            const row = rows.find((r) => r.name === name);
-            if (row && !row.namespaceVolumes) {
-              await repos.service.update(row.id, { namespaceVolumes: true }).catch(() => {});
-              log(`clone: ${name} now mounts its namespaced (cloned) volume`);
+          const proj = await repos.project.findById(projectId);
+          const slug = proj?.slug ?? "";
+          for (const vol of cloneVolumes) {
+            const scoped = scopedVolumeName(slug, vol);
+            for (const row of rows) {
+              const vols = (row.volumes ?? []) as string[];
+              let changed = false;
+              const rewritten = vols.map((spec) => {
+                const parts = spec.split(":");
+                if (parts[0] === vol) {
+                  parts[0] = scoped;
+                  changed = true;
+                  return parts.join(":");
+                }
+                return spec;
+              });
+              if (changed) {
+                await repos.service.update(row.id, { volumes: rewritten }).catch(() => {});
+                log(`clone: ${vol} → ${scoped} (${row.name} mounts the clone)`);
+              }
             }
           }
         }
@@ -720,6 +763,9 @@ class MigrationOrchestratorImpl {
         label: string;
         kind: "volume" | "bind";
         source: string;
+        /** Volume name written on the TARGET (for optional post-failure cleanup);
+         *  undefined for binds (host paths, not docker volumes). */
+        targetVolume?: string;
         src: TransferEndpoint;
         dst: TransferEndpoint;
       }> = [];
@@ -752,6 +798,7 @@ class MigrationOrchestratorImpl {
               label: svc.name,
               kind: "volume",
               source: src.source,
+              targetVolume: scopedVolumeName(projectSlug, src.source),
               src: { exec: execA, handle: bareHandle, sourceId: src.id },
               dst: { exec: execA, handle: scopedHandle, sourceId: dst.id },
             });
@@ -773,12 +820,11 @@ class MigrationOrchestratorImpl {
             projectSlug,
             namespaceVolumes: svc.namespaceVolumes,
           };
-          // Scoped dst handle for a "clone"-resolved service (target volume →
-          // openship-<slug>-<name>); mirrors the same-server copy branch.
-          const action = conflictResolution[svc.name];
+          // Scoped dst handle for a "clone"-resolved volume (target volume →
+          // openship-<slug>-<name>); mirrors the same-server copy branch. Lazy —
+          // only computed when this service actually has a clone volume.
           const scopedHandle: ServiceHandle = { ...handle, namespaceVolumes: true };
-          const scopedSrcs =
-            action === "clone" ? await execB.listSources(scopedHandle) : [];
+          let scopedSrcs: Awaited<ReturnType<typeof execB.listSources>> | null = null;
           const sources = await execA.listSources(handle);
           for (const src of sources) {
             if (src.type === "bind") {
@@ -786,11 +832,14 @@ class MigrationOrchestratorImpl {
             } else if (src.type !== "volume") {
               continue;
             }
-            // Volume conflict resolution: keep = don't transfer (use existing);
-            // clone = land in the scoped target volume; override/none = bare.
+            // Per-VOLUME conflict resolution (keyed by the unique volume name):
+            // keep = don't transfer (use existing); clone = land in the scoped
+            // target volume; override/none = bare (clearTarget overwrites).
+            const action = src.type === "volume" ? conflictResolution[src.source] : undefined;
+            if (action === "keep") continue;
             let dst: TransferEndpoint = { exec: execB, handle, sourceId: src.id };
-            if (src.type === "volume" && action === "keep") continue;
-            if (src.type === "volume" && action === "clone") {
+            if (action === "clone") {
+              if (!scopedSrcs) scopedSrcs = await execB.listSources(scopedHandle);
               const sd = scopedSrcs.find((d) => d.type === "volume" && d.target === src.target);
               if (sd) dst = { exec: execB, handle: scopedHandle, sourceId: sd.id };
             }
@@ -798,6 +847,12 @@ class MigrationOrchestratorImpl {
               label: svc.name,
               kind: src.type === "bind" ? "bind" : "volume",
               source: src.source,
+              targetVolume:
+                src.type === "volume"
+                  ? action === "clone"
+                    ? scopedVolumeName(projectSlug, src.source)
+                    : src.source
+                  : undefined,
               src: { exec: execA, handle, sourceId: src.id },
               dst,
             });
@@ -810,9 +865,14 @@ class MigrationOrchestratorImpl {
         // destructive write — UNLESS the user resolved that service's conflict at
         // the plan step (override/clone/keep). The caller's rollback restarts the
         // originals otherwise.
+        // A straggler conflict (not surfaced at the plan step) inherits the
+        // user's unanimous override/keep choice — a bare→bare task already
+        // overwrites (= override), so here we only need to not hard-fail.
+        const relayFallbackRaw = unanimousConflictAction(conflictResolution);
+        const relayFallback = relayFallbackRaw === "clone" ? undefined : relayFallbackRaw;
         const conflicts: string[] = [];
         for (const task of tasks) {
-          if (conflictResolution[task.label]) continue; // resolved — not blocking
+          if (conflictResolution[task.source] || relayFallback) continue; // resolved / inherited
           const probe = await task.dst.exec.probeVolume?.(task.dst.handle, task.dst.sourceId);
           if (probe?.exists && !probe.empty) conflicts.push(`${task.label}/${task.dst.sourceId}`);
         }
@@ -862,9 +922,15 @@ class MigrationOrchestratorImpl {
           return 0;
         }
       });
+      // Cross-server target volumes written (for optional post-failure cleanup);
+      // same-server "copies" live on the same daemon but are recorded too.
+      const targetVolumes = rtB
+        ? tasks.filter((t) => t.targetVolume).map((t) => t.targetVolume as string)
+        : [];
       return {
         bytesMoved: imageBytes + results.reduce((sum, n) => sum + n, 0),
         pendingItems,
+        targetVolumes,
       };
     } finally {
       await rtA.dispose().catch(() => {});
@@ -964,14 +1030,24 @@ class MigrationOrchestratorImpl {
         else log(`image ${image.tag}: not present on source — target will pull`);
       }
 
-      // Refuse to clobber a pre-existing, non-empty volume on the target — UNLESS
-      // the user resolved that service's conflict at the plan step (override /
-      // clone / keep). A resolved volume isn't a blocking conflict; an unresolved
-      // one still hard-fails (safe). Clone targets a fresh scoped name, so it
-      // never conflicts anyway.
+      // Effective resolution = the user's explicit per-volume choices, plus (for
+      // any conflict the plan step didn't surface) their unanimous choice. A
+      // volume with a resolution isn't a blocking conflict; a truly unresolved
+      // one (mixed choices, none inferable) still hard-fails (safe). Clone
+      // targets a fresh scoped name, so it never conflicts anyway.
+      const resolution: Record<string, "override" | "clone" | "keep"> = { ...conflictResolution };
+      // Only override/keep are inheritable — both are self-contained in the move.
+      // Clone also needs a post-move metadata rewrite keyed off the EXPLICIT map,
+      // so an inherited clone would land data the deploy wouldn't mount → exclude.
+      const inheritRaw = unanimousConflictAction(conflictResolution);
+      const fallback = inheritRaw === "clone" ? undefined : inheritRaw;
+      log(
+        `conflict resolution: ${Object.keys(conflictResolution).length ? JSON.stringify(conflictResolution) : "none"}` +
+          `; enumerated volumes: ${[...volumeNames].join(", ") || "none"}`,
+      );
       const conflicts: string[] = [];
       for (const name of volumeNames) {
-        if (conflictResolution[owner.get(name) ?? ""]) continue; // resolved — not blocking
+        if (resolution[name]) continue; // resolved (by volume) — not blocking
         const out = await target.executor
           .exec(
             `if docker volume inspect ${sq(name)} >/dev/null 2>&1; then ` +
@@ -979,7 +1055,13 @@ class MigrationOrchestratorImpl {
               `[ -n "$(ls -A "$mp" 2>/dev/null)" ] && echo CONFLICT || true; fi`,
           )
           .catch(() => "");
-        if (out.includes("CONFLICT")) conflicts.push(name);
+        if (!out.includes("CONFLICT")) continue;
+        if (fallback) {
+          resolution[name] = fallback;
+          log(`conflict ${name}: no explicit choice — applying '${fallback}' (matches your other choices)`);
+        } else {
+          conflicts.push(name);
+        }
       }
       if (conflicts.length > 0) {
         throw new Error(
@@ -1013,8 +1095,11 @@ class MigrationOrchestratorImpl {
           onProgress?.({ task, kind, movedBytes, totalBytes });
         };
 
-      // Images first — sequential (large; save|load contends on the link).
+      // Images first — sequential (large; save|load contends on the link). Every
+      // image the source has locally is MOVED as data (docker save|load), so a
+      // locally-built/tagged image never triggers a registry pull on the target.
       for (const image of imagesToMove) {
+        log(`image ${image.tag}: moving as data (docker save|load) — no registry pull`);
         await link.transferImage(image, track(`image:${image.tag}`, "image"));
       }
 
@@ -1032,21 +1117,26 @@ class MigrationOrchestratorImpl {
       // run parks `partial`, resolvable + resumable) instead of aborting the
       // whole migration. A genuine link/tool failure also lands here.
       const pendingItems: PendingItem[] = [];
+      const targetVolumes: string[] = [];
+      // src volume name → target volume name, for the post-transfer size check.
+      const verifyVolumes: Array<{ src: string; dst: string }> = [];
       await runPool(items, TRANSFER_CONCURRENCY, async (it) => {
         // Cancel check BEFORE the resilience try — a cancel must abort the run,
         // not get swallowed into pendingItems as if the path failed.
         this.throwIfCancelled(runId);
         try {
           if (it.kind === "volume") {
-            // Conflict resolution (per owning service): keep = don't transfer
-            // (use existing target data); clone = land in a fresh scoped volume;
+            // Conflict resolution (per VOLUME): keep = don't transfer (use
+            // existing target data); clone = land in a fresh scoped volume;
             // override/none = overwrite the bare target (clearTarget default).
-            const action = conflictResolution[owner.get(it.ref) ?? ""];
+            const action = resolution[it.ref];
             if (action === "keep") {
               log(`volume ${it.ref}: keeping existing target data (not transferred)`);
             } else {
               const dstName = action === "clone" ? scopedVolumeName(projectSlug, it.ref) : undefined;
+              targetVolumes.push(dstName ?? it.ref); // written on the target (for optional cleanup)
               await link.transferVolume(it.ref, track(`volume:${it.ref}`, "volume"), dstName);
+              verifyVolumes.push({ src: it.ref, dst: dstName ?? it.ref });
             }
           } else if (it.kind === "bind") await link.transferBind(it.ref, track(`bind:${it.ref}`, "volume"));
           else await link.transferPath(it.source, it.dest, track(`path:${it.source}`, "volume"));
@@ -1070,9 +1160,40 @@ class MigrationOrchestratorImpl {
         return 0;
       });
 
+      // Integrity check: rsync (-a) / docker load already make the target an
+      // EXACT copy, but re-`du` both sides so the session log VISIBLY confirms
+      // the bytes landed (and flags a surprise mismatch). Best-effort; a small
+      // delta is normal (filesystem block/overhead differences), so it warns
+      // rather than fails.
+      const duVolume = async (
+        exec: { exec: (c: string) => Promise<string> },
+        name: string,
+      ): Promise<number | null> => {
+        const out = await exec
+          .exec(
+            `mp=$(docker volume inspect ${sq(name)} -f '{{.Mountpoint}}' 2>/dev/null) && ` +
+              `du -sb "$mp" 2>/dev/null | cut -f1 || echo`,
+          )
+          .catch(() => "");
+        const n = Number(out.trim());
+        return Number.isFinite(n) && n > 0 ? n : null;
+      };
+      for (const v of verifyVolumes) {
+        const [srcBytes, dstBytes] = await Promise.all([
+          duVolume(source.executor, v.src),
+          duVolume(target.executor, v.dst),
+        ]);
+        if (srcBytes == null || dstBytes == null) {
+          log(`verify ${v.dst}: size unavailable — skipped`);
+          continue;
+        }
+        const ok = Math.abs(srcBytes - dstBytes) <= Math.max(4096, srcBytes * 0.01);
+        log(`verify ${v.dst}: source ${srcBytes} → target ${dstBytes} bytes ${ok ? "✓" : "⚠ size mismatch"}`);
+      }
+
       let total = 0;
       for (const b of bytesByTask.values()) total += b;
-      return { bytesMoved: total, pendingItems };
+      return { bytesMoved: total, pendingItems, targetVolumes };
     } finally {
       // rtA/rtB are disposed by moveData's own finally (this runs on its return).
       await link.cleanup();
@@ -1351,6 +1472,41 @@ class MigrationOrchestratorImpl {
       );
     });
     return { ok: true };
+  }
+
+  /**
+   * Remove the volumes this run copied to the TARGET. Only for a failed/rolled-
+   * back run (its target draft is already torn down, so the copies are orphaned)
+   * — never for a succeeded run (those volumes are the live data). Lets the user
+   * clear stale copies so a retry doesn't hit "target already has data". The
+   * SOURCE is untouched. Best-effort per volume.
+   */
+  async cleanupTargetData(
+    id: string,
+    organizationId: string,
+  ): Promise<{ ok: true; removed: number } | { ok: false; status: number; error: string }> {
+    const run = await repos.dockerMigrationRun.findById(id);
+    if (!run || run.organizationId !== organizationId) {
+      return { ok: false, status: 404, error: "Migration not found" };
+    }
+    if (run.status !== "failed" && run.status !== "rolled_back") {
+      return { ok: false, status: 409, error: "Target cleanup is only for a failed migration." };
+    }
+    if (!run.targetServerId) {
+      return { ok: false, status: 409, error: "Target server is no longer available." };
+    }
+    const vols = (run.targetVolumes ?? []) as string[];
+    if (vols.length === 0) return { ok: true, removed: 0 };
+    const { executor } = await createServerCommandExecutor(run.targetServerId, organizationId);
+    let removed = 0;
+    for (const v of vols) {
+      // -f so an anonymous/unused volume goes even if dangling; `|| true` keeps
+      // one stubborn volume (e.g. still referenced) from failing the whole sweep.
+      await executor.exec(`docker volume rm -f ${sq(v)} 2>&1 || true`).catch(() => {});
+      removed++;
+    }
+    await repos.dockerMigrationRun.updateTargetVolumes(id, []).catch(() => {});
+    return { ok: true, removed };
   }
 
   private async runResume(

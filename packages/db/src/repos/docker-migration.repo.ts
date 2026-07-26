@@ -121,6 +121,14 @@ export function createDockerMigrationRunRepo(db: Database) {
         .where(eq(dockerMigrationRun.id, id));
     },
 
+    /** Patch the recorded target-volume list (cleared after a post-failure wipe). */
+    async updateTargetVolumes(id: string, targetVolumes: string[]): Promise<void> {
+      await db
+        .update(dockerMigrationRun)
+        .set({ targetVolumes })
+        .where(eq(dockerMigrationRun.id, id));
+    },
+
     /** Patch only the durable session log (no status change). Bumps lastEventAt
      *  so an actively-logging long transfer isn't seen as stale. */
     async updateLogs(id: string, logs: string): Promise<void> {

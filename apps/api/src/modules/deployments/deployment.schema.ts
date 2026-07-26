@@ -117,6 +117,17 @@ export const BuildAccessBody = Type.Object({
   services: Type.Optional(
     Type.Array(BuildServiceInput, { description: "Compose / multi-service definitions (services mode)." }),
   ),
+  serviceIds: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        "Subset of service ids to (re)build; every other service carries forward on its existing container, untouched. Omit to build the whole stack (first deploy). Use this on a scoped redeploy so stateful services (MySQL/Redis/Qdrant) are NOT recreated for an unrelated code change.",
+    }),
+  ),
+  refreshServiceIds: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "Subset of serviceIds to recreate WITHOUT rebuilding (env-only refresh).",
+    }),
+  ),
   cloudResourceTier: Type.Optional(
     Type.Union([
       Type.Literal("micro"),
