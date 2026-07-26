@@ -54,6 +54,20 @@ export function sanitizeSubpaths(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/** Keep only discoveredServiceName → repoServiceName (non-empty string) entries;
+ *  drops non-strings and no-op (identity) renames. Names the adopted row after
+ *  the mapped repo compose service so the later reconcile matches it in place. */
+export function sanitizeRenames(
+  input: Record<string, unknown> | undefined,
+): Record<string, string> | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [name, v] of Object.entries(input)) {
+    if (typeof v === "string" && v.trim() && v.trim() !== name) out[name] = v.trim();
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** Keep only serviceName → {KEY: string} env maps from client input (per-service
  *  env overrides). Drops non-object entries and non-string values. */
 export function sanitizeServiceEnv(

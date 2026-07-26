@@ -93,6 +93,11 @@ export interface StartMigrationInput {
   gitSource?: { provider: "github"; owner: string; repo: string; branch?: string };
   /** serviceName → build subpath inside the linked repo. Metadata only. */
   serviceSubpaths?: Record<string, string>;
+  /** DISCOVERED service name → the repo compose service name to adopt the row AS
+   *  (the wizard's step-2 mapping). Names the adopted row after the repo service
+   *  so a later git-compose reconcile matches it in place instead of creating a
+   *  duplicate row with a fresh empty volume. */
+  serviceRenames?: Record<string, string>;
   /** serviceName → env override (defaults to the discovered container's env). */
   serviceEnv?: Record<string, Record<string, string>>;
   /** User-selected extra paths to move (cross-server): each a source path on the
@@ -112,6 +117,19 @@ export interface StartMigrationInput {
   /** Adopt in flat-docker mode — MUST match the scan the user selected from, or
    *  openship-labeled containers get treated as managed and "none are found". */
   flatDocker?: boolean;
+}
+
+/** Re-key a DISCOVERED-name-keyed map onto the adopted ROW names via a
+ *  discovered→row rename map. Keys with no rename entry pass through unchanged.
+ *  Used so migrate inputs (e.g. routesByServiceName) land on renamed rows. */
+function remapKeys<T>(
+  map: Record<string, T> | undefined,
+  renames: Record<string, string>,
+): Record<string, T> | undefined {
+  if (!map) return map;
+  const out: Record<string, T> = {};
+  for (const [k, v] of Object.entries(map)) out[renames[k] ?? k] = v;
+  return out;
 }
 
 /** A built image to move: probed/saved by `id` (reliable), re-tagged to `tag`
@@ -399,6 +417,7 @@ class MigrationOrchestratorImpl {
         volumeStrategies: input.volumeStrategies,
         serviceSubpaths: input.serviceSubpaths,
         serviceEnv: input.serviceEnv,
+        serviceRenames: input.serviceRenames,
         flatDocker: input.flatDocker,
       });
       const projectId = adopt.projectId;
@@ -418,7 +437,10 @@ class MigrationOrchestratorImpl {
         }
       }
 
-      const attachNames = new Set(attachChosen.map((s) => s.name));
+      // Translate the discovered attach names onto the adopted ROW names (repo
+      // names when the wizard mapped them) — the rows are keyed by their final
+      // name, so matching by the discovered name would miss every renamed row.
+      const attachNames = new Set(attachChosen.map((s) => adopt.renames[s.name] ?? s.name));
       const attachRows = (await repos.service.listByProject(projectId)).filter((r) =>
         attachNames.has(r.name),
       );
@@ -599,14 +621,21 @@ class MigrationOrchestratorImpl {
           serverId: sourceServerId,
           attach: attachChosen,
           serviceRows: await repos.service.listByProject(projectId),
+          renames: adopt.renames,
         });
       }
 
       // Publish the chosen domains/routes SERVER-SIDE now the target is verified
       // (was client-only → lost when the wizard unmounted or a run was opened
       // from the list; same-server included). Best-effort — domains never fail a
-      // migration.
-      await this.publishRoutes(ctx, projectId, input.routesByServiceName, log);
+      // migration. Route keys are DISCOVERED names → translate onto the adopted
+      // ROW names so a renamed service still gets its routes.
+      await this.publishRoutes(
+        ctx,
+        projectId,
+        remapKeys(input.routesByServiceName, adopt.renames),
+        log,
+      );
 
       // ── partial / cutover / awaiting_cutover ──
       // Some paths didn't move → PARK as `partial` (target UP, source

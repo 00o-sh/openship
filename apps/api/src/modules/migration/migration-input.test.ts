@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   sanitizeGitSource,
   sanitizeSubpaths,
+  sanitizeRenames,
   sanitizeVolumeStrategies,
   sanitizeServiceEnv,
   sanitizeCustomPaths,
@@ -88,6 +89,25 @@ describe("sanitizeSubpaths", () => {
     expect(sanitizeSubpaths({ web: "   " })).toBeUndefined();
     expect(sanitizeSubpaths(undefined)).toBeUndefined();
     expect(sanitizeSubpaths([] as unknown as Record<string, unknown>)).toBeUndefined();
+  });
+});
+
+describe("sanitizeRenames", () => {
+  it("keeps discovered→repo string entries (trimmed), drops non-strings and identity renames", () => {
+    expect(
+      sanitizeRenames({
+        postgres: " db ", // → repo service "db"
+        web: "web", // identity → dropped (no rename needed)
+        worker: "", // empty → dropped
+        cache: 5 as unknown as string, // non-string → dropped
+      }),
+    ).toEqual({ postgres: "db" });
+  });
+
+  it("returns undefined when nothing survives", () => {
+    expect(sanitizeRenames({ web: "web", api: "  " })).toBeUndefined();
+    expect(sanitizeRenames(undefined)).toBeUndefined();
+    expect(sanitizeRenames([] as unknown as Record<string, unknown>)).toBeUndefined();
   });
 });
 

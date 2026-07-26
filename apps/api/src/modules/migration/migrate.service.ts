@@ -102,6 +102,10 @@ export interface AdoptResult {
   slug: string;
   created: boolean;
   adopted: string[];
+  /** DISCOVERED service name → the adopted ROW name (the repo compose name when
+   *  the wizard mapped it, else the discovered name). Lets the orchestrator
+   *  translate discovered-keyed attach/route inputs onto the (renamed) rows. */
+  renames: Record<string, string>;
 }
 
 export interface ReimportResult {
@@ -173,23 +177,32 @@ function normalizeHostPorts(
  * + takeover-consent flow. Pushes a per-service warning when a host port is
  * dropped as a duplicate.
  */
-function buildAdoptedServiceRows(
+export function buildAdoptedServiceRows(
   chosen: DiscoveredService[],
   selected: Set<string>,
   serviceEnv?: Record<string, Record<string, string>>,
-): ParsedComposeList {
+  /** DISCOVERED service name → the repo compose service name to adopt AS. When
+   *  the wizard mapped a moved container to a repo compose service, name the row
+   *  after the REPO service so a later git-compose reconcile matches it in place
+   *  (no duplicate row / no fresh empty volume). Keyed by discovered name to
+   *  match serviceEnv/serviceSubpaths/volumeStrategies. */
+  serviceRenames?: Record<string, string>,
+): { rows: ParsedComposeList; renames: Record<string, string> } {
   const nameCounts = new Map<string, number>();
-  const firstUnique = new Map<string, string>();
+  const firstUnique = new Map<string, string>(); // discovered name → FINAL row name
+  const renames: Record<string, string> = {};
   const uniqueNames = chosen.map((s) => {
-    const n = (nameCounts.get(s.name) ?? 0) + 1;
-    nameCounts.set(s.name, n);
-    const unique = n === 1 ? s.name : `${s.name}-${n}`;
+    const desired = serviceRenames?.[s.name]?.trim() || s.name;
+    const n = (nameCounts.get(desired) ?? 0) + 1;
+    nameCounts.set(desired, n);
+    const unique = n === 1 ? desired : `${desired}-${n}`;
     if (!firstUnique.has(s.name)) firstUnique.set(s.name, unique);
+    renames[s.name] = unique;
     return unique;
   });
 
   const claimedHostPorts = new Set<number>();
-  return chosen.map((s, i) => {
+  const rows = chosen.map((s, i) => {
     const { ports, droppedDuplicates } = normalizeHostPorts(s.ports, claimedHostPorts);
     if (droppedDuplicates.length > 0) {
       s.warnings.push(
@@ -221,6 +234,7 @@ function buildAdoptedServiceRows(
       advanced: s.healthcheck ? { healthcheck: s.healthcheck } : undefined,
     };
   });
+  return { rows, renames };
 }
 
 
@@ -240,11 +254,15 @@ export async function adoptServerStack(opts: {
   /** serviceName → env override (edited in the wizard). Absent → the container's
    *  live env is adopted as-is. */
   serviceEnv?: Record<string, Record<string, string>>;
+  /** DISCOVERED service name → repo compose service name to adopt AS (the
+   *  wizard's step-2 map). Names the adopted row after the repo service so a
+   *  later reconcile matches it in place instead of duplicating. */
+  serviceRenames?: Record<string, string>;
   /** Adopt in flat-docker mode — must match the scan the user selected from, or
    *  openship-labeled containers are treated as managed and none are found. */
   flatDocker?: boolean;
 }): Promise<AdoptResult> {
-  const { serverId, organizationId, projectName, serviceNames, sameServer, volumeStrategies, serviceSubpaths, serviceEnv, flatDocker } = opts;
+  const { serverId, organizationId, projectName, serviceNames, sameServer, volumeStrategies, serviceSubpaths, serviceEnv, serviceRenames, flatDocker } = opts;
 
   const stack = await discoverServerStack(serverId, organizationId, undefined, { flatDocker });
   const selected = new Set(serviceNames);
@@ -275,31 +293,33 @@ export async function adoptServerStack(opts: {
   };
   const { project_id, created } = await ensureProject(ensureBody, organizationId);
 
-  const parsed = buildAdoptedServiceRows(chosen, selected, serviceEnv);
+  const { rows: parsed, renames } = buildAdoptedServiceRows(chosen, selected, serviceEnv, serviceRenames);
   const createdServices = await repos.service.syncFromCompose(project_id, parsed);
 
-  // Volume ownership: reuse the original bare-named volumes in place
-  // (namespaceVolumes=false) — EXCEPT same-server services the user marked
-  // "copy", which keep the scoped openship-<slug>-<name> name so the deploy
-  // mounts the fresh copy (populated in moving_data) and the original volume is
-  // left untouched. Cross-server always reuses bare names (the A→B stream trick).
-  for (const svc of createdServices) {
-    const copy = Boolean(sameServer) && volumeStrategies?.[svc.name] === "copy";
+  // Apply the per-service options keyed by the DISCOVERED name: iterate `chosen`
+  // (discovered), resolve the created row by its FINAL (possibly-renamed) name,
+  // and look the option up by the discovered key. Doing it row-name-first would
+  // miss every renamed row (svc.name is now the repo name, but the option maps
+  // are keyed by discovered name).
+  const rowByFinalName = new Map(createdServices.map((svc) => [svc.name, svc]));
+  for (const s of chosen) {
+    const svc = rowByFinalName.get(renames[s.name]);
+    if (!svc) continue;
+    // Volume ownership: reuse the original bare-named volumes in place
+    // (namespaceVolumes=false) — EXCEPT same-server services the user marked
+    // "copy", which keep the scoped openship-<slug>-<name> name so the deploy
+    // mounts the fresh copy (populated in moving_data) and the original is left
+    // untouched. Cross-server always reuses bare names (the A→B stream trick).
+    const copy = Boolean(sameServer) && volumeStrategies?.[s.name] === "copy";
     if (svc.namespaceVolumes !== copy) {
       await repos.service.update(svc.id, { namespaceVolumes: copy });
     }
-  }
-
-  // Per-service build subpath: point each adopted service at a folder inside the
-  // project's linked repo. Pure metadata (rootDirectory only, no build/framework)
-  // so it does NOT flip the row to build-from-source — the running image is still
-  // reused. Applies on a later source rebuild.
-  if (serviceSubpaths) {
-    for (const svc of createdServices) {
-      const sub = serviceSubpaths[svc.name]?.trim();
-      if (sub && svc.rootDirectory !== sub) {
-        await repos.service.update(svc.id, { rootDirectory: sub });
-      }
+    // Per-service build subpath: point the adopted service at a folder inside the
+    // project's linked repo. Pure metadata (rootDirectory only) — does NOT flip
+    // the row to build-from-source; the running image is still reused.
+    const sub = serviceSubpaths?.[s.name]?.trim();
+    if (sub && svc.rootDirectory !== sub) {
+      await repos.service.update(svc.id, { rootDirectory: sub });
     }
   }
 
@@ -309,6 +329,10 @@ export async function adoptServerStack(opts: {
     slug: project?.slug ?? "",
     created,
     adopted: chosen.map((s) => s.name),
+    // discovered service name → adopted ROW name (repo name when mapped). The
+    // orchestrator uses this to translate the discovered-keyed attach/route
+    // inputs onto the renamed rows.
+    renames,
   };
 }
 
@@ -422,13 +446,20 @@ export async function attachLiveRuntime(opts: {
   serverId: string;
   attach: DiscoveredService[];
   serviceRows: Service[];
+  /** DISCOVERED name → adopted ROW name (from adoptServerStack). The service
+   *  ROWS are keyed by their final (possibly-renamed) name, so we match the
+   *  discovered containers to rows through this map — else a renamed row never
+   *  matches its container and the same-server attach silently does nothing. */
+  renames?: Record<string, string>;
 }): Promise<void> {
-  const { deploymentId, projectId, organizationId, serverId, attach, serviceRows } = opts;
+  const { deploymentId, projectId, organizationId, serverId, attach, serviceRows, renames } = opts;
   if (attach.length === 0) return;
 
   const rt = await createServerDockerRuntime(serverId, organizationId);
   try {
-    const discByName = new Map(attach.map((c) => [c.name, c]));
+    // Key the discovered containers by their ADOPTED ROW name so they join the
+    // (possibly-renamed) rows. disc.containerId is used downstream — rename-safe.
+    const discByName = new Map(attach.map((c) => [renames?.[c.name] ?? c.name, c]));
     const attachRows = serviceRows.filter((s) => discByName.has(s.name));
     const placements = await Promise.all(
       attachRows.map(async (service) => {
@@ -645,7 +676,9 @@ export async function reimportOpenshipProject(opts: {
     gitBranch: group.source?.gitBranch ?? undefined,
   });
 
-  const parsed = buildAdoptedServiceRows(chosen, selected);
+  // Re-import preserves the original service names (from the manifest/labels),
+  // so no rename map — buildAdoptedServiceRows returns identity renames here.
+  const { rows: parsed } = buildAdoptedServiceRows(chosen, selected);
   const createdServices = await repos.service.syncFromCompose(created.id, parsed);
 
   // Reuse the original bare-named volumes in place (data survives) — combined

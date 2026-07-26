@@ -397,6 +397,9 @@ export const dockerMigrationApi = {
     gitSource?: { provider: "github"; owner: string; repo: string; branch?: string };
     /** serviceName → build subpath (rootDirectory) inside the linked repo. */
     serviceSubpaths?: Record<string, string>;
+    /** discovered serviceName → repo compose service name to adopt the row AS,
+     *  so a later git-compose reconcile matches it in place (no duplicate). */
+    serviceRenames?: Record<string, string>;
     /** serviceName → env override (edited in the wizard; else discovered env). */
     serviceEnv?: Record<string, Record<string, string>>;
     /** Extra paths to move (cross-server): source host path → target host path. */

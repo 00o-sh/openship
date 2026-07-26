@@ -23,6 +23,7 @@ import { migrationRunBus } from "./migration.sse";
 import {
   sanitizeVolumeStrategies,
   sanitizeSubpaths,
+  sanitizeRenames,
   sanitizeGitSource,
   sanitizeServiceEnv,
   sanitizeCustomPaths,
@@ -303,6 +304,7 @@ export async function startMigration(c: Context) {
     transferCompression?: unknown;
     gitSource?: unknown;
     serviceSubpaths?: Record<string, unknown>;
+    serviceRenames?: Record<string, unknown>;
     serviceEnv?: Record<string, unknown>;
     customPaths?: unknown;
     routesByServiceName?: Record<string, unknown>;
@@ -346,6 +348,7 @@ export async function startMigration(c: Context) {
       transferCompression,
       gitSource: sanitizeGitSource(body.gitSource),
       serviceSubpaths: sanitizeSubpaths(body.serviceSubpaths),
+      serviceRenames: sanitizeRenames(body.serviceRenames),
       serviceEnv: sanitizeServiceEnv(body.serviceEnv),
       customPaths: sanitizeCustomPaths(body.customPaths),
       routesByServiceName: sanitizeRoutes(body.routesByServiceName),

@@ -368,9 +368,22 @@ export function toDiscoveredService(
   let existingRoute: DiscoveredService["existingRoute"];
   if (proxyRoutesByPort && proxyRoutesByPort.size > 0) {
     const routes: NonNullable<DiscoveredService["existingRoute"]> = [];
-    for (const p of detail.ports) {
-      if (!p.publicPort) continue;
-      for (const hit of proxyRoutesByPort.get(p.publicPort) ?? []) {
+    // Iterate DISTINCT public ports. Docker publishes each host port on BOTH
+    // IPv4 (0.0.0.0) and IPv6 (::), so detail.ports lists the same publicPort
+    // twice — without deduping we'd push the same route (same domain) twice and
+    // the wizard would show each domain doubled (and submit two identical
+    // endpoints). proxyRoutesByPort already holds one entry per (port,path), so
+    // visiting each port ONCE preserves path-fan-out while killing the IPv4/IPv6
+    // double-count. (portsToComposeStrings already dedups the same way.)
+    const publicPorts = [
+      ...new Set(
+        detail.ports
+          .map((p) => p.publicPort)
+          .filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0),
+      ),
+    ];
+    for (const port of publicPorts) {
+      for (const hit of proxyRoutesByPort.get(port) ?? []) {
         routes.push({ port: hit.port, path: hit.path, domains: hit.domains, ssl: hit.ssl, source: hit.source });
       }
     }

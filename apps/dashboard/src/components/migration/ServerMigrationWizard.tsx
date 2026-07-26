@@ -158,6 +158,9 @@ interface MigrateItem {
   gitSource?: { provider: "github"; owner: string; repo: string; branch?: string };
   /** serviceName → build subpath (sent to the migrate API). */
   serviceSubpaths?: Record<string, string>;
+  /** discovered serviceName → repo compose service name (step-2 map, sent to the
+   *  migrate API so the adopted row is named after the repo service). */
+  serviceRenames?: Record<string, string>;
   /** serviceName → env override (sent to the migrate API). */
   serviceEnv?: Record<string, Record<string, string>>;
   /** serviceName → routes to apply AFTER the run verifies (client-only, NOT sent). */
@@ -698,6 +701,7 @@ export function ServerMigrationWizard({
         conflictResolution: Object.keys(conflictResolution).length ? conflictResolution : undefined,
         gitSource: item.gitSource,
         serviceSubpaths: item.serviceSubpaths,
+        serviceRenames: item.serviceRenames,
         serviceEnv: item.serviceEnv,
         flatDocker,
       });
@@ -733,12 +737,16 @@ export function ServerMigrationWizard({
       // the discovered→compose mapping (matched compose service's build context).
       const composeByName = new Map(p.composeServices.map((c) => [c.name, c]));
       const serviceSubpaths: Record<string, string> = {};
+      const serviceRenames: Record<string, string> = {};
       const serviceEnv: Record<string, Record<string, string>> = {};
       const routesByServiceName: Record<string, PublicEndpoint[]> = {};
       for (const s of picked) {
         const mapped = p.serviceMap[svcUid(s)];
         const build = mapped ? composeByName.get(mapped)?.build?.trim() : undefined;
         if (build) serviceSubpaths[s.name] = build;
+        // Adopt the row under the mapped REPO compose service name so a later
+        // git-compose reconcile matches it in place (no duplicate / empty volume).
+        if (mapped && mapped !== s.name) serviceRenames[s.name] = mapped;
         const env = p.serviceEnvs[svcUid(s)];
         if (env) serviceEnv[s.name] = env; // only edited services carry an override
         // Resolve the route by the per-container mode. "keep" reuses the domain
@@ -773,6 +781,7 @@ export function ServerMigrationWizard({
           ? { provider: "github" as const, owner: p.repo.owner, repo: p.repo.repo, branch: p.repo.branch }
           : undefined,
         serviceSubpaths: Object.keys(serviceSubpaths).length ? serviceSubpaths : undefined,
+        serviceRenames: Object.keys(serviceRenames).length ? serviceRenames : undefined,
         serviceEnv: Object.keys(serviceEnv).length ? serviceEnv : undefined,
         routesByServiceName: Object.keys(routesByServiceName).length ? routesByServiceName : undefined,
       };
