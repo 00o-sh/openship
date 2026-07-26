@@ -616,6 +616,44 @@ export function composeDown(): boolean {
   return compose(["down"]) === 0;
 }
 
+/**
+ * `openship uninstall` (compose): tear the stack down INCLUDING its volumes, and
+ * optionally delete the images we own.
+ *
+ * `down -v` is the destructive part — those volumes hold the database, the issued
+ * certificates and the edge's vhosts. Only ever called behind an explicit
+ * confirmation. `--remove-orphans` also collects containers from an earlier
+ * project name so an uninstall doesn't leave a stale edge holding :80/:443.
+ *
+ * Image removal is scoped to the three images we build/pull by exact reference —
+ * never a prune, so a box sharing this daemon with the operator's own containers
+ * (postgres, redis, their apps) is untouched.
+ */
+export function composeUninstall(opts: { removeImages?: boolean } = {}): {
+  ok: boolean;
+  removedImages: string[];
+} {
+  const removedImages: string[] = [];
+  const ok = existsSync(COMPOSE_FILE)
+    ? compose(["down", "-v", "--remove-orphans"]) === 0
+    : false;
+
+  if (opts.removeImages) {
+    const env = readEnvFile();
+    const registry = env.OPENSHIP_IMAGE_REGISTRY || "ghcr.io/oblien";
+    const version = env.OPENSHIP_VERSION || "latest";
+    for (const { service } of BUILT_SERVICES) {
+      const ref = `${registry}/openship-${service}:${version}`;
+      // Ours by exact tag. Upstream postgres/redis are left alone — they're
+      // commonly shared with whatever else the operator runs on this box.
+      if (spawnSync("docker", ["image", "rm", "-f", ref], { stdio: "ignore" }).status === 0) {
+        removedImages.push(ref);
+      }
+    }
+  }
+  return { ok, removedImages };
+}
+
 /** `openship update` (compose): pull the latest pinned images + recreate. */
 export function composeUpdate(version?: string): boolean {
   if (!existsSync(COMPOSE_FILE)) return false;

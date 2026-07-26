@@ -28,9 +28,14 @@ export class DockerEdgeExecutor implements CommandExecutor {
   /** Shared-volume file ops run locally (the volumes are mounted in the api). */
   private readonly files = new LocalExecutor();
 
-  constructor(opts: { containerName: string; socketPath?: string }) {
+  constructor(opts: {
+    containerName: string;
+    socketPath?: string;
+    /** Injectable daemon client — tests use it to pin the exec options we send. */
+    docker?: Dockerode;
+  }) {
     this.containerName = opts.containerName;
-    this.docker = new Dockerode({ socketPath: opts.socketPath ?? DEFAULT_SOCKET });
+    this.docker = opts.docker ?? new Dockerode({ socketPath: opts.socketPath ?? DEFAULT_SOCKET });
   }
 
   /** Run one command inside the edge container, capturing stdout/stderr + exit. */
@@ -44,7 +49,16 @@ export class DockerEdgeExecutor implements CommandExecutor {
       AttachStderr: true,
       Tty: false,
     });
-    const stream = await exec.start({ hijack: true, stdin: false });
+    // NO `hijack` — and it must stay that way. Hijack makes docker-modem request a
+    // connection upgrade; the daemon answers `101 Switching Protocols`, and Bun's
+    // node:http does not surface that upgrade the way modem expects, so every exec
+    // died with `(HTTP code 101) unexpected`. The api image runs Bun, so in
+    // docker-edge mode that broke EVERY edge operation — config reload, certbot,
+    // and site registration all failed while the edge itself looked healthy.
+    // Verified both ways under Bun: hijack=true → 101; hijack=false → stdout,
+    // stderr and exit code all correct. Hijack only exists for interactive stdin,
+    // which no edge command uses.
+    const stream = await exec.start({ stdin: false });
 
     const outStream = new PassThrough();
     const errStream = new PassThrough();

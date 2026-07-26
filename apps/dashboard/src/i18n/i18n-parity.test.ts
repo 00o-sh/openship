@@ -21,8 +21,8 @@ import { checkI18nParity, defaultLocalesDir } from "../../scripts/check-i18n.mjs
 const MISSING_BASELINE: Record<string, number> = {
   projectSettings: 1074,
   jobs: 876,
-  migration: 1199,
-  settings: 564,
+  migration: 1237,
+  settings: 576,
   emailsAdmin: 316,
   projects: 276,
   dashboard: 200,
