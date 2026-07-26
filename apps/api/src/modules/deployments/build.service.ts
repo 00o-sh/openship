@@ -849,6 +849,18 @@ export async function requestBuildAccess(ctx: RequestContext, input: BuildAccess
   await checkNoActiveBuild(project.id);
 
   const resolvedBranch = await resolveProjectBranch(ctx, project, branch);
+
+  // Reconcile the repo's compose BEFORE resolving the service set — the third
+  // deploy entry point (alongside redeployBuildSession + triggerDeployment) that
+  // must do this. Without it a deploy only ever sees the CURRENT service rows, so
+  // a repo compose service that isn't in the collection yet (e.g. a migrated
+  // stack whose repo adds `redis`) is never created or deployed. reconcileFromCompose
+  // CREATES the missing ones (native) and, for freshly-adopted rows (importedSpec
+  // null), bootstraps their baseline while KEEPING the adopted image — so mapped
+  // services reuse their running image (no rebuild) and everything else in the
+  // compose is taken from the repo. Best-effort; self-guards to compose+git projects.
+  await reconcileComposeDrift(ctx, project, resolvedBranch);
+
   const projectDomains = await listProjectRouteRows(project.id);
   let routeState = await resolveProjectRouteState(project, { projectDomains });
   const snapshot = buildConfigSnapshot(project, resolvedBranch);

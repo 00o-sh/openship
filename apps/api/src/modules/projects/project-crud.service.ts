@@ -46,7 +46,7 @@ import {
 } from "../domains/project-route.service";
 import { applyProjectRouting } from "../domains/routing-apply.service";
 import { syncProjectManagedEdge } from "./project-runtime.service";
-import { normalizeStoredPublicEndpoints } from "../../lib/public-endpoints";
+import { normalizeStoredPublicEndpoints, publicEndpointHostname } from "../../lib/public-endpoints";
 import { assertFreeEndpointsAllowed } from "../../lib/free-domain-guard";
 import type {
   TCreateProjectBody,
@@ -1017,22 +1017,37 @@ export async function updateProject(
     update.slug !== undefined ||
     update.port !== undefined
   ) {
-    // Atomic gate: when the caller explicitly sets endpoints (the domain
-    // add/edit), a free (*.opsh.io) route only resolves behind the Openship
-    // Cloud edge — refuse before any write so a disconnected instance can't
-    // persist a dead route. Same check as the service-route path. Skipped for
-    // incidental slug/port re-syncs (data.publicEndpoints undefined).
-    if (data.publicEndpoints !== undefined) {
-      await assertFreeEndpointsAllowed(
-        organizationId,
-        normalizeStoredPublicEndpoints(data.publicEndpoints),
-      );
-    }
-
     // Snapshot the live hostnames before the sync so re-application can tear
-    // down any the edit drops.
+    // down any the edit drops — AND so the free-cloud gate only fires for
+    // NET-NEW free routes.
     const beforeState = await resolveProjectRouteState(p).catch(() => null);
     const previousHostnames = beforeState?.projectDomains.map((d) => d.hostname) ?? [];
+
+    // Atomic gate: a free (*.opsh.io) route only resolves behind the Openship
+    // Cloud edge — refuse before any write so a disconnected instance can't
+    // INTRODUCE a dead route. Only gate endpoints whose hostname isn't already
+    // live: re-validating the WHOLE set blocked removing/editing a route whenever
+    // another, already-persisted free route stayed in the set (you can't remove
+    // api.openship.io because app.openship.io is still there). Removal never
+    // introduces anything, so it never gates. Skipped for slug/port re-syncs.
+    if (data.publicEndpoints !== undefined) {
+      // Already-live hostnames = DB domain rows ∪ the resolved route endpoints
+      // (the latter also covers a PENDING route that has no domain row yet), so a
+      // remaining pending route is never mistaken for net-new.
+      const priorHosts = new Set(
+        [
+          ...previousHostnames,
+          ...(beforeState?.publicEndpoints ?? []).map((e) => e.hostname),
+        ]
+          .filter((h): h is string => typeof h === "string" && h.length > 0)
+          .map((h) => h.trim().toLowerCase()),
+      );
+      const netNew = normalizeStoredPublicEndpoints(data.publicEndpoints).filter((endpoint) => {
+        const host = publicEndpointHostname(endpoint)?.trim().toLowerCase();
+        return host ? !priorHosts.has(host) : false;
+      });
+      await assertFreeEndpointsAllowed(organizationId, netNew);
+    }
 
     // Best-effort ONLY for incidental re-syncs (a slug/port edit) — the field
     // edit is already committed and the next deploy re-syncs routes. But when
