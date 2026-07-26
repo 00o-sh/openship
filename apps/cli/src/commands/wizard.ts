@@ -17,7 +17,7 @@
 import chalk from "chalk";
 import open from "open";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   intro,
@@ -47,6 +47,9 @@ import { ensureDashboard } from "../lib/dashboard";
 import { serviceStatus, stop as stopService, restart as restartService } from "../lib/service";
 import { saveInstanceUrl, readInstanceUrl } from "../lib/ports";
 import { runRepair, looksCorrupted, lastServiceError } from "../lib/repair";
+import { ensureDocker, hasDockerCompose, composeUp, composeInternalToken } from "../lib/compose";
+import { planAndApplyHostEdge } from "../lib/edge-preflight";
+import { headlessProvision, type InstallInputs } from "../lib/instance-provision";
 
 declare const __CLI_VERSION__: string;
 
@@ -73,7 +76,7 @@ const b64url = (buf: Buffer) =>
  * finalize on the loopback API (internal-token gated). Returns the linked cloud
  * account (its email) on success, or null when not linked.
  */
-async function connectOpenshipCloud(port: string): Promise<{ email: string | null } | null> {
+async function connectOpenshipCloud(port: string, token?: string): Promise<{ email: string | null } | null> {
   const already = await internalGet(port, "/api/system/cloud-status");
   if (already?.connected) {
     log.success(`Already connected to Openship Cloud${already.user?.email ? ` as ${already.user.email}` : ""}.`);
@@ -107,7 +110,10 @@ async function connectOpenshipCloud(port: string): Promise<{ email: string | nul
     `&state=${encodeURIComponent(state)}&code_challenge=${challenge}&mode=device`;
 
   const overSsh = !!(process.env.SSH_CONNECTION || process.env.SSH_TTY || process.env.SSH_CLIENT);
-  note(handoff, "Open this URL in your browser to authorize (then click Authorize)");
+  // Print the URL as a bare, single-line, selectable value. clack's note() boxes
+  // and gutters it, which wraps the URL across lines and makes it uncopyable.
+  log.step("Open this URL in your browser to authorize, then click Authorize:");
+  console.log("\n" + chalk.cyan.underline(handoff) + "\n");
   // A box with a desktop browser can auto-open it; over SSH there's none, so
   // the user opens the printed URL on their own machine.
   if (!overSsh) void open(handoff).catch(() => {});
@@ -146,7 +152,7 @@ async function connectOpenshipCloud(port: string): Promise<{ email: string | nul
 
   const linking = spinner();
   linking.start("Linking this instance to Openship Cloud");
-  const res = await internalPost(port, "/api/system/cloud-connect", { code, codeVerifier: verifier });
+  const res = await internalPost(port, "/api/system/cloud-connect", { code, codeVerifier: verifier }, token);
   if (!res.ok) {
     linking.stop(`Couldn't link Openship Cloud: ${res.data?.error || "failed"}`, 1);
     return null;
@@ -235,8 +241,93 @@ async function streamProvision(
   return { ok, detail };
 }
 
+/**
+ * "Setup didn't finish" marker. Written once the wizard COMMITS the OS service
+ * (so `serviceStatus().installed` flips true) and cleared only when setup runs
+ * all the way to the end. If the wizard is interrupted in between — e.g. the
+ * cloud-connect / domain step is cancelled or times out — this stays behind, so
+ * the next `openship` resumes setup instead of showing the control panel as if
+ * the install were finished. `openship up` never writes it (that path is a
+ * complete install on its own), and pre-this-version installs never had one, so
+ * neither is mistaken for interrupted.
+ */
+const SETUP_LOCK = join(OS_DIR, "setup-in-progress");
+
+/** True when a prior wizard run installed the service but never completed. */
+export function isSetupInProgress(): boolean {
+  return existsSync(SETUP_LOCK);
+}
+function markSetupStarted(): void {
+  mkdirSync(OS_DIR, { recursive: true });
+  writeFileSync(SETUP_LOCK, "1");
+}
+function markSetupDone(): void {
+  rmSync(SETUP_LOCK, { force: true });
+}
+
+/** Map the wizard's collected domain plan to the shared provision pipe's inputs. */
+function wizardInputs(
+  admin: { name: string; email: string; password: string },
+  plan:
+    | { type: "free"; slug: string; publicHost: string }
+    | { type: "custom"; hostname: string }
+    | { type: "byo"; hostname: string }
+    | { type: "none" },
+): InstallInputs {
+  switch (plan.type) {
+    case "free":
+      return { admin, domain: { kind: "free", slug: plan.slug, publicHost: plan.publicHost } };
+    case "custom":
+      // Compose edge is a container; headlessProvision issues the cert via the
+      // self-app project, so `edge` (host takeover) is a no-op here.
+      return { admin, domain: { kind: "custom", hostname: plan.hostname, acmeEmail: admin.email, edge: "cancel" } };
+    case "byo":
+      return { admin, domain: { kind: "byo", hostname: plan.hostname } };
+    default:
+      return { admin, domain: { kind: "none" } };
+  }
+}
+
+/** Shared "Openship is live" summary + clear the in-progress marker + outro. */
+function finishSetup(opts: {
+  liveUrl: string;
+  dashPort: string;
+  apiPort: string;
+  adminEmail: string;
+  cloudEmail: string | null;
+  method: "compose" | "bare";
+  byo: boolean;
+}): void {
+  saveInstanceUrl(opts.liveUrl);
+  markSetupDone();
+  const pad = (label: string) => chalk.dim(label.padEnd(11));
+  log.success(chalk.bold("Openship is live"));
+  log.message(
+    `${pad("URL")}${chalk.bold(opts.liveUrl)}\n` +
+      `${pad("Dashboard")}http://localhost:${opts.dashPort}\n` +
+      `${pad("API")}http://localhost:${opts.apiPort}\n` +
+      `${pad("Login")}${opts.adminEmail} ${chalk.dim("(email + password you set)")}\n` +
+      (opts.cloudEmail
+        ? `${pad("Cloud")}${chalk.dim("connected as ")}${opts.cloudEmail}${chalk.dim(" — free domain + mail only")}\n`
+        : "") +
+      `${pad("Status")}${chalk.green("running")} ${chalk.dim(opts.method === "compose" ? "· Docker Compose stack (restarts on boot)" : "· service (restarts on boot)")}`,
+  );
+  log.message(
+    chalk.dim("Sign in with the email + password you just set. Openship appears under your Apps.\n") +
+      chalk.dim("Change the domain, Openship Cloud, team, and everything else anytime in Settings.\n") +
+      chalk.dim(`Locked out? Run ${chalk.reset("openship reset-admin-password")}${chalk.dim(" on this machine — resets your login without signing in.")}`),
+  );
+  outro(opts.byo ? chalk.dim("Point your reverse proxy at the dashboard port above.") : chalk.green("Happy shipping."));
+}
+
 export async function runWizard(): Promise<void> {
+  const resuming = isSetupInProgress();
   intro(`${chalk.bgCyan(chalk.black(" Openship "))}${chalk.dim(" setup")}`);
+  if (resuming) {
+    log.warn(
+      "Your last setup didn't finish — picking it back up. Re-enter your details to complete it (or run `openship up` to just keep the server running).",
+    );
+  }
   log.message(
     chalk.dim(
       "Deploy Openship on this machine — a few questions, then it installs itself\nas a service, registers as an app, and prints the URL to log in.",
@@ -467,43 +558,86 @@ export async function runWizard(): Promise<void> {
     break planning;
   }
 
-  // 3. Deploy Openship as an app — pull the prebuilt DIST from GitHub (no build),
-  //    then run it through the SAME `up` service pipeline. The dist pull happens
-  //    LIVE here (not hidden in the background service) so you see it; the service
-  //    then reuses this exact cached bundle (matched by tag).
-  const uiTag = `v${__CLI_VERSION__}`;
-  const dl = spinner();
-  dl.start("Pulling the Openship dist from GitHub");
-  try {
-    await ensureDashboard({
-      tag: uiTag,
-      onProgress: (received, total) => {
-        if (total) dl.message(`Pulling the Openship dist from GitHub — ${Math.round((received / total) * 100)}%`);
-      },
-    });
-    dl.stop("Openship dist ready.");
-  } catch (e) {
-    dl.stop(`Couldn't pull the Openship dist: ${(e as Error).message}`, 1);
-    log.info("Check your network / that this release published its dashboard asset, then re-run `openship`.");
-    process.exit(1);
+  // 3. Choose how to run Openship. On a Linux server use the Docker Compose stack
+  //    (containerized edge on 80/443 that hosts apps on THIS box, with real
+  //    image-pull progress) — the same install `openship up` picks — auto-installing
+  //    Docker via the same toolchain the deploy pipeline uses. macOS/Windows (no
+  //    host-net Docker) and a failed Docker ensure fall back to the bare service.
+  let method: "compose" | "bare" = "bare";
+  if (process.platform === "linux") {
+    if (hasDockerCompose()) {
+      method = "compose";
+    } else {
+      log.step("Docker isn't installed — installing it now (get.docker.com)…");
+      method = (await ensureDocker()) ? "compose" : "bare";
+      if (method === "bare") {
+        log.warn("Couldn't install Docker automatically — falling back to the bare process service.");
+      }
+    }
   }
+
+  const uiTag = `v${__CLI_VERSION__}`;
+  // Bare runs the downloaded dashboard bundle; Compose ships the dashboard inside
+  // the image, so only the bare path pulls the dist (Compose shows pull progress).
+  if (method === "bare") {
+    const dl = spinner();
+    dl.start("Pulling the Openship dist from GitHub");
+    try {
+      await ensureDashboard({
+        tag: uiTag,
+        onProgress: (received, total) => {
+          if (total) dl.message(`Pulling the Openship dist from GitHub — ${Math.round((received / total) * 100)}%`);
+        },
+      });
+      dl.stop("Openship dist ready.");
+    } catch (e) {
+      dl.stop(`Couldn't pull the Openship dist: ${(e as Error).message}`, 1);
+      log.info("Check your network / that this release published its dashboard asset, then re-run `openship`.");
+      process.exit(1);
+    }
+  }
+
+  // From here the service/stack exists, so serviceStatus().installed is true even
+  // if the user bails at the cloud/domain step below — mark setup in-progress so
+  // the next launch resumes here instead of jumping to the control panel.
+  markSetupStarted();
 
   const s = spinner();
-  s.start("Installing Openship as a service");
   let started: { port: string; dashPort: string; publicUrl?: string };
-  try {
-    started = await startService(
-      { publicUrl, trustProxy: behindProxy, managedEdge, acmeEmail: managedEdge ? admin.email : undefined, uiVersion: uiTag },
-      { quiet: true },
-    );
-  } catch (e) {
-    s.stop("Couldn't install the service.", 1);
-    log.error((e as Error).message);
-    log.info("Run `openship up --foreground` to run it attached and see the error.");
-    process.exit(1);
+  let provisionToken: string | undefined;
+  if (method === "compose") {
+    // A foreign proxy already on 80/443? Migrate/take it over first (interactive)
+    // so the container edge can bind — the same host-edge pipe `openship up` uses.
+    const edgePlan = await planAndApplyHostEdge({});
+    if (!edgePlan.proceed) {
+      cancel("Left the existing proxy on 80/443 running — re-run and choose migrate/takeover when ready.");
+      process.exit(0);
+    }
+    log.step("Pulling images and starting the Docker Compose stack…");
+    const up = composeUp({ publicUrl, trustProxy: behindProxy, version: __CLI_VERSION__ });
+    if (!up.ok) {
+      log.error("The Docker Compose stack didn't come up. Run `openship up --compose` to see the error.");
+      process.exit(1);
+    }
+    started = { port: up.apiPort, dashPort: up.dashPort, publicUrl };
+    provisionToken = composeInternalToken() ?? undefined;
+    s.start("Waiting for the Openship API");
+  } else {
+    s.start("Installing Openship as a service");
+    try {
+      started = await startService(
+        { publicUrl, trustProxy: behindProxy, managedEdge, acmeEmail: managedEdge ? admin.email : undefined, uiVersion: uiTag },
+        { quiet: true },
+      );
+    } catch (e) {
+      s.stop("Couldn't install the service.", 1);
+      log.error((e as Error).message);
+      log.info("Run `openship up --foreground` to run it attached and see the error.");
+      process.exit(1);
+    }
+    s.message("Waiting for the Openship API");
   }
 
-  s.message("Waiting for the Openship API");
   if (!(await waitHealthy(started.port))) {
     s.stop("Openship didn't become healthy in time.", 1);
     const reason = lastServiceError();
@@ -511,9 +645,52 @@ export async function runWizard(): Promise<void> {
     if (reason && /lock/i.test(reason)) {
       log.info("The database is locked by another instance — run `openship stop`, then re-run `openship`.");
     } else {
-      log.info("Run `openship up --foreground` to run it attached and see the error.");
+      log.info(
+        method === "compose"
+          ? "Run `openship up --compose` to see the error."
+          : "Run `openship up --foreground` to run it attached and see the error.",
+      );
     }
     process.exit(1);
+  }
+
+  if (method === "compose") {
+    // Reuse the SAME provision pipe as `openship up` (admin + domain via
+    // self-register against the running stack). Keep the interactive Openship
+    // Cloud connect for a free domain; the container edge owns HTTPS.
+    s.message("Starting the Openship dashboard");
+    await waitDashboard(started.dashPort);
+    s.stop("Deployed.");
+
+    let liveUrl = publicUrl ?? `http://localhost:${started.dashPort}`;
+    if (domainPlan.type === "free") {
+      const cloud = await connectOpenshipCloud(started.port, provisionToken);
+      if (cloud) cloudEmail = cloud.email;
+      else
+        log.warn(
+          "Openship Cloud wasn't connected — skipping the free domain. Your local admin login still works; add it later in Settings → Cloud.",
+        );
+    }
+    const result = await headlessProvision({
+      port: started.port,
+      dashPort: started.dashPort,
+      inputs: wizardInputs(admin, domainPlan),
+      token: provisionToken,
+      method: "compose",
+      onLog: (msg) => log.message(chalk.dim(msg)),
+    });
+    if (result.liveUrl) liveUrl = result.liveUrl;
+    for (const w of result.warnings) log.warn(w);
+    finishSetup({
+      liveUrl,
+      dashPort: started.dashPort,
+      apiPort: started.port,
+      adminEmail: admin.email,
+      cloudEmail,
+      method: "compose",
+      byo: domainPlan.type === "byo",
+    });
+    return;
   }
 
   // Always create the local admin now — before any cloud connect — so the instance
@@ -722,34 +899,15 @@ export async function runWizard(): Promise<void> {
     await internalPost(port, "/api/system/self-register", { domainType: "byo" });
   }
 
-  // Remember the access URL so `openship` (control panel) can show/open it later.
-  saveInstanceUrl(liveUrl);
-
-  // Borderless summary (left rail only). A boxed note() sizes to the longest
-  // line and doesn't wrap, so long lines (Cloud / the help text) spill past the
-  // right border on narrow terminals — the rail-only log.* flows cleanly.
-  const pad = (label: string) => chalk.dim(label.padEnd(11));
-  log.success(chalk.bold("Openship is live"));
-  log.message(
-    `${pad("URL")}${chalk.bold(liveUrl)}\n` +
-      `${pad("Dashboard")}http://localhost:${started.dashPort}\n` +
-      `${pad("API")}http://localhost:${started.port}\n` +
-      `${pad("Login")}${admin.email} ${chalk.dim("(email + password you set)")}\n` +
-      (cloudEmail
-        ? `${pad("Cloud")}${chalk.dim("connected as ")}${cloudEmail}${chalk.dim(" — free domain + mail only")}\n`
-        : "") +
-      `${pad("Status")}${chalk.green("running")} ${chalk.dim("· service (restarts on boot)")}`,
-  );
-  log.message(
-    chalk.dim("Sign in with the email + password you just set. Openship appears under your Apps.\n") +
-      chalk.dim("Change the domain, Openship Cloud, team, and everything else anytime in Settings.\n") +
-      chalk.dim(`Locked out? Run ${chalk.reset("openship reset-admin-password")}${chalk.dim(" on this machine — resets your login without signing in.")}`),
-  );
-  outro(
-    domainPlan.type === "byo"
-      ? chalk.dim("Point your reverse proxy at the dashboard port above.")
-      : chalk.green("Happy shipping."),
-  );
+  finishSetup({
+    liveUrl,
+    dashPort: started.dashPort,
+    apiPort: started.port,
+    adminEmail: admin.email,
+    cloudEmail,
+    method: "bare",
+    byo: domainPlan.type === "byo",
+  });
 }
 
 /** The resolved API/dashboard ports the service last used. */
