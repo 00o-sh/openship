@@ -3,7 +3,7 @@
  */
 
 import { normalizeRoutingFields, repos, composeSpecDiff, type Service, type ServicePublicEndpoint } from "@repo/db";
-import { serviceStatusToContainerState, isValidCustomHostname, ValidationError, type ServiceContainerState } from "@repo/core";
+import { serviceStatusToContainerState, isValidCustomHostname, ValidationError, withTimeout, type ServiceContainerState } from "@repo/core";
 import {
   BuildLogger,
   DockerRuntime,
@@ -497,6 +497,10 @@ export async function updateService(
   return updated;
 }
 
+/** Best-effort runtime/route teardown is bounded so a slow or unreachable box
+ *  can't hang the delete request past the DB-row removal (the authoritative op). */
+const SERVICE_TEARDOWN_TIMEOUT_MS = 20_000;
+
 export async function deleteService(
   ctx: RequestContext,
   projectId: string,
@@ -510,29 +514,41 @@ export async function deleteService(
     const serviceDeployment = serviceDeployments.find((row) => row.serviceId === serviceId);
 
     if (dep && serviceDeployment?.containerId) {
-      const { platform } = await resolveServicePlatform(project, dep);
-      await platform.runtime.destroy(serviceDeployment.containerId).catch((err: unknown) => {
-        console.error(
-          `[SERVICE] Failed to destroy service container ${serviceDeployment.containerId}:`,
-          err,
-        );
+      // Runtime teardown is best-effort AND time-bounded: reaching the box is an
+      // SSH round-trip, so a slow/unreachable server or a stale container (e.g. a
+      // legacy row whose container is already gone) must never HANG the request.
+      // The `.catch()`es only cover rejection — a hang would block until the HTTP
+      // request aborts and the DB removal below (the authoritative, atomic op)
+      // would never run, so the row could never be deleted. withTimeout converts a
+      // hang into a caught failure; a lingering container is reaped by images:gc /
+      // manual cleanup. Keyed on serviceId throughout — never by name.
+      const containerId = serviceDeployment.containerId;
+      await withTimeout(
+        (async () => {
+          const { platform } = await resolveServicePlatform(project, dep);
+          await platform.runtime.destroy(containerId).catch((err: unknown) => {
+            console.error(`[SERVICE] Failed to destroy service container ${containerId}:`, err);
+          });
+          // Reclaim this service's built image NOW — the FK cascade in
+          // repos.service.remove() below erases the imageRef record, so a later
+          // teardown could never enumerate it. Guarded to `openship/…` build tags:
+          // a base/third-party image (postgres:16-alpine, redis:7-alpine) is PULLED,
+          // shared, and must never be removed. Best-effort; images:gc is the backstop.
+          if (
+            serviceDeployment.imageRef?.startsWith("openship/") &&
+            platform.runtime instanceof DockerRuntime
+          ) {
+            await platform.runtime.removeImage(serviceDeployment.imageRef).catch((err: unknown) => {
+              console.error(`[SERVICE] Failed to remove image for ${svc.name}:`, err);
+            });
+          }
+          await platform.runtime.dispose?.();
+        })(),
+        SERVICE_TEARDOWN_TIMEOUT_MS,
+        `runtime teardown timed out for ${svc.name}`,
+      ).catch((err: unknown) => {
+        console.error(`[SERVICE] Runtime teardown skipped for ${svc.name} (best-effort):`, err);
       });
-      // Reclaim this service's built image NOW — the FK cascade in
-      // repos.service.remove() below erases the imageRef record, so a later
-      // teardown could never enumerate it. Guarded to `openship/…` build tags:
-      // a base/third-party image (postgres:16-alpine, redis:7-alpine) is PULLED,
-      // shared, and must never be removed. Best-effort; images:gc is the backstop
-      // for older builds (which stay label-scoped and drop out of the keep-set
-      // once this service's rows are gone).
-      if (
-        serviceDeployment.imageRef?.startsWith("openship/") &&
-        platform.runtime instanceof DockerRuntime
-      ) {
-        await platform.runtime.removeImage(serviceDeployment.imageRef).catch((err: unknown) => {
-          console.error(`[SERVICE] Failed to remove image for ${svc.name}:`, err);
-        });
-      }
-      await platform.runtime.dispose?.();
     }
   }
 
@@ -554,13 +570,17 @@ export async function deleteService(
           !project.cloudWorkspaceId && project.activeDeploymentId
             ? await repos.deployment.findById(project.activeDeploymentId)
             : null;
-        await reconcileProjectRoutes(project, {
-          deployment: dep,
-          removes: routes.map((route) => ({
-            hostname: route.hostname,
-            isCustomDomain: route.domainType === "custom",
-          })),
-        });
+        await withTimeout(
+          reconcileProjectRoutes(project, {
+            deployment: dep,
+            removes: routes.map((route) => ({
+              hostname: route.hostname,
+              isCustomDomain: route.domainType === "custom",
+            })),
+          }),
+          SERVICE_TEARDOWN_TIMEOUT_MS,
+          `route teardown timed out for ${svc.name}`,
+        );
       }
     } catch (err) {
       console.error(`[SERVICE] Failed to remove route for ${svc.name}:`, err);
