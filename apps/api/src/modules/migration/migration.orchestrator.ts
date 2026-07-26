@@ -50,6 +50,7 @@ import { withKeyedMutex } from "../../lib/provision-lock";
 import { requestBuildAccess } from "../deployments/build.service";
 import { restartServiceContainer, updateService } from "../services/service.service";
 import { applyProjectRouting } from "../domains/routing-apply.service";
+import { resolveProjectRouteState, reapplyProjectLiveRoutes } from "../domains/project-route.service";
 import { linkProjectRepo } from "../projects/project-crud.service";
 import type { ProjectCompositeRoute } from "@repo/core";
 import { teardownProject } from "../projects/project-teardown";
@@ -1253,7 +1254,16 @@ class MigrationOrchestratorImpl {
     routes: StartMigrationInput["routesByServiceName"],
     log: (m: string) => void,
   ): Promise<void> {
-    if (!routes || Object.keys(routes).length === 0) return;
+    // Snapshot the hostnames the project's edge serves NOW, BEFORE publishing —
+    // so the symmetric reconcile at the end can TEAR DOWN any hostname this
+    // migration drops (a service set to "None", or a domain reassigned). Without
+    // this, publishRoutes was publish-only: a dropped domain's legacy <slug>.conf
+    // kept proxying the hostname to its OLD upstream port (stale exposure — a
+    // security gap). This runs even when `routes` is empty (everything → None).
+    const project = await repos.project.findById(projectId).catch(() => null);
+    const before = project ? await resolveProjectRouteState(project).catch(() => null) : null;
+    const previousHostnames = before?.projectDomains.map((d) => d.hostname) ?? [];
+
     const services = await repos.service.listByProject(projectId).catch(() => []);
     const byName = new Map(services.map((s) => [s.name, s]));
 
@@ -1262,7 +1272,7 @@ class MigrationOrchestratorImpl {
     // globally unique, so exactly one service can own its row.
     type Entry = { name: string; svcId: string; spec: MigrationRouteSpec; domain: string };
     const byDomain = new Map<string, Entry[]>();
-    for (const [name, spec] of Object.entries(routes)) {
+    for (const [name, spec] of Object.entries(routes ?? {})) {
       const svc = byName.get(name);
       const domain = (spec.domainType === "custom" ? spec.customDomain : spec.domain)
         ?.trim()
@@ -1332,6 +1342,20 @@ class MigrationOrchestratorImpl {
       } catch (err) {
         log(`path-routing apply skipped: ${safeErrorMessage(err)}`);
       }
+    }
+
+    // SYMMETRIC RECONCILE (the security fix): re-apply the CURRENT live routes and
+    // REMOVE every hostname that was served before but is NOT published now — via
+    // the same atomic path the interactive edits use (reconcileProjectRoutes →
+    // NginxProvider.removeRoute deletes <slug>.conf + <slug>.route.json + validates
+    // and reloads, plus deregisters dropped free *.opsh.io slugs). This makes a
+    // migrated route set to "None" actually take the domain DOWN on the edge
+    // instead of leaving a legacy vhost pointed at the old port.
+    const refreshed = await repos.project.findById(projectId).catch(() => null);
+    if (refreshed) {
+      await reapplyProjectLiveRoutes(refreshed, previousHostnames).catch((err) =>
+        log(`edge reconcile skipped: ${safeErrorMessage(err)}`),
+      );
     }
   }
 

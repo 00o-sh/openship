@@ -124,6 +124,9 @@ interface RepoLink {
 interface ImportProject {
   id: string;
   name: string;
+  /** True once the user typed a name — stops the auto-derive (from the selected
+   *  stack) from overwriting it. False = name still tracks the picked stack. */
+  nameEdited: boolean;
   services: Set<string>;
   bound: string | null;
   /** Optional project-level repo (step 2 "source"). */
@@ -450,16 +453,20 @@ export function ServerMigrationWizard({
       // whole group ONLY when it's a real compose project (a cohesive unit);
       // standalone containers have no natural grouping, so start empty and let the
       // user pick first. The user adds more project tabs for the rest.
-      const first = scanned.groups.find((g) => g.services.some((s) => !isExcluded(s)));
-      if (first) {
-        const uids = first.services.filter((s) => !isExcluded(s)).map(svcUid);
-        const preselect = first.project ? uids : [];
+      // Seed ONE EMPTY project — NEVER auto-select a group or its services.
+      // Auto-picking the first group previously pinned ITS name/identity (e.g.
+      // "n8n") onto a DIFFERENT stack the user actually chose, and shipped a
+      // 1-service "app" instead of the multi-service stack. The user picks the
+      // stack; the name derives from that selection (toggleService/toggleGroup).
+      const hasCandidate = scanned.groups.some((g) => g.services.some((s) => !isExcluded(s)));
+      if (hasCandidate) {
         setProjects([
           {
             id: randomUUID(),
-            name: first.project ?? serverName ?? "migrated-app",
-            services: new Set(preselect),
-            bound: groupKey(first),
+            name: "",
+            nameEdited: false,
+            services: new Set(),
+            bound: null,
             repo: null,
             composeServices: [],
             serviceMap: {},
@@ -492,19 +499,11 @@ export function ServerMigrationWizard({
   const groupLabel = (key: string | null) =>
     key === null || key === STANDALONE ? m.discover.standaloneGroup : key;
 
-  const nextProjectName = () => {
-    const usedComposes = new Set(projects.map((p) => p.bound).filter(Boolean));
-    const freeCompose = stack?.groups.find(
-      (g) => g.project && !usedComposes.has(g.project),
-    )?.project;
-    if (freeCompose) return freeCompose;
-    return `project-${projects.length + 1}`;
-  };
-
   const addProject = () => {
     const p: ImportProject = {
       id: randomUUID(),
-      name: nextProjectName(),
+      name: "", // derived from the stack the user picks (never auto-guessed)
+      nameEdited: false,
       services: new Set(),
       bound: null,
       repo: null,
@@ -599,7 +598,16 @@ export function ServerMigrationWizard({
   };
 
   const renameProject = (id: string, name: string) =>
-    setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, name } : p)));
+    // Typing a name (non-empty) marks it user-owned so the auto-derive stops
+    // overwriting it; clearing the box re-enables derive-from-selection.
+    setProjects((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, name, nameEdited: name.trim().length > 0 } : p)),
+    );
+
+  /** Project name derived from the SELECTED stack: the bound compose group's
+   *  name, else the server name. Never the first-discovered group. */
+  const deriveName = (bound: string | null) =>
+    bound && bound !== STANDALONE ? bound : (serverName ?? "");
 
   /** Can the active project accept a service from `key` group? Empty project →
    *  binds to any group; otherwise only its already-bound group. */
@@ -620,7 +628,13 @@ export function ServerMigrationWizard({
           if (!canBind(key)) return p; // one-compose-per-project guard
           services.add(uid);
         }
-        return { ...p, services, bound: services.size ? (p.bound ?? key) : null };
+        const nextBound = services.size ? (p.bound ?? key) : null;
+        return {
+          ...p,
+          services,
+          bound: nextBound,
+          name: p.nameEdited ? p.name : deriveName(nextBound),
+        };
       }),
     );
   };
@@ -642,7 +656,13 @@ export function ServerMigrationWizard({
           if (allOn) services.delete(u);
           else services.add(u);
         }
-        return { ...p, services, bound: services.size ? (p.bound ?? key) : null };
+        const nextBound = services.size ? (p.bound ?? key) : null;
+        return {
+          ...p,
+          services,
+          bound: nextBound,
+          name: p.nameEdited ? p.name : deriveName(nextBound),
+        };
       }),
     );
   };

@@ -554,15 +554,32 @@ ${webhookLocation}${extraLocations}
   }
 
   /**
-   * Remove a route by deleting its conf file, then reload.
+   * Remove a route by deleting its conf + route-state files, then reload.
+   *
+   * Self-rollback (same pattern as registerRoute): snapshot both files first, and
+   * if the post-removal `openresty -t`/reload fails — usually because an UNRELATED
+   * vhost is broken — restore them so the edge on disk == the running config.
+   * Without this, a failed reload left the route GONE from disk but still served
+   * from the old in-memory config (an inconsistent half-state that would silently
+   * vanish on the next unrelated reload). The error is re-thrown for retry.
    */
   async removeRoute(domain: string): Promise<void> {
     assertValidDomain(domain);
     const slug = this.domainSlug(domain);
     const configPath = join(this.sitesDir, `${slug}.conf`);
+    const statePath = this.routeStatePath(slug);
+    const confSnapshot = await this._captureFile(configPath);
+    const stateSnapshot = await this._captureFile(statePath);
     await this._rm(configPath);
-    await this._rm(this.routeStatePath(slug)).catch(() => undefined);
-    await this.reload();
+    await this._rm(statePath).catch(() => undefined);
+    try {
+      await this.reload();
+    } catch (err) {
+      await this._restoreFile(configPath, confSnapshot);
+      await this._restoreFile(statePath, stateSnapshot);
+      await this.reload().catch(() => undefined);
+      throw err;
+    }
   }
 
   // ── SSL ──────────────────────────────────────────────────────────────

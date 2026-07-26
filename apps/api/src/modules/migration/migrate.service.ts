@@ -274,6 +274,31 @@ export async function adoptServerStack(opts: {
     throw new Error("None of the selected services were found on the server.");
   }
 
+  // IDEMPOTENCY GATE: refuse to RE-ADOPT containers this instance already
+  // manages as a project. Without it, re-importing the same running stack mints
+  // a SECOND project on the SAME containers → duplicate `-2` services, routes
+  // bound to the wrong (duplicate) service's port, and phantom domain claims.
+  // A first-time adopt has no matching service_deployment rows, so this only
+  // ever blocks a genuine re-import (redeploy/edit the existing project instead).
+  const chosenContainerIds = chosen
+    .map((s) => s.containerId)
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
+  if (chosenContainerIds.length > 0) {
+    const managed = await repos.service.findByContainerIds(chosenContainerIds);
+    for (const sd of managed) {
+      const dep = await repos.deployment.findById(sd.deploymentId).catch(() => null);
+      if (!dep || dep.organizationId !== organizationId) continue; // other org / stale row
+      const proj = await repos.project.findById(dep.projectId).catch(() => null);
+      if (proj && !proj.deletedAt) {
+        throw new Error(
+          `These containers are already managed here by project "${proj.name}". ` +
+            `Redeploy or edit that project instead of re-importing — a re-import would ` +
+            `duplicate its services and routes.`,
+        );
+      }
+    }
+  }
+
   // Cross-server DOES move locally-built images now: moving_data streams the
   // running image A→B as data (docker save | docker load), so the target adopts
   // the exact same image — no registry, no rebuild. Registry-image stacks still

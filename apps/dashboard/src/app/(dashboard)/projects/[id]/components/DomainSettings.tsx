@@ -1187,24 +1187,43 @@ export const DomainSettings = () => {
   // registration; the app/service keeps running. Inline confirm so a stray click
   // can't yank a live route.
   const handleDeleteDomain = (summary: DomainSummaryItem) => {
-    if (!summary.domainId) return;
-    setRemoveTarget(summary); // open the styled confirm modal
+    setRemoveTarget(summary); // open the styled confirm modal (pending routes too)
   };
 
   const confirmRemoveRoute = async () => {
     const summary = removeTarget;
-    if (!summary?.domainId) return;
+    if (!summary) return;
     setRemoving(true);
     try {
-      await domainsApi.remove(summary.domainId);
-      updateDomains(
-        (Array.isArray(domainsData.domains) ? domainsData.domains : []).filter(
-          (d: any) => d?.id !== summary.domainId,
-        ),
-      );
-      if (id) invalidateProjectCaches(id);
-      showToast("Route removed.", "success", t.projectSettings.domains.toast.domainsTitle);
-      setRemoveTarget(null);
+      if (summary.domainId) {
+        // Persisted domain row → force-delete it (backend removeDomain always
+        // drops the row + best-effort tears down the edge, atomically now).
+        await domainsApi.remove(summary.domainId);
+        updateDomains(
+          (Array.isArray(domainsData.domains) ? domainsData.domains : []).filter(
+            (d: any) => d?.id !== summary.domainId,
+          ),
+        );
+        if (id) invalidateProjectCaches(id);
+        showToast("Route removed.", "success", t.projectSettings.domains.toast.domainsTitle);
+        setRemoveTarget(null);
+      } else {
+        // PENDING / endpoint-only route (no domain row) — drop it from the
+        // project's publicEndpoints and persist. Reuses persistPublicEndpoints
+        // (→ projectsApi.update → server reapplyProjectLiveRoutes tears the edge
+        // down), the same canonical save the route editor uses. Match by id/host.
+        const remaining = publicEndpoints.filter((e) => {
+          const host =
+            e.domainType === "custom"
+              ? (e.customDomain ?? "")
+              : e.domain
+                ? `${e.domain}.${baseDomain}`
+                : "";
+          return e.id !== summary.id && host.toLowerCase() !== summary.hostname.toLowerCase();
+        });
+        const ok = await persistPublicEndpoints(remaining, "Route removed.");
+        if (ok) setRemoveTarget(null);
+      }
     } catch (error) {
       showToast(getApiErrorMessage(error, "Couldn't remove the route."), "error", t.projectSettings.domains.toast.domainsTitle);
     } finally {
@@ -1445,17 +1464,18 @@ export const DomainSettings = () => {
         onClick: () => setCertUploadDomain({ domainId: domain.domainId!, hostname: domain.hostname }),
       });
     }
-    // Remove route — a direct destructive action for every real domain row (both
-    // free + custom), so deletion lives in the ⋯ menu, not buried in edit.
-    if (domain.domainId) {
-      items.push({
-        id: "delete",
-        label: "Remove route",
-        icon: <Trash2 className="size-4" />,
-        variant: "danger",
-        onClick: () => void handleDeleteDomain(domain),
-      });
-    }
+    // Remove route — ALWAYS offered for a real route, including a PENDING one
+    // with no persisted domain row (domainId undefined). That was the gap: a
+    // stuck-pending route (a publicEndpoint whose domain claim failed) had no
+    // delete affordance, so it could never be cleared. confirmRemoveRoute routes
+    // the two cases (row delete vs endpoint removal) to the right teardown.
+    items.push({
+      id: "delete",
+      label: "Remove route",
+      icon: <Trash2 className="size-4" />,
+      variant: "danger",
+      onClick: () => void handleDeleteDomain(domain),
+    });
     return items;
   };
 
