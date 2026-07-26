@@ -89,10 +89,11 @@ export interface MigrationPreview {
    *  will be CARRIED (reused, no ACME). `false` → the target issues via ACME on
    *  publish (e.g. Traefik acme.json, or no cert). Cross-server only. */
   sslByDomain?: Array<{ domain: string; hasCert: boolean }>;
-  /** Cross-server: services whose target volume(s) ALREADY hold data. The user
-   *  must resolve each (override / clone / keep) at the plan step before the
-   *  migrate can run — otherwise the move would refuse to clobber existing data. */
-  conflicts?: Array<{ serviceName: string; volumes: string[] }>;
+  /** Cross-server: each target VOLUME that already holds data (keyed by the
+   *  unique volume name — two services can share a display name, so per-volume
+   *  is the isolation unit). The user resolves each (override/clone/keep) at the
+   *  plan step before the migrate can run. */
+  conflicts?: Array<{ serviceName: string; volume: string }>;
 }
 
 export async function buildMigrationPreview(opts: {
@@ -216,13 +217,15 @@ export async function buildMigrationPreview(opts: {
         if (out.includes("CONFLICT")) hasData.add(name);
       }
       if (hasData.size > 0) {
-        const grouped = workloads
-          .map((s) => ({
-            serviceName: s.name,
-            volumes: s.volumes.map((v) => v.name).filter((n) => hasData.has(n)),
-          }))
-          .filter((c) => c.volumes.length > 0);
-        if (grouped.length > 0) conflicts = grouped;
+        // Flatten to one entry PER VOLUME — the unique isolation unit (two
+        // services can share a display name; volume names can't collide).
+        const flat: Array<{ serviceName: string; volume: string }> = [];
+        for (const s of workloads) {
+          for (const v of s.volumes) {
+            if (hasData.has(v.name)) flat.push({ serviceName: s.name, volume: v.name });
+          }
+        }
+        if (flat.length > 0) conflicts = flat;
       }
     } catch {
       /* best-effort — leave `conflicts` undefined */

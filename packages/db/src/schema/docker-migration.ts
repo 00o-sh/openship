@@ -85,6 +85,11 @@ export const dockerMigrationRun = pgTable(
     /** Snapshot of the sanitized start input, so a `partial` run can be resumed
      *  and a `failed` run can be re-opened pre-filled (edit & retry). */
     inputSnapshot: jsonb("input_snapshot").$type<Record<string, unknown> | null>(),
+    /** Volume names this run WROTE on the TARGET (cross-server). After a failed
+     *  deploy the rollback leaves these copies behind (never wipes data blindly);
+     *  the user can opt to remove them so a retry starts clean instead of hitting
+     *  "target already has data". Excludes "keep"-resolved (pre-existing) volumes. */
+    targetVolumes: jsonb("target_volumes").$type<string[]>().default([]),
 
     startedAt: timestamp("started_at").notNull().defaultNow(),
     finishedAt: timestamp("finished_at"),

@@ -13,6 +13,7 @@ import {
   getAppManagement,
   getAppSettings,
   getAppConnection,
+  getOutputService,
   flattenSettingFields,
   validateSetting,
   ValidationError,
@@ -186,6 +187,11 @@ export interface AppConnectionOutput {
   /** Catalog-recommended target env-var name for the "Use in a project" handover
    *  (so the client doesn't guess). Undefined → the client falls back. */
   envKey?: string;
+  /** Source SERVICE (docker alias) this output belongs to — lets the connect UI
+   *  group outputs by service and pick which service(s) to inject. Derived from
+   *  the output's declared `service` or its `source` prefix; null when neither
+   *  carries one (a `template:` value with no service → internal not available). */
+  service: string | null;
   /** Part of the recommended one-click bundle — pre-checked in the handover. */
   recommended?: boolean;
   /** Label for the primary value in the switch (default "Default"); with `variants`. */
@@ -357,6 +363,7 @@ export async function getAppConnectionView(
       secret: !!o.secret,
       value,
       envKey: o.envKey,
+      service: getOutputService(o),
       recommended: o.recommended,
       sourceLabel: o.sourceLabel,
       variants,

@@ -5,12 +5,12 @@ import { Hono } from "hono";
 import { hostname, userInfo } from "node:os";
 import { cloudRuntimeTarget, env } from "../../config/env";
 import { rateLimiterFor } from "../../middleware/rate-limiter";
-import apiPackage from "../../../package.json";
+import { APP_VERSION } from "../../lib/app-version";
 
-/** Running server version (from apps/api/package.json). Lets the dashboard tell
- *  a self-hosted operator their instance is outdated / has a security advisory.
- *  The desktop dashboard uses window.desktop.app.version() instead. */
-const APP_VERSION = apiPackage.version;
+/** Running server version (apps/api/package.json, via lib/app-version — the same
+ *  value sent to the cloud on every call). Lets the dashboard tell a self-hosted
+ *  operator their instance is outdated / has a security advisory. The desktop
+ *  dashboard uses window.desktop.app.version() instead. */
 
 /**
  * Best-effort friendly name for the local machine. On macOS with Bonjour
@@ -48,7 +48,10 @@ const machineName = resolveMachineName();
 export const healthRoutes = new Hono();
 
 healthRoutes.get("/", (c) => {
-  return c.json({ status: "ok", timestamp: new Date().toISOString() });
+  // `cloudMode` lets a migrate-control-plane flow cheaply refuse a multi-tenant
+  // SaaS as a transfer TARGET before sending anything (GATE 3 probe) — an
+  // instance import --wipe against the SaaS would truncate every tenant.
+  return c.json({ status: "ok", cloudMode: env.CLOUD_MODE === true, timestamp: new Date().toISOString() });
 });
 
 /** GET /health/env - static deployment info (no auth, cached by callers). Rate-

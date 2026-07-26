@@ -99,6 +99,10 @@ const connection = z.object({
       source: z.string(),
       secret: z.boolean().optional(),
       envKey: z.string().optional(),
+      /** Source service (docker alias) this output belongs to — authoritative
+       *  for internal-mode host rewriting; validated against declared services
+       *  in the superRefine below. */
+      service: z.string().optional(),
       recommended: z.boolean().optional(),
       sourceLabel: z.union([z.string(), z.record(z.string(), z.string())]).optional(),
       variants: z.array(outputVariant).optional(),
@@ -250,6 +254,9 @@ export const appTemplateSchema = z.object({
   };
   (data.connection?.outputs ?? []).forEach((o, i) => {
     checkSource(o.source, ["connection", "outputs", i, "source"], "output");
+    // An explicit output.service (needed when a `template:` source can't carry
+    // the service) must name a declared service — it's the internal-mode alias.
+    if (o.service) refSvc(o.service, ["connection", "outputs", i, "service"], "output");
     (o.variants ?? []).forEach((v, j) => {
       checkSource(v.source, ["connection", "outputs", i, "variants", j, "source"], "variant");
     });

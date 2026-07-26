@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
-import { Server, Cloud, Cpu, ArrowRight, Pencil, ChevronDown, ChevronUp, CheckCircle2, Loader2, Plus, Settings2, Zap, Globe, GitBranch, Search, ShieldAlert, ShieldCheck, Terminal } from "lucide-react";
+import { Server, Cloud, Cpu, ArrowRight, Pencil, ChevronDown, ChevronUp, CheckCircle2, Loader2, Plus, Settings2, Zap, Globe, GitBranch, Search, ShieldAlert, ShieldCheck } from "lucide-react";
 import { BlurIp } from "@/components/BlurIp";
 import { useDeployment } from "@/context/DeploymentContext";
 import { usesServiceDeployment } from "@/context/deployment/types";
@@ -14,7 +14,6 @@ import type { ServerInfo } from "@/lib/api/system";
 import { useToast } from "@/context/ToastContext";
 import { useModal } from "@/context/ModalContext";
 import type { DeployTarget, BuildStrategy, CloneStrategy, RuntimeMode } from "@/context/deployment/types";
-import { isTypicallyStatic, STACKS, type StackId } from "@repo/core";
 import { createPersistedValue } from "@/lib/persisted-value";
 import { AddServerModal } from "./AddServerModal";
 import ServerRuntimePicker from "./ServerRuntimePicker";
@@ -84,97 +83,6 @@ export const OptionCard: React.FC<OptionCardProps> = ({
   </div>
 );
 
-// ─── Serve mode (static-capable apps) ────────────────────────────────────────
-// The one honest isolation choice a frontend/static app has: served as files by
-// the edge (nothing runs) vs run as a real server process. "Server process"
-// requires a start command + port (preflight hard-fails otherwise), so we
-// surface those inputs inline instead of shipping a toggle that fails two steps
-// later — and only THEN is the Sandbox/Direct runtime picker meaningful.
-const ServeModePicker: React.FC = () => {
-  const { config, updateOptions } = useDeployment();
-  const { t } = useI18n();
-  const sm = t.deploy.serveMode;
-  const hasServer = config.options.hasServer;
-  const stackDef = config.framework in STACKS ? STACKS[config.framework as StackId] : undefined;
-
-  const selectServer = () =>
-    updateOptions({
-      hasServer: true,
-      startCommand: config.options.startCommand || (stackDef?.defaultStartCommand ?? ""),
-      productionPort: config.options.productionPort || String(stackDef?.defaultPort ?? ""),
-    });
-
-  return (
-    <div className="space-y-3">
-      <div>
-        <h3 className="text-base font-semibold text-foreground flex items-center gap-2">
-          <Globe className="size-4 text-muted-foreground" />
-          {sm.heading}
-        </h3>
-        <p className="text-sm text-muted-foreground mt-0.5">{sm.subtitle}</p>
-      </div>
-
-      <div className="space-y-2">
-        <OptionCard
-          value="static"
-          selected={!hasServer}
-          onSelect={() => updateOptions({ hasServer: false })}
-          icon={<Globe className="size-5" />}
-          label={sm.staticLabel}
-          description={sm.staticDesc}
-        />
-        <OptionCard
-          value="server"
-          selected={hasServer}
-          onSelect={selectServer}
-          icon={<Terminal className="size-5" />}
-          label={sm.serverLabel}
-          description={sm.serverDesc}
-        />
-      </div>
-
-      {/* Static: built in a Docker sandbox, then served as files by the edge. */}
-      {!hasServer && (
-        <div className="flex items-start gap-2.5 rounded-xl border border-info-border bg-info-bg px-3 py-2.5">
-          <Globe className="size-4 text-info shrink-0 mt-0.5" />
-          <p className="text-[12px] leading-relaxed text-info">{sm.staticNote}</p>
-        </div>
-      )}
-
-      {/* Server process: the required start command + port (else preflight fails). */}
-      {hasServer && (
-        <div className="space-y-2.5 rounded-xl border border-border/50 bg-card/40 p-3">
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-foreground/80">{sm.startCommandLabel}</label>
-            <input
-              type="text"
-              value={config.options.startCommand}
-              placeholder={sm.startCommandPlaceholder}
-              onChange={(e) => updateOptions({ startCommand: e.target.value })}
-              className="w-full rounded-lg border border-border/60 bg-card px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/60 focus:border-primary/50 focus:outline-none focus:ring-1 focus:ring-primary/20"
-            />
-            <p className="text-[11px] text-muted-foreground/70 leading-relaxed">{sm.startCommandHint}</p>
-          </div>
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-foreground/80">{sm.portLabel}</label>
-            <input
-              type="number"
-              min={1}
-              max={65535}
-              value={config.options.productionPort}
-              placeholder="3000"
-              onChange={(e) => updateOptions({ productionPort: e.target.value })}
-              className="w-full rounded-lg border border-border/60 bg-card px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/60 focus:border-primary/50 focus:outline-none focus:ring-1 focus:ring-primary/20"
-            />
-          </div>
-          {/* Sandbox/Direct is real only now that a process runs — server target only. */}
-          {config.deployTarget === "server" && !!config.serverId && <ServerRuntimePicker />}
-        </div>
-      )}
-    </div>
-  );
-};
-
 // ─── Server picker (collapsed → searchable list) ─────────────────────────────
 
 interface ServerPickerProps {
@@ -227,6 +135,25 @@ const ServerPicker: React.FC<ServerPickerProps> = ({ servers, selectedId, onSele
   // (so a fresh "Your servers" pick lands straight on the searchable list).
   const [open, setOpen] = useState(!selected);
   const [query, setQuery] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+
+  // The list is a FLOATING menu (absolute), so it must dismiss itself on an
+  // outside click / Escape instead of reflowing the card. Only listen while open.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
 
   const q = query.trim().toLowerCase();
   const filtered = q
@@ -241,77 +168,82 @@ const ServerPicker: React.FC<ServerPickerProps> = ({ servers, selectedId, onSele
     <div className="space-y-1.5">
       <p className="text-xs font-medium text-muted-foreground mb-2">{ts.chooseServer}</p>
 
-      {/* Collapsed trigger — the selected server, or a placeholder. */}
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-start transition-all border ${
-          open
-            ? "border-primary/30 bg-muted/20"
-            : "bg-card/60 border-border/30 hover:border-primary/20 hover:bg-muted/30"
-        }`}
-      >
-        {selected ? (
-          <ServerRowContent server={selected} active />
-        ) : (
-          <>
-            <div className="w-7 h-7 rounded-md flex items-center justify-center shrink-0 bg-muted/50 text-muted-foreground">
-              <Server className="size-3.5" />
-            </div>
-            <span className="flex-1 text-sm text-muted-foreground">{ts.chooseServer}</span>
-          </>
-        )}
-        <ChevronDown className={`size-4 shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`} />
-      </button>
+      {/* Anchor for the floating menu. */}
+      <div className="relative" ref={ref}>
+        {/* Collapsed trigger — the selected server, or a placeholder. */}
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-start transition-all border ${
+            open
+              ? "border-primary/30 bg-muted/20"
+              : "bg-card/60 border-border/30 hover:border-primary/20 hover:bg-muted/30"
+          }`}
+        >
+          {selected ? (
+            <ServerRowContent server={selected} active />
+          ) : (
+            <>
+              <div className="w-7 h-7 rounded-md flex items-center justify-center shrink-0 bg-muted/50 text-muted-foreground">
+                <Server className="size-3.5" />
+              </div>
+              <span className="flex-1 text-sm text-muted-foreground">{ts.chooseServer}</span>
+            </>
+          )}
+          <ChevronDown className={`size-4 shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`} />
+        </button>
 
-      {/* Expanded — search box + filtered, scrollable list. */}
-      {open && (
-        <div className="rounded-lg border border-border/40 bg-card/40 p-1.5 space-y-1.5">
-          <div className="relative">
-            <Search className="pointer-events-none absolute start-3 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder={ts.searchPlaceholder}
-              className="w-full ps-9 pe-3 py-2 bg-card border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all"
-            />
-          </div>
-          <div className="max-h-64 overflow-y-auto space-y-1 pe-0.5">
-            {filtered.map((s) => {
-              const isSelected = selectedId === s.id;
-              return (
-                <button
-                  key={s.id}
-                  type="button"
-                  onClick={() => { onSelect(s); setQuery(""); setOpen(false); }}
-                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-start transition-all ${
-                    isSelected
-                      ? "bg-primary/10 border border-primary/30"
-                      : "bg-card/60 border border-transparent hover:border-primary/20 hover:bg-muted/30"
-                  }`}
-                >
-                  <ServerRowContent server={s} active={isSelected} />
-                  {isSelected && <CheckCircle2 className="size-4 text-primary shrink-0" />}
-                </button>
-              );
-            })}
-            {filtered.length === 0 && (
-              <p className="px-3 py-6 text-center text-xs text-muted-foreground">{ts.noServersMatch}</p>
+        {/* Floating menu — absolute + elevated so it OVERLAYS the cards below
+            instead of growing the container. Search box + filtered list. */}
+        {open && (
+          <div className="absolute inset-x-0 top-full z-50 mt-1.5 rounded-lg border border-border/60 bg-popover p-1.5 space-y-1.5 shadow-xl shadow-black/30">
+            <div className="relative">
+              <Search className="pointer-events-none absolute start-3 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={ts.searchPlaceholder}
+                autoFocus
+                className="w-full ps-9 pe-3 py-2 bg-background border border-border/50 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all"
+              />
+            </div>
+            <div className="max-h-64 overflow-y-auto space-y-1 pe-0.5">
+              {filtered.map((s) => {
+                const isSelected = selectedId === s.id;
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => { onSelect(s); setQuery(""); setOpen(false); }}
+                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-start transition-all ${
+                      isSelected
+                        ? "bg-primary/10 border border-primary/30"
+                        : "bg-card/60 border border-transparent hover:border-primary/20 hover:bg-muted/30"
+                    }`}
+                  >
+                    <ServerRowContent server={s} active={isSelected} />
+                    {isSelected && <CheckCircle2 className="size-4 text-primary shrink-0" />}
+                  </button>
+                );
+              })}
+              {filtered.length === 0 && (
+                <p className="px-3 py-6 text-center text-xs text-muted-foreground">{ts.noServersMatch}</p>
+              )}
+            </div>
+            {onAddServer && (
+              <button
+                type="button"
+                onClick={onAddServer}
+                className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-border/50 px-3 py-2.5 text-[13px] text-muted-foreground transition-all hover:border-primary/40 hover:bg-muted/30 hover:text-foreground"
+              >
+                <Plus className="size-3.5" />
+                {ts.addServer}
+              </button>
             )}
           </div>
-          {onAddServer && (
-            <button
-              type="button"
-              onClick={onAddServer}
-              className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-border/50 px-3 py-2.5 text-[13px] text-muted-foreground transition-all hover:border-primary/40 hover:bg-muted/30 hover:text-foreground"
-            >
-              <Plus className="size-3.5" />
-              {ts.addServer}
-            </button>
-          )}
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 };
@@ -949,19 +881,6 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
   const showBuildStrategy =
     config.projectType === "app" || (config.projectType === "services" && !isServiceDeployment);
 
-  // A frontend/static stack (vite, CRA, plain static…) can EITHER be served as
-  // files by the edge (hasServer=false) OR run as a real server process
-  // (hasServer=true). We surface that as an explicit choice — the only honest
-  // isolation decision a static-capable app has (Sandbox/Direct is meaningless
-  // when nothing runs). `framework in STACKS` guards isTypicallyStatic, which
-  // dereferences the stack def and would throw on an unknown framework id.
-  const isStaticCapable =
-    config.projectType === "app" &&
-    !isServiceDeployment &&
-    config.framework in STACKS &&
-    isTypicallyStatic(config.framework as StackId);
-
-
   // UNIFIED BUILD — build where you deploy, as the PERSISTENT default (every
   // untouched deploy, not just the first). A SERVER target builds on that server
   // (desktop → remote build + clone-on-server via git-credential forwarding;
@@ -1263,8 +1182,12 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
   // Services always deploy as docker (build on the server), so the clone picker
   // applies to them regardless of the config.runtimeMode field (which may not be
   // hydrated to "docker" on a config-edit).
+  // Clone location only exists for a REMOTE build (the clone runs on the target).
+  // "This Machine" (local build) clones + builds here and ships the output, so
+  // there's no on-server-vs-here choice to make — hide it entirely.
   const showCloneStrategy =
     config.deployTarget === "server" &&
+    config.buildStrategy === "server" &&
     (config.runtimeMode === "docker" || isServiceDeployment);
   // Clone-on-server is the default (primary card); cloning on the api host and
   // uploading is the advanced/manual alternative.
@@ -1440,20 +1363,23 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
   // (its resource/power picker).
   const showServerAdvanced =
     showFullPicker && config.deployTarget === "server" && !!config.serverId;
-  // Runtime-isolation (Sandbox/Direct) applies only to a self-hosted server APP —
-  // docker/compose always run sandboxed, static has no long-running process. For
-  // a static-capable app the picker is rendered INLINE under ServeModePicker
-  // (only once the user opts into "run as a server process"), so exclude it here
-  // to avoid rendering ServerRuntimePicker twice.
+  // Runtime-isolation (Sandbox/Direct) applies only to a self-hosted server APP
+  // that runs a process: docker/compose always run sandboxed, and a static app
+  // (files served by the edge, hasServer=false) has nothing to isolate. Shown in
+  // the Advanced panel (right column).
   const showRuntimeIsolation =
     config.options.hasServer &&
     config.projectType !== "docker" &&
-    !isServiceDeployment &&
-    !isStaticCapable;
-  // The static-vs-server choice — shown up-front (not buried in Advanced) for
-  // any static-capable app, so a vite/CRA user isn't silently defaulted.
-  const showServeMode = showFullPicker && isStaticCapable;
+    !isServiceDeployment;
   const showRightPanel = showCloudPicker || showServerAdvanced;
+  // Self-hosted server layout: the server/cloud choice is the MAIN wide column on
+  // the LEFT; Advanced is a collapsed RAIL on the right. Opening Advanced EXCHANGES
+  // the column widths — the server column shrinks to the rail width and Advanced
+  // grows to fill (positions stay fixed; only the grid track widths trade, with a
+  // transition). So the screen leads with "where to deploy" and the build/clone/
+  // runtime detail expands into the space only when asked for. Cloud keeps its own
+  // right-hand power panel; single-column onboarding is untouched.
+  const serverLayout = showServerAdvanced;
 
   // Action controls (extracted so they can live in the left column on a single-
   // column layout, or move into the right column — above the Advanced/Cloud
@@ -1509,9 +1435,11 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
       {headerSubtitle && <p className="text-sm text-muted-foreground/70 mt-1">{headerSubtitle}</p>}
     </div>
   );
-  const header = showRightPanel ? (
-    // Same track as the body grid (gap-0 on lg) so the third cell lines up
-    // pixel-for-pixel with the advanced panel underneath it.
+  const header = showRightPanel && !serverLayout ? (
+    // Cloud: mirror the body grid track (gap-0 on lg) so Continue lines up
+    // pixel-for-pixel with the power panel underneath it. The swapped server
+    // layout uses the plain flex header below instead (Continue top-right, above
+    // the server rail), since its columns are reordered.
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_1px_320px] lg:gap-0 lg:items-start">
       <div className="lg:pe-6">{headerTitleBlock}</div>
       <div className="hidden lg:block" aria-hidden />
@@ -1535,12 +1463,28 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
       {header}
       <div
         className={
-          showRightPanel
-            ? "grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_1px_320px] gap-0 items-start"
-            : ""
+          !showRightPanel
+            ? ""
+            : serverLayout
+              ? // Server layout: flex row so the two columns can TRADE widths with a
+                // real width transition (grid-template-columns won't interpolate
+                // fr↔px, so it snapped). Stacks on mobile.
+                "space-y-8 lg:space-y-0 lg:flex lg:items-start"
+              : "grid grid-cols-1 gap-0 items-start lg:grid-cols-[minmax(0,1fr)_1px_320px]"
         }
       >
-    <div className={`space-y-8 ${showRightPanel ? "lg:pe-6" : ""}`}>
+    {/* "Where" cell — deploy target + server picker. Always the LEFT column; the
+        wide main until Advanced opens, then it shrinks to the rail width (the
+        Advanced column grows to fill — an animated width exchange). */}
+    <div
+      className={
+        serverLayout
+          ? `space-y-8 min-w-0 lg:pe-6 lg:shrink-0 lg:transition-[width] lg:duration-300 lg:ease-out ${
+              advancedOpen ? "lg:w-[360px]" : "lg:w-[calc(100%-361px)]"
+            }`
+          : `space-y-8 min-w-0 ${showRightPanel ? "lg:pe-6" : ""}`
+      }
+    >
       {showLoading && (
         <div className="flex items-center justify-center gap-2 rounded-xl border border-border/50 bg-card px-4 py-8 text-sm text-muted-foreground">
           <Loader2 className="size-4 animate-spin" />
@@ -1624,29 +1568,38 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
         </div>
       )}
 
-      {/* Static-capable apps: choose "served as files" vs "runs as a server
-          process". Picking server unlocks the real Sandbox/Direct picker. */}
-      {showServeMode && <ServeModePicker />}
+      {/* "How it's served" (static vs server process + start command) is NOT here —
+          it lives with the app's build settings (the "Start" toggle), so the deploy
+          step stays about WHERE to deploy, not how the app is built/served. */}
 
       {/* Advanced (Sandbox/Direct, build location, clone, git-forward) renders
           as a compact panel in the RIGHT column for server deploys — see the
           right-panel block below. Continue lives in the unified header. */}
 
-      {/* Single-column layout: save-default sits under the options (Continue is
-          in the header). With a right panel, save-default moves into it. */}
-      {!showRightPanel && saveDefaultCheckbox}
+      {/* save-default sits with the target picker: single-column, or the swap's
+          server rail. For cloud it lives in the right power column instead. */}
+      {(!showRightPanel || serverLayout) && saveDefaultCheckbox}
     </div>
     {showRightPanel && (
       <>
-        {/* Vertical divider between the two columns. Right column = cloud
-            power/resource picker OR the server "Advanced" disclosure — a
-            compact panel beside the target choice instead of a wide expander
-            under it. */}
-        <div className="hidden lg:block w-px bg-border self-stretch" />
-        <div key={config.deployTarget} className="lg:ps-6 animate-slide-in-right space-y-6">
-          {/* Continue is in the unified header; the right column carries the
-              save-default toggle then the Cloud/Advanced panel. */}
-          {saveDefaultCheckbox}
+        {/* Vertical divider between the two columns. */}
+        <div className="hidden lg:block w-px bg-border self-stretch lg:shrink-0" />
+        {/* "How" column (right) — the Advanced disclosure (server) or the cloud
+            power picker. For a server it's a rail (360px) that grows to fill when
+            opened, trading widths with the server column via a width transition. */}
+        <div
+          key={config.deployTarget}
+          className={
+            serverLayout
+              ? `min-w-0 space-y-6 animate-slide-in-right lg:ps-6 lg:shrink-0 lg:transition-[width] lg:duration-300 lg:ease-out ${
+                  advancedOpen ? "lg:w-[calc(100%-361px)]" : "lg:w-[360px]"
+                }`
+              : "min-w-0 space-y-6 animate-slide-in-right lg:ps-6"
+          }
+        >
+          {/* Cloud carries the save-default toggle here; the swap moved it into
+              the server rail (left cell above). */}
+          {!serverLayout && saveDefaultCheckbox}
           {showCloudPicker && <CloudPowerPicker />}
           {showServerAdvanced && (
             <div className="rounded-2xl border border-border/50 bg-card">
@@ -1671,10 +1624,22 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
                 )}
               </button>
 
-              {advancedOpen && (
-                <div className="border-t border-border/50 px-4 py-4 space-y-5">
+              {/* Accordion: animate the content's HEIGHT (grid-rows 0fr→1fr) so it
+                  doesn't pop in. Always mounted so the transition has something to
+                  reveal; the inner content fades in as it grows. */}
+              <div
+                className={`grid transition-[grid-template-rows] duration-300 ease-out ${
+                  advancedOpen ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+                }`}
+              >
+                <div
+                  className={`overflow-hidden transition-opacity duration-200 ${
+                    advancedOpen ? "opacity-100 delay-100" : "opacity-0"
+                  }`}
+                >
+                  <div className="border-t border-border/50 px-4 py-4 space-y-5">
                   {/* Runtime isolation — Sandbox (default) vs Direct. Server app only. */}
-                  {showRuntimeIsolation && <ServerRuntimePicker />}
+                  {showRuntimeIsolation && <ServerRuntimePicker enabled={advancedOpen} />}
 
                   {/* Build location — where the clone + build run. */}
                   {showBuildStrategy && (
@@ -1687,7 +1652,7 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
                           {config.options.hasBuild ? ts.build.subtitle : ts.build.prepareSubtitle}
                         </p>
                       </div>
-                      <div className="space-y-2">
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 items-stretch">
                         {visibleBuildOptions.map((opt) => (
                           <OptionCard
                             key={opt.value}
@@ -1700,6 +1665,7 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
                             icon={opt.icon}
                             label={opt.label}
                             description={opt.description}
+                            className="h-full"
                           />
                         ))}
                       </div>
@@ -1718,7 +1684,7 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
                           {isDesktop ? ts.clone.descDesktop : ts.clone.descServer}
                         </p>
                       </div>
-                      <div className="space-y-2">
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 items-stretch">
                         {cloneOptions.map((opt) => (
                           <OptionCard
                             key={opt.value}
@@ -1739,6 +1705,7 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
                             icon={opt.icon}
                             label={opt.label}
                             description={opt.description}
+                            className="h-full"
                           />
                         ))}
                       </div>
@@ -1746,7 +1713,7 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
                   )}
 
                   {/* Git credential forwarding — Direct (bare) app, desktop-only. */}
-                  {isDesktop && config.runtimeMode === "bare" && !isServiceDeployment && (
+                  {isDesktop && config.runtimeMode === "bare" && !isServiceDeployment && config.buildStrategy === "server" && (
                     <label className="flex items-start gap-2.5 cursor-pointer select-none rounded-xl border border-border/50 bg-card/40 px-4 py-3">
                       <input
                         type="checkbox"
@@ -1767,8 +1734,9 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
                       </span>
                     </label>
                   )}
+                  </div>
                 </div>
-              )}
+              </div>
             </div>
           )}
         </div>

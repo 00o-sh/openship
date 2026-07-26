@@ -781,12 +781,19 @@ export async function verifyPendingDomains(opts?: {
   minAgeMinutes?: number;
   /** Cap iterations per call so a backlog doesn't lock the worker. */
   limit?: number;
+  /**
+   * Scope the sweep to a single org. REQUIRED for the HTTP `/verify-pending`
+   * route (the caller's own org) — without it a tenant could enumerate and
+   * trigger DNS/SSL on every other tenant's pending domains. Omitted only by
+   * the trusted system `domains:verify-pending` cron, which sweeps instance-wide.
+   */
+  organizationId?: string;
 }): Promise<PendingVerificationResult> {
   const minAgeMinutes = opts?.minAgeMinutes ?? 10;
   const limit = opts?.limit ?? 50;
   const cutoff = new Date(Date.now() - minAgeMinutes * 60_000);
 
-  const pending = await repos.domain.findPendingVerification(cutoff, limit);
+  const pending = await repos.domain.findPendingVerification(cutoff, limit, opts?.organizationId);
   const result: PendingVerificationResult = {
     verified: 0,
     stillPending: 0,

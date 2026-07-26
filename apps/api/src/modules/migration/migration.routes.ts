@@ -41,6 +41,8 @@ r.post("/migrations/:id/cutover", { tag: "server:write", collection: true }, mig
 r.post("/migrations/:id/cancel", { tag: "server:write", collection: true }, migration.cancelMigration);
 // Resume a partial run: re-transfer pending paths (edit/skip), then finish.
 r.post("/migrations/:id/resume", { tag: "server:write", collection: true }, migration.resumeMigration);
+// Remove the volumes a FAILED run copied to the target (retry starts clean).
+r.post("/migrations/:id/cleanup-target", { tag: "server:write", collection: true }, migration.cleanupTargetData);
 // Delete a terminal run's record (history cleanup; project + data untouched).
 r.delete("/migrations/:id", { tag: "server:write", collection: true }, migration.deleteMigration);
 // The in-flight run for a server, so a reloaded client can re-attach.

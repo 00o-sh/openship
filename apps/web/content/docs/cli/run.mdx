@@ -96,6 +96,14 @@ openship up --dry-run
 | `--trust-proxy` | Trust the `X-Real-IP` set by a reverse proxy in front (the proxy MUST overwrite it with the real client IP, e.g. `proxy_set_header X-Real-IP $remote_addr`) — enables per-client rate limiting. | — |
 | `--managed-edge` | Install OpenResty + a free Let's Encrypt cert on this box and route `--public-url`'s domain to the dashboard — no separate reverse proxy needed. | — |
 | `--acme-email <email>` | Contact email for the Let's Encrypt certificates (managed edge). | — |
+| `--non-interactive`, `--yes` | Headless install: after the service starts, create the admin + register the domain from the flags below — no prompts. Missing/invalid flags exit non-zero. | — |
+| `--admin-email <email>` | Admin email — **required** for a headless install. | — |
+| `--admin-name <name>` | Admin display name. | email local-part |
+| `--admin-password <pw>` | Admin password (min 8). Prefer the `OPENSHIP_ADMIN_PASSWORD` env var (keeps it out of shell history). | — |
+| `--domain-kind <kind>` | Headless domain: `byo` · `custom` · `free` · `none`. | `byo` if `--public-url`, else `none` |
+| `--hostname <host>` | Hostname for `byo`/`custom` (or derived from `--public-url`). | — |
+| `--slug <slug>` | Free `.opsh.io` subdomain for `--domain-kind free` (box must already be Cloud-connected). | — |
+| `--edge <action>` | `migrate` · `takeover` · `cancel` — pre-answer the `:80/:443` takeover (custom domain / Compose). | prompt, else cancel |
 
 <Callout title="The dashboard is downloaded on first run">
 Unless you pass `--no-ui`, the dashboard bundle is lazy-downloaded from GitHub releases the first time you run

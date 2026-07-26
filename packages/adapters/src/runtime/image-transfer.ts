@@ -55,7 +55,10 @@ export async function transferImage(
   stdout.pipe(counter);
 
   // load consumes the counted stream; it resolves when the save stream EOFs.
-  await dst.loadImage(counter);
+  // It returns the ref the load actually restored under (the config id for a
+  // save-by-id tar) — retag from THAT, not `image.id` (often a RepoDigest that
+  // doesn't resolve on the target → "No such image").
+  const loadedRef = await dst.loadImage(counter);
 
   const exit = await awaitExit;
   if (exit.code !== 0) {
@@ -64,7 +67,7 @@ export async function transferImage(
     );
   }
   // Re-apply the tag on the target (loaded untagged when saved by id).
-  await dst.tagImage(image.id, image.tag);
+  await dst.tagImage(loadedRef ?? image.id, image.tag);
   opts?.log?.(`loaded ${image.tag} — ${bytesMoved} bytes`);
   return { bytesMoved };
 }

@@ -14,6 +14,12 @@ import { composeUp, composeIsViableDefault, composeInternalToken, hasDockerCompo
 import { resolvePorts } from "../lib/ports";
 import { prepareFromSource, type FromSourceRun } from "../lib/from-source";
 import { planAndApplyHostEdge, type EdgeAction } from "../lib/edge-preflight";
+import {
+  resolveInstallInputs,
+  headlessProvision,
+  HeadlessInputError,
+} from "../lib/instance-provision";
+import { OS_DIR, ensureInternalToken } from "../lib/loopback-api";
 import type { ImportedSite } from "@repo/adapters/proxy";
 
 const EDGE_ACTIONS: EdgeAction[] = ["migrate", "takeover", "cancel"];
@@ -49,6 +55,17 @@ interface UpOpts {
   bare?: boolean;
   /** Non-interactive answer for the compose edge preflight when a foreign proxy holds :80/:443. */
   edge?: string;
+  /** Headless install: after the service is up, create the admin + register the
+   *  domain from flags instead of prompting. Requires --admin-email + password. */
+  nonInteractive?: boolean;
+  adminName?: string;
+  adminEmail?: string;
+  /** Prefer OPENSHIP_ADMIN_PASSWORD env over the flag (keeps it out of argv). */
+  adminPassword?: string;
+  /** byo | custom | free | none (default: byo when --public-url set, else none). */
+  domainKind?: string;
+  hostname?: string;
+  slug?: string;
 }
 
 /** Normalize a URL/host to `scheme://host`, or null if unparseable. Shared with
@@ -84,7 +101,11 @@ declare const __CLI_VERSION__: string;
 // build/stage-server.ts lives alongside it at dist/server/.
 const DIST_DIR = dirname(fileURLToPath(import.meta.url));
 const SERVER_DIR = join(DIST_DIR, "server");
-const OS_DIR = join(homedir(), ".openship");
+
+// OS_DIR + ensureInternalToken live in lib/loopback-api (shared with the wizard +
+// headless installer — single copy, imported above). Re-exported so existing
+// importers of `ensureInternalToken` from "./up" (reset-admin, repair) keep working.
+export { ensureInternalToken };
 
 /** Persist a stable auth secret so sessions survive restarts. */
 function ensureAuthSecret(): string {
@@ -94,21 +115,6 @@ function ensureAuthSecret(): string {
   const secret = randomBytes(32).toString("hex");
   writeFileSync(path, secret, { mode: 0o600 });
   return secret;
-}
-
-/**
- * Persist a stable INTERNAL_TOKEN. The API is booted with it (so zero-auth is
- * off), and the `openship` setup wizard reads the SAME file to authenticate its
- * one-shot POST /system/bootstrap-admin. A browser reaching the API through the
- * public proxy has no token, so it can't create the admin.
- */
-export function ensureInternalToken(): string {
-  const path = join(OS_DIR, "internal-token");
-  if (existsSync(path)) return readFileSync(path, "utf8").trim();
-  mkdirSync(OS_DIR, { recursive: true, mode: 0o700 });
-  const token = randomBytes(32).toString("hex");
-  writeFileSync(path, token, { mode: 0o600 });
-  return token;
 }
 
 export const upCommand = new Command("up")
@@ -144,16 +150,82 @@ export const upCommand = new Command("up")
   .option("--compose", "Install via Docker Compose using the published images (postgres + redis + api + dashboard + edge on :80/:443). Default when Docker is available on Linux.")
   .option("--bare", "Install as the bare process service (embedded DB, no Docker) instead of Compose")
   .option("--edge <action>", "Compose mode: how to handle an existing proxy on :80/:443 — 'migrate' (import its sites into Openship's edge), 'takeover' (stop it; its sites stop serving), or 'cancel'. Default: prompt when interactive, else cancel.")
-  .action(async (opts: UpOpts) => {
+  .option("--non-interactive", "Headless install: after the service starts, create the admin + register the domain from the flags below (no prompts). Alias: --yes.")
+  .option("--yes", "Alias for --non-interactive.")
+  .option("--admin-name <name>", "Admin display name (headless install)")
+  .option("--admin-email <email>", "Admin email — required for a headless install")
+  .option("--admin-password <password>", "Admin password (min 8). Prefer the OPENSHIP_ADMIN_PASSWORD env var to keep it out of shell history.")
+  .option("--domain-kind <kind>", "Headless install domain: byo | custom | free | none (default: byo if --public-url set, else none)")
+  .option("--hostname <host>", "Domain/hostname for --domain-kind byo|custom (or derived from --public-url)")
+  .option("--slug <slug>", "Free .opsh.io subdomain for --domain-kind free (box must already be Cloud-connected)")
+  .action(async (opts: UpOpts & { yes?: boolean }) => {
     // From-source + foreground are bare-only (attached / dev preview).
     if (opts.fromSource || opts.source) return runFromSource(opts);
     if (opts.foreground) return runForeground(opts);
+    const headless = !!(opts.nonInteractive || opts.yes);
     // Install method: Compose is the default when it can actually work (Docker
     // present on Linux — the edge container needs host networking); else bare.
     const method = opts.bare ? "bare" : opts.compose ? "compose" : composeIsViableDefault() ? "compose" : "bare";
-    if (method === "compose") return runCompose(opts);
-    await startService(opts);
+    if (method === "compose") {
+      await runCompose(opts);
+      if (headless) {
+        console.warn(
+          chalk.yellow(
+            "\n  Headless admin bootstrap isn't wired for the Compose install yet — open the dashboard to register the first account.\n",
+          ),
+        );
+      }
+      return;
+    }
+    const started = await startService(opts);
+    if (headless && !opts.dryRun) await runHeadlessProvision(opts, started);
   });
+
+/**
+ * Headless install (bare service): after `startService` installs + supervises
+ * the process, create the admin + register the domain from the flags, so a box
+ * can be provisioned end-to-end without a TTY (the args-driven counterpart to the
+ * interactive wizard). Secrets come from flags/env and are never logged.
+ */
+async function runHeadlessProvision(
+  opts: UpOpts,
+  started: { port: string; dashPort: string },
+): Promise<void> {
+  let inputs;
+  try {
+    inputs = resolveInstallInputs({
+      adminName: opts.adminName,
+      adminEmail: opts.adminEmail,
+      adminPassword: opts.adminPassword,
+      domainKind: opts.domainKind,
+      hostname: opts.hostname,
+      slug: opts.slug,
+      publicUrl: opts.publicUrl,
+      acmeEmail: opts.acmeEmail,
+      edge: opts.edge,
+    });
+  } catch (err) {
+    if (err instanceof HeadlessInputError) {
+      console.error(chalk.red(`\n  ${err.message}\n`));
+      process.exit(1);
+    }
+    throw err;
+  }
+
+  try {
+    const result = await headlessProvision({
+      port: started.port,
+      dashPort: started.dashPort,
+      inputs,
+      onLog: (m) => console.log(chalk.dim(`  ${m}`)),
+    });
+    console.log(chalk.green(`\n  ✓ Openship provisioned${result.liveUrl ? `: ${result.liveUrl}` : "."}`));
+    for (const w of result.warnings) console.warn(chalk.yellow(`  ⚠ ${w}`));
+  } catch (err) {
+    console.error(chalk.red(`\n  Headless provisioning failed: ${(err as Error).message}\n`));
+    process.exit(1);
+  }
+}
 
 /**
  * `openship up` (Docker Compose): bring up the published images as a stack

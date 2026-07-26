@@ -62,7 +62,7 @@
     "servers": "Serveurs",
     "emails": "E-mails",
     "settings": "Paramètres",
-    "billing": "Facturation",
+    "billing": "Facturation et utilisation",
     "sections": {
       "main": "Principal",
       "settings": "Paramètres",
@@ -135,7 +135,7 @@
       "description": "Paramètres du compte, de l'équipe et de la plateforme."
     },
     "billing": {
-      "title": "Facturation",
+      "title": "Facturation et utilisation",
       "description": "Gérez votre abonnement, votre consommation et vos moyens de paiement."
     },
     "apps": {
@@ -196,7 +196,7 @@
       "description": "Domaines personnalisés"
     },
     "billing": {
-      "title": "Facturation",
+      "title": "Facturation et utilisation",
       "description": "Consommation et forfaits"
     }
   }

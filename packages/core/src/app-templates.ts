@@ -167,6 +167,12 @@ export interface AppOutput {
    *  (e.g. dbUrl → "DATABASE_URL"). Authored in the catalog so the "Use in a
    *  project" flow can prefill it instead of guessing client-side. */
   envKey?: string;
+  /** Source SERVICE this output belongs to (a `TemplateServiceSpec.name` /
+   *  `AppEndpoint.service`, i.e. the docker network alias). Authoritative for
+   *  internal-mode host rewriting — needed when the `source` string can't carry
+   *  it (a `template:` URL). Falls back to the service parsed from `source`
+   *  (`env:<service>:…` / `publicUrl:<service>…`) via `getOutputService`. */
+  service?: string;
   /** Part of the one-click recommended bundle — pre-checked in the connection
    *  handover so the user doesn't have to reason about which value to inject. */
   recommended?: boolean;
@@ -450,6 +456,41 @@ export function getAppEndpoints(template: AppTemplate): readonly AppEndpoint[] {
     derived.push({ service: svc.name, port, label: svc.name, kind: "http" });
   }
   return derived;
+}
+
+/**
+ * The source SERVICE (docker network alias) an output belongs to: the explicit
+ * `output.service` when authored, else parsed from the `source` prefix
+ * (`env:<service>:…` / `publicUrl:<service>…`). Null for a `template:` source
+ * with no declared service — there's no alias to rewrite an internal URL to.
+ * Single authority so the DTO, the internal-URL rewrite, and validation agree.
+ */
+export function getOutputService(output: Pick<AppOutput, "service" | "source">): string | null {
+  if (output.service) return output.service;
+  const m = /^(?:env|publicUrl):([^:]+)/.exec(output.source ?? "");
+  return m?.[1] ?? null;
+}
+
+/**
+ * Resolve the internal docker endpoint (service alias + container port) an
+ * internal connection URL should point at: the declared endpoint for `service`,
+ * preferring one whose port matches `preferredPort` (the source URL's own port),
+ * else the required endpoint, else the first. Null when the service exposes no
+ * declared endpoint. Replaces the old port-coincidence guess — the service is
+ * authoritative, so two endpoints sharing a port or a portless URL resolve
+ * correctly.
+ */
+export function resolveInternalEndpoint(
+  template: AppTemplate,
+  service: string,
+  preferredPort?: number,
+): { service: string; port: number } | null {
+  const eps = getAppEndpoints(template).filter((e) => e.service === service);
+  if (eps.length === 0) return null;
+  const byPort =
+    preferredPort !== undefined ? eps.find((e) => e.port === preferredPort) : undefined;
+  const chosen = byPort ?? eps.find((e) => e.required) ?? eps[0]!;
+  return { service: chosen.service, port: chosen.port };
 }
 
 /** Connectable bundles this app advertises to other projects (empty when none). */

@@ -17,6 +17,8 @@
     "custom-servers",
     "migrate-from-coolify-dokploy-dokku",
     "server-to-server-migration",
+    "migrate-control-plane",
+    "database-migrations",
     "teams-members",
     "email-webmail",
     "cloud-connect-migration",

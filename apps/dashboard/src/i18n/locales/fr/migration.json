@@ -57,7 +57,8 @@
       "conflictClone": "Cloner",
       "conflictCloneHint": "Nouveau volume, garder l'ancien",
       "conflictKeep": "Conserver",
-      "conflictKeepHint": "Utiliser les données existantes"
+      "conflictKeepHint": "Utiliser les données existantes",
+      "measuring": "Mesure de la taille du transfert…"
     },
     "steps": {
       "select": "Sélection",
@@ -235,7 +236,8 @@
     "resuming": "Reprise…",
     "editRetry": "Modifier et réessayer",
     "safetyTitle": "Non destructif et réversible.",
-    "safetyBody": "Votre source continue de fonctionner tout du long — les données sont copiées, jamais déplacées. Rien n'est supprimé, même après une migration réussie : vos conteneurs d'origine restent (arrêtés, comme filet de sécurité) jusqu'à ce que vous les supprimiez explicitement lors de la bascule."
+    "safetyBody": "Votre source continue de fonctionner tout du long — les données sont copiées, jamais déplacées. Rien n'est supprimé, même après une migration réussie : vos conteneurs d'origine restent (arrêtés, comme filet de sécurité) jusqu'à ce que vous les supprimiez explicitement lors de la bascule.",
+    "cleanupTarget": "Supprimer les données copiées sur la cible"
   },
   "plan": {
     "missing": "introuvable"

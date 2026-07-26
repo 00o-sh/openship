@@ -578,7 +578,7 @@ export interface CommandExecutor {
   execWithInput?(
     command: string,
     body: Readable,
-  ): Promise<{ code: number; stderr: string }>;
+  ): Promise<{ code: number; stderr: string; stdout: string }>;
 
   /**
    * Open a Unix domain socket tunnel to the target machine.

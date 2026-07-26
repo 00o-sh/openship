@@ -101,4 +101,54 @@ describe("assertDumpSelfContained (cross-tenant ingest guard)", () => {
       assertDumpSelfContained(dump({ project: [{ id: "prj_1", groupId: null, organizationId: "o" }] })),
     ).not.toThrow();
   });
+
+  it("rejects a backup_run whose destinationId points at a foreign backup_destination (credential-adoption exploit)", () => {
+    expect(() =>
+      assertDumpSelfContained(
+        dump({
+          backup_run: [
+            { id: "bkr_evil", destinationId: "bkd_VICTIM", projectId: "prj_1", organizationId: "o" },
+          ],
+          project: [{ id: "prj_1", organizationId: "o" }],
+        }),
+      ),
+    ).toThrow(/references a backup_destination not present/);
+  });
+
+  it("rejects a backup_restore whose runId points at a foreign backup_run", () => {
+    expect(() =>
+      assertDumpSelfContained(
+        dump({ backup_restore: [{ id: "bks_1", runId: "bkr_VICTIM", organizationId: "o" }] }),
+      ),
+    ).toThrow(/references a backup_run not present/);
+  });
+
+  it("rejects a notification_subscription whose channelId points at a foreign notification_channel (cross-tenant channel attach)", () => {
+    expect(() =>
+      assertDumpSelfContained(
+        dump({
+          notification_subscription: [
+            { id: "nsb_evil", channelId: "nch_VICTIM", organizationId: "o", userId: "u" },
+          ],
+        }),
+      ),
+    ).toThrow(/references a notification_channel not present/);
+  });
+
+  it("accepts a self-contained backup subgraph (destination + run present)", () => {
+    expect(() =>
+      assertDumpSelfContained(
+        dump({
+          backup_destination: [{ id: "bkd_1", organizationId: "o" }],
+          project: [{ id: "prj_1", organizationId: "o" }],
+          backup_run: [
+            { id: "bkr_1", destinationId: "bkd_1", projectId: "prj_1", organizationId: "o" },
+          ],
+          backup_restore: [
+            { id: "bks_1", runId: "bkr_1", destinationId: "bkd_1", organizationId: "o" },
+          ],
+        }),
+      ),
+    ).not.toThrow();
+  });
 });

@@ -443,6 +443,7 @@
             "id": "dbUrl",
             "label": "Database URL",
             "source": "template:postgresql://postgres:{{env:db:POSTGRES_PASSWORD}}@{{host}}:5432/postgres",
+            "service": "db",
             "secret": true,
             "envKey": "DATABASE_URL",
             "recommended": true,

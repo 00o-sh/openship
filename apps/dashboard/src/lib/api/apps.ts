@@ -78,6 +78,10 @@ export interface AppConnectionOutput {
   value: string;
   /** Catalog-recommended target env-var name for the "Use in a project" handover. */
   envKey?: string;
+  /** Source SERVICE (docker alias) this output belongs to — lets the "Use in a
+   *  project" modal group outputs by service and pick which service(s) to inject.
+   *  null when neither the output's `service` nor its `source` carries one. */
+  service: string | null;
   /** Part of the recommended one-click bundle — pre-checked in the handover. */
   recommended?: boolean;
   /** Label for the primary value in the switch (default "Default"); with `variants`. */

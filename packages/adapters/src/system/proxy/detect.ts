@@ -91,27 +91,51 @@ export function isOurEdgeContainer(name?: string, image?: string): boolean {
 }
 
 /**
- * Does OUR OpenResty own the edge? Two topologies:
- *   - bare host  → our Lua scripts are deployed on the host (`test -f`).
- *   - CONTAINER (default self-hosted) → our `openship-edge` container is running.
- *     Its Lua lives INSIDE the container (invisible to a host `test -f`), and
- *     with host networking it publishes no port a `--filter publish` would match,
- *     so detect it by name — otherwise our own edge reads as a foreign proxy and
- *     the takeover flow fires against itself (the "Another proxy holds 80/443"
- *     stall after a migration).
+ * Is OUR edge CONTAINER running? `openship-edge` by NAME (the default) or by
+ * IMAGE (covers a container renamed via OPENSHIP_EDGE_CONTAINER). A running edge
+ * container OWNS 80/443 — host-networked (no `--filter publish` match; its Lua
+ * lives inside the container, so a host `test -f` misses it) or bridged. This is
+ * the SELF-TAKEOVER LOCK: a running edge container alone proves the edge is
+ * ours, independent of how the host renders the listening process (the host may
+ * show `nginx: master process nginx -g daemon off;` with no `openresty` prefix,
+ * and `readlink /proc/<pid>/exe` can be denied). Never let our own edge read as
+ * a foreign proxy the takeover flow would kill.
  */
-export async function isOpenshipManagedEdge(executor: CommandExecutor): Promise<boolean> {
+export async function ourEdgeContainerRunning(executor: CommandExecutor): Promise<boolean> {
+  const byName = await tryExec(
+    executor,
+    `docker ps --filter name=openship-edge --format '{{.Names}}' 2>/dev/null | head -1`,
+  );
+  if (byName && byName.trim()) return true;
+
+  // Renamed container (OPENSHIP_EDGE_CONTAINER): still ours if it runs our image.
+  const all = await tryExec(executor, `docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null`);
+  if (!all) return false;
+  return all
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .some((line) => {
+      const [name, image] = line.split("\t");
+      return isOurEdgeContainer(name, image);
+    });
+}
+
+/**
+ * Is our OpenResty Lua deployed on the HOST filesystem — i.e. is OUR BARE-HOST
+ * edge present? Deliberately distinct from `ourEdgeContainerRunning`: callers on
+ * the bare-install path (stop-then-reinstall a host OpenResty) must key on THIS,
+ * not on a running container — a host `pkill -f openresty` would also hit a
+ * host-networked container's process and kill our own containerized edge.
+ * `probeEdge` also uses the two signals separately for the bare-host regression
+ * guard (stale Lua + a foreign nginx must NOT read as ours).
+ */
+export async function ourLuaOnHost(executor: CommandExecutor): Promise<boolean> {
   const lua = await tryExec(
     executor,
     `test -f ${OPENRESTY_LUA_DIR}/site_logger.lua && echo ok`,
   );
-  if (lua && lua.includes("ok")) return true;
-
-  const edge = await tryExec(
-    executor,
-    `docker ps --filter name=openship-edge --format '{{.Names}}' 2>/dev/null | head -1`,
-  );
-  return Boolean(edge && edge.trim());
+  return Boolean(lua && lua.includes("ok"));
 }
 
 async function detectDockerOnPort(
@@ -151,7 +175,7 @@ async function listenerIsOurOpenResty(
 async function probeEdgePort(
   executor: CommandExecutor,
   port: number,
-  ourEdge: boolean,
+  ours: { containerRunning: boolean; luaOnHost: boolean },
 ): Promise<EdgeOccupant | null> {
   const listener = await probeListeningPort(executor, port);
   const docker = await detectDockerOnPort(executor, port);
@@ -169,19 +193,28 @@ async function probeEdgePort(
       .join(" "),
   );
 
-  // "Ours" has two shapes:
+  // A DIFFERENT docker container publishing this port is genuinely foreign — our
+  // edge can't co-bind with it, so `containerRunning` must not claim it.
+  const foreignDockerProxy = Boolean(docker) && !isOurEdgeContainer(docker?.name, docker?.image);
+
+  // "Ours" has three shapes:
   //   - OUR edge CONTAINER publishes this port (bridged `openship-edge`) — the
   //     docker occupant IS our edge image/name.
-  //   - a HOST process is genuinely our OpenResty: the binary ACTUALLY LISTENING
-  //     resolves under an `openresty` prefix (/usr/local/openresty/nginx/sbin/
-  //     nginx), NOT a distro /usr/sbin/nginx that merely shares the "nginx"
-  //     process name while our Lua happens to sit on disk from a past run
-  //     (the hekai regression). Host networking puts our containerized edge's
-  //     OpenResty here too (no docker publish match) → `ourEdge` (the running
-  //     `openship-edge` container) gates it.
+  //   - our edge CONTAINER is RUNNING (host-networked → no docker publish match;
+  //     its Lua lives inside the container). A running edge container OWNS
+  //     80/443, so the host-process occupant here IS its OpenResty — mark it ours
+  //     WITHOUT depending on the listener's binary path (the host may render the
+  //     master as `nginx: master process nginx …` with no `openresty` prefix, and
+  //     `readlink /proc/<pid>/exe` can be denied). THIS is the self-takeover lock:
+  //     our own edge must never read as foreign and get killed by the takeover.
+  //   - BARE host: our Lua is on disk AND the process ACTUALLY LISTENING resolves
+  //     under an `openresty` prefix — the strict check that keeps a distro
+  //     /usr/sbin/nginx from being claimed as ours just because stale Lua remains
+  //     (the hekai regression).
   const managedByOpenship =
     isOurEdgeContainer(docker?.name, docker?.image) ||
-    (!docker && ourEdge && (await listenerIsOurOpenResty(executor, listener)));
+    (ours.containerRunning && !foreignDockerProxy) ||
+    (!docker && ours.luaOnHost && (await listenerIsOurOpenResty(executor, listener)));
 
   return {
     port,
@@ -201,11 +234,16 @@ async function probeEdgePort(
 
 /** Detect and classify what owns ports 80/443. Read-only. */
 export async function probeEdge(executor: CommandExecutor): Promise<EdgeStatus> {
-  const ourEdge = await isOpenshipManagedEdge(executor);
+  // Two independent "ours" signals: a running edge CONTAINER is authoritative on
+  // its own (self-takeover lock); Lua-on-host only counts alongside a listener
+  // that resolves to our OpenResty (bare-host regression guard). Kept separate
+  // so probeEdgePort can apply each rule correctly.
+  const containerRunning = await ourEdgeContainerRunning(executor);
+  const luaOnHost = await ourLuaOnHost(executor);
 
   const all: EdgeOccupant[] = [];
   for (const port of EDGE_PORTS) {
-    const occ = await probeEdgePort(executor, port, ourEdge);
+    const occ = await probeEdgePort(executor, port, { containerRunning, luaOnHost });
     if (occ) all.push(occ);
   }
 

@@ -340,10 +340,9 @@ export default function DashboardHomeClient({ initialData }: DashboardHomeClient
                     const status = getProjectStatus(p);
                     const statusMeta = PROJECT_STATUS_META[status];
                     return (
-                      <button
+                      <Link
                         key={p.id}
-                        type="button"
-                        onClick={() => router.push(`/projects/${p.id}`)}
+                        href={`/projects/${p.id}`}
                         className={`group flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/40 ${
                           i > 0 ? "border-t border-border/50" : ""
                         }`}
@@ -359,7 +358,7 @@ export default function DashboardHomeClient({ initialData }: DashboardHomeClient
                         >
                           {projectStatusLabel(status, t)}
                         </span>
-                      </button>
+                      </Link>
                     );
                   })}
                   {appProjects.length > 3 && (

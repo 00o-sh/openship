@@ -383,6 +383,18 @@ function extractNetworkInfo(data: { NetworkSettings: any }): {
   return { ip, hostPort };
 }
 
+/**
+ * Parse the reference `docker load` printed. It emits either
+ * "Loaded image: <repo:tag>" (the tar carried RepoTags) or "Loaded image ID:
+ * sha256:<configId>" (a save-by-id tar is untagged). Returns the last such ref
+ * — that's the loadable handle on THIS daemon (the config id, not the source's
+ * possibly-a-RepoDigest id), which the caller retags.
+ */
+function parseLoadedImageRef(output: string): string | undefined {
+  const matches = [...(output || "").matchAll(/Loaded image(?: ID)?:\s*(\S+)/gi)];
+  return matches.length ? matches[matches.length - 1][1].trim() : undefined;
+}
+
 // ─── Docker runtime ──────────────────────────────────────────────────────────
 
 export class DockerRuntime implements RuntimeAdapter {
@@ -2018,21 +2030,30 @@ export class DockerRuntime implements RuntimeAdapter {
    * Load an image tar (a `docker save` stream) INTO this daemon — the target
    * half of a cross-server image move. Over SSH the tar streams into a native
    * `docker load` stdin (execWithInput); local socket / TCP use dockerode's
-   * loadImage. Throws on a non-zero load.
+   * loadImage. Throws on a non-zero load. Returns the reference `docker load`
+   * reported ("Loaded image( ID)?: <ref>") so the caller can retag: a
+   * save-by-id load is untagged AND restores under the CONFIG image id, which
+   * differs from the source ref — tagging by the source id would fail.
    */
-  async loadImage(body: Readable): Promise<void> {
+  async loadImage(body: Readable): Promise<string | undefined> {
     const executor = this.transport.kind === "ssh" ? this.connectionOptions?.executor : null;
     if (executor?.execWithInput) {
-      const { code, stderr } = await executor.execWithInput(`docker load`, body);
+      const { code, stderr, stdout } = await executor.execWithInput(`docker load`, body);
       if (code !== 0) throw new Error(`docker load exited ${code}${stderr ? `: ${stderr.slice(0, 500)}` : ""}`);
-      return;
+      return parseLoadedImageRef(stdout);
     }
     const stream = await this.docker.loadImage(body);
+    let loadOutput = "";
     await new Promise<void>((resolve, reject) => {
-      this.docker.modem.followProgress(stream as NodeJS.ReadableStream, (err) =>
-        err ? reject(err) : resolve(),
+      this.docker.modem.followProgress(
+        stream as NodeJS.ReadableStream,
+        (err) => (err ? reject(err) : resolve()),
+        (ev: { stream?: string }) => {
+          if (ev?.stream) loadOutput += ev.stream;
+        },
       );
     });
+    return parseLoadedImageRef(loadOutput);
   }
 
   /**

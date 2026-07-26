@@ -34,7 +34,7 @@ import { ProjectSidebar, ProjectMobileTabs } from "../components/ProjectSidebar"
 import { DraftProjectView } from "../components/DraftProjectView";
 import { getProjectStatus } from "@/utils/project-status";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
-import { useProjectInfo } from "@/hooks/useProjectEndpoints";
+import { useProjectInfo, PROJECT_INFO_NOT_FOUND } from "@/hooks/useProjectEndpoints";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useToast } from "@/context/ToastContext";
@@ -855,6 +855,14 @@ const ProjectSettingsContent = () => {
       </PageContainer>
     );
   }
+  // A non-404 fetch failure (cloud unreachable, network, 5xx) never delivers
+  // the real project — the empty seed still reads as "draft" below, so guard
+  // here and surface the actual load error instead of a fake draft screen.
+  // (404 / access errors are already handled via projectNotFound above.)
+  if (projectInfoError && projectInfoError !== PROJECT_INFO_NOT_FOUND && !projectDataReady) {
+    return <ErrorState type="load-failed" error={{ details: projectInfoError }} />;
+  }
+
   // Draft / never-successfully-deployed projects (no active deployment)
   // get a focused screen instead of the analytics dashboard, which would
   // otherwise render empty. In-flight first builds (queued/building/

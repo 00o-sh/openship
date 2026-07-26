@@ -17,7 +17,6 @@ import { useToast } from "@/context/ToastContext";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import { WebhookDeliveries } from "./WebhookDeliveries";
-import { ManagedGithubWebhook } from "./ManagedGithubWebhook";
 
 export function IncomingWebhooks() {
   const { t } = useI18n();
@@ -79,10 +78,8 @@ export function IncomingWebhooks() {
 
   return (
     <div className="space-y-5">
-      {/* Managed GitHub hook — the push→auto-deploy webhook, surfaced here as the
-          generic webhook control (enable/disable + delivery route + status). */}
-      <ManagedGithubWebhook />
-
+      {/* GitHub push→deploy lives on the Source tab now (a single switch next to
+          the repo). This tab is only the generic incoming webhooks. */}
       <div className="rounded-2xl border border-border/50 bg-card p-5">
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-start gap-3">

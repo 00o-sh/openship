@@ -173,12 +173,13 @@ export interface MigrationPreview {
   /** Per kept domain: whether the source cert will be CARRIED (reused, no ACME)
    *  or re-issued on publish. Cross-server only. */
   sslByDomain?: Array<{ domain: string; hasCert: boolean }>;
-  /** Cross-server: services whose target volume(s) already hold data — the user
-   *  resolves each (override/clone/keep) at the plan step before migrating. */
-  conflicts?: Array<{ serviceName: string; volumes: string[] }>;
+  /** Cross-server: each target VOLUME that already holds data (unique per
+   *  volume name — two services can share a display name). The user resolves
+   *  each (override/clone/keep) at the plan step before migrating. */
+  conflicts?: Array<{ serviceName: string; volume: string }>;
 }
 
-/** Per-service resolution for a target-volume conflict. */
+/** Per-VOLUME resolution for a target-volume conflict (keyed by volume name). */
 export type ConflictAction = "override" | "clone" | "keep";
 
 export type MigrationStatus =
@@ -223,6 +224,9 @@ export interface MigrationRun {
   finishedAt?: string | null;
   /** `partial` run's unresolved paths (edit/skip → resume). */
   pendingItems?: PendingItem[];
+  /** Volumes a run wrote to the target — a FAILED run can offer to remove these
+   *  (they're orphaned after rollback) so a retry starts clean. */
+  targetVolumes?: string[];
   /** Snapshot of the start input — drives a failed run's edit-&-retry re-seed
    *  (detail fetch only; stripped from the list). */
   inputSnapshot?: Record<string, unknown> | null;
@@ -404,6 +408,71 @@ export const dockerMigrationApi = {
       endpoints.dockerMigration.migration(id),
     ),
 
+  /**
+   * Live run SSE — the CLEAN real-time feed (like the deploy build stream):
+   * byte-level `progress` (smooth bar) + session `log` lines as they happen.
+   * Returns a cleanup fn; the run row (status / pendingItems) is still the
+   * authoritative source via getMigration, so a dropped stream degrades to the
+   * poll rather than stalling. Best-effort — never throws.
+   */
+  streamMigration: (
+    id: string,
+    handlers: { onProgress?: (u: TransferProgress) => void; onLog?: (line: string) => void },
+  ): (() => void) => {
+    const controller = new AbortController();
+    void (async () => {
+      const url = `${getApiBaseUrl()}${endpoints.dockerMigration.migration(id)}/stream`;
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: "GET",
+          credentials: "include",
+          headers: { Accept: "text/event-stream" },
+          signal: controller.signal,
+        });
+      } catch {
+        return;
+      }
+      if (!res.ok || !res.body) return;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let nl: number;
+          while ((nl = buf.indexOf("\n\n")) !== -1) {
+            const frame = buf.slice(0, nl);
+            buf = buf.slice(nl + 2);
+            const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
+            if (!dataLine) continue;
+            let ev: { type?: string; line?: string } & Partial<TransferProgress>;
+            try {
+              ev = JSON.parse(dataLine.slice(5).trim());
+            } catch {
+              continue;
+            }
+            if (ev.type === "progress" && typeof ev.movedBytes === "number") {
+              handlers.onProgress?.({
+                task: ev.task ?? "",
+                kind: ev.kind ?? "volume",
+                movedBytes: ev.movedBytes,
+                totalBytes: ev.totalBytes ?? null,
+              });
+            } else if (ev.type === "log" && typeof ev.line === "string") {
+              handlers.onLog?.(ev.line);
+            }
+          }
+        }
+      } catch {
+        /* aborted / dropped — the getMigration poll keeps state fresh */
+      }
+    })();
+    return () => controller.abort();
+  },
+
   /** Confirm (kill=true) or decline (kill=false) the destructive cutover. */
   confirmCutover: (id: string, confirmationToken: string, kill: boolean) =>
     api.post<{ success: boolean }>(endpoints.dockerMigration.cutover(id), {
@@ -423,6 +492,10 @@ export const dockerMigrationApi = {
    *  overrides) and skip the chosen ones; finishes to cutover when none remain. */
   resume: (id: string, body: { overrides?: Record<string, string>; skip?: string[] }) =>
     api.post<{ success: boolean }>(endpoints.dockerMigration.resume(id), body),
+
+  /** Remove the volumes a FAILED run copied to the target (source untouched). */
+  cleanupTarget: (id: string) =>
+    api.post<{ success: boolean; removed: number }>(endpoints.dockerMigration.cleanupTarget(id), {}),
 
   /** The in-flight run for a server (or null) — for re-attaching after a reload. */
   getActive: (serverId: string) =>

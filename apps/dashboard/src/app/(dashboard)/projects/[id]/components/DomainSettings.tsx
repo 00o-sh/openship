@@ -17,7 +17,6 @@ import {
   ShieldAlert,
   ShieldCheck,
   Star,
-  X,
 } from "lucide-react";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { RoutingConfigCard } from "./RoutingConfigCard";
@@ -376,15 +375,6 @@ export const DomainSettings = () => {
   const servicesLoading = servicesData.isLoading;
   const hasProjectServer = projectData.options?.hasServer ?? buildData.hasServer ?? true;
 
-  // A deployed self-hosted stack with an exposed service is the only case that
-  // needs an edge — probe its health once so the button can show "Edge ready"
-  // vs "Set up edge" without the user having to click.
-  const edgeRelevant =
-    selfHosted && !!projectData.activeDeploymentId && services.some((s) => s.enabled && s.exposed);
-  useEffect(() => {
-    if (edgeRelevant) void checkEdge();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [edgeRelevant]);
   const projectRuntimePort = String(
     projectData.options?.productionPort ||
     buildData.productionPort ||
@@ -465,6 +455,73 @@ export const DomainSettings = () => {
   const localPort = projectData.port || projectData.options?.productionPort || 3000;
   const localUrl = `localhost:${localPort}`;
   const hasDomain = !!primaryDomainName;
+
+  // An edge (OpenResty owning the server's 80/443) is needed by ANY deployed
+  // self-hosted stack that serves a public route — a compose stack with an
+  // exposed service OR a single/project-level app that has a domain. This used
+  // to require an exposed SERVICE, so the single-project Domains tab never
+  // surfaced the edge status / "Set up edge" control (the edge was only wired
+  // implicitly on first-route publish). Probe once so the shared control can
+  // show "Edge ready" vs "Set up edge" without the user having to click.
+  const edgeRelevant =
+    selfHosted &&
+    !!projectData.activeDeploymentId &&
+    (services.some((s) => s.enabled && s.exposed) || (hasProjectLevelRouting && hasDomain));
+  useEffect(() => {
+    if (edgeRelevant) void checkEdge();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [edgeRelevant]);
+
+  // Shared edge status/control — ONE definition rendered by BOTH the
+  // project-level (single app) and per-service (compose) branches so the
+  // "Set up edge" / "Edge ready" affordance is identical everywhere and never
+  // duplicated. Returns null when the stack needs no server edge (not
+  // self-hosted, not deployed, or no public route yet).
+  const renderEdgeControl = (): React.ReactNode => {
+    if (!edgeRelevant) return null;
+    if (edge.loading) {
+      return (
+        <ActionButton
+          label={t.projectSettings.domains.edge.checking}
+          icon={Loader2}
+          spinning
+          disabled
+        />
+      );
+    }
+    if (edge.ready) {
+      return (
+        <span className="inline-flex items-center gap-2">
+          <span className="inline-flex min-h-10 items-center gap-1.5 rounded-xl bg-success-bg px-3 py-2 text-[13px] font-medium text-success">
+            <ShieldCheck className="size-3.5" />
+            {t.projectSettings.domains.edge.ready}
+          </span>
+          <button
+            type="button"
+            onClick={() => void checkEdge()}
+            className="text-[12px] text-muted-foreground transition-colors hover:text-foreground"
+          >
+            {t.projectSettings.domains.edge.recheck}
+          </button>
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-2">
+        <ActionButton
+          label={t.projectSettings.domains.edge.setUp}
+          icon={ShieldCheck}
+          onClick={openEdge}
+        />
+        {(edge.classification === "known" || edge.classification === "unknown") && (
+          <span className="text-[12px] text-warning">
+            {t.projectSettings.domains.edge.foreignProxyHint}
+          </span>
+        )}
+      </span>
+    );
+  };
+
   const currentUrl = hasDomain ? primaryDomainName : localUrl;
   const currentHref = hasDomain ? `https://${primaryDomainName}` : `http://${localUrl}`;
   const isManagedHostDomain = hasDomain && primaryDomainName.endsWith(`.${baseDomain}`);
@@ -980,12 +1037,14 @@ export const DomainSettings = () => {
       .map((endpoint) => buildPublicEndpointPayload(endpoint, hasProjectServer))
       .filter((endpoint): endpoint is NonNullable<ReturnType<typeof buildPublicEndpointPayload>> => endpoint !== null);
 
-    if (payload.length !== endpoints.length || payload.length === 0) {
+    // Reject INCOMPLETE endpoints (a row that didn't map), but ALLOW an empty set
+    // — removing every domain is a valid "internal-only / no public route" state.
+    if (payload.length !== endpoints.length) {
       showToast(t.projectSettings.domains.toast.completeEndpoints, "error", t.projectSettings.domains.toast.domainsTitle);
       return false;
     }
 
-    const primaryPort = hasProjectServer && "port" in payload[0]
+    const primaryPort = hasProjectServer && payload[0] && "port" in payload[0]
       ? payload[0].port
       : undefined;
 
@@ -1327,6 +1386,42 @@ export const DomainSettings = () => {
     return items;
   };
 
+  // ONE route card, rendered by BOTH the project-level and per-service grids so
+  // a single-app domain and a compose service route look identical. The caller
+  // supplies only what differs: the edit target (`onEdit`) and whether
+  // set-primary applies (`onSetPrimary`). Everything else — verify, SSL menu,
+  // hints — is shared.
+  const renderRouteCard = (
+    item: DomainSummaryItem,
+    opts: { onEdit: () => void; onSetPrimary?: () => void },
+  ): React.ReactNode => {
+    const canVerify = item.needsVerify && !!item.domainId;
+    const menuActions = buildDomainMenuActions({
+      domain: item,
+      isManagedRow: item.hostname.toLowerCase().endsWith(`.${baseDomain}`),
+      isRenewing: renewingHostname === item.hostname,
+      isRechecking: recheckingDomainId === item.domainId,
+      onEditRoute: opts.onEdit,
+      onSetPrimary: opts.onSetPrimary,
+      isSettingPrimary: settingPrimaryId === item.id,
+    });
+    return (
+      <DomainOverviewCard
+        key={item.id}
+        domain={item}
+        menuActions={menuActions}
+        onVerify={canVerify ? () => startVerify(item.domainId!, item.hostname) : undefined}
+        verifying={!!verifyingDomainId && verifyingDomainId === item.domainId}
+        verifyHint={verifyHintFor(item.domainId)}
+        autoOpenRecords={!!item.domainId && verifyFailure?.domainId === item.domainId}
+        loadRecords={canVerify ? () => domainsApi.records(item.domainId!).then((r) => r.data.records) : undefined}
+        onCopy={handleCopy}
+        portHint={portHintFor(item.mappedPort, item.serviceId)}
+        outputHint={outputHintFor(item.targetPath)}
+      />
+    );
+  };
+
   const editingRouteService =
     services.find((service) => service.id === editingRouteServiceId) ?? null;
   const editingRoute = editingRouteService ? getServiceRouteSummary(editingRouteService) : null;
@@ -1663,80 +1758,70 @@ export const DomainSettings = () => {
         // no auto project "primary" domain for them.
         <div className="space-y-3">
           <div className="flex flex-wrap items-center justify-end gap-2">
+            {renderEdgeControl()}
             {hasMultipleProjectDomains ? multiDomainActions : singleDomainActions}
           </div>
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-            {domainSummaries.map((domain) => {
-              // Pending custom domains get a Verify button right next to
-              // their Pending status pill so the toast's "click Verify"
-              // instruction isn't a scavenger hunt. Verified rows just
-              // get the Visit action. We never render Verify without a
-              // domainId — without it the API call has no row to verify
-              // (e.g. pre-save endpoint drafts).
-              // Secondary actions collapse into the card's ⋯ menu (Visit is the
-              // header icon). Verify shows on pending rows; Renew/Recheck SSL on
-              // verified custom rows only (free .opsh.io is host-managed).
-              const isVerifying = !!verifyingDomainId && verifyingDomainId === domain.domainId;
-              const isManagedRow = domain.hostname.toLowerCase().endsWith(`.${baseDomain}`);
-              const isRenewing = renewingHostname === domain.hostname;
-              const isRechecking = recheckingDomainId === domain.domainId;
-              const canVerify = domain.needsVerify && !!domain.domainId;
-              const menuActions = buildDomainMenuActions({
-                domain,
-                isManagedRow,
-                isRenewing,
-                isRechecking,
-                // Per-card Edit → the project's edit-domains mode, so a single-app
-                // domain card has the same ⋯ affordance as the per-service cards.
-                onEditRoute: () => setIsEditingDomains(true),
-                // Reassigning primary only makes sense with >1 project domain.
+            {domainSummaries.map((domain) =>
+              renderRouteCard(domain, {
+                // Per-card Edit → the project's edit-domains mode (Phase 2 will
+                // route this to the shared modal). Set-primary only makes sense
+                // with >1 project domain.
+                onEdit: () => setIsEditingDomains(true),
                 onSetPrimary:
                   hasMultipleProjectDomains && !domain.isPrimary
                     ? () => void handleSetPrimaryDomain(domain)
                     : undefined,
-                isSettingPrimary: settingPrimaryId === domain.id,
-              });
-              return (
-                <DomainOverviewCard
-                  key={domain.id}
-                  domain={domain}
-                  menuActions={menuActions}
-                  onVerify={canVerify ? () => startVerify(domain.domainId!, domain.hostname) : undefined}
-                  verifying={isVerifying}
-                  verifyHint={verifyHintFor(domain.domainId)}
-                  autoOpenRecords={!!domain.domainId && verifyFailure?.domainId === domain.domainId}
-                  loadRecords={canVerify ? () => domainsApi.records(domain.domainId!).then((r) => r.data.records) : undefined}
-                  onCopy={handleCopy}
-                  portHint={portHintFor(domain.mappedPort, domain.serviceId)}
-                  outputHint={outputHintFor(domain.targetPath)}
-                />
-              );
-            })}
+              }),
+            )}
           </div>
         </div>
       ) : null}
 
       {hasProjectLevelRouting && isEditingDomains ? (
-        <div className="space-y-3">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h3 className="text-[14px] font-semibold text-foreground">{t.projectSettings.domains.edit.title}</h3>
-              <p className="mt-0.5 text-[12px] text-muted-foreground">
-                {hasProjectServer
-                  ? t.projectSettings.domains.edit.descServer
-                  : t.projectSettings.domains.edit.descStatic}
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
+        // Same modal chrome as the per-service "Edit route" modal below, so
+        // editing a single-app domain and a compose route look identical. The
+        // body reuses PublicEndpointsCard (which renders RoutingSettingsCard),
+        // saved once via handleSavePublicEndpoints. Backdrop / Cancel closes.
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm"
+          onClick={handleCancelEditingDomains}
+        >
+          <div
+            className="w-full max-w-2xl overflow-hidden rounded-2xl border border-border/60 bg-card shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-4 border-b border-border/40 px-5 py-4">
+              <div className="min-w-0">
+                <h3 className="text-[14px] font-semibold text-foreground">{t.projectSettings.domains.edit.title}</h3>
+                <p className="mt-0.5 text-[12px] text-muted-foreground">
+                  {hasProjectServer
+                    ? t.projectSettings.domains.edit.descServer
+                    : t.projectSettings.domains.edit.descStatic}
+                </p>
+              </div>
               <button
                 type="button"
                 onClick={handleCancelEditingDomains}
                 disabled={isSavingPublicEndpoints}
-                className="inline-flex items-center justify-center gap-2 rounded-xl bg-foreground/[0.06] px-4 py-2.5 text-[13px] font-medium text-foreground transition-colors hover:bg-foreground/[0.1] disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex min-h-9 items-center rounded-xl bg-foreground/[0.06] px-3 text-[12px] font-medium text-foreground transition-colors hover:bg-foreground/[0.1] disabled:opacity-50"
               >
-                <X className="size-4" />
                 {t.projectSettings.domains.edit.cancel}
               </button>
+            </div>
+
+            <div className="px-5 py-5">
+              <PublicEndpointsCard
+                projectName={projectLabel}
+                endpoints={publicEndpoints}
+                hasServer={hasProjectServer}
+                runtimePort={publicEndpoints[0]?.port || projectRuntimePort}
+                onChange={(nextEndpoints) => setPublicEndpoints(nextEndpoints)}
+                allowRemoveAll
+              />
+            </div>
+
+            <div className="flex items-center justify-end border-t border-border/40 px-5 py-4">
               <button
                 type="button"
                 onClick={() => void handleSavePublicEndpoints()}
@@ -1752,14 +1837,6 @@ export const DomainSettings = () => {
               </button>
             </div>
           </div>
-
-          <PublicEndpointsCard
-            projectName={projectLabel}
-            endpoints={publicEndpoints}
-            hasServer={hasProjectServer}
-            runtimePort={publicEndpoints[0]?.port || projectRuntimePort}
-            onChange={(nextEndpoints) => setPublicEndpoints(nextEndpoints)}
-          />
         </div>
       ) : null}
 
@@ -1771,42 +1848,7 @@ export const DomainSettings = () => {
                 first — show "Edge ready" when OpenResty already owns it, else the
                 "Set up edge" action (installs/owns it + applies routes reload-free,
                 surfacing the takeover consent if a foreign proxy holds 80/443). */}
-            {edgeRelevant &&
-              (edge.loading ? (
-                <ActionButton
-                  label={t.projectSettings.domains.edge.checking}
-                  icon={Loader2}
-                  spinning
-                  disabled
-                />
-              ) : edge.ready ? (
-                <span className="inline-flex items-center gap-2">
-                  <span className="inline-flex min-h-10 items-center gap-1.5 rounded-xl bg-success-bg px-3 py-2 text-[13px] font-medium text-success">
-                    <ShieldCheck className="size-3.5" />
-                    {t.projectSettings.domains.edge.ready}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => void checkEdge()}
-                    className="text-[12px] text-muted-foreground transition-colors hover:text-foreground"
-                  >
-                    {t.projectSettings.domains.edge.recheck}
-                  </button>
-                </span>
-              ) : (
-                <span className="inline-flex items-center gap-2">
-                  <ActionButton
-                    label={t.projectSettings.domains.edge.setUp}
-                    icon={ShieldCheck}
-                    onClick={openEdge}
-                  />
-                  {(edge.classification === "known" || edge.classification === "unknown") && (
-                    <span className="text-[12px] text-warning">
-                      {t.projectSettings.domains.edge.foreignProxyHint}
-                    </span>
-                  )}
-                </span>
-              ))}
+            {renderEdgeControl()}
             <ActionButton
               label={showAddRoute ? t.projectSettings.domains.addRoute.cancel : t.projectSettings.domains.addRoute.add}
               icon={Plus}
@@ -1881,37 +1923,16 @@ export const DomainSettings = () => {
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-              {serviceRouteCards.map(({ service, summary }) => {
-                const isVerifying = !!verifyingDomainId && verifyingDomainId === summary.domainId;
-                const canVerify = summary.needsVerify && !!summary.domainId;
-                const menuActions = buildDomainMenuActions({
-                  domain: summary,
-                  isManagedRow: summary.hostname.toLowerCase().endsWith(`.${baseDomain}`),
-                  isRenewing: renewingHostname === summary.hostname,
-                  isRechecking: recheckingDomainId === summary.domainId,
-                  onEditRoute: () => setEditingRouteServiceId(service.id),
+              {serviceRouteCards.map(({ service, summary }) =>
+                renderRouteCard(summary, {
+                  onEdit: () => setEditingRouteServiceId(service.id),
                   // Choosing a canonical domain only makes sense with >1 route.
                   onSetPrimary:
                     serviceRouteCards.length > 1 && summary.domainId && !summary.isPrimary
                       ? () => void handleSetPrimaryServiceDomain(summary)
                       : undefined,
-                  isSettingPrimary: settingPrimaryId === summary.id,
-                });
-                return (
-                  <DomainOverviewCard
-                    key={summary.id}
-                    domain={summary}
-                    menuActions={menuActions}
-                    onVerify={canVerify ? () => startVerify(summary.domainId!, summary.hostname) : undefined}
-                    verifying={isVerifying}
-                    verifyHint={verifyHintFor(summary.domainId)}
-                    autoOpenRecords={!!summary.domainId && verifyFailure?.domainId === summary.domainId}
-                    loadRecords={canVerify ? () => domainsApi.records(summary.domainId!).then((r) => r.data.records) : undefined}
-                    onCopy={handleCopy}
-                    portHint={portHintFor(summary.mappedPort, summary.serviceId)}
-                  />
-                );
-              })}
+                }),
+              )}
             </div>
           )}
         </div>

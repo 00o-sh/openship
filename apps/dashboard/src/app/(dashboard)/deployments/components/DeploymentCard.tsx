@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { DeploymentMenu } from "./DeploymentMenu";
 import { CommitDetailsModal } from "./CommitDetailsModal";
 import type { Deployment } from "../types";
@@ -118,7 +118,6 @@ export const DeploymentCard: React.FC<DeploymentCardProps> = ({
   appTemplateId,
 }) => {
   const { t } = useI18n();
-  const router = useRouter();
   const [isCommitModalOpen, setIsCommitModalOpen] = useState(false);
   const statusConfig = getStatusConfig(deployment.status);
   const frameworkConfig = getFrameworkConfig(deployment.framework);
@@ -141,10 +140,12 @@ export const DeploymentCard: React.FC<DeploymentCardProps> = ({
     deployment.commit?.message && deployment.commit.message !== "Manual deployment";
 
   return (
-    <div
-      className="group relative flex cursor-pointer items-center gap-4 px-4 py-4 transition-colors hover:bg-muted/25"
-      onClick={() => router.push(`/build/${deployment.id}`)}
-    >
+    <div className="group relative flex items-center gap-4 px-4 py-4 transition-colors hover:bg-muted/25">
+      <Link
+        href={`/build/${deployment.id}`}
+        aria-label={deployment.projectName || t.deployments.card.unknownProject}
+        className="absolute inset-0 z-0"
+      />
       {/* App logo (catalog apps) → else framework icon → else initials */}
       <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-muted/45 transition-colors group-hover:bg-muted/65">
         {appTemplateId ? (
@@ -275,7 +276,7 @@ export const DeploymentCard: React.FC<DeploymentCardProps> = ({
       </div>
 
       {/* Right side - commit hash + actions */}
-      <div className="flex items-center gap-2 shrink-0">
+      <div className="relative z-10 flex items-center gap-2 shrink-0">
         {hasCommitData && (
           <button
             onClick={(e) => {

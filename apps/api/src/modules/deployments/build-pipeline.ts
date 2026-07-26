@@ -45,6 +45,7 @@ import {
   resolveDeployRouting,
   type DeployRouting,
 } from "./build-execution-plan";
+import { attachLinkedNetworks } from "./attach-linked-networks";
 import { syncProjectToServerManifest } from "../../lib/openship-manifest-sync";
 import { syncManagedEdgeRoutes, edgeUnsyncedWarning } from "../../lib/managed-edge-proxy";
 import { decryptEnvMap } from "../../lib/encryption";
@@ -1180,7 +1181,15 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
             await ensurePortAvailable(executor, port, logger, promptUser);
           }
         },
-        activate: (cfg, onLog) => runtime.deploy(cfg, onLog),
+        activate: async (cfg, onLog) => {
+          const deployed = await runtime.deploy(cfg, onLog);
+          // Single-app consumer: join the networks of any internally-linked
+          // source apps so injected internal hosts (e.g. db:5432) resolve. The
+          // compose path does this in compose/deploy.service.ts; this closes the
+          // single-container gap. Advisory — never fails the deploy.
+          await attachLinkedNetworks(project.id, runtime, (m, level) => logger.log(`${m}\n`, level));
+          return deployed;
+        },
         resolveRoute: undefined,
         healthCheck: async (containerId, cfg) => {
           let host = "127.0.0.1";

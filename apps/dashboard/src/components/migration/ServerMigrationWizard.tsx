@@ -380,6 +380,23 @@ export function ServerMigrationWizard({
     }
   };
 
+  // Failed → "Remove copied data from target": wipe the volumes this run copied
+  // to the target (orphaned after rollback) so a retry starts clean. Source is
+  // untouched. Clears the local flag so the button disappears once done.
+  const [cleanupBusy, setCleanupBusy] = useState(false);
+  const cleanupTarget = async () => {
+    if (!migrationId) return;
+    setCleanupBusy(true);
+    try {
+      await dockerMigrationApi.cleanupTarget(migrationId);
+      setRun((prev) => (prev ? { ...prev, targetVolumes: [] } : prev));
+    } catch {
+      /* best-effort */
+    } finally {
+      setCleanupBusy(false);
+    }
+  };
+
   // Failed → "Edit & retry": drop back into a fresh flow on the SAME server
   // with the prior custom paths restored, re-scan, and let the user adjust
   // (services / env / paths) before re-running. The failed run's record stays.
@@ -908,6 +925,18 @@ export function ServerMigrationWizard({
       clearInterval(iv);
     };
   }, [migrationId, run?.status]);
+
+  // Live progress SSE — a smooth, real-time transfer bar (the 2.5s poll above is
+  // coarse). The poll stays the authoritative run/log source, so a dropped
+  // stream degrades to it rather than stalling. Server closes the stream on the
+  // terminal event; opening a finished run just gets a snapshot + close.
+  useEffect(() => {
+    if (!migrationId) return;
+    const stop = dockerMigrationApi.streamMigration(migrationId, {
+      onProgress: (u) => setProgress(u),
+    });
+    return stop;
+  }, [migrationId]);
 
   // Pull the target deploy's logs + per-service status while it's deploying/
   // verifying (live) and once it fails — so the wizard shows the actual reason
@@ -1638,6 +1667,9 @@ export function ServerMigrationWizard({
                   )}
                   {failed && run?.inputSnapshot && (
                     <button type="button" onClick={editRetry} className="inline-flex w-full items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-colors"><RefreshCw className="size-4" />{m.tab.editRetry}</button>
+                  )}
+                  {failed && (run?.targetVolumes?.length ?? 0) > 0 && (
+                    <button type="button" onClick={() => void cleanupTarget()} disabled={cleanupBusy} className="inline-flex w-full items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-danger-border text-sm font-medium text-danger hover:bg-danger-bg transition-colors disabled:opacity-40">{cleanupBusy ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}{m.tab.cleanupTarget}</button>
                   )}
                   <button type="button" onClick={cancelRun} className="w-full px-4 py-2.5 rounded-xl border border-border text-sm font-medium text-foreground hover:bg-muted transition-colors">{failed ? m.wizard.close : m.wizard.cancel}</button>
                 </>
@@ -3181,9 +3213,9 @@ function TransferPlanSummary({
   setCompress: (v: boolean) => void;
   customPaths: CustomPath[];
   setCustomPaths: (v: CustomPath[]) => void;
-  /** serviceName → conflict resolution (override/clone/keep), chosen here. */
+  /** volumeName → conflict resolution (override/clone/keep), chosen here. */
   conflictResolution: Record<string, ConflictAction>;
-  setConflictResolution: (v: Record<string, ConflictAction>) => void;
+  setConflictResolution: React.Dispatch<React.SetStateAction<Record<string, ConflictAction>>>;
   /** Preview cache (by request key) so Back/Next doesn't re-hit the server. */
   cache: { current: Map<string, MigrationPreview> };
   /** Fires true once the plan is loaded AND every volume conflict is resolved
@@ -3239,7 +3271,7 @@ function TransferPlanSummary({
   const conflicts = preview?.conflicts ?? [];
   useEffect(() => {
     if (!preview) return;
-    onReady?.(conflicts.every((c) => Boolean(conflictResolution[c.serviceName])));
+    onReady?.(conflicts.every((c) => Boolean(conflictResolution[c.volume])));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preview, conflictResolution]);
 
@@ -3265,35 +3297,36 @@ function TransferPlanSummary({
       </div>
 
       {/* Target-volume conflicts — must be resolved (override/clone/keep) before
-          Migrate. Gates onReady above; nothing destructive starts unresolved. */}
+          Migrate. Keyed by the unique VOLUME name so two same-named services stay
+          isolated. Gates onReady above; nothing destructive starts unresolved. */}
       {conflicts.length > 0 && (
-        <div className="space-y-3 rounded-xl border border-warning-border bg-warning-bg/40 p-3">
+        <div className="space-y-4 rounded-xl border border-warning-border bg-warning-bg/40 p-4">
           <div className="flex items-center gap-2">
             <AlertCircle className="size-4 shrink-0 text-warning" />
             <span className="text-sm font-medium text-foreground">{plan.conflictTitle}</span>
           </div>
-          <p className="text-xs leading-relaxed text-muted-foreground">{plan.conflictDesc}</p>
+          <p className="text-sm leading-relaxed text-muted-foreground">{plan.conflictDesc}</p>
           {conflicts.map((c) => {
-            const sel = conflictResolution[c.serviceName];
+            const sel = conflictResolution[c.volume];
             const opt = (action: ConflictAction, label: string, hint: string) => (
               <button
                 key={action}
                 type="button"
-                onClick={() => setConflictResolution({ ...conflictResolution, [c.serviceName]: action })}
-                className={`flex-1 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
+                onClick={() => setConflictResolution((prev) => ({ ...prev, [c.volume]: action }))}
+                className={`flex-1 rounded-lg border px-3 py-2 text-left transition-colors ${
                   sel === action ? "border-primary bg-primary/10" : "border-border hover:bg-muted/40"
                 }`}
               >
-                <span className="block text-xs font-medium text-foreground">{label}</span>
-                <span className="block text-[10px] leading-tight text-muted-foreground">{hint}</span>
+                <span className="block text-sm font-medium text-foreground">{label}</span>
+                <span className="block text-xs leading-tight text-muted-foreground">{hint}</span>
               </button>
             );
             return (
-              <div key={c.serviceName} className="space-y-1.5">
-                <div className="flex items-center gap-2 text-xs">
+              <div key={c.volume} className="space-y-2">
+                <div className="flex items-center gap-2 text-sm">
                   <span className="font-medium text-foreground">{c.serviceName}</span>
-                  <span className="min-w-0 truncate text-muted-foreground" title={c.volumes.join(", ")}>
-                    {c.volumes.join(", ")}
+                  <span className="min-w-0 truncate text-muted-foreground" title={c.volume}>
+                    {c.volume}
                   </span>
                 </div>
                 <div className="flex gap-2">
@@ -3346,8 +3379,31 @@ function TransferPlanSummary({
             </ul>
           )}
         </div>
+      ) : loading ? (
+        // Alive loading state — a shimmer skeleton + "measuring" line instead of
+        // just a corner spinner, so the size scan (du over SSH) doesn't feel dead.
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="size-4 animate-spin" />
+            {plan.measuring}
+          </div>
+          <div className="space-y-2">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 flex-1 items-center gap-2">
+                  <div className="h-4 w-12 shrink-0 animate-pulse rounded bg-muted" />
+                  <div
+                    className="h-4 animate-pulse rounded bg-muted"
+                    style={{ width: `${55 - i * 12}%` }}
+                  />
+                </div>
+                <div className="h-4 w-16 shrink-0 animate-pulse rounded bg-muted" />
+              </div>
+            ))}
+          </div>
+        </div>
       ) : (
-        !loading && <p className="text-sm text-muted-foreground">{plan.empty}</p>
+        <p className="text-sm text-muted-foreground">{plan.empty}</p>
       )}
 
       {/* SSL checks — which kept domains carry their cert vs re-issue via ACME. */}
@@ -3678,7 +3734,7 @@ export function MigrationProgress({
       {run?.logs && (
         <div>
           <p className="mb-1.5 text-xs font-medium text-muted-foreground">{m.tab.sessionLog}</p>
-          <div className="max-h-56 overflow-y-auto rounded-xl bg-[#0b0b0c] px-4 py-3 font-mono text-[12px] leading-relaxed text-neutral-200">
+          <div className="max-h-56 overflow-y-auto rounded-xl border border-border/50 bg-muted/20 px-4 py-3 font-mono text-[12px] leading-relaxed text-muted-foreground">
             {run.logs.split("\n").map((line, i) => (
               <div key={i} className="whitespace-pre-wrap break-all">
                 {line}

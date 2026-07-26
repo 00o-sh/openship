@@ -374,13 +374,26 @@ export async function establishDirectLink(ctx: LinkContext): Promise<DirectLink 
           const tail = output.split("\n").filter(Boolean).slice(-4).join(" ");
           throw new Error(`image transfer failed (exit ${code}): ${tail || "no output"}`);
         }
-        // Re-apply the tag on the TARGET (peer for push, initiator for pull).
-        if (image.id !== image.tag) {
-          const tagCmd = `docker tag ${sq(image.id)} ${sq(image.tag)}`;
-          await (pushToPeer
-            ? initiatorExec.exec(sshTo(sshCommand, peerConn, sq(tagCmd)))
-            : targetExec.exec(tagCmd)
-          ).catch((e) => log(`image ${image.tag}: retag failed — ${e instanceof Error ? e.message : e}`));
+        // Re-apply the tag on the TARGET. `docker save <id>` is untagged and the
+        // load restores it under the CONFIG image id (≠ the source `image.id`,
+        // which is often a RepoDigest) — so tagging by `image.id` fails with
+        // "No such image". Instead retag from what `docker load` actually reported
+        // ("Loaded image( ID)?: <ref>"), which comes back over the pipe. Only skip
+        // when the load already restored the exact target tag.
+        const loaded = output.match(/Loaded image(?: ID)?:\s*(\S+)/i)?.[1]?.trim();
+        const from = loaded && loaded !== image.tag ? loaded : loaded ? null : image.id;
+        if (from) {
+          const tagCmd = `docker tag ${sq(from)} ${sq(image.tag)}`;
+          const retag = await (pushToPeer
+            ? initiatorExec.exec(sshTo(sshCommand, peerConn, sq(`${tagCmd} 2>&1`)))
+            : targetExec.exec(`${tagCmd} 2>&1`)
+          ).catch((e) => (e instanceof Error ? e.message : String(e)));
+          if (retag && /error|no such/i.test(retag)) {
+            // An untagged image = the target can't resolve it = the deploy would
+            // fall back to a registry pull. Surface loudly, don't swallow.
+            throw new Error(`image ${image.tag}: retag failed — ${retag.trim()}`);
+          }
+          log(`image ${image.tag}: tagged on target (from ${from})`);
         }
         if (total) onProgress?.(total, total);
       },
