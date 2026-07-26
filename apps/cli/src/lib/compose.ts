@@ -17,9 +17,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { OS_DIR } from "./paths";
+
 declare const __CLI_VERSION__: string;
 
-const OS_DIR = join(homedir(), ".openship");
 const COMPOSE_DIR = join(OS_DIR, "compose");
 const INSTALL_METHOD_FILE = join(OS_DIR, "install-method");
 const COMPOSE_FILE = join(COMPOSE_DIR, "docker-compose.yml");

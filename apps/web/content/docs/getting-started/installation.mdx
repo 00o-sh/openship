@@ -17,7 +17,7 @@ own (npm), buy the ready-to-use boxed version (the desktop app), or wire it into
 
 ## Install
 
-<Tabs items={['Install script', 'npm', 'Desktop app', 'Docker Compose']}>
+<Tabs items={['Install script', 'npm', 'From source (dev)', 'Desktop app', 'Docker Compose']}>
 
 <Tab value="Install script">
 
@@ -63,6 +63,39 @@ bun add -g openship       # bun
 ```
 
 That gives you the same `openship` command as the install script. Head to [Run Openship](#run-openship).
+
+</Tab>
+
+<Tab value="From source (dev)">
+
+Want to preview an unreleased build — a branch, a tag, or `main` ahead of the next release? This builds the
+CLI **from source** (the same way `bun dev` does) and installs it as a **separate `openship-dev` command**:
+
+```bash
+curl -fsSL https://get.openship.io/dev | sh
+```
+
+Pick a branch/tag with `OPENSHIP_REF` (default `main`):
+
+```bash
+OPENSHIP_REF=my-branch curl -fsSL https://get.openship.io/dev | sh
+```
+
+The from-source build runs **fully isolated** from a production install — its own home (`~/.openship-dev`),
+its own tokens/ports/data, and its own boot service — so your production `openship` is never touched. Use it
+just like the normal CLI, under the `openship-dev` name:
+
+```bash
+openship-dev            # interactive setup + control panel
+openship-dev up         # run locally
+openship-dev update     # pull the latest source + rebuild in place (no npm release needed)
+```
+
+<Callout title="It's a dev/preview build" type="warn">
+The build is unverified (no signed release asset) and compiling the dashboard needs real RAM/CPU — small
+boxes can OOM. It requires **Bun** and **git**. Not a production path; for production use the install script
+or npm above. Remove it with `rm -f "$(command -v openship-dev)" && rm -rf ~/.openship-dev`.
+</Callout>
 
 </Tab>
 

@@ -18,7 +18,6 @@ import chalk from "chalk";
 import open from "open";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   intro,
@@ -42,6 +41,7 @@ import {
   waitHealthy,
   waitDashboard,
   detectPublicIp,
+  OS_DIR,
 } from "../lib/loopback-api";
 import { ensureDashboard } from "../lib/dashboard";
 import { serviceStatus, stop as stopService, restart as restartService } from "../lib/service";
@@ -754,7 +754,7 @@ export async function runWizard(): Promise<void> {
 
 /** The resolved API/dashboard ports the service last used. */
 function storedPorts(): { api?: number; dashboard?: number } {
-  const p = join(homedir(), ".openship", "ports.json");
+  const p = join(OS_DIR, "ports.json");
   try {
     return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : {};
   } catch {

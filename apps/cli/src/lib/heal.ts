@@ -29,6 +29,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
+import { OS_DIR } from "./paths";
+
 /** The embedded DB directory: `PGLITE_DATA_DIR` (with `~` expansion) else
  *  `~/.openship/data` — matches `resolvePgliteDataDir()` in packages/db. */
 export function resolveDataDir(): string {
@@ -38,7 +40,7 @@ export function resolveDataDir(): string {
       ? join(homedir(), fromEnv.slice(1).replace(/^[/\\]/, ""))
       : fromEnv;
   }
-  return join(homedir(), ".openship", "data");
+  return join(OS_DIR, "data");
 }
 
 export function dataDirExists(dataDir = resolveDataDir()): boolean {

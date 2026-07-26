@@ -11,6 +11,12 @@
  *   openship update            update if a newer release exists
  *   openship update --check    report current/latest only (no install)
  *   openship update --via npm  force the package manager (default: bun if present, else npm)
+ *
+ * FROM-SOURCE installs (scripts/install-source.sh, marked by
+ * ~/.openship-dev/source-install.json) take a different path: instead of
+ * reinstalling an npm release, `openship update` pulls the tracked git ref and
+ * rebuilds the CLI + dashboard in place — a quick update with no release in the
+ * loop. `--rebuild` forces it even when already at the remote tip.
  */
 import { Command } from "commander";
 import { spawnSync } from "node:child_process";
@@ -19,8 +25,69 @@ import { resolveLatestTag } from "../lib/github-releases";
 import { restart as restartService } from "../lib/service";
 import { readInstallMethod, composeUpdate } from "../lib/compose";
 import { err, info, isJsonMode, ok, printJson } from "../lib/output";
+import { shortSha } from "../lib/from-source";
+import {
+  readSourceInstall,
+  rebuildFromSource,
+  remoteSha,
+  type SourceInstall,
+} from "../lib/source-install";
 
 declare const __CLI_VERSION__: string;
+
+interface UpdateOpts {
+  check?: boolean;
+  via?: string;
+  rebuild?: boolean;
+}
+
+/**
+ * Quick update for a from-source install: pull the tracked ref and rebuild the
+ * CLI + dashboard in place (like `bun dev`), then restart the service. No npm
+ * release is involved. Compares the local checkout sha against the remote tip.
+ */
+async function runSourceUpdate(source: SourceInstall, opts: UpdateOpts): Promise<void> {
+  const current = shortSha(source.dir);
+  const remote = remoteSha(source.repo, source.ref);
+
+  if (opts.check) {
+    const behind = remote != null && remote !== current;
+    if (isJsonMode()) {
+      printJson({ source: true, ref: source.ref, current, remote, updateAvailable: behind });
+    } else if (remote == null) {
+      info(`On source ${source.ref} @ ${current} — couldn't reach ${source.repo} to compare.`);
+    } else if (behind) {
+      info(`Source update available on ${source.ref}: ${current} → ${remote}. Run \`openship update\`.`);
+    } else {
+      ok(`Up to date on source ${source.ref} (${current}).`);
+    }
+    return;
+  }
+
+  if (!opts.rebuild && remote != null && remote === current) {
+    ok(`Already up to date on source ${source.ref} (${current}). Use --rebuild to force.`);
+    return;
+  }
+
+  info(`Updating from source (${source.ref})…`);
+  let sha: string;
+  try {
+    sha = await rebuildFromSource(source);
+  } catch (e) {
+    err(`Source update failed: ${(e as Error).message}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const { restarted } = restartService();
+  if (isJsonMode()) {
+    printJson({ updated: true, source: true, ref: source.ref, from: current, to: sha, restarted });
+  } else if (restarted) {
+    ok(`Rebuilt from source (${source.ref} @ ${sha}) and restarted the service.`);
+  } else {
+    ok(`Rebuilt from source (${source.ref} @ ${sha}). Restart to run it: openship up`);
+  }
+}
 
 /** Prefer bun (the curl installer uses `bun add -g`); fall back to npm. */
 function detectPackageManager(override?: string): CliPackageManager {
@@ -33,7 +100,13 @@ export const updateCommand = new Command("update")
   .description("Update the Openship CLI + bundled server to the latest release")
   .option("--check", "Only report the current + latest version; don't install")
   .option("--via <manager>", "Package manager to update with: bun | npm")
-  .action(async (opts) => {
+  .option("--rebuild", "From-source installs: rebuild even if already at the remote tip")
+  .action(async (opts: UpdateOpts) => {
+    // From-source installs rebuild from git in place; the release path below is
+    // for the published npm package.
+    const source = readSourceInstall();
+    if (source) return runSourceUpdate(source, opts);
+
     const current = __CLI_VERSION__;
 
     let latest: string;

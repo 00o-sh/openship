@@ -94,6 +94,16 @@ openship up --public-url https://openship.example.com   # + serve the dashboard 
 
 A self-hosted instance **always requires login** (the admin you create in setup). `openship open` opens the dashboard · `openship stop` stops it · `openship update` upgrades · `openship up --foreground` runs attached.
 
+> **Preview an unreleased build (dev).** To run the CLI built straight from source — a branch, tag, or `main` ahead of the next release — install the from-source build:
+>
+> ```bash
+> curl -fsSL https://get.openship.io/dev | sh     # or: OPENSHIP_REF=my-branch curl ... | sh
+> openship-dev                                     # same CLI, built from source
+> openship-dev update                              # pull latest source + rebuild (no release needed)
+> ```
+>
+> It installs as a **separate `openship-dev`** command with its own isolated home (`~/.openship-dev`) and boot service, so your production `openship` and its data are never touched. Needs Bun + git; it's an unverified dev build (the dashboard compile wants real RAM/CPU) — not a production path.
+
 **Deploy a project:**
 
 ```bash

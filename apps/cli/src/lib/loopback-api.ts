@@ -12,11 +12,14 @@
 
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { homedir } from "node:os";
 import { join } from "node:path";
 
-/** `~/.openship` — the CLI's state dir (internal-token, auth-secret, data, logs). */
-export const OS_DIR = join(homedir(), ".openship");
+import { OS_DIR } from "./paths";
+
+/** The CLI's state dir (internal-token, auth-secret, data, logs); ~/.openship
+ *  by default, or OPENSHIP_HOME for a from-source install. Re-exported for the
+ *  many callers that import it from here. */
+export { OS_DIR };
 
 /**
  * Persist a stable INTERNAL_TOKEN. The API is booted with it (so zero-auth is

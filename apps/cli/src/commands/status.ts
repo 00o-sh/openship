@@ -11,8 +11,9 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+
+import { OS_DIR } from "../lib/paths";
 import { apiRequest, getApiUrl, ApiError } from "../lib/api-client";
 import { getActiveContext } from "../lib/config";
 import { serviceStatus } from "../lib/service";
@@ -36,7 +37,7 @@ interface HealthEnv {
 
 function readPorts(): { api?: number; dashboard?: number } {
   try {
-    return JSON.parse(readFileSync(join(homedir(), ".openship", "ports.json"), "utf8"));
+    return JSON.parse(readFileSync(join(OS_DIR, "ports.json"), "utf8"));
   } catch {
     return {};
   }
