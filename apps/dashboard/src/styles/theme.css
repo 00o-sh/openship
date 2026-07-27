@@ -66,8 +66,15 @@
   --th-text-hint:      rgba(0,0,0,.46);
   --th-text-ghost:     rgba(0,0,0,.22);
 
-  /* ─ Page / layout ─ */
-  --th-bg-page:        #ffffff;
+  /* ─ Page / layout ─ The page is deliberately NOT #ffffff. Cards are white, so
+   * a white page left them with nothing to lift off and they needed a drawn
+   * border to exist at all. A few steps of grey here is what lets light use the
+   * same borderless lifted-surface language as dark and dim.
+   *
+   * This is the floor, not a free knob: 6 steps of lift off #ffffff, against 8
+   * for dim. Push it much closer to white and borderless cards stop reading —
+   * there is no border left to fall back on. */
+  --th-bg-page:        #f9f9f9;
   --th-bg-card:        #fafafa;
   --th-bg-subtle:      rgba(0,0,0,.02);
   --th-bg-hover:       rgba(0,0,0,.025);
@@ -99,10 +106,12 @@
   --th-btn-ghost-text-hover: rgba(0,0,0,.72);
   --th-btn-ghost-bg-hover:   rgba(0,0,0,.025);
 
-  /* ─ Card ─ */
+  /* ─ Card ─ White on the grey page above, so no resting border — same language
+   * as dark and dim. The lift comes from bg vs --th-bg-page; if you ever move
+   * the page back toward #ffffff these go invisible. */
   --th-card-bg:       #ffffff;
   --th-card-bg-solid: #ffffff;
-  --th-card-bd:       #efefef;
+  --th-card-bd:       transparent;
   --th-card-bd-hover: #e0e0e0;
   --th-card-shadow:   none;
 
@@ -209,10 +218,14 @@
   --th-btn-ghost-text-hover: rgba(255,255,255,.72);
   --th-btn-ghost-bg-hover:   rgba(255,255,255,.04);
 
-  /* ─ Card ─ */
-  --th-card-bg:       rgba(255,255,255,.025);
+  /* ─ Card ─ The page here is pure #000, so a .025 fill landed on #060606 and
+   * the container was effectively invisible — all you saw was its hairline.
+   * With the fill lifted clear of the page the surface carries its own edge, so
+   * there is no resting border, same as dim. If you ever lower this fill, the
+   * container will start disappearing into the black before it looks borderless. */
+  --th-card-bg:       rgba(255,255,255,.05);
   --th-card-bg-solid: #060606;
-  --th-card-bd:       rgba(255,255,255,.06);
+  --th-card-bd:       transparent;
   --th-card-bd-hover: rgba(255,255,255,.12);
   --th-card-shadow:   none;
 
@@ -321,10 +334,13 @@
   --th-btn-ghost-text-hover: rgba(255,255,255,.88);
   --th-btn-ghost-bg-hover:   rgba(255,255,255,.05);
 
-  /* ─ Card ─ Elevated above the page. */
+  /* ─ Card ─ Elevated above the page. The #141414 page against a .03 fill
+   * already separates on its own, so there is no resting border: the hairline
+   * was the only thing making these read as boxed-in. Fill deliberately
+   * unchanged — this shade is the one we want. */
   --th-card-bg:       rgba(255,255,255,.03);
   --th-card-bg-solid: #1e1e1e;
-  --th-card-bd:       rgba(255,255,255,.08);
+  --th-card-bd:       transparent;
   --th-card-bd-hover: rgba(255,255,255,.14);
   --th-card-shadow:   none;
 

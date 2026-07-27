@@ -26,7 +26,11 @@ import type { Dictionary } from "@/i18n";
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
-function timeAgo(dateStr: string, t: Dictionary): string {
+/* Exported for ProjectGridCard: the tile view shows the same relative time and
+   hosting label as this row, so both read them from here instead of deriving
+   their own (which is how the two views would drift). */
+
+export function timeAgo(dateStr: string, t: Dictionary): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   const mins = Math.floor(diff / 60_000);
   if (mins < 1) return t.projects.time.justNow;
@@ -38,7 +42,7 @@ function timeAgo(dateStr: string, t: Dictionary): string {
   return interpolate(t.projects.time.monthsAgo, { count: String(Math.floor(days / 30)) });
 }
 
-function getHostingLabel(
+export function getHostingLabel(
   deployTarget: string | null | undefined,
   serverName: string | null | undefined,
   t: Dictionary,

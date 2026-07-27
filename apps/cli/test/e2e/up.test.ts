@@ -11,6 +11,9 @@ const h = vi.hoisted(() => ({
 vi.mock("../../src/lib/compose", () => ({
   hasDockerCompose: () => h.hasDocker,
   composeIsViableDefault: () => true,
+  // `up` now installs Docker rather than degrading to bare (same helper the
+  // wizard uses); the fixture reports whether it's present/installable.
+  ensureDocker: async () => h.hasDocker,
   composeUp: () => {
     h.composeUpCalls++;
     return h.composeUpResult;

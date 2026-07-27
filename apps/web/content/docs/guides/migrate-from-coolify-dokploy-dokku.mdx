@@ -109,6 +109,15 @@ old proxy to OpenResty while it installs — measured in seconds, and rollback-s
 Confirm everything serves through Openship. Then run **cutover** (explicit, token-confirmed): it stops and
 removes only the *old* deploy-set containers — **never your source volumes**. Once you're happy, remove
 Coolify/Dokploy/Dokku entirely; Openship now owns the box.
+
+<Callout title="Verify before you cut over" type="warn">
+Cutover **stops and removes the old workload**, so don't run it until the Openship-managed app is fully healthy:
+it loads and serves traffic, your **data is intact** (sign in, open a record, check volumes/uploads and any
+database), and every service is `RUNNING`. Cutover leaves your **source volumes untouched**, so the old
+deploy-set stays as a fallback until you're certain. If anything's off — missing data, a service that won't
+start, routing/TLS wrong — **don't cut over**; leave the old containers running and
+[open an issue on GitHub](https://github.com/oblien/openship/issues) and we'll help.
+</Callout>
 </Step>
 
 </Steps>

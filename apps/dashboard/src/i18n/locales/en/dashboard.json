@@ -146,6 +146,11 @@
         "rollbacks": "Rollbacks",
         "rollbacksDesc": "One-click revert",
         "commandPalette": "Or press {key} to open command palette"
+      },
+      "view": {
+        "label": "View",
+        "list": "List",
+        "grid": "Grid"
       }
     },
     "deployments": {

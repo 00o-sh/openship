@@ -96,6 +96,11 @@ function resourcePaths() {
     apiBin: join(root, "bin", API_BIN),
     migrationsDir: join(root, "migrations"),
     pgliteDir: join(root, "pglite"),
+    // Vendored GeoLite2-Country DB. geo-ip.ts otherwise probes paths relative to
+    // its own module, which inside a --compile binary is the virtual /$bunfs/root
+    // — every candidate misses and it silently downloads 8.8 MB from GitHub on
+    // the first server-flag lookup (and shows no flags at all offline).
+    geoipDb: join(root, "geoip", "GeoLite2-Country.mmdb"),
     dashboardDir: join(root, "dashboard", "apps", "dashboard"),
     // ssh2 + dockerode live here (externalized from the compiled API binary);
     // the binary resolves them via NODE_PATH — see the spawn below.
@@ -216,7 +221,8 @@ export async function startLocalServices(internalToken: string): Promise<void> {
   if (started) return;
   started = true;
 
-  const { apiBin, migrationsDir, pgliteDir, dashboardDir, nodeModulesDir } = resourcePaths();
+  const { apiBin, migrationsDir, pgliteDir, geoipDb, dashboardDir, nodeModulesDir } =
+    resourcePaths();
   const userData = app.getPath("userData");
   const dataDir = join(userData, "data");
   mkdirSync(dataDir, { recursive: true });
@@ -285,6 +291,10 @@ export async function startLocalServices(internalToken: string): Promise<void> {
       PGLITE_DATA_DIR: dataDir,
       OPENSHIP_MIGRATIONS_DIR: migrationsDir,
       OPENSHIP_PGLITE_ASSETS_DIR: pgliteDir,
+      // Point geo-ip.ts straight at the staged mmdb. Only set when the file is
+      // actually there, so a stale/partial Resources dir falls back to geo-ip's
+      // own download path instead of pinning a bad override.
+      ...(existsSync(geoipDb) ? { OPENSHIP_GEOIP_DB: geoipDb } : {}),
       // The dashboard + API run on dynamic ports not in the API's static origin
       // table — trust both loopback spellings of each explicitly so CORS /
       // origin-guard / auth accept them regardless of which a client resolves.

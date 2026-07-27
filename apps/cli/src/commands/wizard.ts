@@ -32,6 +32,7 @@ import {
   isCancel,
 } from "@clack/prompts";
 
+import { isValidEmail } from "@repo/core";
 import { startService, normalizeUrl } from "./up";
 import {
   ensureInternalToken,
@@ -175,7 +176,9 @@ async function promptLocalAdmin(): Promise<{ name: string; email: string; passwo
     await text({
       message: "Email",
       placeholder: "you@example.com",
-      validate: (v) => (v?.includes("@") ? undefined : "Enter a valid email"),
+      // Same rule the headless path enforces (isValidEmail) — an `@`-only check
+      // let `test@gmail.co,` through and created an admin nobody could reach.
+      validate: (v) => (isValidEmail(v ?? "") ? undefined : "Enter a valid email address"),
     }),
   )
     .trim()
@@ -616,6 +619,41 @@ export async function runWizard(): Promise<void> {
   let edgeAction: "migrate" | "takeover" | "cancel" | undefined;
   let migratedSites: ImportedSite[] | undefined;
   let migratedCertPems: Record<string, { certPem: string; keyPem: string }> | undefined;
+  // Host control is a SECURITY decision, so it's shown rather than assumed — but
+  // pre-selected to "allow", because a single-box install needs it (:80/:443
+  // takeover, host port scans, the host terminal) and a hardening prompt that
+  // blocks the happy path just gets clicked through. Declining is a real posture:
+  // this box then manages only REMOTE servers.
+  let allowHostControl = true;
+  if (method === "compose") {
+    allowHostControl =
+      ensure(
+        await select({
+          message: "Let Openship operate this machine's OS?",
+          initialValue: "allow",
+          options: [
+            {
+              value: "allow",
+              label: "Allow (recommended)",
+              hint: "needed to deploy to THIS box: take over :80/:443, scan ports, host terminal",
+            },
+            {
+              value: "deny",
+              label: "No host control",
+              hint: "manage only remote servers — no host key is created, host ops refuse",
+            },
+          ],
+        }),
+      ) === "allow";
+    if (!allowHostControl) {
+      log.message(
+        chalk.dim(
+          "  No host key will be created or mounted, and this box won't be offered as a deploy target.\n" +
+            "  The Docker socket stays mounted (deployments need it), so this is defense in depth, not isolation.",
+        ),
+      );
+    }
+  }
   if (method === "compose") {
     // A foreign proxy already on 80/443? Migrate/take it over first (interactive)
     // so the container edge can bind — the same host-edge pipe `openship up` uses.
@@ -634,7 +672,12 @@ export async function runWizard(): Promise<void> {
         ? "Building the Openship images from your source checkout (first run takes a few minutes)…"
         : "Pulling images and starting the Docker Compose stack…",
     );
-    const up = composeUp({ publicUrl, trustProxy: behindProxy, version: __CLI_VERSION__ });
+    const up = composeUp({
+      publicUrl,
+      trustProxy: behindProxy,
+      version: __CLI_VERSION__,
+      noHostControl: !allowHostControl,
+    });
     if (!up.ok) {
       // The preflight stopped + disabled the operator's proxy to free 80/443. The
       // stack isn't coming up, so restore it rather than leaving the box dark.

@@ -246,7 +246,7 @@ export {
 } from "./system/port-scan";
 export { probeStaticOutput, type OutputProbeResult } from "./system/output-exists";
 
-export { LocalExecutor, SshExecutor, SystemSshExecutor, createExecutor, createHostExecutor } from "./system/executor";
+export { LocalExecutor, SshExecutor, SystemSshExecutor, createExecutor, createHostExecutor, hostControlDisabled } from "./system/executor";
 export { DockerEdgeExecutor } from "./system/docker-edge-executor";
 export {
   ensureRemoteJournal,

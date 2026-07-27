@@ -22,7 +22,7 @@ import {
 import { useCloud } from "@/context/CloudContext";
 import { useModal } from "@/context/ModalContext";
 import { usePlatform } from "@/context/PlatformContext";
-import { githubApi } from "@/lib/api";
+import { githubApi, settingsApi } from "@/lib/api";
 import { SettingsSection } from "./SettingsSection";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 
@@ -45,6 +45,10 @@ export function GitHubConnection() {
   const [accounts, setAccounts] = useState<GitHubAccount[]>([]);
   const [installUrl, setInstallUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // "Forward my git identity to build servers" (Settings → Clone credentials).
+  // When on, gh CLI is NOT local-only — its identity is forwarded to remote
+  // build hosts over SSH, so it authenticates remote server clones too.
+  const [forwardGit, setForwardGit] = useState(false);
 
   const loadStatus = useCallback(async (force = false) => {
     setLoading(true);
@@ -67,6 +71,10 @@ export function GitHubConnection() {
 
   useEffect(() => {
     void loadStatus();
+    void settingsApi
+      .get()
+      .then((r) => setForwardGit(!!r.forwardGitToServer))
+      .catch(() => {});
   }, [loadStatus]);
 
   // Connect/install opens a separate window (OAuth popup or the GitHub App
@@ -270,10 +278,10 @@ export function GitHubConnection() {
              cloud minting tokens for them. Route them through the
              cloud-connect flow first; once cloud is connected the App
              card flips to the standard not-yet-OAuth'd state. */
-          <div className="space-y-4">
-            <p className="text-sm text-muted-foreground leading-relaxed">
-              {t.settings.github.cloudExplainer}
-            </p>
+          <div className="space-y-3.5">
+            {/* No explainer paragraph here: the section description already says
+                "Requires Openship Cloud — the App is owned by openship.io", and
+                repeating it directly underneath was the same sentence twice. */}
             <button
               onClick={startCloudConnect}
               className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium bg-foreground text-background hover:bg-foreground/90 rounded-xl transition-colors"
@@ -284,8 +292,8 @@ export function GitHubConnection() {
 
             {/* Escape hatches — clone private repos without cloud. SSH keys
                 attach per server (Servers → GitHub); a PAT works everywhere. */}
-            <div className="border-t border-border/40 pt-3.5">
-              <p className="text-xs font-medium text-muted-foreground/70 mb-2.5">
+            <div className="border-t border-border/40 pt-3">
+              <p className="text-xs font-medium text-muted-foreground/70 mb-2">
                 {t.settings.github.noCloudTitle}
               </p>
               <div className="flex flex-wrap items-center gap-2">
@@ -304,9 +312,9 @@ export function GitHubConnection() {
                   {t.settings.github.usePat}
                 </button>
               </div>
-              <p className="text-xs text-muted-foreground/60 mt-2 leading-relaxed">
-                {t.settings.github.noCloudHint}
-              </p>
+              {/* The two buttons above ARE the instruction ("SSH key per server"
+                  → Servers, "Access token" → Tokens); the hint line under them
+                  only restated it in prose. */}
             </div>
           </div>
         ) : (
@@ -333,85 +341,96 @@ export function GitHubConnection() {
             </button>
           </div>
         )}
+        {/* ─── gh CLI — a second GitHub auth method, INSIDE this same section
+            (self-hosted only). One "GitHub" card, not two cards for the same
+            provider. A divider separates it from the App block above. ─── */}
+        {isSelfHosted && (
+          <div className="mt-4 border-t border-border/50 pt-4">
+            <GhCliBlock
+              available={state.sources.ghCli.available}
+              login={state.sources.ghCli.login}
+              avatarUrl={state.sources.ghCli.avatarUrl}
+              active={state.primary === "gh-cli"}
+              onConnect={() => connect("cli")}
+              connecting={connecting && !state.sources.ghCli.available}
+              forwardEnabled={forwardGit}
+              onManageForward={() => router.push("/settings?tab=tokens")}
+            />
+          </div>
+        )}
       </SettingsSection>
-
-      {/* ─── gh CLI card (self-hosted only) ─────────────────────────────
-          Separate card so the App listing above stays clean. Compact
-          single-row layout that surfaces the auth state + the build-
-          target capability so users understand WHY cli is treated as a
-          local-only escape hatch.                                         */}
-      {isSelfHosted && (
-        <GhCliCard
-          available={state.sources.ghCli.available}
-          login={state.sources.ghCli.login}
-          avatarUrl={state.sources.ghCli.avatarUrl}
-          active={state.primary === "gh-cli"}
-          onConnect={() => connect("cli")}
-          connecting={connecting && !state.sources.ghCli.available}
-        />
-      )}
     </>
   );
 }
 
 /**
- * Compact local-gh-CLI card. Lives in its own SettingsSection so the App
- * card above stays untouched. Surfaces the auth state, "Local builds
- * only" capability chip, connect/disconnect action, and a deploy-time
- * warning when CLI is the active source (clone-auth.ts rejects cli
- * tokens for remote builds — we surface that here rather than at deploy
- * time).
+ * gh CLI auth — an inline sub-block rendered INSIDE the GitHub section (not its
+ * own card), so there's a single "GitHub" section, not two cards for the same
+ * provider. Surfaces the auth state, the "Used for deploys" state, git-identity
+ * forwarding, and the connect/disconnect action.
  */
-function GhCliCard(props: {
+function GhCliBlock(props: {
   available: boolean;
   login?: string;
   avatarUrl?: string;
   active: boolean;
   onConnect: () => void;
   connecting: boolean;
+  /** "Forward my git identity to build servers" is on → gh CLI authenticates
+   *  remote server clones too (not local-only). */
+  forwardEnabled: boolean;
+  /** Jump to the Clone-credentials section (Tokens tab) that owns the toggle. */
+  onManageForward: () => void;
 }) {
-  const { available, login, avatarUrl, active, onConnect, connecting } = props;
+  const { available, login, avatarUrl, active, onConnect, connecting, forwardEnabled, onManageForward } = props;
   const { t } = useI18n();
   return (
-    <SettingsSection
-      icon={Terminal}
-      title={t.settings.github.ghCli.title}
-      description={
-        available && login
-          ? interpolate(t.settings.github.ghCli.loggedInAs, { login })
-          : t.settings.github.ghCli.fallbackDesc
-      }
-      iconBg="bg-foreground/5"
-      iconColor="text-foreground"
-    >
       <div className="space-y-3">
-        {/* Status badge — only when gh CLI is actually the active source. */}
-        {active && (
-          <div className="flex items-center gap-2 flex-wrap">
-            <span
-              className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-primary/15 text-primary"
-              title={t.settings.github.ghCli.usedForDeploysTitle}
-            >
-              {t.settings.github.ghCli.usedForDeploys}
-            </span>
+        {/* Compact "gh CLI" sub-header — this block lives INSIDE the GitHub
+            section (not a separate card), so it uses a small inline header. */}
+        <div className="flex items-center gap-2.5">
+          <div className="size-8 rounded-lg bg-foreground/5 flex items-center justify-center shrink-0">
+            <Terminal className="size-4 text-foreground" />
           </div>
-        )}
-
-        {/* Auth identity row when authenticated */}
-        {available && login && (
-          <div className="flex items-center gap-3 px-3 py-2 bg-muted/30 rounded-lg border border-border/40 w-fit">
-            {avatarUrl ? (
-              <img src={avatarUrl} alt={login} className="size-6 rounded-full" />
-            ) : (
-              <Terminal className="size-4 text-muted-foreground" />
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-foreground leading-tight">{t.settings.github.ghCli.title}</p>
+            {/* When authed, the identity row right below shows the avatar + @login
+                + the deploys badge — so "Logged in as @login" here was the same
+                line twice. Only the not-authed description earns a subtitle. */}
+            {!(available && login) && (
+              <p className="text-xs text-muted-foreground truncate">
+                {t.settings.github.ghCli.fallbackDesc}
+              </p>
             )}
-            <span className="text-sm font-medium text-foreground">@{login}</span>
+          </div>
+        </div>
+        {/* Auth identity row when authenticated — the "Used for deploys" badge
+            rides on the RIGHT of this same row (right-aligned to the avatar)
+            instead of adding its own line above. */}
+        {available && login && (
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 px-3 py-2 bg-muted/30 rounded-lg border border-border/40">
+              {avatarUrl ? (
+                <img src={avatarUrl} alt={login} className="size-6 rounded-full" />
+              ) : (
+                <Terminal className="size-4 text-muted-foreground" />
+              )}
+              <span className="text-sm font-medium text-foreground">@{login}</span>
+            </div>
+            {active && (
+              <span
+                className="shrink-0 inline-flex items-center rounded-full bg-success/10 px-2 py-0.5 text-[10px] font-medium text-success ring-1 ring-inset ring-success/20"
+                title={t.settings.github.ghCli.usedForDeploysTitle}
+              >
+                {t.settings.github.ghCli.usedForDeploys}
+              </span>
+            )}
           </div>
         )}
 
-        {/* Active-source warning — remote deploys get refused.
-            Fires when CLI is the ONLY source (no cloud connection).  */}
-        {active && (
+        {/* Active-source warning — remote deploys get refused. Only when
+            forwarding is OFF; with forwarding on, gh CLI DOES reach remote. */}
+        {active && !forwardEnabled && (
           <p className="text-sm text-muted-foreground leading-relaxed">
             <span className="font-medium text-foreground">{t.settings.github.ghCli.activeWarnStrong}</span>{" "}
             {t.settings.github.ghCli.activeWarnRest}
@@ -442,15 +461,38 @@ function GhCliCard(props: {
           </p>
         )}
 
+        {/* Git-identity forwarding — the access point that turns gh CLI from a
+            local-only source into a remote-capable one. Shows the current state
+            and links to the toggle (Clone credentials, Tokens tab). */}
+        {available && (
+          <div className="flex items-start gap-2 rounded-lg border border-border/40 bg-muted/20 px-3 py-2">
+            <KeyRound className="size-3.5 mt-0.5 shrink-0 text-muted-foreground" />
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              {forwardEnabled
+                ? t.settings.github.ghCli.forwardOnNote
+                : t.settings.github.ghCli.forwardOffHint}{" "}
+              <button
+                type="button"
+                onClick={onManageForward}
+                className="font-medium text-foreground underline underline-offset-2 hover:text-primary"
+              >
+                {t.settings.github.ghCli.manageForward}
+              </button>
+            </p>
+          </div>
+        )}
+
         {/* Action / hint row.
             Connected → terminal instruction for the durable disconnect
             (`gh auth logout`). Not connected → button that triggers the
             connect flow (device flow / terminal instruction). */}
         <div className="flex items-center gap-2">
           {available ? (
-            <p className="text-sm text-muted-foreground leading-relaxed">
+            // Fine print, not a paragraph: it's a reference for later, competing
+            // with nothing. (Was text-sm, the same weight as the real content.)
+            <p className="text-xs text-muted-foreground/70 leading-relaxed">
               {t.settings.github.ghCli.disconnectPrefix}{" "}
-              <code className="px-1.5 py-0.5 rounded bg-muted/60 text-foreground font-mono text-xs">
+              <code className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-[11px] text-foreground/80">
                 gh auth logout
               </code>{" "}
               {t.settings.github.ghCli.disconnectSuffix}
@@ -471,6 +513,5 @@ function GhCliCard(props: {
           )}
         </div>
       </div>
-    </SettingsSection>
   );
 }

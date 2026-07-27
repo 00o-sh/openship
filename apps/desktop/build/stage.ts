@@ -7,6 +7,7 @@
  *   resources/dashboard/              the dashboard's own Next standalone output
  *   resources/migrations/             drizzle .sql  → OPENSHIP_MIGRATIONS_DIR
  *   resources/pglite/                 pglite.wasm + pglite.data → OPENSHIP_PGLITE_ASSETS_DIR
+ *   resources/geoip/                  GeoLite2-Country.mmdb → OPENSHIP_GEOIP_DB
  *
  * Invoked by electron-forge's `generateAssets` hook (forge.config.js) and also
  * runnable standalone with `bun run build/stage.ts`. Must run under bun — it
@@ -29,6 +30,7 @@ const DB_DRIZZLE_DIR = join(REPO_ROOT, "packages/db/drizzle");
 
 const isWin = process.platform === "win32";
 const API_BIN = isWin ? "openship-api.exe" : "openship-api";
+const GEOIP_DB = "GeoLite2-Country.mmdb";
 
 // Target arch for the compiled API binary. electron-forge passes the build
 // arch to the generateAssets hook, which forwards it as FORGE_ARCH; default to
@@ -258,10 +260,40 @@ function main(): void {
     }
   });
 
+  // 5. GeoLite2-Country DB — vendored in the repo, used for the country flag on
+  //    each server row. Same class of problem as migrations/pglite: geo-ip.ts
+  //    probes paths relative to its own module, and inside a --compile binary
+  //    that is the virtual /$bunfs/root, so every candidate misses. Unstaged, the
+  //    desktop silently downloads 8.8 MB from raw.githubusercontent.com on the
+  //    first lookup and shows no flags offline — the opposite of what geo-ip.ts
+  //    documents ("production reads OUR shipped copy"). Handed over as
+  //    OPENSHIP_GEOIP_DB at spawn (services.ts).
+  step("copying geoip db → resources/geoip/", () => {
+    const src = join(API_DIR, "assets/geoip");
+    if (!existsSync(join(src, GEOIP_DB))) {
+      throw new Error(
+        `geoip asset missing: ${join(src, GEOIP_DB)} — run \`bun run update:geoip\` at the repo root`,
+      );
+    }
+    const dest = join(RESOURCES, "geoip");
+    mkdirSync(dest, { recursive: true });
+    cpSync(join(src, GEOIP_DB), join(dest, GEOIP_DB));
+    process.stdout.write(`  ${GEOIP_DB}: ${sizeOf(join(dest, GEOIP_DB))}\n`);
+  });
+
   // NB: OpenResty Lua is NOT staged here. Unlike migrations/pglite (plain data
   //   files), the .lua scripts are embedded as base64 in the API bundle itself
   //   (packages/adapters/src/infra/lua-embedded.ts) so they travel inside the
   //   compiled binary with no path to lose — see scripts/embed-lua.ts.
+  //
+  // NB: the openship + webmail RELEASE DISTS are not staged either — they are
+  //   downloaded (sha256-verified) from the matching GitHub release on first use,
+  //   via resolveReleaseDist slot 3. Staging them would mean shipping a second
+  //   copy of the dashboard standalone. To test a packaged build against a dist
+  //   that has not been published yet, build it locally
+  //   (`bun run build:server`) and launch the app with
+  //   OPENSHIP_RELEASE_DIST_PATH=<repo>/apps/api/release-dist — slot 1 — which
+  //   gives the packaged app the same behaviour as a from-source dev run.
 
   process.stdout.write(
     `\n✓ Staged ${APP_NAME} v${APP_VERSION} for ${TARGET} → apps/desktop/resources\n`,

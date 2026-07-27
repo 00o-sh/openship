@@ -207,32 +207,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
-## Releasing
-
-Cut a release with the version script — it syncs every package's version,
-commits the bump, tags `vX.Y.Z`, and pushes:
-
-```bash
-bun scripts/release.ts 0.2.0        # explicit version
-# or a bump keyword: patch | minor | major | rc   (minor from 0.1.x → 0.2.0)
-```
-
-Pushing the tag triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which:
-
-- builds the **macOS / Windows / Linux installers** and the server tarballs (with SHA-256 sidecars),
-- **publishes the `openship` CLI to npm** — via npm [OIDC trusted publishing](https://docs.npmjs.com/trusted-publishers) (no token), and
-- creates the **GitHub Release** with the built assets (notes come from the tag).
-
-Official Docker images (`ghcr.io/oblien/openship-{api,dashboard,edge}`) publish from
-[`.github/workflows/docker-images.yml`](.github/workflows/docker-images.yml) — on a version tag, or on demand with `bun scripts/release.ts docker`.
-
-To flag a release as **critical** (or add recommended/info advisories) in the
-in-app updater, add an entry to [`release-advisories.json`](release-advisories.json)
-**before** tagging — clients pull it pinned to the release tag. High-level notes
-live in [`CHANGELOG.md`](CHANGELOG.md).
-
----
-
 ## Security
 
 Found a vulnerability? We welcome your report — please disclose it **privately**,

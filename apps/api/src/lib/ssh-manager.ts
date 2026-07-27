@@ -479,7 +479,34 @@ export class SshConnectionManager {
     if (this.cooldownRemaining(serverId) > 0) return false;
 
     const server = await repos.server.get(serverId).catch(() => undefined);
-    if (!server?.sshHost) return false;
+    if (!server) return false;
+
+    // An isLocal row is THIS box (the auto-registered "This Server"). Its ssh*
+    // fields are display-only — self-server.ts writes `127.0.0.1`/SERVER_IP purely
+    // so the list reads truthfully, and every operation goes through
+    // createHostExecutor, never a dial. Probing that display value reported the
+    // control plane's own host as Offline: inside the api container `127.0.0.1:22`
+    // is the CONTAINER's loopback, where there is no sshd.
+    //
+    // So answer with the channel ops actually use: the host SSH bridge when we're
+    // containerized (host.docker.internal), else the same machine we're running on.
+    if (server.isLocal) {
+      const hostSsh = process.env.OPENSHIP_HOST_SSH_HOST?.trim();
+      if (!hostSsh) {
+        this.recordSuccess(serverId);
+        return true;
+      }
+      const hostOk = await probeTcp(
+        hostSsh,
+        Number(process.env.OPENSHIP_HOST_SSH_PORT || 22),
+        timeoutMs,
+      );
+      if (hostOk) this.recordSuccess(serverId);
+      else this.recordFailure(serverId);
+      return hostOk;
+    }
+
+    if (!server.sshHost) return false;
 
     const ok = await probeTcp(server.sshHost, server.sshPort ?? 22, timeoutMs);
     if (ok) this.recordSuccess(serverId);

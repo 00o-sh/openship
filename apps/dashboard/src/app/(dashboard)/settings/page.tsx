@@ -44,6 +44,7 @@ import {
   useSettingsTabs,
 } from "./_components/SettingsSidebar";
 import { PageContainer } from "@/components/ui/PageContainer";
+import { HelpMenu } from "@/components/HelpMenu";
 
 export default function SettingsPage() {
   return (
@@ -83,16 +84,24 @@ function SettingsPageInner() {
 
   return (
     <PageContainer>
-      <div className="mb-6">
-        <h1
-          className="text-2xl font-medium text-foreground/80"
-          style={{ letterSpacing: "-0.2px" }}
-        >
-          {t.settings.page.title}
-        </h1>
-        <p className="text-sm text-muted-foreground/70 mt-1">
-          {t.settings.page.subtitle}
-        </p>
+      {/* Settings is where people land when something needs explaining, so the
+          shared ⋮ (support / report issue / feedback / docs / community) sits at
+          the page title's trailing edge. A section inside a tab may carry its own
+          ⋮ for its own actions (e.g. Team's workspace menu) — different level,
+          different scope. */}
+      <div className="mb-6 flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h1
+            className="text-2xl font-medium text-foreground/80"
+            style={{ letterSpacing: "-0.2px" }}
+          >
+            {t.settings.page.title}
+          </h1>
+          <p className="text-sm text-muted-foreground/70 mt-1">
+            {t.settings.page.subtitle}
+          </p>
+        </div>
+        <HelpMenu className="shrink-0" />
       </div>
 
       <SettingsMobileTabs />
@@ -103,9 +112,12 @@ function SettingsPageInner() {
           {activeTab === "general" && (
             <>
               <GitHubConnection />
-              {showDeployDefaults && <DeployDefaults />}
+              {/* Deploy Defaults + Routing hidden for now — advanced/rarely-needed,
+                  reduces general-settings noise. The edge defaults to loopback-port
+                  and both keep a per-project override; re-enable by uncommenting. */}
+              {/* {showDeployDefaults && <DeployDefaults />} */}
               {showBuildPreferences && <BuildPreferences />}
-              {showBuildPreferences && <RoutePreferences />}
+              {/* {showBuildPreferences && <RoutePreferences />} */}
               <LanguageSetting />
               <PreferencesSetting />
             </>

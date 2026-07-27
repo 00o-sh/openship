@@ -140,7 +140,10 @@
       "optionalSuffix": "on this machine to enable local-build clones of repos outside your App installations. Remote deploys use each server's SSH key or the App.",
       "disconnectPrefix": "To disconnect, run",
       "disconnectSuffix": "in your terminal.",
-      "use": "Use gh CLI"
+      "use": "Use gh CLI",
+      "forwardOnNote": "Forwarding is on — gh CLI also authenticates remote server clones. Your identity is tunneled over SSH per clone; nothing is stored on the server.",
+      "forwardOffHint": "Local builds only for now. Turn on \"Forward my git identity to build servers\" to use gh CLI for remote server deploys too.",
+      "manageForward": "Manage forwarding"
     }
   },
   "deployDefaults": {
@@ -327,7 +330,7 @@
       "pendingBody": "Your Openship domain is pending verification (DNS / SSL). Invites turn on once it's live.",
       "viewDomain": "View domain"
     },
-    "descPersonal": "People with access to your personal workspace. Invite collaborators directly, or create a separate team organization.",
+    "descPersonal": "People with access to your personal workspace.",
     "descTeam": "People with access to this organization's projects, deployments, and servers.",
     "inviteMember": "Invite member",
     "createTeamCard": {
@@ -477,6 +480,16 @@
     "toast": {
       "disconnected": "Disconnected from Openship Cloud",
       "disconnectFailed": "Failed to disconnect"
+    },
+    "pitch": {
+      "title": "Add Openship Cloud",
+      "body": "Every project gets a free .{domain} domain with automatic SSL — no DNS, no certificates. Your own servers keep working exactly as they do now.",
+      "perkDomain": "Free .{domain} domain + automatic SSL on every project",
+      "perkDeploy": "Deploy to managed cloud, or stay on your own servers",
+      "perkServices": "Managed Postgres, Redis and more, provisioned in a click",
+      "perkGithub": "GitHub connected without registering your own app",
+      "noLockIn": "Free to connect. Nothing moves, and you can disconnect at any time.",
+      "viewPricing": "View pricing"
     }
   },
   "instance": {

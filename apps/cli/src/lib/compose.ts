@@ -117,6 +117,8 @@ export async function ensureDocker(): Promise<boolean> {
 }
 
 export interface ComposeUpOpts {
+  /** Don't give the api a channel to the HOST OS (no key, no mount, refuse ops). */
+  noHostControl?: boolean;
   apiPort?: string;
   dashboardPort?: string;
   publicUrl?: string;
@@ -470,6 +472,9 @@ function renderEnv(opts: ComposeUpOpts, host: { user: string; keyPath: string } 
     "CLOUD_MODE=false",
     "OPENSHIP_TARGET=local",
     "OPENSHIP_REQUIRE_AUTH=true",
+    // Read by createHostExecutor (throws when false) and by the servers list
+    // (hides the local row). Written explicitly so the policy is visible in .env.
+    `OPENSHIP_HOST_CONTROL=${opts.noHostControl ? "false" : "true"}`,
     `OPENSHIP_IMAGE_REGISTRY=${opts.registry || "ghcr.io/oblien"}`,
     `OPENSHIP_VERSION=${opts.version || (typeof __CLI_VERSION__ === "string" ? __CLI_VERSION__ : "latest")}`,
     `POSTGRES_PASSWORD=${keepSecret(prev, "POSTGRES_PASSWORD")}`,
@@ -535,7 +540,9 @@ function materialize(opts: ComposeUpOpts): {
   // about to write is brand new, which is the case that can mismatch a surviving
   // data volume (see reconcileDbPassword).
   const regeneratedSecrets = !readEnvFile().POSTGRES_PASSWORD;
-  const host = provisionHostSshChannel(); // best-effort; null → LocalExecutor fallback
+  // --no-host-control: never generate/authorize a host key in the first place.
+  // Not just "don't use it" — there is nothing on disk to steal.
+  const host = opts.noHostControl ? null : provisionHostSshChannel();
   writeFileSync(COMPOSE_FILE, COMPOSE_YAML);
   writeFileSync(ENV_FILE, renderEnv(opts, host), { mode: 0o600 });
 

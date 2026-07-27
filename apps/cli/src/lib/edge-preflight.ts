@@ -86,6 +86,11 @@ export interface EdgePreflightDeps {
     executor: CommandExecutor,
     proxy: ProxyKind,
   ): Promise<{ sites: ImportedSite[]; warnings: string[] }>;
+  /** Hostnames our edge already serves (authoritative "already imported" check). */
+  edgeServedHostnames(): Set<string>;
+  /** Ask whether to import a stopped proxy's remaining sites. Injectable like
+   *  `confirm` so the flow stays testable without a TTY. */
+  confirmStoppedImport(info: { proxy: ProxyKind; count: number }): Promise<boolean>;
   /** Read a cert/key PEM off the host filesystem; null if unreadable. */
   readCert(path: string): string | null;
   /** Show the detected conflict (sites + non-migratable warnings) to the operator. */
@@ -186,6 +191,40 @@ export async function rollbackHostEdge(): Promise<boolean> {
 /** Marker: sites from a stopped proxy were already imported — don't re-offer. */
 const IMPORTED_MARKER = join(OS_DIR, "imported-proxy");
 
+/**
+ * Hostnames OUR edge already serves, read from its live vhosts.
+ *
+ * The authoritative "already imported?" signal. A marker file under OS_DIR is not:
+ * `openship-dev` runs with OPENSHIP_HOME=~/.openship-dev, so a marker written by
+ * one install is invisible to the other, and wiping ~/.openship (or reinstalling)
+ * loses it — either way the operator gets re-asked to import sites that are
+ * already live, which reads as the tool having forgotten what it just did.
+ *
+ * Returns an empty set when the edge isn't up yet (first install) — nothing is
+ * served, so everything is genuinely importable.
+ */
+function edgeServedHostnames(): Set<string> {
+  const served = new Set<string>();
+  const r = spawnSync(
+    "docker",
+    [
+      "exec",
+      "openship-edge",
+      "sh",
+      "-c",
+      "cat /usr/local/openresty/nginx/conf/sites-enabled/*.conf 2>/dev/null || true",
+    ],
+    { encoding: "utf8" },
+  );
+  if (r.status !== 0 || !r.stdout) return served;
+  for (const m of r.stdout.matchAll(/server_name\s+([^;]+);/g)) {
+    for (const host of m[1].trim().split(/\s+/)) {
+      if (host && host !== "_") served.add(host.toLowerCase());
+    }
+  }
+  return served;
+}
+
 /** Record that a stopped proxy's sites were imported, so re-runs don't duplicate. */
 export function markStoppedProxyImported(): void {
   try {
@@ -230,16 +269,20 @@ async function offerStoppedProxyImport(
   }
   if (sites.length === 0) return { proceed: true };
 
+  // Drop anything our edge ALREADY serves, so a re-run doesn't offer to re-import
+  // sites that are live. A site counts as done when every hostname it answers to
+  // is present in the edge's vhosts.
+  const served = deps.edgeServedHostnames();
+  const pending = sites.filter(
+    (site) => !site.serverNames.every((h) => served.has(h.trim().toLowerCase())),
+  );
+  if (pending.length === 0) return { proceed: true };
+  sites = pending;
+
   deps.render({ owner: `${proxy} (stopped)`, sites, warnings });
-  const take = await select({
-      message: `${proxy} is stopped but still has ${sites.length} site(s) configured — import them into Openship's edge?`,
-      options: [
-        { value: "import", label: `Import ${sites.length} site(s)`, hint: "serve them from Openship's edge" },
-        { value: "skip", label: "Skip", hint: "leave them unserved" },
-      ],
-      initialValue: "import",
-  });
-  if (isCancel(take) || take !== "import") return { proceed: true };
+  if (!(await deps.confirmStoppedImport({ proxy, count: sites.length }))) {
+    return { proceed: true };
+  }
 
   return { proceed: true, action: "migrate", sites, certPems: collectCertPems(sites, readCertFile) };
 }
@@ -452,6 +495,18 @@ function defaultDeps(): EdgePreflightDeps {
     ourEdgeContainerRunning: realOurEdgeContainerRunning,
     detectInstalledProxy: realDetectInstalledProxy,
     scanProxySites: realScanImportableSites,
+    edgeServedHostnames,
+    confirmStoppedImport: async ({ proxy, count }) => {
+      const take = await select({
+        message: `${proxy} is stopped but still has ${count} site(s) not served by Openship — import them?`,
+        options: [
+          { value: "import", label: `Import ${count} site(s)`, hint: "serve them from Openship's edge" },
+          { value: "skip", label: "Skip", hint: "leave them unserved" },
+        ],
+        initialValue: "import",
+      });
+      return !isCancel(take) && take === "import";
+    },
     readCert: readCertFile,
     render: ({ owner, sites, warnings }) => {
       if (sites.length > 0) {

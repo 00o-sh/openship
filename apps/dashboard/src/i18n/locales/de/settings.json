@@ -273,7 +273,7 @@
   },
   "team": {
     "heading": "Team",
-    "descPersonal": "Personen mit Zugriff auf deinen persönlichen Arbeitsbereich. Lade Mitarbeitende direkt ein oder erstelle eine separate Team-Organisation.",
+    "descPersonal": "Personen mit Zugriff auf deinen persönlichen Workspace.",
     "descTeam": "Personen mit Zugriff auf die Projekte, Deployments und Server dieser Organisation.",
     "inviteMember": "Mitglied einladen",
     "createTeamCard": {

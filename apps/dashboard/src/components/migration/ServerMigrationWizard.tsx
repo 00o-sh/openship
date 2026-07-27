@@ -24,6 +24,7 @@ import {
   Globe,
   ChevronRight,
   KeyRound,
+  ShieldCheck,
 } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
 import ServerSelector, { type ServerOption } from "@/components/shared/ServerSelector";
@@ -62,6 +63,7 @@ import { AppLogo } from "@/components/AppLogo";
 import { Logo } from "@/components/logo";
 import { DeploymentTerminal } from "@/components/import-project/DeploymentTerminal";
 import { ServerConnectionCard } from "@/app/(dashboard)/servers/[serverId]/_components/connection-card";
+import { MigrationIllustration } from "@/components/migration/MigrationIllustration";
 
 /** Platforms whose Docker/Compose apps this flow can adopt — shown as faint,
  *  clean brand marks under the intro (decorative). Only brands with a crisp
@@ -1699,7 +1701,7 @@ export function ServerMigrationWizard({
         disabled={!selectedId || scanning}
         title={m.wizard.rescan}
         aria-label={m.wizard.rescan}
-        className="p-2 rounded-lg border border-border text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        className="p-2.5 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
       >
         {scanning ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
       </button>
@@ -2037,12 +2039,7 @@ export function ServerMigrationWizard({
               still renders the tabs — so bringing this back is a JSX-only change.
               `active` falls back to projects[0], which the scan always creates,
               so the single-project path works untouched. */}
-          {(backBtn || (adoptable && stack)) && (
-            <div className="flex items-center gap-3">
-              {backBtn}
-              {adoptable && stack && <div className="ms-auto">{rescanBtn}</div>}
-            </div>
-          )}
+          {backBtn && <div className="flex items-center gap-3">{backBtn}</div>}
 
           {!stack && !error && <EmptyHint scanning={scanning} status={scanStatus} />}
           {stack && !adoptable && !hasReimport && <NoResults message={m.discover.nothing} />}
@@ -2239,6 +2236,7 @@ export function ServerMigrationWizard({
                       className="px-4 py-2.5 rounded-xl border border-border text-sm font-medium text-foreground hover:bg-muted transition-colors">
                       {m.wizard.cancel}
                     </button>
+                    {rescanBtn}
                     <button type="button" onClick={() => setStep("source")} disabled={migratable.length === 0}
                       className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                       {m.wizard.steps.next}
@@ -2296,29 +2294,27 @@ export function ServerMigrationWizard({
               </div>
             </div>
           ) : (
-            <>
-              {server && <ServerConnectionCard server={server} />}
-              <div className="rounded-2xl border border-border/50 bg-card p-5 space-y-3.5">
-                <div className="flex items-center gap-2.5">
-                  <div className="size-9 rounded-xl bg-info/10 flex items-center justify-center shrink-0">
-                    <Boxes className="size-[18px] text-info" />
-                  </div>
-                  <h3 className="text-sm font-semibold text-foreground leading-tight">{m.entry.cardTitle}</h3>
+            /* No host/connection card here — only the scan card. */
+            <div className="rounded-2xl border border-border/50 bg-card p-5 space-y-3.5">
+              <div className="flex items-center gap-2.5">
+                <div className="size-9 rounded-xl bg-info/10 flex items-center justify-center shrink-0">
+                  <Boxes className="size-[18px] text-info" />
                 </div>
-                <p className="text-[13px] leading-relaxed text-muted-foreground">{m.entry.cardDesc}</p>
-                {/* Scan-mode option sits directly above the button it changes. */}
-                {flatOption(true)}
-                <button
-                  type="button"
-                  onClick={() => handleScan()}
-                  disabled={!selectedId || scanning}
-                  className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  {scanning ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />}
-                  {scanning ? m.wizard.scanning : m.wizard.scan}
-                </button>
+                <h3 className="text-sm font-semibold text-foreground leading-tight">{m.entry.cardTitle}</h3>
               </div>
-            </>
+              <p className="text-[13px] leading-relaxed text-muted-foreground">{m.entry.cardDesc}</p>
+              {/* Scan-mode option sits directly above the button it changes. */}
+              {flatOption(true)}
+              <button
+                type="button"
+                onClick={() => handleScan()}
+                disabled={!selectedId || scanning}
+                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {scanning ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />}
+                {scanning ? m.wizard.scanning : m.wizard.scan}
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -2346,59 +2342,24 @@ export function ServerMigrationWizard({
 function EmptyHint({ scanning, status }: { scanning?: boolean; status?: string }) {
   const { t } = useI18n();
   return (
-    <div className="flex flex-col items-center justify-center text-center py-14 gap-4">
-      {/* Themed illustration — a container stack being inspected under a lens
-          (read-only "adopt"). Kept during the scan (pulses to signal loading)
-          so the body never goes blank. */}
-      <div className={`relative h-36 w-52 ${scanning ? "animate-pulse" : ""}`}>
-        <svg className="absolute inset-0 h-full w-full" viewBox="0 0 220 150" fill="none">
-          {/* ground */}
-          <line x1="34" y1="112" x2="150" y2="112" stroke="var(--th-bd-subtle)" strokeWidth="1" />
-
-          {/* back container */}
-          <rect x="44" y="74" width="52" height="38" rx="4" fill="var(--th-sf-03)" stroke="var(--th-bd-default)" strokeWidth="1" />
-          <line x1="60" y1="74" x2="60" y2="112" stroke="var(--th-bd-subtle)" strokeWidth="1" />
-          <line x1="78" y1="74" x2="78" y2="112" stroke="var(--th-bd-subtle)" strokeWidth="1" />
-
-          {/* front container */}
-          <rect x="82" y="84" width="56" height="28" rx="4" fill="var(--th-sf-05)" stroke="var(--th-bd-default)" strokeWidth="1" />
-          <line x1="100" y1="84" x2="100" y2="112" stroke="var(--th-bd-subtle)" strokeWidth="1" />
-          <line x1="120" y1="84" x2="120" y2="112" stroke="var(--th-bd-subtle)" strokeWidth="1" />
-
-          {/* small top container + activity lights */}
-          <rect x="58" y="56" width="34" height="18" rx="3" fill="var(--th-card-bg)" stroke="var(--th-bd-default)" strokeWidth="1" />
-          <circle cx="66" cy="65" r="2" fill="#22c55e" fillOpacity="0.7" />
-          <circle cx="74" cy="65" r="2" fill="#eab308" fillOpacity="0.5" />
-          <circle cx="82" cy="65" r="2" fill="var(--th-on-12)" />
-
-          {/* magnifier inspecting a container */}
-          <circle cx="150" cy="62" r="26" fill="var(--th-card-bg)" stroke="var(--th-bd-strong)" strokeWidth="2" />
-          <rect x="139" y="55" width="22" height="15" rx="2" fill="var(--th-sf-06)" stroke="var(--th-bd-default)" strokeWidth="1" />
-          <line x1="146" y1="55" x2="146" y2="70" stroke="var(--th-bd-subtle)" strokeWidth="1" />
-          <line x1="154" y1="55" x2="154" y2="70" stroke="var(--th-bd-subtle)" strokeWidth="1" />
-          <line x1="169" y1="81" x2="186" y2="98" stroke="var(--th-bd-strong)" strokeWidth="4" strokeLinecap="round" />
-
-          {/* decorative dots + sparkles */}
-          <circle cx="24" cy="46" r="3.5" fill="var(--th-on-10)" />
-          <circle cx="30" cy="126" r="5" fill="var(--th-on-08)" />
-          <circle cx="200" cy="40" r="3" fill="var(--th-on-12)" />
-          <circle cx="196" cy="118" r="4.5" fill="var(--th-on-06)" />
-          <path d="M14 82l2-4 2 4-4-2 4 0-4 2z" fill="var(--th-on-16)" />
-          <path d="M202 76l1.5-3 1.5 3-3-1.5 3 0-3 1.5z" fill="var(--th-on-12)" />
-        </svg>
+    <div className="overflow-hidden rounded-2xl border border-border/50 bg-card">
+      <div className="flex flex-col items-center px-6 pb-12 pt-10 text-center">
+        {/* The migration illustration — the same one the runs-list empty state
+            uses. Pulses during the scan so the body never goes blank. */}
+        <MigrationIllustration className={`relative mb-7 h-32 w-72 max-w-full ${scanning ? "animate-pulse" : ""}`} />
+        <p className="mx-auto max-w-md text-sm leading-relaxed text-muted-foreground">
+          {scanning ? (status || t.migration.wizard.scanning) : t.migration.wizard.intro}
+        </p>
       </div>
-      <p className="max-w-sm text-sm text-muted-foreground">
-        {scanning ? (status || t.migration.wizard.scanning) : t.migration.wizard.intro}
-      </p>
-      {!scanning && (
-        <div className="mt-1 flex items-center gap-4 opacity-40" aria-hidden>
-          {MIGRATE_SOURCES.map((slug) => (
-            <AppLogo key={slug} slug={slug} className="size-5 grayscale" />
-          ))}
-          <ArrowRight className="size-4 text-muted-foreground/60" />
-          <Logo size={20} />
-        </div>
-      )}
+      {/* Safety guarantee footer — migration COPIES, never moves; nothing is
+          deleted unless you explicitly cut over. */}
+      <div className="flex items-start gap-2.5 border-t border-border/50 bg-muted/30 px-5 py-4 text-start">
+        <ShieldCheck className="mt-0.5 size-4 shrink-0 text-success" />
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          <span className="font-medium text-foreground">{t.migration.tab.safetyTitle}</span>{" "}
+          {t.migration.tab.safetyBody}
+        </p>
+      </div>
     </div>
   );
 }
@@ -2707,9 +2668,9 @@ function ServiceRow({
         interactionBlocked
           ? "cursor-not-allowed border-border/50 bg-card/40 opacity-55"
           : readOnly
-            ? "cursor-default border-primary/30 bg-primary/[0.05]"
+            ? "cursor-default border-success-border bg-success/[0.05]"
             : checked
-              ? "cursor-pointer border-primary/60 bg-primary/[0.08] ring-1 ring-inset ring-primary/10"
+              ? "cursor-pointer border-success-border bg-success/[0.05]"
               : "cursor-pointer border-border/50 bg-card hover:border-foreground/25 hover:bg-muted/20"
       }`}
     >
@@ -2718,7 +2679,7 @@ function ServiceRow({
           interactionBlocked
             ? "border-border bg-muted"
             : checked
-              ? "bg-primary border-primary text-primary-foreground"
+              ? "bg-success-solid border-success-solid text-white"
               : "border-border bg-transparent group-hover:border-foreground/40"
         }`}
       >
@@ -2777,15 +2738,15 @@ function ServiceRow({
         )}
       </div>
 
-      {/* Quiet status — no loud filled pill; running takes the on-brand success
-          tint, the notable "stopped" state the warning tint. */}
+      {/* Quiet status MARK — a small hollow "holo" ring instead of the loud
+          RUNNING/STOPPED text, so the card stays clean. Full label on hover. */}
       <span
-        className={`mt-0.5 shrink-0 text-[11px] font-medium uppercase tracking-wide ${
-          service.running ? "text-success" : "text-warning"
+        className={`mt-1 block size-2.5 shrink-0 rounded-full ring-2 ring-inset ${
+          service.running ? "ring-success/70" : "ring-warning/70"
         }`}
-      >
-        {service.running ? m.running : m.stopped}
-      </span>
+        title={service.running ? m.running : m.stopped}
+        aria-label={service.running ? m.running : m.stopped}
+      />
     </label>
   );
 }

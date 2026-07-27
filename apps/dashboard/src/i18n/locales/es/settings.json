@@ -273,7 +273,7 @@
   },
   "team": {
     "heading": "Equipo",
-    "descPersonal": "Personas con acceso a tu espacio de trabajo personal. Invita colaboradores directamente, o crea una organización de equipo separada.",
+    "descPersonal": "Personas con acceso a tu espacio de trabajo personal.",
     "descTeam": "Personas con acceso a los proyectos, despliegues y servidores de esta organización.",
     "inviteMember": "Invitar miembro",
     "createTeamCard": {

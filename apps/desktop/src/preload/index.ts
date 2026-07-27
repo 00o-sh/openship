@@ -128,6 +128,28 @@ contextBridge.exposeInMainWorld("desktop", {
     },
   },
 
+  /**
+   * Window controls for the app's own header bar (see DesktopChrome in the
+   * dashboard). macOS keeps its native traffic lights, so only Windows/Linux
+   * actually render buttons — but the whole surface is exposed on every platform
+   * so the renderer never has to branch on process.platform.
+   */
+  window: {
+    minimize: () => ipcRenderer.invoke("window:minimize"),
+    /** Maximize, or restore if already maximized. */
+    toggleMaximize: () => ipcRenderer.invoke("window:toggle-maximize"),
+    close: () => ipcRenderer.invoke("window:close"),
+    isMaximized: (): Promise<boolean> => ipcRenderer.invoke("window:is-maximized"),
+    /** Track real maximize state so the restore icon can't drift out of sync
+     *  (the window can also be maximized by the OS, a double-click, or a
+     *  keyboard shortcut — none of which go through toggleMaximize). */
+    onMaximizedChange: (cb: (maximized: boolean) => void) => {
+      const h = (_e: unknown, maximized: boolean) => cb(maximized);
+      ipcRenderer.on("window:maximized-change", h);
+      return () => ipcRenderer.removeListener("window:maximized-change", h);
+    },
+  },
+
   /** Shared onboarding utilities from @repo/onboarding */
   utils: {
     isPrivateIp: onboardingUtils.isPrivateIp ?? (() => false),

@@ -15,11 +15,15 @@ import { scopedVolumeName, type CommandExecutor } from "@repo/adapters";
 import { encrypt, decrypt } from "../../lib/encryption";
 import { assertResourceInOrg, platform } from "../../lib/controller-helpers";
 import type { RequestContext } from "../../lib/request-context";
-import { resolveServerExecutor } from "../../lib/deployment-runtime";
+import {
+  resolveServerExecutor,
+  resolveDeploymentRuntimeForRead,
+} from "../../lib/deployment-runtime";
 import {
   containerIdForService,
   liveContainerIdWithRuntime,
   resolveServicePlatform,
+  resolveServiceRuntimeForRead,
 } from "./service-container";
 import { resolveLiveServiceState, type LiveMatchKind } from "./live-state";
 import { parseVolumeSpec, type VolumeKind } from "./volume-spec";
@@ -757,9 +761,11 @@ export async function getActiveServiceContainers(
   // aborted instead of reporting a state.
   const live = await withLiveQueryTimeout(
     (async (): Promise<LiveServiceContainer[] | null> => {
-      const runtime = await resolveServicePlatform(project, dep)
-        .then((r) => r.platform.runtime)
-        .catch(() => null);
+      // RUNTIME ONLY — see resolveServiceRuntimeForRead. Resolving the full
+      // platform here dragged the OpenResty detect + Lua self-heal (and the
+      // provision lock they run under) into every poll of this read endpoint,
+      // which is what made status hang and then report "unknown".
+      const runtime = await resolveServiceRuntimeForRead(project, dep);
       if (!runtime) return null;
 
       try {
@@ -961,15 +967,18 @@ export async function getServiceVolumeSizes(
   let serverId: string | null = null;
   let liveContainerId: string | null = null;
   try {
-    const resolved = await resolveServicePlatform(project, dep);
+    const resolved = await resolveDeploymentRuntimeForRead({
+      meta: dep.meta,
+      organizationId: ctx.organizationId,
+    });
     serverId = resolved.serverId;
-    liveContainerId = await liveContainerIdWithRuntime(resolved.platform.runtime, {
+    liveContainerId = await liveContainerIdWithRuntime(resolved.runtime, {
       service: { id: svc.id, name: svc.name },
       projectId,
       slug: project.slug,
       tracked: await containerIdForService(dep, { id: svc.id, name: svc.name }),
     });
-    await resolved.platform.runtime?.dispose?.();
+    await resolved.runtime?.dispose?.();
   } catch {
     // fall through — try the instance's local host below
   }
@@ -1072,8 +1081,14 @@ async function resolveServiceContainer(
   const rows = await repos.service.listByDeployment(dep.id);
   const row = rows.find((r) => r.serviceId === serviceId);
 
-  const resolved = await resolveServicePlatform(project, dep);
-  const runtime = resolved.platform.runtime;
+  // Runtime only: start/stop/restart/logs/terminal need `runtime` + the pooled
+  // connection, never routing or the system manager — resolving a full platform
+  // here charged every one of them the OpenResty detect + Lua self-heal (under the
+  // provision lock), which is the other half of "the action takes forever".
+  const { runtime, serverId } = await resolveDeploymentRuntimeForRead({
+    meta: dep.meta,
+    organizationId: ctx.organizationId,
+  });
 
   // Live query answered → trust it. No match = the container is genuinely gone,
   // and saying so beats handing docker a dead id.
@@ -1093,7 +1108,7 @@ async function resolveServiceContainer(
     throw new Error("Service has no running container");
   }
 
-  return { runtime, containerId, serverId: resolved.serverId, row, service: svc };
+  return { runtime, containerId, serverId, row, service: svc };
 }
 
 /** Map a live runtime ContainerStatus onto the UI's service state vocabulary.

@@ -23,6 +23,12 @@ export function registerSelfServerReconcile(): void {
     // "desktop"), so this only runs on a real server-host install.
     modes: ["selfhosted"],
     run: async () => {
+      // Host control off → this box is NOT a deploy target, so don't advertise it
+      // as one. Registering it would put a server in the list whose every
+      // operation throws, which reads as broken rather than as a policy.
+      const { hostControlDisabled } = await import("@repo/adapters");
+      if (hostControlDisabled()) return;
+
       const adminId = await foundingAdminId();
       if (!adminId) return; // no admin/org yet — retry next boot
       const organizationId = `org_${adminId}`;

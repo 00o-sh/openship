@@ -13,6 +13,7 @@
  * copy the wizard uses (no duplication).
  */
 
+import { isValidEmail } from "@repo/core";
 import { internalPost, waitHealthy, bootstrapAdmin, ensureInternalToken } from "./loopback-api";
 
 export type DomainKind = "byo" | "custom" | "free" | "none";
@@ -37,7 +38,7 @@ export class HeadlessInputError extends Error {
 }
 
 const SLUG_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 
 /** Bare hostname from a URL or `host[:port]`. */
 function hostOf(value: string | undefined): string | undefined {
@@ -74,7 +75,7 @@ export function resolveInstallInputs(flags: InstallFlags): InstallInputs {
   const password = flags.adminPassword ?? process.env.OPENSHIP_ADMIN_PASSWORD;
   const name = flags.adminName?.trim() || (email ? email.split("@")[0]! : "");
 
-  if (!email || !EMAIL_RE.test(email)) {
+  if (!email || !isValidEmail(email)) {
     throw new HeadlessInputError("Missing/invalid --admin-email for a non-interactive install.");
   }
   if (!password || password.length < 8) {
@@ -98,7 +99,11 @@ export function resolveInstallInputs(flags: InstallFlags): InstallInputs {
       if (!["migrate", "takeover", "cancel"].includes(edge)) {
         throw new HeadlessInputError(`Invalid --edge "${flags.edge}" (expected migrate | takeover | cancel).`);
       }
-      return { admin, domain: { kind: "custom", hostname, acmeEmail: flags.acmeEmail?.trim() || email, edge } };
+      const acmeEmail = flags.acmeEmail?.trim() || email;
+      if (!isValidEmail(acmeEmail)) {
+        throw new HeadlessInputError(`Invalid --acme-email "${acmeEmail}" — Let's Encrypt rejects a malformed contact.`);
+      }
+      return { admin, domain: { kind: "custom", hostname, acmeEmail, edge } };
     }
     case "free": {
       const slug = (flags.slug?.trim() || (hostname ? hostname.split(".")[0] : "")).toLowerCase();
@@ -138,22 +143,70 @@ async function bootstrapOrReset(
 
 /** Drain a self-register provisioning SSE stream best-effort (custom domain ACME).
  *  Never throws — the site serves over HTTP until the cert is ready. */
-async function drainProvisionStream(port: string, sessionId: string, token?: string): Promise<void> {
+/**
+ * Follow the provisioning SSE stream: print each step as it happens and return as
+ * soon as the session reports a terminal event.
+ *
+ * This used to read frames and DISCARD them, ending only when the server closed
+ * the socket (or after a 3-minute timeout). Two bad consequences: the operator saw
+ * a frozen "Issuing HTTPS certificate…" line with no idea what was happening, and
+ * a run whose work had already SUCCEEDED sat there for minutes because the edge
+ * provisioning keeps its session open across retry backoffs. Parsing the events
+ * fixes both — live progress, and we stop on `complete`/`end` instead of waiting
+ * for a socket close that may be a minute away.
+ *
+ * Certs are best-effort by design, so the deadline is a bound, not a contract: if
+ * it expires we say the work continues in the background rather than implying
+ * failure.
+ */
+async function drainProvisionStream(
+  port: string,
+  sessionId: string,
+  token?: string,
+  onLog?: (message: string) => void,
+): Promise<{ completed: boolean; detail?: string }> {
+  let detail: string | undefined;
   try {
     const res = await fetch(`http://127.0.0.1:${port}/api/system/self-register/stream?id=${sessionId}`, {
       headers: { "X-Internal-Token": token ?? ensureInternalToken() },
       signal: AbortSignal.timeout(180000),
     });
-    if (!res.body) return;
+    if (!res.body) return { completed: false };
     const reader = res.body.getReader();
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      const { done } = await reader.read();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
       if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let sep: number;
+      while ((sep = buffer.indexOf("\n\n")) >= 0) {
+        const frame = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        const event = /event:\s*(.*)/.exec(frame)?.[1]?.trim();
+        const dataRaw = /data:\s*([\s\S]*)/.exec(frame)?.[1]?.trim();
+        if (!event || !dataRaw) continue;
+        try {
+          const d = JSON.parse(dataRaw) as { message?: string; level?: string; status?: string };
+          if (event === "log" && d.message) {
+            const msg = String(d.message).replace(/\s+/g, " ");
+            onLog?.(msg);
+            // Keep the last problem so a best-effort step that didn't work says why.
+            if (d.level === "warn" || d.level === "error") detail = msg;
+          } else if (event === "complete") {
+            return { completed: d.status === "completed", detail };
+          } else if (event === "end") {
+            return { completed: true, detail };
+          }
+        } catch {
+          /* a malformed frame is not worth failing the install over */
+        }
+      }
     }
   } catch {
-    /* best-effort: cert retries on reboot */
+    /* best-effort: the edge/cert work continues server-side and retries on boot */
   }
+  return { completed: false, detail };
 }
 
 export interface ProvisionResult {
@@ -240,7 +293,20 @@ export async function headlessProvision(opts: {
     liveUrl = res.data?.url ?? `https://${d.hostname}`;
     if (res.ok && res.data?.sessionId) {
       log("Issuing HTTPS certificate (Let's Encrypt) — best-effort…");
-      await drainProvisionStream(port, String(res.data.sessionId), token);
+      // Stream each step through `log` so this step SHOWS its work. Certbot can
+      // take a while (DNS propagation, ACME retry backoffs) and a single static
+      // line for a minute-plus reads as a hang — which is exactly how a run that
+      // actually succeeded looked.
+      const cert = await drainProvisionStream(port, String(res.data.sessionId), token, (m) =>
+        log(`  ${m}`),
+      );
+      if (!cert.completed) {
+        warnings.push(
+          cert.detail
+            ? `HTTPS certificate not issued yet: ${cert.detail}`
+            : "HTTPS certificate not issued yet — it retries in the background and on the next boot.",
+        );
+      }
     } else if (!res.ok) {
       warnings.push(`Custom domain provisioning returned: ${res.data?.error || "failed"}`);
     }

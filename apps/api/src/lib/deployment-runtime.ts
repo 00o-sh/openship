@@ -358,7 +358,10 @@ export async function resolveTargetPlatform(
  * `sshManager` and is left intact.
  */
 export async function createServerDockerRuntime(
-  serverId: string,
+  /** Undefined is allowed: `resolveServerExecutor` falls back to the org's single
+   *  server, which is the same fallback a server-target deploy with no recorded
+   *  serverId takes. Keeps that rule in ONE place. */
+  serverId: string | undefined,
   organizationId: string,
 ): Promise<DockerRuntime> {
   const { executor, isLocal, ssh } = await resolveServerExecutor(serverId, organizationId);
@@ -475,4 +478,53 @@ export async function resolveDeploymentRuntime(
     effectiveTarget: resolved.effectiveTarget,
     serverId: resolved.serverId,
   };
+}
+
+/**
+ * The RUNTIME ALONE for a deployment — for READ paths (live container state,
+ * logs, usage) that never provision anything.
+ *
+ * `resolveDeploymentRuntime` above picks `.runtime` off a FULL platform, and
+ * building that platform is not free: on a bare self-hosted box `createPlatform`
+ * eagerly constructs the infra provider, which runs `detectOpenRestyPaths` and
+ * then re-asserts the nginx.conf include + self-heals the edge Lua — inside the
+ * `provision:local` provision lock. Fine for a deploy; wrong for a POLLED read,
+ * which only needs one `docker ps`, and which then contends with any in-flight
+ * deploy holding that lock (that contention is how service status timed out and
+ * rendered "unknown" while the containers were up).
+ *
+ * The target decision is NOT re-derived here: `resolveEffectiveTarget` stays the
+ * one authority (so `deployTarget:"server"` with no recorded serverId, and a
+ * desktop deployment with no deployTarget, both resolve exactly as a deploy
+ * would), and the server→docker transport stays `createServerDockerRuntime`.
+ * Only cloud keeps the platform path — its runtime is an Oblien HTTP client with
+ * no executor and no OpenResty, so there is nothing to skip.
+ *
+ * Callers own `runtime.dispose()` (tears down the SSH loopback bridge; no-op on
+ * the socket transport).
+ */
+export async function resolveDeploymentRuntimeForRead(
+  dep: Pick<Deployment, "meta" | "organizationId">,
+): Promise<{ runtime: RuntimeAdapter; serverId: string | null }> {
+  // Services are containers even when the app itself deploys "bare" — pin docker
+  // so a bare project's sidecars still resolve a docker runtime (matches
+  // resolveServicePlatform's long-standing behaviour).
+  const snapshot = { ...((dep.meta ?? {}) as DeploymentMeta), runtimeMode: "docker" as const };
+  const effectiveTarget = resolveEffectiveTarget(platform().target, snapshot);
+
+  if (effectiveTarget === "server") {
+    return {
+      runtime: await createServerDockerRuntime(snapshot.serverId, dep.organizationId),
+      // Same value resolveDeploymentPlatform reports: the RECORDED id, which
+      // streaming callers use to retain/release the pooled SSH connection.
+      serverId: snapshot.serverId ?? null,
+    };
+  }
+  if (effectiveTarget === "local") {
+    return { runtime: await DockerRuntime.create({ transport: "socket" }), serverId: null };
+  }
+  const resolved = await resolveDeploymentPlatform(snapshot, {
+    organizationId: dep.organizationId,
+  });
+  return { runtime: resolved.platform.runtime, serverId: resolved.serverId };
 }

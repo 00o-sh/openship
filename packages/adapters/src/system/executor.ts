@@ -34,7 +34,22 @@ export function createExecutor(ssh?: SshConfig): CommandExecutor {
  * pipeline (`SshExecutor`), so foreign-proxy handover / host system config land
  * on the host. Not more privilege than the mounted docker socket already grants.
  */
+/** Host control explicitly switched off by the operator (`--no-host-control`). */
+export function hostControlDisabled(): boolean {
+  return process.env.OPENSHIP_HOST_CONTROL?.trim().toLowerCase() === "false";
+}
+
 export function createHostExecutor(): CommandExecutor {
+  // Explicit opt-out: FAIL rather than degrade. The `!host → LocalExecutor`
+  // fallback below is correct for a bare install (LocalExecutor IS the host) but
+  // would silently target the CONTAINER's own filesystem in a containerized one —
+  // so a disabled host channel must throw, not quietly operate on the wrong box.
+  if (hostControlDisabled()) {
+    throw new Error(
+      "Host control is disabled on this instance (OPENSHIP_HOST_CONTROL=false). " +
+        "Re-run `openship up` without --no-host-control to allow host operations.",
+    );
+  }
   const host = process.env.OPENSHIP_HOST_SSH_HOST?.trim();
   if (!host) return new LocalExecutor();
   const keyPath = process.env.OPENSHIP_HOST_SSH_KEY?.trim();

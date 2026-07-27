@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { PageContainer } from "@/components/ui/PageContainer";
 import { AppLogo } from "@/components/AppLogo";
+import { HelpMenu } from "@/components/HelpMenu";
 
 /**
  * Apps tab — catalog-installed managed services. Shares `projects/home` data with
@@ -114,15 +115,22 @@ export default function AppsPage() {
                 })}
           </p>
         </div>
-        {apps.length > 0 && (
-          <Link
-            href="/apps/new"
-            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-medium transition-all hover:bg-primary/90 hover:shadow-lg hover:shadow-primary/25 hover:-translate-y-0.5 w-full sm:w-auto justify-center"
-          >
-            <Plus className="size-4" />
-            <span>{ap.createButton}</span>
-          </Link>
-        )}
+        {/* Primary action + the shared ⋮ help menu (support / report issue /
+            feedback / docs / community) that the other page headers carry. The
+            menu renders even with no apps installed — the header's Install
+            button doesn't, but help shouldn't depend on having apps. */}
+        <div className="flex w-full items-center gap-2 sm:w-auto">
+          {apps.length > 0 && (
+            <Link
+              href="/apps/new"
+              className="inline-flex flex-1 items-center gap-2 px-5 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-medium transition-all hover:bg-primary/90 hover:shadow-lg hover:shadow-primary/25 hover:-translate-y-0.5 sm:flex-none justify-center"
+            >
+              <Plus className="size-4" />
+              <span>{ap.createButton}</span>
+            </Link>
+          )}
+          <HelpMenu className="ms-auto sm:ms-0" />
+        </div>
       </div>
 
       {isLoading ? (

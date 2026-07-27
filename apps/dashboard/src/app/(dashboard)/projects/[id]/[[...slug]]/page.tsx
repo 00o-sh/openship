@@ -1,12 +1,6 @@
 "use client";
 
 import {
-  MoreVertical,
-  HelpCircle,
-  MessageSquare,
-  Bug,
-  BookOpen,
-  ExternalLink,
   Check,
   Plus,
   X,
@@ -43,7 +37,7 @@ import { useI18n, interpolate } from "@/components/i18n-provider";
 import { ApiError, getApiErrorMessage, projectsApi } from "@/lib/api";
 import ErrorState from "@/components/shared/ErrorState";
 import { PageContainer } from "@/components/ui/PageContainer";
-import DropdownMenu, { type MenuAction } from "@/components/ui/DropdownMenu";
+import { HelpMenu } from "@/components/HelpMenu";
 import { DismissiblePopover } from "@/components/ui/Popover";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -695,52 +689,6 @@ const ProjectSettingsContent = () => {
     }
   };
 
-  const helpMenuActions: MenuAction[] = [
-    {
-      id: "support",
-      label: t.projects.help.contactSupport,
-      icon: <HelpCircle className="w-4 h-4" />,
-      onClick: () => {
-        window.open("https://openship.io/support", "_blank");
-      },
-    },
-    {
-      id: "report-issue",
-      label: t.projects.help.reportIssue,
-      icon: <Bug className="w-4 h-4" />,
-      onClick: () => {
-        window.open("https://github.com/oblien/openship/deployments/issues/new", "_blank");
-      },
-    },
-    {
-      id: "feedback",
-      label: t.projects.help.sendFeedback,
-      icon: <MessageSquare className="w-4 h-4" />,
-      onClick: () => {
-        window.open("https://openship.io/contact", "_blank");
-      },
-    },
-    {
-      id: "divider",
-      divider: true,
-    },
-    {
-      id: "documentation",
-      label: t.projects.help.documentation,
-      icon: <BookOpen className="w-4 h-4" />,
-      onClick: () => {
-        window.open("https://openship.io/docs", "_blank");
-      },
-    },
-    {
-      id: "community",
-      label: t.projects.help.joinCommunity,
-      icon: <ExternalLink className="w-4 h-4" />,
-      onClick: () => {
-        window.open("https://discord.gg/Q9eWNCeXjg", "_blank");
-      },
-    },
-  ];
 
   const renderTabContent = () => {
     switch (activeTab) {
@@ -932,11 +880,8 @@ const ProjectSettingsContent = () => {
 
           <div className="flex items-center gap-2">
             <EnvironmentSwitcher />
-            <DropdownMenu
-              actions={helpMenuActions}
-              trigger={<MoreVertical className="w-5 h-5 text-muted-foreground" />}
-              align="right"
-            />
+            {/* Shared definition — the same ⋮ the Apps page header carries. */}
+            <HelpMenu />
           </div>
         </div>
       </div>

@@ -134,10 +134,6 @@ const POINTS = [
     desc: 'Add as many sending domains as you need. No add-on, no per-domain pricing.',
   },
   {
-    name: 'Real deliverability.',
-    desc: 'Warm-up, reputation tracking, bounce handling, suppression lists - out of the box.',
-  },
-  {
     name: 'Open SMTP & REST API.',
     desc: 'Plug straight in from your code. Webhooks for opens, clicks, bounces.',
   },

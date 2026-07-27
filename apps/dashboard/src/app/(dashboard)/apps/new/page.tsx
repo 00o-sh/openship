@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowLeft, ArrowRight, Loader2, Search, MoreVertical, BookOpen, LifeBuoy, Plus, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Loader2, Search, BookOpen, Plus, X } from "lucide-react";
 import { appsApi, type AppCatalogEntry } from "@/lib/api";
 import { getApiErrorMessage } from "@/lib/api/client";
 import { AppLogo } from "@/components/AppLogo";
@@ -11,7 +11,7 @@ import { AddCustomAppModal } from "@/components/apps/AddCustomAppModal";
 import { useI18n } from "@/components/i18n-provider";
 import { useToast } from "@/context/ToastContext";
 import { PageContainer } from "@/components/ui/PageContainer";
-import DropdownMenu from "@/components/ui/DropdownMenu";
+import { HelpMenu } from "@/components/HelpMenu";
 
 /**
  * Create App — the one-click catalog. Clicking an app opens its clean, business-
@@ -141,10 +141,10 @@ export default function NewAppPage() {
           >
             <Plus className="size-4" /> Add custom
           </button>
-          <DropdownMenu
-            align="right"
-            trigger={<MoreVertical className="w-5 h-5 text-muted-foreground" />}
-            actions={[
+          {/* The shared help menu, with this page's own guide link on top —
+              so Support / Report issue / Docs read identically everywhere. */}
+          <HelpMenu
+            extraActions={[
               {
                 id: "guide",
                 label: "How to add an app",
@@ -155,13 +155,6 @@ export default function NewAppPage() {
                     "_blank",
                     "noopener,noreferrer",
                   ),
-              },
-              {
-                id: "support",
-                label: "Support",
-                icon: <LifeBuoy className="size-4" />,
-                onClick: () =>
-                  window.open("https://github.com/oblien/openship/issues", "_blank", "noopener,noreferrer"),
               },
             ]}
           />

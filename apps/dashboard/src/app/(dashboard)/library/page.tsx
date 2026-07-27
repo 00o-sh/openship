@@ -16,6 +16,7 @@ import { LibrarySidebar } from "./components/LibrarySidebar";
 import { UrlImport } from "./components/UrlImport";
 import { TemplateGrid } from "./components/TemplateGrid";
 import { PageContainer } from "@/components/ui/PageContainer";
+import { HelpMenu } from "@/components/HelpMenu";
 import { ServerMigrationWizard } from "@/components/migration/ServerMigrationWizard";
 import { useI18n } from "@/components/i18n-provider";
 import { useToast } from "@/context/ToastContext";
@@ -96,11 +97,17 @@ export default function LibraryPage() {
   return (
     <PageContainer>
       {/* ── Header ───────────────────────────────────────────── */}
-      <div className="mb-6">
-        <h1 className="text-2xl font-medium text-foreground/80" style={{ letterSpacing: "-0.2px" }}>
-          {t.library.page.title}
-        </h1>
-        <p className="text-sm text-muted-foreground/70 mt-1">{t.library.page.subtitle}</p>
+      {/* No primary action here (the tabs below are the action), so the shared ⋮
+          help menu sits alone at the title's trailing edge — level with the
+          heading, matching the Projects / Apps headers. */}
+      <div className="mb-6 flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h1 className="text-2xl font-medium text-foreground/80" style={{ letterSpacing: "-0.2px" }}>
+            {t.library.page.title}
+          </h1>
+          <p className="text-sm text-muted-foreground/70 mt-1">{t.library.page.subtitle}</p>
+        </div>
+        <HelpMenu className="shrink-0" />
       </div>
 
       {/* ── Tabs ─────────────────────────────────────────────── */}

@@ -221,26 +221,39 @@ function createWindow() {
   // Never open larger than the display (a previously-stored oversized bound, or
   // a small screen, would otherwise make the window bigger than the desktop).
   const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize;
-  const width = Math.min(bounds?.width ?? 1200, screenW);
-  const height = Math.min(bounds?.height ?? 800, screenH);
+  // Default to a generous window, not the whole screen. Leaving a margin makes it
+  // obvious the app is a window you can move and resize; it used to open
+  // maximized on every fresh launch (see the maximize block below), which read as
+  // the app forcing itself fullscreen.
+  const width = Math.min(bounds?.width ?? 1440, screenW - 80);
+  const height = Math.min(bounds?.height ?? 900, screenH - 80);
+  // Only honour a stored position — a fresh launch centres instead of pinning to
+  // the top-left corner.
+  const hasStoredPosition = typeof bounds?.x === "number" && typeof bounds?.y === "number";
 
   mainWindow = new BrowserWindow({
     width,
     height,
-    x: bounds?.x,
-    y: bounds?.y,
+    ...(hasStoredPosition ? { x: bounds?.x, y: bounds?.y } : { center: true }),
     minWidth: 800,
     minHeight: 560,
     title: "Openship",
-    // Seamless native frame (like VS Code / Spotify): no OS title-bar strip,
-    // traffic lights inlaid top-left. The dashboard reserves top-left space +
-    // a drag region for them (see the `is-desktop` handling in the web app).
-    titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
-    // Inset the traffic lights a touch further down/right so they sit inside the
-    // window's rounded content area rather than hugging the corner. Kept in sync
-    // with the dashboard's `--titlebar-h` reserved strip so they never overhang
-    // page content.
-    trafficLightPosition: { x: 22, y: 22 },
+    // The app draws its own header row (DesktopChrome in the dashboard), so no
+    // platform gets an OS title-bar strip above it.
+    //
+    // macOS stays on `hiddenInset` rather than going fully frameless: that keeps
+    // the REAL traffic lights, so the green-button fullscreen menu and hover
+    // behaviour work as Mac users expect, and the window is still closable by
+    // mouse if the renderer ever stalls. Windows/Linux have no equivalent, so
+    // there we take the frame off and draw ─ □ ✕ ourselves.
+    ...(process.platform === "darwin"
+      ? {
+          titleBarStyle: "hiddenInset" as const,
+          // Vertically centre the lights in the header row (--titlebar-h, 44px):
+          // (44 - 12) / 2 ≈ 16. Keep in sync with that CSS var or they sit off-axis.
+          trafficLightPosition: { x: 18, y: 16 },
+        }
+      : { frame: false }),
     // Match the OS appearance so there's no wrong-theme flash while the dashboard
     // loads (the web UI defaults to "system" in desktop). Dark bg is the app's
     // --th-bg-page dark value (#000000); light is #ffffff.
@@ -254,11 +267,20 @@ function createWindow() {
     },
   });
 
-  // Full-window by default: maximize unless the user chose a non-maximized
-  // size last time.
-  if (store.get("windowMaximized") !== false) {
+  // Restore a maximized window only if the user actually left it maximized. This
+  // was `!== false`, i.e. undefined counted as "maximize" — so every first launch
+  // (and any launch after a config reset) opened fullscreen-wide regardless of the
+  // sizing above.
+  if (store.get("windowMaximized") === true) {
     mainWindow.maximize();
   }
+
+  // Keep the renderer's restore icon honest: the window can be maximized by the
+  // OS, a keyboard shortcut, or a double-click, none of which go through our IPC.
+  const emitMaximized = (maximized: boolean) =>
+    mainWindow?.webContents.send("window:maximized-change", maximized);
+  mainWindow.on("maximize", () => emitMaximized(true));
+  mainWindow.on("unmaximize", () => emitMaximized(false));
 
   // Show the window once content is painted (avoids white flash)
   mainWindow.once("ready-to-show", () => {
@@ -510,6 +532,33 @@ async function runUpdate(): Promise<boolean> {
 }
 
 ipcMain.handle("update:start", () => runUpdate());
+
+// ─── IPC: Window controls ───────────────────────────────────────────────────
+//
+// Drives the app's own header row (DesktopChrome). Only Windows/Linux render
+// buttons — macOS keeps its native traffic lights — but all four are registered
+// on every platform so the renderer never branches on process.platform.
+
+ipcMain.handle("window:minimize", () => {
+  mainWindow?.minimize();
+  return true;
+});
+
+ipcMain.handle("window:toggle-maximize", () => {
+  if (!mainWindow) return false;
+  if (mainWindow.isMaximized()) mainWindow.unmaximize();
+  else mainWindow.maximize();
+  return mainWindow.isMaximized();
+});
+
+ipcMain.handle("window:close", () => {
+  // close(), not destroy() — the existing "close" handler persists window bounds
+  // and decides hide-vs-quit per platform.
+  mainWindow?.close();
+  return true;
+});
+
+ipcMain.handle("window:is-maximized", () => mainWindow?.isMaximized() ?? false);
 
 // ─── IPC: Config store ───────────────────────────────────────────────────────
 

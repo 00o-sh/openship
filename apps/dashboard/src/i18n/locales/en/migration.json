@@ -1,7 +1,7 @@
 {
   "wizard": {
     "title": "Migrate apps",
-    "intro": "Inspect this server's Docker and adopt its containers as an Openship project. Inspection is read-only — nothing changes on the server until you deploy.",
+    "intro": "Inspect this server's running apps and adopt them into Openship. It's read-only — nothing changes on the server until you deploy.",
     "selectServer": "Select a server",
     "scan": "Scan server",
     "scanning": "Scanning…",
@@ -247,7 +247,7 @@
     "resuming": "Resuming…",
     "editRetry": "Edit & retry",
     "safetyTitle": "Non-destructive & reversible.",
-    "safetyBody": "Data is copied, never moved — your source is only briefly paused for a clean copy. Nothing is deleted, even after a successful migration: if you keep the originals, a cross-server source is restarted as a live standby (same-server stays stopped), and they're removed only when you explicitly cut over.",
+    "safetyBody": "Data is copied, never moved — your source is only briefly paused, and nothing is deleted unless you explicitly cut over.",
     "cleanupTarget": "Remove copied data from target"
   },
   "plan": {

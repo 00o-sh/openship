@@ -1,5 +1,9 @@
 import { repos } from "@repo/db";
-import { resolveDeploymentPlatform } from "../../lib/deployment-runtime";
+import type { RuntimeAdapter } from "@repo/adapters";
+import {
+  resolveDeploymentPlatform,
+  resolveDeploymentRuntimeForRead,
+} from "../../lib/deployment-runtime";
 import { resolveLiveServiceState } from "./live-state";
 import type { DeploymentConfigSnapshot } from "../deployments/build.service";
 
@@ -47,6 +51,24 @@ export async function resolveServicePlatform(
 ) {
   const snapshot = { ...(dep.meta as DeploymentConfigSnapshot), runtimeMode: "docker" as const };
   return resolveDeploymentPlatform(snapshot, { organizationId: project.organizationId });
+}
+
+/**
+ * Read-only runtime for a service — thin alias over the shared
+ * `resolveDeploymentRuntimeForRead` (which owns the target decision and the
+ * runtime-vs-platform split), adapted to the (project, dep) shape service code
+ * already passes around and degrading to null so a read never throws.
+ */
+export async function resolveServiceRuntimeForRead(
+  project: { organizationId: string },
+  dep: { meta: unknown },
+): Promise<RuntimeAdapter | null> {
+  return resolveDeploymentRuntimeForRead({
+    meta: dep.meta,
+    organizationId: project.organizationId,
+  })
+    .then((r) => r.runtime)
+    .catch(() => null);
 }
 
 /** The runtime surface live identity resolution needs — anything that can list
@@ -120,8 +142,7 @@ export async function liveContainerIdForService(
   const tracked = await containerIdForService(dep, service);
   const projectId = opts?.projectId;
 
-  const resolved = await resolveServicePlatform(project, { meta: dep.meta }).catch(() => null);
-  const runtime = resolved?.platform.runtime;
+  const runtime = await resolveServiceRuntimeForRead(project, { meta: dep.meta });
   if (!runtime) return tracked;
   try {
     return await liveContainerIdWithRuntime(runtime, {

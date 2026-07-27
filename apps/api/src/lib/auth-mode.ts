@@ -36,13 +36,28 @@ export async function getAuthMode(): Promise<"none" | "cloud" | "local"> {
   // always defaults to requiring login — the loopback zero-auth shortcut is
   // unsafe once the box is CLI-deployed / network-reachable via the proxy.
   const requireAuth = !!env.OPENSHIP_REQUIRE_AUTH || !!env.OPENSHIP_PUBLIC_URL;
-  const fallback: "none" | "local" =
-    env.DEPLOY_MODE === "desktop" && !requireAuth ? "none" : "local";
+  const desktopZeroAuth = env.DEPLOY_MODE === "desktop" && !requireAuth;
+  const fallback: "none" | "local" = desktopZeroAuth ? "none" : "local";
 
   try {
     const { repos } = await import("@repo/db");
     const settings = await repos.instanceSettings.get();
-    cached = settings?.authMode ?? fallback;
+    const stored = settings?.authMode ?? null;
+
+    // A stored "cloud" on a loopback-only desktop install is never right: it
+    // delegates login to a remote IdP for an app that only ever serves 127.0.0.1,
+    // so a stale row (left by a cloud connect or an old onboarding run) bounced a
+    // fresh desktop launch to the Openship Cloud sign-in page with no way back
+    // short of wiping the local DB. Downgrade just that case to zero-auth.
+    //
+    // Scope is deliberately this narrow. A stored "local" is HONOURED — that is
+    // someone choosing to put a password on a shared machine, and silently
+    // ignoring it would be a downgrade. And this branch is unreachable unless
+    // DEPLOY_MODE=desktop with neither OPENSHIP_REQUIRE_AUTH nor
+    // OPENSHIP_PUBLIC_URL set, so docker/bare self-hosted and SaaS are untouched.
+    // "none" still only grants a session to a loopback peer — zeroAuthAllowed()
+    // re-checks deploy mode, both env flags, and the kernel-reported peer address.
+    cached = desktopZeroAuth && stored === "cloud" ? "none" : (stored ?? fallback);
   } catch {
     cached = fallback;
   }

@@ -4,6 +4,7 @@ import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { usePlatform } from "@/context/PlatformContext";
 import { serviceKind, serviceCanStartWithoutBuild, servicesApi, sortServicesByPublicFirst, type Service, type ServiceContainer, type ServiceInput } from "@/lib/api/services";
+import { ServiceIcon } from "@/components/services/ServiceIcon";
 import { getApiErrorMessage, isAbortError } from "@/lib/api/client";
 import { useToast } from "@/context/ToastContext";
 import { resolveServiceHostnameLabel, internalServiceAddress } from "@repo/core";
@@ -14,7 +15,6 @@ import {
   Layers,
   RefreshCw,
   Globe,
-  Container,
   AlertCircle,
   AlertTriangle,
   ChevronRight,
@@ -561,8 +561,8 @@ export const ServicesTab = () => {
               onClick={() => openService(svc.id)}
               className="w-full flex items-center gap-4 px-5 py-4 text-start transition-colors hover:bg-foreground/[0.025]"
             >
-              <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 bg-muted/50">
-                <Container className="size-[18px] text-muted-foreground" />
+              <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 bg-muted/50 overflow-hidden">
+                <ServiceIcon service={svc} />
               </div>
 
               <div className="flex-1 min-w-0">

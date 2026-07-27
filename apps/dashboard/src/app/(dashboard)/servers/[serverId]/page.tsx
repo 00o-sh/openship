@@ -594,27 +594,15 @@ export default function ServerDetailPage({
             <ArrowLeft className="size-4 text-muted-foreground rtl:rotate-180" />
           </button>
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <h1
-                className="text-2xl font-medium text-foreground/80 truncate"
-                style={{ letterSpacing: "-0.2px" }}
-              >
-                {server.name || <BlurIp>{server.sshHost}</BlurIp>}
-              </h1>
-              {allHealthy ? (
-                <span className="shrink-0 inline-flex items-center gap-1.5 text-success text-xs font-medium">
-                  <span className="size-1.5 rounded-full bg-success" />
-                  {t.servers.detail.healthy}
-                </span>
-              ) : components.length > 0 ? (
-                <span className="shrink-0 inline-flex items-center gap-1.5 text-warning text-xs font-medium">
-                  <span className="size-1.5 rounded-full bg-warning" />
-                  {t.servers.detail.issues}
-                </span>
-              ) : null}
-            </div>
-            {/* Connection line: user@host + country flag. The SSH port lives in
-                the right-hand connection card, not glued to the IP. */}
+            <h1
+              className="text-2xl font-medium text-foreground/80 truncate"
+              style={{ letterSpacing: "-0.2px" }}
+            >
+              {server.name || <BlurIp>{server.sshHost}</BlurIp>}
+            </h1>
+            {/* Connection line: user@host + country flag + a clean status pill
+                (moved off the title, no loud dot). The SSH port lives in the
+                right-hand connection card, not glued to the IP. */}
             <div className="mt-1 flex items-center gap-2">
               <p className="text-sm text-muted-foreground/70 font-mono">
                 {server.sshUser ?? "root"}@<BlurIp>{server.sshHost}</BlurIp>
@@ -625,6 +613,15 @@ export default function ServerDetailPage({
                   <Flag title={server.country ?? undefined} className="h-3.5 w-auto rounded-[2px] ring-1 ring-border/50" />
                 ) : null;
               })()}
+              {allHealthy ? (
+                <span className="shrink-0 inline-flex items-center rounded-full bg-success/10 px-2 py-0.5 text-[11px] font-medium text-success ring-1 ring-inset ring-success/20">
+                  {t.servers.detail.healthy}
+                </span>
+              ) : components.length > 0 ? (
+                <span className="shrink-0 inline-flex items-center rounded-full bg-warning/10 px-2 py-0.5 text-[11px] font-medium text-warning ring-1 ring-inset ring-warning/20">
+                  {t.servers.detail.issues}
+                </span>
+              ) : null}
             </div>
           </div>
           <div className="flex items-center gap-1.5">

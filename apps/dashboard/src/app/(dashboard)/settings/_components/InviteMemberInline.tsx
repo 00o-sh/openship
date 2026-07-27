@@ -1,11 +1,15 @@
 "use client";
 
 /**
- * Self-contained content for the "Invite a member" modal — rendered via the
- * centralized `showModal` hook (blurred, centered Modal shell). Owns all its
- * own state (email, role, mail source, initial grants) so it stays reactive
- * inside showModal's snapshotted customContent. Calls `onInvited` after a
- * successful send and `onClose` to dismiss.
+ * Inline "invite a member" composer — lives INSIDE the Team tab, expanded from
+ * the header's Invite button, instead of in a modal.
+ *
+ * Why inline: the Restricted role needs a resource picker, and a modal had to
+ * grow to ~1040px and fight the viewport to fit one. On the page it simply uses
+ * the width it already has, and the picker gets a full-width row of its own.
+ *
+ * Owns all its state (email, role, mail source, grants). Calls `onInvited` after
+ * a successful send and `onClose` to collapse.
  */
 
 import { useState, useEffect } from "react";
@@ -35,7 +39,7 @@ const orgClient = (authClient as unknown as {
   };
 }).organization;
 
-export function InviteMemberModal({
+export function InviteMemberInline({
   availableTypes,
   selfHosted,
   initialMailSource,
@@ -47,8 +51,6 @@ export function InviteMemberModal({
   availableTypes: ResourceType[];
   selfHosted: boolean;
   initialMailSource: MailSource;
-  /** Cloud state is passed in (not read via useCloud) because this content is
-   *  rendered by the ROOT-level modal host, outside the dashboard's CloudProvider. */
   cloudConnected: boolean;
   onConnectCloud: () => void;
   onInvited: () => void;
@@ -152,182 +154,160 @@ export function InviteMemberModal({
 
   const restricted = role === "restricted";
 
-  // Left column (single-column body when not restricted): email, role cards,
-  // and the mail-source picker. Rendered as the left pane in two-pane mode.
-  const formFields = (
-    <>
-      <div className="space-y-2">
-        <label className="text-sm font-medium text-foreground block">{t.settings.inviteMember.email}</label>
-        <input
-          type="email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          placeholder={t.settings.inviteMember.emailPlaceholder}
-          disabled={inviting}
-          className="w-full px-3 py-2 bg-muted/30 border border-border/50 rounded-xl text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all"
-        />
-      </div>
-
-      <div className="space-y-2">
-        <label className="text-sm font-medium text-foreground block">{t.settings.inviteMember.role}</label>
-        <div className="space-y-2">
-          <RoleCard
-            icon={UsersIcon}
-            title={t.settings.inviteMember.roleMemberTitle}
-            description={t.settings.inviteMember.roleMemberDesc}
-            selected={role === "member"}
-            disabled={inviting}
-            onClick={() => {
-              setRole("member");
-              setGrants([]);
-            }}
-          />
-          <RoleCard
-            icon={Shield}
-            title={t.settings.inviteMember.roleAdminTitle}
-            description={t.settings.inviteMember.roleAdminDesc}
-            selected={role === "admin"}
-            disabled={inviting}
-            onClick={() => {
-              setRole("admin");
-              setGrants([]);
-            }}
-          />
-          <RoleCard
-            icon={Lock}
-            title={t.settings.inviteMember.roleRestrictedTitle}
-            description={t.settings.inviteMember.roleRestrictedDesc}
-            selected={restricted}
-            disabled={inviting}
-            onClick={() => setRole("restricted")}
-            badge={
-              restricted && grants.length > 0
-                ? interpolate(
-                    grants.length === 1 ? t.settings.inviteMember.grantsOne : t.settings.inviteMember.grantsMany,
-                    { count: String(grants.length) },
-                  )
-                : undefined
-            }
-          />
-        </div>
-      </div>
-
-      {/* Send via — self-hosted only (SaaS always relays via its own infra).
-          A segmented switch: recessed track, raised active pill. A status dot
-          per option lets you compare deliverability at a glance; a single
-          contextual line below handles the active option's fix (no double
-          messaging). */}
-      {selfHosted && (
-        <div className="space-y-2">
-          <label className="text-sm font-medium text-foreground block">{t.settings.inviteMember.sendVia}</label>
-          <div className="grid grid-cols-2 gap-1 rounded-xl border border-border/50 bg-muted/25 p-1">
-            <SendSegment
-              icon={Send}
-              label={t.settings.inviteMember.yourMailServer}
-              statusText={
-                emailDeliverable === false
-                  ? t.settings.inviteMember.mailNotSetUp
-                  : emailDeliverable
-                    ? t.settings.inviteMember.mailReady
-                    : undefined
-              }
-              tone={emailDeliverable === false ? "warn" : emailDeliverable ? "ok" : "pending"}
-              selected={mailSource === "platform"}
-              disabled={inviting || savingMailSource}
-              onClick={() => changeMailSource("platform")}
-            />
-            <SendSegment
-              icon={Cloud}
-              label={t.settings.inviteMember.openshipCloud}
-              statusText={cloudConnected ? t.settings.inviteMember.cloudReady : t.settings.inviteMember.cloudNotReady}
-              tone={cloudConnected ? "ok" : "warn"}
-              selected={mailSource === "cloud"}
-              disabled={inviting || savingMailSource}
-              onClick={() => changeMailSource("cloud")}
-            />
-          </div>
-
-          {mailSource === "platform" && emailDeliverable === false && (
-            <p className="flex items-start gap-1.5 px-1 text-xs text-warning">
-              <AlertTriangle className="mt-0.5 size-3.5 shrink-0" strokeWidth={1.8} />
-              <span>
-                {t.settings.inviteMember.noMailSystem}{" "}
-                <Link
-                  href="/settings?tab=email"
-                  onClick={onClose}
-                  className="font-medium underline underline-offset-2 hover:opacity-80"
-                >
-                  {t.settings.inviteMember.setUpEmail}
-                </Link>
-              </span>
-            </p>
-          )}
-          {mailSource === "cloud" && !cloudConnected && (
-            <p className="flex items-start gap-1.5 px-1 text-xs text-warning">
-              <AlertTriangle className="mt-0.5 size-3.5 shrink-0" strokeWidth={1.8} />
-              <span>
-                {t.settings.inviteMember.cloudNotConnected}{" "}
-                <button
-                  type="button"
-                  onClick={() => onConnectCloud()}
-                  className="font-medium underline underline-offset-2 hover:opacity-80"
-                >
-                  {t.settings.inviteMember.connectCloud}
-                </button>
-              </span>
-            </p>
-          )}
-        </div>
-      )}
-    </>
-  );
-
-  // Right pane, restricted only: the resource picker the invite unlocks.
-  const pickerPane = (
-    <div className="space-y-3">
-      <div>
-        <h4 className="text-sm font-semibold text-foreground">{t.settings.inviteMember.pickerTitle}</h4>
-        <p className="text-xs text-muted-foreground mt-1">
-          {t.settings.inviteMember.pickerDesc}
-        </p>
-      </div>
-      <ResourcePicker
-        value={grants}
-        onChange={setGrants}
-        availableTypes={availableTypes}
-        defaultPermissions={["read"]}
-        disabled={inviting}
-      />
-    </div>
-  );
-
   return (
-    <div
-      className={`flex flex-col max-h-[85vh] transition-[width,max-width] duration-300 ${
-        restricted ? "w-[92vw] max-w-[1040px]" : "w-[min(92vw,560px)]"
-      }`}
-    >
-      <div className="p-6 border-b border-border/50">
-        <h3 className="text-lg font-semibold text-foreground">{t.settings.inviteMember.headerTitle}</h3>
-        <p className="text-sm text-muted-foreground mt-1">
-          {restricted
-            ? t.settings.inviteMember.headerDescRestricted
-            : t.settings.inviteMember.headerDescDefault}
-        </p>
+    <div className="rounded-2xl bg-card p-5 space-y-5">
+      {/* Email + role side by side: the role cards are the tall element, so
+          pairing them with the short email field keeps the panel compact. */}
+      <div className="grid gap-5 md:grid-cols-[minmax(0,1fr)_minmax(0,1.35fr)]">
+        <div className="space-y-2">
+          <label className="text-sm font-medium text-foreground block" htmlFor="invite-email">
+            {t.settings.inviteMember.email}
+          </label>
+          <input
+            id="invite-email"
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && email.trim() && !transportBlocked) void handleInvite();
+            }}
+            placeholder={t.settings.inviteMember.emailPlaceholder}
+            disabled={inviting}
+            autoFocus
+            className="w-full px-3 py-2 bg-muted/30 border border-border/50 rounded-xl text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all"
+          />
+
+          {/* Send via — self-hosted only (SaaS always relays via its own infra).
+              A segmented switch: recessed track, raised active pill. A status dot
+              per option lets you compare deliverability at a glance; a single
+              contextual line below handles the active option's fix. */}
+          {selfHosted && (
+            <div className="space-y-2 pt-3">
+              <label className="text-sm font-medium text-foreground block">{t.settings.inviteMember.sendVia}</label>
+              <div className="grid grid-cols-2 gap-1 rounded-xl border border-border/50 bg-muted/25 p-1">
+                <SendSegment
+                  icon={Send}
+                  label={t.settings.inviteMember.yourMailServer}
+                  statusText={
+                    emailDeliverable === false
+                      ? t.settings.inviteMember.mailNotSetUp
+                      : emailDeliverable
+                        ? t.settings.inviteMember.mailReady
+                        : undefined
+                  }
+                  tone={emailDeliverable === false ? "warn" : emailDeliverable ? "ok" : "pending"}
+                  selected={mailSource === "platform"}
+                  disabled={inviting || savingMailSource}
+                  onClick={() => changeMailSource("platform")}
+                />
+                <SendSegment
+                  icon={Cloud}
+                  label={t.settings.inviteMember.openshipCloud}
+                  statusText={cloudConnected ? t.settings.inviteMember.cloudReady : t.settings.inviteMember.cloudNotReady}
+                  tone={cloudConnected ? "ok" : "warn"}
+                  selected={mailSource === "cloud"}
+                  disabled={inviting || savingMailSource}
+                  onClick={() => changeMailSource("cloud")}
+                />
+              </div>
+
+              {mailSource === "platform" && emailDeliverable === false && (
+                <p className="flex items-start gap-1.5 px-1 text-xs text-warning">
+                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0" strokeWidth={1.8} />
+                  <span>
+                    {t.settings.inviteMember.noMailSystem}{" "}
+                    <Link
+                      href="/settings?tab=email"
+                      className="font-medium underline underline-offset-2 hover:opacity-80"
+                    >
+                      {t.settings.inviteMember.setUpEmail}
+                    </Link>
+                  </span>
+                </p>
+              )}
+              {mailSource === "cloud" && !cloudConnected && (
+                <p className="flex items-start gap-1.5 px-1 text-xs text-warning">
+                  <AlertTriangle className="mt-0.5 size-3.5 shrink-0" strokeWidth={1.8} />
+                  <span>
+                    {t.settings.inviteMember.cloudNotConnected}{" "}
+                    <button
+                      type="button"
+                      onClick={() => onConnectCloud()}
+                      className="font-medium underline underline-offset-2 hover:opacity-80"
+                    >
+                      {t.settings.inviteMember.connectCloud}
+                    </button>
+                  </span>
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <label className="text-sm font-medium text-foreground block">{t.settings.inviteMember.role}</label>
+          <div className="space-y-2">
+            <RoleCard
+              icon={UsersIcon}
+              title={t.settings.inviteMember.roleMemberTitle}
+              description={t.settings.inviteMember.roleMemberDesc}
+              selected={role === "member"}
+              disabled={inviting}
+              onClick={() => {
+                setRole("member");
+                setGrants([]);
+              }}
+            />
+            <RoleCard
+              icon={Shield}
+              title={t.settings.inviteMember.roleAdminTitle}
+              description={t.settings.inviteMember.roleAdminDesc}
+              selected={role === "admin"}
+              disabled={inviting}
+              onClick={() => {
+                setRole("admin");
+                setGrants([]);
+              }}
+            />
+            <RoleCard
+              icon={Lock}
+              title={t.settings.inviteMember.roleRestrictedTitle}
+              description={t.settings.inviteMember.roleRestrictedDesc}
+              selected={restricted}
+              disabled={inviting}
+              onClick={() => setRole("restricted")}
+              badge={
+                restricted && grants.length > 0
+                  ? interpolate(
+                      grants.length === 1 ? t.settings.inviteMember.grantsOne : t.settings.inviteMember.grantsMany,
+                      { count: String(grants.length) },
+                    )
+                  : undefined
+              }
+            />
+          </div>
+        </div>
       </div>
 
-      {restricted ? (
-        <div className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
-          <div className="overflow-y-auto p-6 space-y-5 md:border-e border-border/50">
-            {formFields}
+      {/* Restricted → the picker gets the panel's FULL width, which is the whole
+          point of being inline rather than in a modal. */}
+      {restricted && (
+        <div className="space-y-3 border-t border-border/50 pt-5">
+          <div>
+            <h4 className="text-sm font-semibold text-foreground">{t.settings.inviteMember.pickerTitle}</h4>
+            <p className="text-xs text-muted-foreground mt-1">{t.settings.inviteMember.pickerDesc}</p>
           </div>
-          <div className="overflow-y-auto p-6">{pickerPane}</div>
+          <ResourcePicker
+            value={grants}
+            onChange={setGrants}
+            availableTypes={availableTypes}
+            defaultPermissions={["read"]}
+            disabled={inviting}
+          />
         </div>
-      ) : (
-        <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-5">{formFields}</div>
       )}
 
-      <div className="flex items-center justify-end gap-2 p-6 border-t border-border/50">
+      <div className="flex items-center justify-end gap-2">
         <button
           type="button"
           onClick={onClose}
@@ -380,9 +360,7 @@ function SendSegment({
       disabled={disabled}
       aria-pressed={selected}
       className={`flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-start transition-all disabled:opacity-50 ${
-        selected
-          ? "bg-card shadow-sm ring-1 ring-inset ring-border/70"
-          : "hover:bg-foreground/[0.03]"
+        selected ? "bg-card shadow-sm ring-1 ring-inset ring-border/70" : "hover:bg-foreground/[0.03]"
       }`}
     >
       <Icon
@@ -427,7 +405,7 @@ function RoleCard({
       onClick={onClick}
       disabled={disabled}
       aria-pressed={selected}
-      className={`w-full text-start flex items-start gap-3 rounded-xl border px-3.5 py-3 transition-all disabled:opacity-50 ${
+      className={`w-full text-start flex items-start gap-3 rounded-xl border px-3.5 py-2.5 transition-all disabled:opacity-50 ${
         selected
           ? "border-primary/40 bg-primary/[0.06]"
           : "border-border/50 bg-muted/[0.05] hover:bg-muted/15 hover:border-border"

@@ -13,6 +13,7 @@ import { installAndStart, preview } from "../lib/service";
 import {
   composeUp,
   composeIsViableDefault,
+  ensureDocker,
   composeInternalToken,
   hasDockerCompose,
   sourceBuildDir,
@@ -68,6 +69,8 @@ interface UpOpts {
   bare?: boolean;
   /** Non-interactive answer for the compose edge preflight when a foreign proxy holds :80/:443. */
   edge?: string;
+  /** Withhold the api's channel to the HOST OS (hardening; see --no-host-control). */
+  hostControl?: boolean;
   /** Headless install: after the service is up, create the admin + register the
    *  domain from flags instead of prompting. Requires --admin-email + password. */
   nonInteractive?: boolean;
@@ -162,6 +165,10 @@ export const upCommand = new Command("up")
   .option("--repo <url>", "Git remote to clone for --from-source (default: oblien/openship)")
   .option("--compose", "Install via Docker Compose using the published images (postgres + redis + api + dashboard + edge on :80/:443). Default when Docker is available on Linux.")
   .option("--bare", "Install as the bare process service (embedded DB, no Docker) instead of Compose")
+  .option(
+    "--no-host-control",
+    "Harden: don't give the control plane a channel to this machine's OS. No host SSH key is generated or mounted, host operations refuse, and this box stops being offered as a deploy target. Recommended when this box only manages REMOTE servers — it loses :80/:443 takeover, the host terminal and host port scans. The Docker socket is still mounted (deployments need it), so this is defense in depth, not isolation.",
+  )
   .option("--edge <action>", "Compose mode: how to handle an existing proxy on :80/:443 — 'migrate' (import its sites into Openship's edge), 'takeover' (stop it; its sites stop serving), or 'cancel'. Default: prompt when interactive, else cancel.")
   .option("--non-interactive", "Headless install: after the service starts, create the admin + register the domain from the flags below (no prompts). Alias: --yes.")
   .option("--yes", "Alias for --non-interactive.")
@@ -176,9 +183,37 @@ export const upCommand = new Command("up")
     if (opts.fromSource || opts.source) return runFromSource(opts);
     if (opts.foreground) return runForeground(opts);
     const headless = !!(opts.nonInteractive || opts.yes);
-    // Install method: Compose is the default when it can actually work (Docker
-    // present on Linux — the edge container needs host networking); else bare.
-    const method = opts.bare ? "bare" : opts.compose ? "compose" : composeIsViableDefault() ? "compose" : "bare";
+    // Install method: Compose is the default when it can actually work (Docker on
+    // Linux — the edge container needs host networking); else bare.
+    //
+    // Docker is INSTALLED if missing, the same way the interactive wizard does it
+    // (ensureDocker → systemCatalog.installs.docker → get.docker.com). Without
+    // this, `openship up` on a fresh Linux box silently degraded to the bare
+    // install — a different topology than the docs promise — and `--compose` died
+    // on a raw "docker: not found" instead of just installing it.
+    let method: "bare" | "compose";
+    if (opts.bare) {
+      method = "bare";
+    } else if (opts.compose) {
+      // Explicitly asked for compose: install Docker or fail loudly. Falling back
+      // to bare here would quietly ignore the flag.
+      if (!(await ensureDocker())) {
+        console.error(
+          chalk.red("\n  --compose needs Docker + docker compose, and they couldn't be installed automatically.") +
+            chalk.dim(
+              "\n  Install Docker (https://docs.docker.com/engine/install/) and re-run, or use --bare.\n",
+            ),
+        );
+        process.exit(1);
+      }
+      method = "compose";
+    } else if (process.platform === "linux") {
+      method = (await ensureDocker()) ? "compose" : "bare";
+    } else {
+      // macOS/Windows: Docker Desktop can't be installed unattended and its edge
+      // container has no host networking.
+      method = composeIsViableDefault() ? "compose" : "bare";
+    }
     if (method === "compose") {
       const started = await runCompose(opts);
       if (headless && !opts.dryRun) {
@@ -313,6 +348,8 @@ async function runCompose(opts: UpOpts & { yes?: boolean }): Promise<{ apiPort: 
     dashboardPort: opts.dashboardPort,
     publicUrl,
     trustProxy: opts.trustProxy,
+    // commander maps `--no-host-control` to hostControl === false.
+    noHostControl: opts.hostControl === false,
   });
   if (!res.ok) {
     spinner.fail("docker compose failed to start the stack");

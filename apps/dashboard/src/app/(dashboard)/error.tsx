@@ -1,7 +1,9 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect } from "react";
+import { RefreshCw, LayoutGrid } from "lucide-react";
+import { ErrorView } from "@/components/error-view";
+import { useI18n } from "@/components/i18n-provider";
 
 /**
  * Error boundary for the whole (dashboard) segment. Catches render errors in any
@@ -20,35 +22,38 @@ export default function DashboardError({
   error: Error & { digest?: string };
   reset: () => void;
 }) {
+  const { t } = useI18n();
+  const c = t.chrome;
+
   useEffect(() => {
     console.error("[dashboard] segment error:", error);
   }, [error]);
 
   return (
-    <div className="flex min-h-[60vh] flex-col items-center justify-center px-6 text-center">
-      <h1 className="th-text-heading text-xl font-semibold">Something went wrong</h1>
-      <p className="th-text-body mt-2 max-w-md text-sm leading-relaxed">
-        This page hit an unexpected error. Try again — if it keeps happening, head
-        back to your projects.
-      </p>
-      {error?.digest && (
-        <p className="th-text-muted mt-3 font-mono text-xs">{error.digest}</p>
-      )}
-      <div className="mt-6 flex items-center gap-3">
-        <button
-          onClick={() => reset()}
-          className="th-text-title rounded-full border px-4 py-2 text-sm font-medium transition-colors hover:opacity-80"
-          style={{ borderColor: "var(--th-bd-subtle)" }}
-        >
-          Try again
-        </button>
-        <Link
-          href="/projects"
-          className="th-text-secondary rounded-full px-4 py-2 text-sm font-medium transition-colors hover:opacity-80"
-        >
-          Go to projects
-        </Link>
-      </div>
+    <div className="flex min-h-[70vh] items-center justify-center px-6 py-10">
+      <ErrorView
+        variant="crash"
+        brand={t.brand}
+        title={c.error.title}
+        description={c.error.description}
+        code={error?.digest}
+        codeLabel={c.error.refCode}
+        actions={[
+          {
+            label: c.error.tryAgain,
+            onClick: () => reset(),
+            icon: <RefreshCw className="size-4" />,
+          },
+          {
+            label: c.error.goToProjects,
+            href: "/projects",
+            icon: <LayoutGrid className="size-4" />,
+            variant: "secondary",
+          },
+        ]}
+        docsLabel={c.errorLinks.docs}
+        githubLabel={c.errorLinks.github}
+      />
     </div>
   );
 }

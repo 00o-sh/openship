@@ -49,8 +49,13 @@ export type ResolvedAppTemplate = AppTemplate & {
   custom?: boolean;
 };
 
-/** This instance's Openship version, for the `minEngine` gate. Best-effort — if
- *  the package.json read throws, skip the gate. */
+/** This instance's Openship version, for the `minEngine` gate.
+ *
+ *  Kept defensive, but note it no longer throws: `readApiVersion()` used to read
+ *  package.json off disk, which threw inside the desktop's compiled binary — so
+ *  this catch was silently disabling the `minEngine` gate for every desktop
+ *  install. It now returns the version embedded at build time, and the gate is
+ *  live on desktop too. */
 function engineVersion(): string | undefined {
   try {
     return readApiVersion();

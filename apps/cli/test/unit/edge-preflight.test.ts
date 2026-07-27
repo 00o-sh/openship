@@ -25,6 +25,10 @@ function deps(over: Partial<EdgePreflightDeps> = {}): EdgePreflightDeps {
     recoverInterruptedTakeover: vi.fn(async () => {}),
     ourEdgeContainerRunning: vi.fn(async () => false),
     readCert: vi.fn((p: string) => (p.endsWith(".crt") ? "CERT" : "KEY")),
+    detectInstalledProxy: vi.fn(async () => null),
+    scanProxySites: vi.fn(async () => ({ sites: [tlsSite], warnings: [] })),
+    edgeServedHostnames: vi.fn(() => new Set<string>()),
+    confirmStoppedImport: vi.fn(async () => true),
     render: vi.fn(),
     confirm: vi.fn(async () => "cancel"),
     warn: vi.fn(),
@@ -139,5 +143,66 @@ describe("planAndApplyHostEdge", () => {
     expect(plan).toEqual({ proceed: false });
     expect(d.confirm).not.toHaveBeenCalled();
     expect(d.warn).toHaveBeenCalled();
+  });
+});
+
+describe("planAndApplyHostEdge — stopped proxy with unimported sites", () => {
+  /** Ports free/ours, but an installed-yet-stopped nginx still has vhosts on disk. */
+  function stoppedDeps(over: Partial<EdgePreflightDeps> = {}) {
+    return deps({
+      foreignProxyOnEdge: vi.fn(async () => ({ status: status("free"), blocked: false, owner: "" })),
+      detectInstalledProxy: vi.fn(async () => "nginx" as const),
+      ...over,
+    });
+  }
+
+  it("does NOT re-offer sites the edge already serves", async () => {
+    // The regression: after a successful migration, re-running `up` asked to import
+    // the same sites again. The old signal was a marker file under OS_DIR, which
+    // `openship-dev` (OPENSHIP_HOME=~/.openship-dev) can't see and a wiped
+    // ~/.openship loses — so the tool appeared to forget what it had just done.
+    const d = stoppedDeps({ edgeServedHostnames: vi.fn(() => new Set(["a.com"])) });
+    const plan = await planAndApplyHostEdge({}, d);
+    expect(plan).toEqual({ proceed: true });
+    expect(d.render).not.toHaveBeenCalled(); // never prompted
+  });
+
+  it("offers only what is genuinely unserved", async () => {
+    const twoSites = [tlsSite, { ...tlsSite, serverNames: ["b.com"] }];
+    const d = stoppedDeps({
+      scanProxySites: vi.fn(async () => ({ sites: twoSites, warnings: [] })),
+      edgeServedHostnames: vi.fn(() => new Set(["a.com"])),
+      render: vi.fn(),
+    });
+    await planAndApplyHostEdge({}, d);
+    // a.com is live; only b.com should be presented.
+    const rendered = (d.render as any).mock.calls[0][0];
+    expect(rendered.sites).toHaveLength(1);
+    expect(rendered.sites[0].serverNames).toEqual(["b.com"]);
+  });
+
+  it("treats a multi-hostname site as done only when EVERY hostname is served", async () => {
+    const multi = [{ ...tlsSite, serverNames: ["onvo.me", "www.onvo.me"] }];
+    const d = stoppedDeps({
+      scanProxySites: vi.fn(async () => ({ sites: multi, warnings: [] })),
+      // apex served, www not → still needs importing
+      edgeServedHostnames: vi.fn(() => new Set(["onvo.me"])),
+      render: vi.fn(),
+    });
+    await planAndApplyHostEdge({}, d);
+    expect(d.render).toHaveBeenCalled();
+  });
+
+  it("stays quiet when no proxy is installed", async () => {
+    const d = stoppedDeps({ detectInstalledProxy: vi.fn(async () => null) });
+    const plan = await planAndApplyHostEdge({}, d);
+    expect(plan).toEqual({ proceed: true });
+    expect(d.scanProxySites).not.toHaveBeenCalled();
+  });
+
+  it("never stops anything — there is nothing holding the ports", async () => {
+    const d = stoppedDeps({ edgeServedHostnames: vi.fn(() => new Set(["a.com"])) });
+    await planAndApplyHostEdge({}, d);
+    expect(d.beginEdgeTakeover).not.toHaveBeenCalled();
   });
 });

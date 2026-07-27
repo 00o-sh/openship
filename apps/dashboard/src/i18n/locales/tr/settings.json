@@ -324,7 +324,7 @@
       "pendingBody": "Openship alan adınız doğrulama bekliyor (DNS / SSL). Canlıya geçtiğinde davetler açılır.",
       "viewDomain": "Alan adını görüntüle"
     },
-    "descPersonal": "Kişisel çalışma alanınıza erişimi olan kişiler. Doğrudan iş birliği yapacak kişileri davet edin veya ayrı bir ekip organizasyonu oluşturun.",
+    "descPersonal": "Kişisel çalışma alanınıza erişimi olan kişiler.",
     "descTeam": "Bu organizasyonun projelerine, dağıtımlarına ve sunucularına erişimi olan kişiler.",
     "inviteMember": "Üye davet et",
     "createTeamCard": {

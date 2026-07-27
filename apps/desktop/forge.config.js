@@ -60,6 +60,10 @@ module.exports = {
       path.join(RESOURCES, "dashboard"),
       path.join(RESOURCES, "migrations"),
       path.join(RESOURCES, "pglite"),
+      // Vendored GeoLite2 DB → OPENSHIP_GEOIP_DB. This list is explicit, not a
+      // glob of resources/ — anything staged by build/stage.ts and NOT named here
+      // is silently absent from the packaged app.
+      path.join(RESOURCES, "geoip"),
       // ssh2 + dockerode (externalized from the --compile binary) — resolved at
       // runtime via NODE_PATH=<Resources>/node_modules in services.ts.
       path.join(RESOURCES, "node_modules"),

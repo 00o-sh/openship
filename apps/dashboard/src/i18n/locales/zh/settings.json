@@ -273,7 +273,7 @@
   },
   "team": {
     "heading": "团队",
-    "descPersonal": "有权访问你个人工作区的人员。可直接邀请协作者，或创建一个独立的团队组织。",
+    "descPersonal": "可以访问你的个人工作区的人员。",
     "descTeam": "有权访问此组织的项目、部署和服务器的人员。",
     "inviteMember": "邀请成员",
     "createTeamCard": {

@@ -6,6 +6,7 @@
 
 import type { Context } from "hono";
 import { repos } from "@repo/db";
+import { hostControlDisabled } from "@repo/adapters";
 import { invalidateOpenRestyPaths } from "@/lib/openresty-paths";
 import { env } from "../../config";
 import { sshManager } from "../../lib/ssh-manager";
@@ -45,7 +46,12 @@ export async function listServers(c: Context) {
 
   // Org-scoped: only the caller's org's servers.
   const ctx = getRequestContext(c);
-  const all = await repos.server.listByOrganization(ctx.organizationId);
+  const rows = await repos.server.listByOrganization(ctx.organizationId);
+  // Host control off (`openship up --no-host-control`): this box is not a deploy
+  // target and every host operation refuses, so the local row is hidden rather
+  // than listed-but-dead. Enforced by createHostExecutor throwing — this only
+  // stops the UI from offering something the API will reject.
+  const all = hostControlDisabled() ? rows.filter((s) => !s.isLocal) : rows;
   await primeGeo();
   // Projects currently deployed to each server (active deployment → meta.serverId).
   const projectCounts = await repos.project
