@@ -308,6 +308,25 @@ jobs:
           else
             echo "::warning::No .rpm found"
           fi
+          # Collect the Windows .zip (the primary asset on Windows — maker-zip
+          # emits out/make/zip/win32/x64/*.zip, which the AppImage/deb/rpm globs
+          # above never match). Guarded to the .zip target so a stray zip on a
+          # Linux runner is never mistaken for the AppImage asset.
+          if [[ "${{ matrix.asset }}" == *.zip ]]; then
+            ZIP="$(find apps/desktop/out/make -type f -name '*.zip' | head -n1)"
+            if [[ -n "${ZIP}" ]]; then
+              cp "${ZIP}" "dist/${{ matrix.asset }}"
+              cd dist
+              if command -v shasum >/dev/null 2>&1; then
+                shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+              else
+                sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+              fi
+              cd ..
+            else
+              echo "::warning::No .zip found"
+            fi
+          fi
           # Fail if nothing was collected
           if [[ -z "$(find dist -type f)" ]]; then
             echo "No installers matched under apps/desktop/out/make"
@@ -461,6 +480,19 @@ jobs:
   publish-npm:
     name: Publish CLI to npm
     runs-on: ubuntu-24.04
+    # npm is the ONE immutable artifact — a published version can never be
+    # replaced. So it must publish LAST, only after every other job in the
+    # release has succeeded (the `publish` job already depends on all the build
+    # jobs + emits the GitHub release). If any installer/image/release step
+    # fails, npm is NOT published, so the whole release can be fixed and re-run
+    # under the SAME version — no forced version bump, no npm-vs-installers
+    # mismatch. `always()` keeps the manual npm-only path working: on a
+    # workflow_dispatch the `publish` job is skipped (push-only), and we publish
+    # anyway; on a tag push we require `publish` to have succeeded.
+    needs: [publish]
+    if: >-
+      always() &&
+      (github.event_name == 'workflow_dispatch' || needs.publish.result == 'success')
     # OIDC trusted publishing: npm verifies this workflow's identity instead of
     # a long-lived token. id-token:write lets the runner mint the OIDC token.
     permissions:
