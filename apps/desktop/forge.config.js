@@ -207,6 +207,7 @@ module.exports = {
           categories: ["Development", "Utilities"],
           maintainer: "Oblien",
           homepage: "https://openship.io",
+          license: "Apache-2.0",
         },
       },
       platforms: ["linux"],
@@ -221,6 +222,9 @@ module.exports = {
           icon: `${ICON_BASE}.png`,
           categories: ["Development", "Utilities"],
           homepage: "https://openship.io",
+          // Required by electron-installer-redhat (the RPM spec's `License:`).
+          // Also set on package.json; kept here so the maker never depends on it.
+          license: "Apache-2.0",
         },
       },
       platforms: ["linux"],
