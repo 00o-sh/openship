@@ -79,6 +79,19 @@ export interface ResolveLiveStateInput {
   slug: string;
   /** serviceId → container id recorded at deploy/attach time. Identity hint. */
   trackedIds?: Record<string, string | null | undefined>;
+  /**
+   * Restrict which identity keys may match. Defaults to all four.
+   *
+   * Exists for DESTRUCTIVE callers. `compose` matches on
+   * `com.docker.compose.project === slug`, which is right for a READ (an adopted
+   * stack the operator later recreated by hand still shows its true state) but
+   * too loose for a delete: a migration that KEPT its source leaves the original
+   * stack running under that same compose project name on the same host, and a
+   * teardown that swept it would destroy containers and volumes the operator
+   * deliberately chose to keep. Teardown therefore asks only for the keys that
+   * PROVE ownership — `label`, `name`, `trackedId`.
+   */
+  tiers?: readonly LiveMatchKind[];
 }
 
 const UNMATCHED: Omit<LiveServiceMatch, "duplicates"> = {
@@ -163,12 +176,12 @@ const displayName = (c: LiveContainerLike) => c.names[0] ?? c.id.slice(0, 12);
  * and a `docker ps -a` snapshot, get back one entry per service.
  */
 export function resolveLiveServiceState(input: ResolveLiveStateInput): Map<string, LiveServiceMatch> {
-  const { services, live, projectId, slug, trackedIds = {} } = input;
+  const { services, live, projectId, slug, trackedIds = {}, tiers: allowed } = input;
   const result = new Map<string, LiveServiceMatch>();
   const claimed = new Set<string>();
   const pending = new Map(services.map((s) => [s.id, s]));
 
-  const tiers: Array<{ kind: LiveMatchKind; matches: (svc: { id: string; name: string }, c: LiveContainerLike) => boolean }> = [
+  const allTiers: Array<{ kind: LiveMatchKind; matches: (svc: { id: string; name: string }, c: LiveContainerLike) => boolean }> = [
     {
       kind: "label",
       matches: (svc, c) =>
@@ -199,6 +212,9 @@ export function resolveLiveServiceState(input: ResolveLiveStateInput): Map<strin
         c.labels["com.docker.compose.service"] === svc.name,
     },
   ];
+
+  // Restricted callers (teardown) drop the looser keys — see `tiers`.
+  const tiers = allowed ? allTiers.filter((t) => allowed.includes(t.kind)) : allTiers;
 
   for (const tier of tiers) {
     if (pending.size === 0) break;

@@ -405,6 +405,23 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
     return () => clearInterval(timer);
   }, [cliAction, refresh, showToast]);
 
+  /* ── Auto-detect a completed login ──────────────────────────── */
+  // Any pending CLI action (the device flow OR a `gh auth login` the operator ran
+  // on the instance) clears the moment the connection lands, so the UI never gets
+  // stuck showing a code/command after success.
+  useEffect(() => {
+    if (connected && cliAction) setCliAction(null);
+  }, [connected, cliAction]);
+
+  // Terminal (`gh auth login`) has no device code to poll — refresh the status
+  // periodically so the UI flips to connected as soon as the operator finishes,
+  // instead of requiring a manual "check connection".
+  useEffect(() => {
+    if (cliAction?.type !== "terminal") return;
+    const timer = setInterval(() => void refresh(), 4000);
+    return () => clearInterval(timer);
+  }, [cliAction, refresh]);
+
   /* ── Fetch repos for an owner ───────────────────────────────── */
   const fetchReposForOwner = useCallback(
     async (owner: string) => {

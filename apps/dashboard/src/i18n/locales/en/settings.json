@@ -141,6 +141,11 @@
       "disconnectPrefix": "To disconnect, run",
       "disconnectSuffix": "in your terminal.",
       "use": "Use gh CLI",
+      "login": "Log in with GitHub",
+      "deviceHint": "Enter this one-time code at GitHub to authorize this instance:",
+      "waiting": "Waiting for authorization — this updates automatically.",
+      "tokenAltPrefix": "Prefer a token? Add a personal access token under",
+      "tokenAltLink": "Clone credentials.",
       "forwardOnNote": "Forwarding is on — gh CLI also authenticates remote server clones. Your identity is tunneled over SSH per clone; nothing is stored on the server.",
       "forwardOffHint": "Local builds only for now. Turn on \"Forward my git identity to build servers\" to use gh CLI for remote server deploys too.",
       "manageForward": "Manage forwarding"

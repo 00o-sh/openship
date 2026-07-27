@@ -495,7 +495,12 @@ export async function pollConnect(c: Context) {
   if (!status) {
     return c.json({ status: "none" as const }, 404);
   }
-  return c.json(status);
+  // NEVER return the access token to the browser. On completion the device flow
+  // has already persisted it server-side (startDeviceFlow → gh-cli token store);
+  // the client only needs the status. Returning `status` verbatim here leaked the
+  // token onto the wire (and into any client logging). Strip it.
+  const { token: _token, ...safe } = status;
+  return c.json(safe);
 }
 
 /**

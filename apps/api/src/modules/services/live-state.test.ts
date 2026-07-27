@@ -336,3 +336,57 @@ describe("describeLiveState", () => {
     ]);
   });
 });
+
+describe("resolveLiveServiceState — restricted tiers (destructive callers)", () => {
+  const composeOnly = [
+    container({
+      id: "c_kept_original",
+      names: ["supabase-db-1"],
+      labels: { "com.docker.compose.project": "supabase", "com.docker.compose.service": "db" },
+    }),
+  ];
+  const services = [{ id: "svc_db", name: "db" }];
+
+  it("matches a compose-labelled container by default (READ path)", () => {
+    const m = resolveLiveServiceState({
+      services,
+      live: composeOnly,
+      projectId: "proj_1",
+      slug: "supabase",
+    });
+    expect(m.get("svc_db")).toMatchObject({ containerId: "c_kept_original", matchedBy: "compose" });
+  });
+
+  it("does NOT match it when the caller restricts to ownership-proving keys", () => {
+    // The teardown case: a migration that KEPT its source leaves the original
+    // stack running under the same compose project name. Sweeping it on delete
+    // would destroy containers + volumes the operator deliberately kept.
+    const m = resolveLiveServiceState({
+      services,
+      live: composeOnly,
+      projectId: "proj_1",
+      slug: "supabase",
+      tiers: ["label", "name", "trackedId"],
+    });
+    expect(m.get("svc_db")?.containerId).toBeNull();
+  });
+
+  it("still reclaims what it owns under the restriction", () => {
+    const live = [
+      container({
+        id: "c_ours",
+        names: ["openship-supabase-db"],
+        labels: { "openship.project": "proj_1", "openship.service": "db" },
+      }),
+      ...composeOnly,
+    ];
+    const m = resolveLiveServiceState({
+      services,
+      live,
+      projectId: "proj_1",
+      slug: "supabase",
+      tiers: ["label", "name", "trackedId"],
+    });
+    expect(m.get("svc_db")?.containerId).toBe("c_ours");
+  });
+});

@@ -3,39 +3,65 @@ import { PassThrough } from "node:stream";
 
 import type { CommandExecutor, LogEntry } from "../types";
 import { LocalExecutor } from "./local-executor";
-import { logEntry } from "./local-shell";
+import { logEntry, sq } from "./local-shell";
 
 const DEFAULT_SOCKET = "/var/run/docker.sock";
+
+/**
+ * Where the edge's config files are reachable from:
+ *
+ *   "mounted"   — the routing volumes are mounted into THIS process (the compose
+ *                 stack's api container, sharing sites-enabled / letsencrypt /
+ *                 acme with the edge). File ops are plain node:fs. Default.
+ *   "container" — they are not: the edge runs on a host we only reach through the
+ *                 Docker daemon (a REMOTE server managed from desktop). File ops
+ *                 go through `docker exec` in the edge container, so this needs no
+ *                 host paths and no knowledge of the volume driver.
+ */
+export type EdgeFileMode = "mounted" | "container";
+
+/** Cap per write command so a large file can't blow past the shell's ARG_MAX.
+ *  Vhosts are a few KB; this only matters if something big is ever written. */
+const WRITE_CHUNK = 60_000;
 
 /**
  * CommandExecutor for a CONTAINERIZED OpenResty edge (see apps/edge +
  * docker-compose `edge` service, `network_mode: host`).
  *
- * The api container and the edge container SHARE the routing volumes
- * (sites-enabled, /etc/letsencrypt, /var/www/acme), so FILE operations are
- * plain node:fs on those mounts — delegated to a `LocalExecutor`. Command
- * execution (`openresty -t` / `-s reload`, `certbot …`) runs INSIDE the edge
- * container via `docker exec` (dockerode). This lets `NginxProvider` — which
- * already speaks the CommandExecutor interface — drive the containerized edge
- * with no changes: it writes vhosts to the shared volume and reloads through us.
+ * Command execution (`openresty -t` / `-s reload`, `certbot …`) always runs
+ * INSIDE the edge container via `docker exec` (dockerode). This lets
+ * `NginxProvider` — which already speaks the CommandExecutor interface — drive
+ * the containerized edge with no changes: it writes vhosts, then reloads through
+ * us.
  *
- * The api reaches the Docker daemon through the mounted socket (DooD), the same
- * socket it uses to build/run app containers.
+ * File operations depend on where we're standing (see `EdgeFileMode`): the
+ * compose stack's api shares the routing volumes and uses node:fs; a remote edge
+ * reached only through the daemon writes via `docker exec`.
+ *
+ * Locally the api reaches the daemon through the mounted socket (DooD), the same
+ * socket it uses to build/run app containers; for a remote server the caller
+ * injects that server's SSH-tunneled dockerode.
  */
 export class DockerEdgeExecutor implements CommandExecutor {
   private readonly docker: Dockerode;
   private readonly containerName: string;
-  /** Shared-volume file ops run locally (the volumes are mounted in the api). */
+  private readonly fileMode: EdgeFileMode;
+  /** node:fs backend — used only in "mounted" mode, where the routing volumes
+   *  really are in this process's filesystem. */
   private readonly files = new LocalExecutor();
 
   constructor(opts: {
     containerName: string;
     socketPath?: string;
-    /** Injectable daemon client — tests use it to pin the exec options we send. */
+    /** Injectable daemon client — tests use it to pin the exec options we send,
+     *  and a REMOTE edge injects the server's SSH-tunneled dockerode here. */
     docker?: Dockerode;
+    /** Defaults to "mounted" — today's compose-local behaviour. */
+    fileMode?: EdgeFileMode;
   }) {
     this.containerName = opts.containerName;
     this.docker = opts.docker ?? new Dockerode({ socketPath: opts.socketPath ?? DEFAULT_SOCKET });
+    this.fileMode = opts.fileMode ?? "mounted";
   }
 
   /** Run one command inside the edge container, capturing stdout/stderr + exit. */
@@ -113,28 +139,67 @@ export class DockerEdgeExecutor implements CommandExecutor {
     return { code, output };
   }
 
-  // ── File ops → shared volume (mounted in the api container) ──────────────
-  writeFile(path: string, content: string): Promise<void> {
-    return this.files.writeFile(path, content);
+  // ── File ops ─────────────────────────────────────────────────────────────
+  // "mounted": the shared volume is in this process's filesystem → node:fs.
+  // "container": reach it through the daemon → `docker exec` in the edge.
+
+  async writeFile(path: string, content: string): Promise<void> {
+    if (this.fileMode === "mounted") return this.files.writeFile(path, content);
+
+    // base64 in the COMMAND, never on stdin: `run()` deliberately doesn't hijack
+    // the connection (see the note above — hijack breaks every exec under Bun),
+    // so there is no stdin to pipe through. Chunked append keeps each command
+    // well inside ARG_MAX for content larger than a vhost.
+    const encoded = Buffer.from(content, "utf8").toString("base64");
+    const dir = path.replace(/\/[^/]*$/, "");
+    if (dir && dir !== path) await this.exec(`mkdir -p ${sq(dir)}`);
+    if (encoded.length === 0) {
+      await this.exec(`: > ${sq(path)}`);
+      return;
+    }
+    for (let offset = 0; offset < encoded.length; offset += WRITE_CHUNK) {
+      const chunk = encoded.slice(offset, offset + WRITE_CHUNK);
+      const redirect = offset === 0 ? ">" : ">>";
+      await this.exec(`printf '%s' ${sq(chunk)} | base64 -d ${redirect} ${sq(path)}`);
+    }
   }
-  readFile(path: string): Promise<string> {
-    return this.files.readFile(path);
+
+  async readFile(path: string): Promise<string> {
+    if (this.fileMode === "mounted") return this.files.readFile(path);
+    return this.exec(`cat ${sq(path)}`);
   }
-  exists(path: string): Promise<boolean> {
-    return this.files.exists(path);
+
+  async exists(path: string): Promise<boolean> {
+    if (this.fileMode === "mounted") return this.files.exists(path);
+    // `test` reports absence via exit code — that's an answer, not a failure, so
+    // check the code instead of letting exec() throw.
+    const { code } = await this.run(`test -e ${sq(path)}`);
+    return code === 0;
   }
-  mkdir(path: string): Promise<void> {
-    return this.files.mkdir(path);
+
+  async mkdir(path: string): Promise<void> {
+    if (this.fileMode === "mounted") return this.files.mkdir(path);
+    await this.exec(`mkdir -p ${sq(path)}`);
   }
-  rm(path: string): Promise<void> {
-    return this.files.rm(path);
+
+  async rm(path: string): Promise<void> {
+    if (this.fileMode === "mounted") return this.files.rm(path);
+    await this.exec(`rm -rf ${sq(path)}`);
   }
+
   transferIn(
     localPath: string,
     remotePath: string,
     onLog?: (log: LogEntry) => void,
     options?: { excludes?: string[]; includes?: string[]; alsoInclude?: string[] },
   ): Promise<void> {
+    if (this.fileMode === "container") {
+      // Routing never transfers trees, and there's no meaningful local source on
+      // the other side of a remote daemon — fail loudly rather than half-work.
+      return Promise.reject(
+        new Error("transferIn is not supported against a container-mode edge"),
+      );
+    }
     // Routing never transfers trees; the shared volume is same-filesystem anyway.
     return this.files.transferIn(localPath, remotePath, onLog, options);
   }

@@ -23,7 +23,11 @@ import {
 import { resolveOrgCloudUserId } from "../../lib/cloud/transport";
 import { buildServiceRouteDomain } from "../../lib/routing-domains";
 import { createReachabilityProbe } from "../../lib/server-reachability";
-import { resolveLiveServiceState } from "../services/live-state";
+import { resolveLiveServiceState, type LiveMatchKind } from "../services/live-state";
+
+/** Identity keys a DELETE may act on: each one proves the container is this
+ *  project's. Deliberately excludes `compose` (see ResolveLiveStateInput.tiers). */
+const TEARDOWN_MATCH_TIERS: readonly LiveMatchKind[] = ["label", "name", "trackedId"];
 
 /** Hard ceiling on a docker-over-SSH volume inspect during manifest/preview.
  *  These calls `.catch(() => [])` on ERROR, but a half-open SSH socket never
@@ -352,6 +356,11 @@ export async function collectProjectManifest(
         live: containers,
         projectId: project.id,
         slug: project.slug,
+        // OWNERSHIP-PROVING keys only. The `compose` key matches on
+        // `com.docker.compose.project === slug`, which for a migration that KEPT
+        // its source would also match the ORIGINAL stack still running under that
+        // name — destroying containers and volumes the operator chose to keep.
+        tiers: TEARDOWN_MATCH_TIERS,
       });
       for (const match of matches.values()) {
         if (!match.containerId) continue;
@@ -591,6 +600,9 @@ export async function previewProjectDeletion(project: Project): Promise<Deletion
           projectId: project.id,
           slug: project.slug,
           trackedIds: Object.fromEntries(serviceRows.map((sd) => [sd.serviceId, sd.containerId])),
+          // Same restriction as the teardown sweep below — the preview must list
+          // exactly what the delete will touch, never more.
+          tiers: TEARDOWN_MATCH_TIERS,
         });
         for (const [serviceId, match] of matches) {
           if (match.containerId) {

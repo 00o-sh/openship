@@ -4,7 +4,6 @@ import React from "react";
 import Link from "next/link";
 import { Plus, Github } from "lucide-react";
 import { useI18n } from "@/components/i18n-provider";
-import { OPENSHIP_LOGO_PATH, logoHeight, logoTransform } from "@/components/ui/logo-path";
 
 /**
  * First-run welcome shown on the home page when the user has no projects.
@@ -57,9 +56,6 @@ function Node({
   );
 }
 
-/** Width the brand mark is drawn at, in the illustration's user units. */
-const LOGO_W = 44;
-
 /** Label under each tile — names what the node is, so the graph reads without a key. */
 function NodeLabel({ x, y, children }: { x: number; y: number; children: string }) {
   return (
@@ -85,16 +81,18 @@ const HomeWelcome: React.FC = () => {
         <svg className="absolute inset-0 h-full w-full" viewBox="0 0 288 132" fill="none" aria-hidden="true">
           {/* Links, behind everything. Dashed = wiring; --th-on-20 is a real step. */}
           <g stroke="var(--th-on-20)" strokeWidth="1.5" strokeDasharray="4 4" fill="none">
-            <path d="M77 36 Q 104 44 118 55" />
-            <path d="M77 96 Q 104 88 118 77" />
-            <path d="M170 55 Q 184 44 211 36" />
-            <path d="M170 77 Q 184 88 211 96" />
+            <path d="M71 32 Q 100 42 123 58" />
+            <path d="M71 96 Q 100 90 123 74" />
+            <path d="M165 58 Q 188 42 217 32" />
+            <path d="M165 74 Q 188 90 217 96" />
           </g>
-          {/* Packets at each curve's midpoint (quadratic t=0.5). */}
-          <circle cx="101" cy="47.8" r="2.4" fill="var(--th-on-30)" />
-          <circle cx="101" cy="84.2" r="2" fill="var(--th-on-20)" />
-          <circle cx="187" cy="47.8" r="2.4" fill="var(--th-on-30)" />
-          <circle cx="187" cy="84.2" r="2" fill="var(--th-on-20)" />
+          {/* Packets sit ON their curve: a quadratic's t=0.5 point is
+              0.25*P0 + 0.5*C + 0.25*P1, NOT the midpoint of the endpoints —
+              eyeballing it is what left them floating beside the line. */}
+          <circle cx="98.5" cy="43.5" r="2.4" fill="var(--th-on-30)" />
+          <circle cx="98.5" cy="87.5" r="2" fill="var(--th-on-20)" />
+          <circle cx="189.5" cy="43.5" r="2.4" fill="var(--th-on-30)" />
+          <circle cx="189.5" cy="87.5" r="2" fill="var(--th-on-20)" />
 
           {/* Repo */}
           <Node x={52} y={32}>
@@ -129,16 +127,14 @@ const HomeWelcome: React.FC = () => {
           </Node>
           <NodeLabel x={236} y={124}>Data</NodeLabel>
 
-          {/* Hub: the REAL brand mark on a soft round plate. (A rounded square
-              with a ring inside read as the Instagram glyph.) */}
-          <circle cx="144" cy="66" r="30" fill="var(--th-sf-05)" />
-          <circle cx="144" cy="66" r="30" fill="none" stroke="var(--th-bd-default)" strokeWidth="1.5" />
-          <g fill="var(--th-on-80)" transform={logoTransform(144 - LOGO_W / 2, 66 - logoHeight(LOGO_W) / 2, LOGO_W)}>
-            <path d={OPENSHIP_LOGO_PATH} />
-          </g>
-          {/* Live dot on the plate's edge — the one spot of colour. */}
-          <circle cx="165" cy="45" r="4" fill="var(--th-card-bg)" />
-          <circle cx="165" cy="45" r="2.8" fill="#22c55e" fillOpacity="0.85" />
+          {/* Hub = the Openship mark: the ring (components/logo.tsx,
+              public/apple-touch-icon.png). Soft halo for presence, no plate —
+              a ring inside a filled circle reads as a target. */}
+          <circle cx="144" cy="66" r="27" fill="var(--th-on-04)" />
+          <circle cx="144" cy="66" r="18" fill="none" stroke="var(--th-on-80)" strokeWidth="3.5" />
+          {/* Live dot on the ring's edge — the one spot of colour. */}
+          <circle cx="158" cy="52" r="4.2" fill="var(--th-card-bg)" />
+          <circle cx="158" cy="52" r="2.8" fill="#22c55e" fillOpacity="0.85" />
         </svg>
       </div>
 

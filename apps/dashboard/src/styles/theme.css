@@ -115,6 +115,13 @@
    * as dark and dim. The lift comes from bg vs --th-bg-page; if you ever move
    * the page back toward #ffffff these go invisible. */
   --th-card-bg:       #ffffff;
+  /* The OPAQUE equivalent of a card sitting on the page — card is already opaque here, so the composite IS the card colour.
+     Use this for a fade/scrim that has to blend INTO a card (e.g. the
+     sidebar's bottom scroll fade). NOT --th-card-bg-solid: that one is the
+     MODAL surface, tuned to read correctly over a dimmed backdrop, and in
+     dark it is darker than the real card (#ffffff vs #060606) — which
+     showed up as a black band under the sidebar list. */
+  --th-card-on-page:  #ffffff;
   --th-card-bg-solid: #ffffff;
   --th-card-bd:       transparent;
   --th-card-bd-hover: #e0e0e0;
@@ -234,6 +241,13 @@
    * there is no resting border, same as dim. If you ever lower this fill, the
    * container will start disappearing into the black before it looks borderless. */
   --th-card-bg:       rgba(255,255,255,.05);
+  /* The OPAQUE equivalent of a card sitting on the page — #000000 page + 5% white.
+     Use this for a fade/scrim that has to blend INTO a card (e.g. the
+     sidebar's bottom scroll fade). NOT --th-card-bg-solid: that one is the
+     MODAL surface, tuned to read correctly over a dimmed backdrop, and in
+     dark it is darker than the real card (#0d0d0d vs #060606) — which
+     showed up as a black band under the sidebar list. */
+  --th-card-on-page:  #0d0d0d;
   --th-card-bg-solid: #060606;
   --th-card-bd:       transparent;
   --th-card-bd-hover: rgba(255,255,255,.12);
@@ -354,6 +368,13 @@
    * was the only thing making these read as boxed-in. Fill deliberately
    * unchanged — this shade is the one we want. */
   --th-card-bg:       rgba(255,255,255,.03);
+  /* The OPAQUE equivalent of a card sitting on the page — #141414 page + 3% white.
+     Use this for a fade/scrim that has to blend INTO a card (e.g. the
+     sidebar's bottom scroll fade). NOT --th-card-bg-solid: that one is the
+     MODAL surface, tuned to read correctly over a dimmed backdrop, and in
+     dark it is darker than the real card (#1b1b1b vs #060606) — which
+     showed up as a black band under the sidebar list. */
+  --th-card-on-page:  #1b1b1b;
   --th-card-bg-solid: #1e1e1e;
   --th-card-bd:       transparent;
   --th-card-bd-hover: rgba(255,255,255,.14);

@@ -12,12 +12,14 @@ import {
   ShieldCheck,
   Key,
   KeyRound,
+  Loader2,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import {
   useGitHub,
   type GitHubConnectionState,
   type GitHubAccount,
+  type CliAction,
 } from "@/context/GitHubContext";
 import { useCloud } from "@/context/CloudContext";
 import { useModal } from "@/context/ModalContext";
@@ -37,7 +39,7 @@ export function GitHubConnection() {
   // GET /github/status here — the cloud round-trip for the App badge +
   // installations happens on THIS page only, never on a plain library browse.
   // Actions (connect/disconnect/connecting) still come from the shared context.
-  const { connecting, connect: ctxConnect, disconnect: ctxDisconnect } = useGitHub();
+  const { connecting, connect: ctxConnect, disconnect: ctxDisconnect, cliAction } = useGitHub();
   const { t } = useI18n();
   const router = useRouter();
 
@@ -353,8 +355,10 @@ export function GitHubConnection() {
               active={state.primary === "gh-cli"}
               onConnect={() => connect("cli")}
               connecting={connecting && !state.sources.ghCli.available}
+              cliAction={cliAction}
               forwardEnabled={forwardGit}
               onManageForward={() => router.push("/settings?tab=tokens")}
+              onManageTokens={() => router.push("/settings?tab=tokens")}
             />
           </div>
         )}
@@ -376,13 +380,18 @@ function GhCliBlock(props: {
   active: boolean;
   onConnect: () => void;
   connecting: boolean;
+  /** In-progress login the shared context returned: a device code (own client
+   *  id) to show inline, or a `gh auth login` instruction for the instance. */
+  cliAction: CliAction | null;
   /** "Forward my git identity to build servers" is on → gh CLI authenticates
    *  remote server clones too (not local-only). */
   forwardEnabled: boolean;
   /** Jump to the Clone-credentials section (Tokens tab) that owns the toggle. */
   onManageForward: () => void;
+  /** Jump to the Tokens tab (clone tokens / PAT shortcut). */
+  onManageTokens: () => void;
 }) {
-  const { available, login, avatarUrl, active, onConnect, connecting, forwardEnabled, onManageForward } = props;
+  const { available, login, avatarUrl, active, onConnect, connecting, cliAction, forwardEnabled, onManageForward, onManageTokens } = props;
   const { t } = useI18n();
   return (
       <div className="space-y-3">
@@ -482,36 +491,85 @@ function GhCliBlock(props: {
           </div>
         )}
 
-        {/* Action / hint row.
-            Connected → terminal instruction for the durable disconnect
-            (`gh auth logout`). Not connected → button that triggers the
-            connect flow (device flow / terminal instruction). */}
-        <div className="flex items-center gap-2">
-          {available ? (
-            // Fine print, not a paragraph: it's a reference for later, competing
-            // with nothing. (Was text-sm, the same weight as the real content.)
-            <p className="text-xs text-muted-foreground/70 leading-relaxed">
-              {t.settings.github.ghCli.disconnectPrefix}{" "}
-              <code className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-[11px] text-foreground/80">
-                gh auth logout
-              </code>{" "}
-              {t.settings.github.ghCli.disconnectSuffix}
-            </p>
+        {/* Login action + in-progress state (not yet authed).
+            A pending cliAction renders inline: a device code (operator's own
+            GITHUB_CLIENT_ID) with the github.com/login/device link, or the
+            `gh auth login` instruction for this instance. Both resolve
+            hands-off — the shared context polls and flips this to authed. */}
+        {!available &&
+          (cliAction ? (
+            <div className="rounded-lg border border-border/50 bg-muted/20 p-3 space-y-2">
+              {cliAction.type === "device_flow" ? (
+                <>
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    {t.settings.github.ghCli.deviceHint}
+                  </p>
+                  <div className="flex items-center gap-3">
+                    <code className="rounded-md bg-muted px-3 py-1.5 font-mono text-base font-bold tracking-widest text-foreground">
+                      {cliAction.userCode}
+                    </code>
+                    <a
+                      href={cliAction.verificationUri}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-xs font-medium text-primary underline underline-offset-2"
+                    >
+                      {cliAction.verificationUri}
+                      <ExternalLink className="size-3" />
+                    </a>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="text-xs text-muted-foreground leading-relaxed">{cliAction.message}</p>
+                  <code className="block rounded-md bg-muted px-3 py-1.5 font-mono text-xs text-foreground">
+                    {cliAction.command}
+                  </code>
+                </>
+              )}
+              <p className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Loader2 className="size-3.5 animate-spin" />
+                {t.settings.github.ghCli.waiting}
+              </p>
+            </div>
           ) : (
             <button
               onClick={onConnect}
               disabled={connecting}
-              className="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium bg-muted/50 text-foreground hover:bg-muted/70 rounded-lg border border-border/50 transition-colors disabled:opacity-50"
+              className="inline-flex items-center gap-2 rounded-xl bg-foreground px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-50"
             >
               {connecting ? (
-                <RefreshCw className="size-3.5 animate-spin" />
+                <Loader2 className="size-4 animate-spin" />
               ) : (
-                <Terminal className="size-3.5" />
+                <Github className="size-4" />
               )}
-              {t.settings.github.ghCli.use}
+              {t.settings.github.ghCli.login}
             </button>
-          )}
-        </div>
+          ))}
+
+        {/* Disconnect hint when authed. */}
+        {available && (
+          <p className="text-xs text-muted-foreground/70 leading-relaxed">
+            {t.settings.github.ghCli.disconnectPrefix}{" "}
+            <code className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-[11px] text-foreground/80">
+              gh auth logout
+            </code>{" "}
+            {t.settings.github.ghCli.disconnectSuffix}
+          </p>
+        )}
+
+        {/* Clone-token shortcut — a personal access token is the other way to
+            authorize clones (no gh, no cloud). */}
+        <p className="text-xs text-muted-foreground/70 leading-relaxed">
+          {t.settings.github.ghCli.tokenAltPrefix}{" "}
+          <button
+            type="button"
+            onClick={onManageTokens}
+            className="font-medium text-foreground underline underline-offset-2 hover:text-primary"
+          >
+            {t.settings.github.ghCli.tokenAltLink}
+          </button>
+        </p>
       </div>
   );
 }
