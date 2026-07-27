@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import Link from "next/link";
 import { BlurIp } from "@/components/BlurIp";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import {
@@ -28,6 +27,7 @@ import { useToast } from "@/context/ToastContext";
 import { useModal } from "@/context/ModalContext";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import { PageContainer } from "@/components/ui/PageContainer";
+import { Tabs } from "@/components/ui/Tabs";
 import { ResourceNotFound } from "@/components/resource-not-found";
 import { useSetupStream } from "@/hooks/useSetupStream";
 import { useMonitorStream } from "@/hooks/useMonitorStream";
@@ -51,17 +51,15 @@ import { ServerGitHubConnect } from "@/components/github/ServerGitHubConnect";
 import { MigrationsTab } from "@/components/migration/MigrationsTab";
 import { ServerConnectionCard } from "./_components/connection-card";
 import { usePlatform } from "@/context/PlatformContext";
-import * as CountryFlags from "country-flag-icons/react/3x2";
 
-/** ISO-3166-1 alpha-2 → flag component (same source the servers list uses). */
-const FLAGS = CountryFlags as Record<string, React.ComponentType<{ title?: string; className?: string }>>;
 
 type Tab = "overview" | "migrations" | "components" | "github" | "security" | "ports" | "terminal";
 type ManualActionMode = "remove" | null;
 
 interface TabDef {
   key: Tab;
-  icon: React.ElementType;
+  /** Narrower than ElementType so these feed the shared <Tabs> directly. */
+  icon: React.ComponentType<{ className?: string }>;
   /** Desktop-only tabs are filtered out in non-desktop deployments. */
   desktopOnly?: boolean;
 }
@@ -587,9 +585,13 @@ export default function ServerDetailPage({
     <PageContainer>
         {/* Header */}
         <div className="flex items-center gap-3 mb-6">
+          {/* `app-nav-fallback` hides this in the desktop app, where the titlebar
+              already carries back/forward. It stays on web/SaaS, which has no
+              titlebar and would otherwise leave no way out of this page. */}
           <button
             onClick={() => router.push("/servers")}
-            className="w-8 h-8 rounded-lg hover:bg-muted flex items-center justify-center transition-colors"
+            className="app-nav-fallback w-8 h-8 rounded-lg hover:bg-muted flex items-center justify-center transition-colors"
+            aria-label={t.servers.setup.goToServers}
           >
             <ArrowLeft className="size-4 text-muted-foreground rtl:rotate-180" />
           </button>
@@ -600,25 +602,19 @@ export default function ServerDetailPage({
             >
               {server.name || <BlurIp>{server.sshHost}</BlurIp>}
             </h1>
-            {/* Connection line: user@host + country flag + a clean status pill
-                (moved off the title, no loud dot). The SSH port lives in the
-                right-hand connection card, not glued to the IP. */}
+            {/* Connection line: user@host + a clean status pill (no loud dot).
+                The country flag lives on the connection card's Host row — beside
+                the value it describes — and the SSH port lives there too. */}
             <div className="mt-1 flex items-center gap-2">
               <p className="text-sm text-muted-foreground/70 font-mono">
                 {server.sshUser ?? "root"}@<BlurIp>{server.sshHost}</BlurIp>
               </p>
-              {(() => {
-                const Flag = server.country ? FLAGS[server.country] : undefined;
-                return Flag ? (
-                  <Flag title={server.country ?? undefined} className="h-3.5 w-auto rounded-[2px] ring-1 ring-border/50" />
-                ) : null;
-              })()}
               {allHealthy ? (
-                <span className="shrink-0 inline-flex items-center rounded-full bg-success/10 px-2 py-0.5 text-[11px] font-medium text-success ring-1 ring-inset ring-success/20">
+                <span className="shrink-0 inline-flex items-center rounded-full bg-success/10 px-2 py-0.5 text-[11px] font-medium text-success">
                   {t.servers.detail.healthy}
                 </span>
               ) : components.length > 0 ? (
-                <span className="shrink-0 inline-flex items-center rounded-full bg-warning/10 px-2 py-0.5 text-[11px] font-medium text-warning ring-1 ring-inset ring-warning/20">
+                <span className="shrink-0 inline-flex items-center rounded-full bg-warning/10 px-2 py-0.5 text-[11px] font-medium text-warning">
                   {t.servers.detail.issues}
                 </span>
               ) : null}
@@ -678,32 +674,22 @@ export default function ServerDetailPage({
           />
         )}
 
-        {/* Tabs — full-width above the grid so the bar is identical on every tab. */}
-        <div className="flex items-center gap-1 mb-6 border-b border-border/50 overflow-x-auto">
-          {TABS.filter((tab) => !tab.desktopOnly || isDesktop).map(({ key, icon: Icon }) => (
-            <Link
-              key={key}
-              href={tabHref(key)}
-              scroll={false}
-              onClick={(e) => {
-                // Let the browser handle modified clicks (new tab / new window);
-                // intercept a plain click for an instant client-side switch.
-                if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-                e.preventDefault();
-                changeTab(key);
-              }}
-              className={`inline-flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors relative shrink-0 ${
-                activeTab === key ? "text-foreground" : "text-muted-foreground hover:text-foreground/70"
-              }`}
-            >
-              <Icon className="size-4" />
-              {t.servers.detail.tabs[key]}
-              {activeTab === key && (
-                <span className="absolute bottom-0 start-0 end-0 h-0.5 bg-primary rounded-full" />
-              )}
-            </Link>
-          ))}
-        </div>
+        {/* Tabs — the SHARED <Tabs> component, the same one the servers LIST uses,
+            so the two pages can't drift apart in size/spacing (this bar used to be
+            a hand-rolled copy of it). `href` keeps the tabs deep-linkable and
+            cmd-clickable; a plain click still switches client-side. */}
+        <Tabs
+          className="mb-6"
+          value={activeTab}
+          onChange={(key) => changeTab(key)}
+          tabs={TABS.map(({ key, icon, desktopOnly }) => ({
+            key,
+            label: t.servers.detail.tabs[key],
+            icon,
+            href: tabHref(key),
+            hidden: desktopOnly && !isDesktop,
+          }))}
+        />
 
         {/* Main Grid — the Migrations tab spans full width (its flow renders its
             own right column: connection card → migrate config / live progress). */}

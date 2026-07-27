@@ -615,6 +615,17 @@ export interface CommandExecutor {
   forwardUnixSocket?(socketPath: string): Promise<Duplex>;
 
   /**
+   * Open a `docker system dial-stdio` exec channel to the target's Docker
+   * daemon and return it as a duplex (writes → daemon socket, reads ← daemon
+   * socket). This carries the Docker Engine API over a plain SSH *exec*
+   * channel — no streamlocal forwarding — so it works on every sshd and under
+   * the Bun-compiled desktop runtime where streamlocal hangs. Runs with the
+   * same env/PATH as `streamExec`, so it matches the (working) remote build.
+   * Not available on LocalExecutor (local Docker uses socket transport).
+   */
+  openDockerDialStdio?(): Promise<Duplex>;
+
+  /**
    * Open a TCP tunnel to a port on the remote machine (SSH direct-tcpip).
    *
    * Returns a duplex stream - write requests, read responses.

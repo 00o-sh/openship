@@ -61,7 +61,9 @@
     "projects": "プロジェクト",
     "regions": "リージョン",
     "thisServer": "このサーバー",
-    "currentHost": "現在のホスト"
+    "currentHost": "現在のホスト",
+    "projectCountOne": "{n} 件のプロジェクト",
+    "projectCountMany": "{n} 件のプロジェクト"
   },
   "form": {
     "sshConnection": "SSH 接続",

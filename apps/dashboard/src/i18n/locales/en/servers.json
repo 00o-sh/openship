@@ -64,7 +64,9 @@
     "projects": "Projects",
     "regions": "Regions",
     "thisServer": "This Server",
-    "currentHost": "Current host"
+    "currentHost": "Current host",
+    "projectCountOne": "{n} project",
+    "projectCountMany": "{n} projects"
   },
   "tabsNav": {
     "servers": "Servers",

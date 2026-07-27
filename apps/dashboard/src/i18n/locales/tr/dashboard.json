@@ -48,7 +48,8 @@
       "hours": "{n}sa önce",
       "days": "{n}g önce",
       "months": "{n}ay önce"
-    }
+    },
+    "viewAllApps": "Tüm {count} uygulamayı gör →"
   },
   "nav": {
     "home": "Ana Sayfa",
@@ -145,6 +146,11 @@
         "rollbacks": "Geri almalar",
         "rollbacksDesc": "Tek tıkla geri alma",
         "commandPalette": "Veya komut paletini açmak için {key} tuşuna basın"
+      },
+      "view": {
+        "label": "Görünüm",
+        "list": "Liste",
+        "grid": "Izgara"
       }
     },
     "deployments": {

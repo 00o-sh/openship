@@ -3,7 +3,7 @@
  */
 
 import { normalizeRoutingFields, repos, composeSpecDiff, type Service, type ServicePublicEndpoint } from "@repo/db";
-import { isValidCustomHostname, ValidationError, withTimeout, type ServiceContainerState } from "@repo/core";
+import { ForbiddenError, isValidCustomHostname, ValidationError, withTimeout, type ServiceContainerState } from "@repo/core";
 import {
   BuildLogger,
   DockerRuntime,
@@ -509,12 +509,36 @@ export async function updateService(
  *  can't hang the delete request past the DB-row removal (the authoritative op). */
 const SERVICE_TEARDOWN_TIMEOUT_MS = 20_000;
 
+/**
+ * Refuse lifecycle/teardown actions on the CONTROL PLANE's own services.
+ *
+ * The self-app project's services are the Openship stack itself (api, dashboard,
+ * edge, postgres, redis), linked so the dashboard can SHOW their state, logs and
+ * shell. Acting on them from here is a foot-gun with no upside: stopping `api` is
+ * the request killing the process serving it, and deleting `postgres` would tear
+ * down the control plane's own database. Same policy — and same wording — as the
+ * existing deploy/redeploy/delete guards (build.service, deployment.service,
+ * project.controller): the CLI owns this runtime.
+ *
+ * Read paths (status/logs/terminal) are deliberately NOT gated — they're the
+ * reason the services are linked at all.
+ */
+function assertNotControlPlaneService(project: { appTemplateId?: string | null } | undefined): void {
+  if (project?.appTemplateId === "openship") {
+    throw new ForbiddenError(
+      "These are the Openship control plane's own services — manage them with the CLI " +
+        "(`openship restart`, `openship up`), not from the dashboard.",
+    );
+  }
+}
+
 export async function deleteService(
   ctx: RequestContext,
   projectId: string,
   serviceId: string,
 ) {
   const { project, svc } = await assertServiceAccess(ctx, projectId, serviceId);
+  assertNotControlPlaneService(project);
 
   if (project.activeDeploymentId) {
     const dep = await repos.deployment.findById(project.activeDeploymentId);
@@ -1212,6 +1236,7 @@ export async function startServiceContainer(
   projectId: string,
   serviceId: string,
 ) {
+  assertNotControlPlaneService(await repos.project.findById(projectId));
   // Existing container → just start it. No container yet → provision it on its
   // own (image → container/workspace), decoupled from the project deploy.
   const existing = await resolveServiceContainer(ctx, projectId, serviceId).catch(() => null);
@@ -1236,6 +1261,7 @@ export async function stopServiceContainer(
   projectId: string,
   serviceId: string,
 ) {
+  assertNotControlPlaneService(await repos.project.findById(projectId));
   const { runtime, containerId, row } = await resolveServiceContainer(
     ctx,
     projectId,
@@ -1258,6 +1284,7 @@ export async function restartServiceContainer(
   projectId: string,
   serviceId: string,
 ) {
+  assertNotControlPlaneService(await repos.project.findById(projectId));
   const { runtime, containerId, row } = await resolveServiceContainer(
     ctx,
     projectId,

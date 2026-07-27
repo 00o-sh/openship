@@ -331,7 +331,7 @@ export const DEFAULT_CONFIG: DeploymentConfig = {
   uploadSessionId: undefined,
   buildStrategy: "server",
   deployTarget: "cloud",
-  runtimeMode: "bare",
+  runtimeMode: "docker",
   projectType: "app",
   framework: "nextjs",
   detectedFramework: null,

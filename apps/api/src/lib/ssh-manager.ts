@@ -32,6 +32,7 @@ import { promisify } from "node:util";
 import { repos } from "@repo/db";
 import {
   createExecutor,
+  createHostExecutor,
   isRetryableRemoteConnectionError,
   probeTcp,
   runReliable,
@@ -41,6 +42,7 @@ import {
 import { formatDuration, systemDebug } from "@/lib/system-debug";
 import { decryptSecretField } from "@/lib/credential-encryption";
 import { resolveSafeSshKeyPath } from "@/lib/ssh-key-path";
+import { isLocalHostRow } from "@/lib/box-org";
 import { OPENSHIP_DIR } from "@/lib/openship-server-store";
 import { safeErrorMessage } from "@repo/core";
 
@@ -297,6 +299,19 @@ export class SshConnectionManager {
       return cached.executor;
     }
 
+    // Local host row → the host executor (LocalExecutor bare / SSH→host.docker.internal
+    // containerized), NEVER a dial to the row's sshHost — for a loopback/self row that
+    // is our OWN loopback (no sshd), which would hang the SSH connect timeout. Mirrors
+    // resolveServerExecutor so probe-gated flows (Test Connection, Scan Ports) that call
+    // acquire don't hang. Placed before the cooldown gate so a row that failed dialing
+    // 127.0.0.1 before this fix isn't stuck "cooling down". Org-gated via isLocalHostRow.
+    const row = await repos.server.get(serverId).catch(() => undefined);
+    if (row && (await isLocalHostRow(row))) {
+      this.recordSuccess(serverId);
+      debugSsh(`acquire:local-host server=${serverId} (${formatDuration(startedAt)})`);
+      return createHostExecutor();
+    }
+
     // Circuit-breaker: a server that just failed repeatedly is in cooldown —
     // fast-fail instead of attempting (and waiting out) another timeout.
     const cooldownLeft = this.cooldownRemaining(serverId);
@@ -488,9 +503,13 @@ export class SshConnectionManager {
     // control plane's own host as Offline: inside the api container `127.0.0.1:22`
     // is the CONTAINER's loopback, where there is no sshd.
     //
+    // Same for a plain SSH row an operator added for THIS host (loopback / the
+    // box's own address) — resolvesToLocalHost catches those too, so they don't
+    // render the "Can't reach 127.0.0.1" banner for a box that is actually up.
+    //
     // So answer with the channel ops actually use: the host SSH bridge when we're
     // containerized (host.docker.internal), else the same machine we're running on.
-    if (server.isLocal) {
+    if (await isLocalHostRow(server)) {
       const hostSsh = process.env.OPENSHIP_HOST_SSH_HOST?.trim();
       if (!hostSsh) {
         this.recordSuccess(serverId);

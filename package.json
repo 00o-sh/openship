@@ -11,6 +11,10 @@
     "apps/*",
     "packages/*"
   ],
+  "trustedDependencies": [
+    "electron",
+    "esbuild"
+  ],
   "scripts": {
     "build": "turbo run build --filter=@repo/api --filter=@repo/dashboard",
     "build:all": "turbo run build",

@@ -1,14 +1,20 @@
 "use client";
 
 import { Server, Globe, Network, User, KeyRound } from "lucide-react";
+import * as CountryFlags from "country-flag-icons/react/3x2";
 import { useI18n } from "@/components/i18n-provider";
 import { BlurIp } from "@/components/BlurIp";
+
+/** ISO-3166-1 alpha-2 → flag component (same source the servers list uses). */
+const FLAGS = CountryFlags as Record<string, React.ComponentType<{ title?: string; className?: string }>>;
 
 interface ConnectionServer {
   sshHost: string;
   sshPort?: number | null;
   sshUser?: string | null;
   sshAuthMethod?: string | null;
+  /** ISO country for the host IP; null for hostnames/private IPs. */
+  country?: string | null;
 }
 
 /** The server's SSH connection summary. Shared by the server-detail right sidebar
@@ -24,8 +30,21 @@ export function ServerConnectionCard({ server }: { server: ConnectionServer }) {
       </div>
       <div className="space-y-3">
         <Row icon={<Globe className="size-4 text-muted-foreground" />} label={d.host}>
-          <span className="text-sm font-medium text-foreground font-mono truncate ms-3 max-w-[140px]">
-            <BlurIp>{server.sshHost}</BlurIp>
+          {/* Flag sits WITH the host it describes, rather than in the page header
+              next to the title. */}
+          <span className="flex items-center gap-2 ms-3 min-w-0">
+            {(() => {
+              const Flag = server.country ? FLAGS[server.country] : undefined;
+              return Flag ? (
+                <Flag
+                  title={server.country ?? undefined}
+                  className="h-3 w-auto shrink-0 rounded-[2px] ring-1 ring-border/50"
+                />
+              ) : null;
+            })()}
+            <span className="text-sm font-medium text-foreground font-mono truncate max-w-[140px]">
+              <BlurIp>{server.sshHost}</BlurIp>
+            </span>
           </span>
         </Row>
         <Row icon={<Network className="size-4 text-muted-foreground" />} label={d.port}>

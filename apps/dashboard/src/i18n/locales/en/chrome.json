@@ -71,6 +71,11 @@
     "minimize": "Minimize",
     "maximize": "Maximize",
     "restore": "Restore",
-    "close": "Close"
+    "close": "Close",
+    "navigation": "Navigation",
+    "back": "Back",
+    "forward": "Forward",
+    "reload": "Reload",
+    "devTools": "Developer tools"
   }
 }

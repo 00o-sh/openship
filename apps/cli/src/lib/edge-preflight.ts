@@ -544,9 +544,14 @@ function defaultDeps(): EdgePreflightDeps {
           },
           { value: "cancel" as const, label: "Cancel — leave it running" },
         ],
-        // Unknown owner pre-selects takeover; a known proxy defaults to cancel so
-        // the operator chooses deliberately (mirrors the wizard / dashboard modal).
-        initialValue: known ? "cancel" : "takeover",
+        // Default to MIGRATE whenever there are sites we can import: it's the only
+        // option that both gets Openship onto 80/443 and keeps the operator's
+        // existing sites served, so it's the choice they almost always want and
+        // the one that loses nothing on a reflexive Enter.
+        // With nothing importable there's no safe default: a known proxy falls
+        // back to cancel (blind Enter would stop sites that are being served),
+        // and an unidentified port holder to takeover.
+        initialValue: importable > 0 ? "migrate" : known ? "cancel" : "takeover",
       });
       return isCancel(choice) ? "cancel" : (choice as EdgeAction);
     },

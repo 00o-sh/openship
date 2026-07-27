@@ -61,7 +61,9 @@
     "projects": "项目",
     "regions": "区域",
     "thisServer": "此服务器",
-    "currentHost": "当前主机"
+    "currentHost": "当前主机",
+    "projectCountOne": "{n} 个项目",
+    "projectCountMany": "{n} 个项目"
   },
   "form": {
     "sshConnection": "SSH 连接",

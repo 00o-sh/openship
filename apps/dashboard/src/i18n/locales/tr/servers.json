@@ -60,7 +60,9 @@
     "errors": "Hatalar",
     "seeDocs": "Dokümanlara bak",
     "projects": "Projeler",
-    "regions": "Bölgeler"
+    "regions": "Bölgeler",
+    "projectCountOne": "{n} proje",
+    "projectCountMany": "{n} proje"
   },
   "tabsNav": {
     "servers": "Sunucular",

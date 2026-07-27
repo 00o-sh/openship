@@ -544,6 +544,34 @@ export class SshExecutor implements CommandExecutor {
     return openSshUnixSocket(client as StreamLocalCapableClient, socketPath);
   }
 
+  /**
+   * Carry the Docker Engine API over a `docker system dial-stdio` exec channel
+   * on the pooled connection — the streamlocal-free transport used when the
+   * SSH server (or the Bun-compiled desktop runtime) can't do socket
+   * forwarding. Uses the SAME ENV_PREFIX as streamExec so `docker` resolves on
+   * PATH exactly as it does for the remote build (which is proven to work).
+   */
+  async openDockerDialStdio(): Promise<Duplex> {
+    const client = await this.connect();
+    return new Promise<Duplex>((resolve, reject) => {
+      client.exec(SshExecutor.ENV_PREFIX + "docker system dial-stdio", (err, stream) => {
+        if (err) return reject(err);
+        // Diagnostics: `docker system dial-stdio` writes any failure (daemon
+        // down, permission, "unknown command" on ancient docker) to stderr and
+        // exits non-zero. Surface it — otherwise dockerode just sees the stream
+        // close and reports an opaque timeout.
+        stream.stderr?.on("data", (d: Buffer) => {
+          const text = d.toString().trim();
+          if (text) console.warn(`[docker-ssh] dial-stdio stderr: ${text}`);
+        });
+        stream.on("exit", (code: number | null) => {
+          if (code) console.warn(`[docker-ssh] dial-stdio exited early (code=${code})`);
+        });
+        resolve(stream as unknown as Duplex);
+      });
+    });
+  }
+
   async forwardPort(remoteHost: string, remotePort: number): Promise<Duplex> {
     const client = await this.connect();
     return new Promise<Duplex>((resolve, reject) => {

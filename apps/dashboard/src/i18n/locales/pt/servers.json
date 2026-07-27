@@ -61,7 +61,9 @@
     "projects": "Projetos",
     "regions": "Regiões",
     "thisServer": "Este servidor",
-    "currentHost": "Host atual"
+    "currentHost": "Host atual",
+    "projectCountOne": "{n} projeto",
+    "projectCountMany": "{n} projetos"
   },
   "form": {
     "sshConnection": "Conexão SSH",

@@ -956,9 +956,11 @@ export async function runWizard(): Promise<void> {
             },
             { value: "cancel", label: "Cancel — leave it running" },
           ],
-          // Per product decision: unknown owner pre-selects takeover; a known
-          // proxy defaults to cancel so the user chooses deliberately.
-          initialValue: known ? "cancel" : "override",
+          // Same default as the `up` preflight (edge-preflight.ts): migrate when
+          // there are importable sites — it takes 80/443 without dropping any of
+          // them. Otherwise a known proxy defaults to cancel (Enter must not stop
+          // sites that are being served) and an unidentified holder to takeover.
+          initialValue: importable > 0 ? "migrate" : known ? "cancel" : "override",
         }),
       );
       if (choice === "cancel") proceedCustom = false;

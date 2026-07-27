@@ -141,20 +141,22 @@ export default function ProjectsPage() {
                 below, so the search + view toggle end at the left (list) column's
                 edge instead of spanning full-page over the right filter column. */}
             <div className="mb-4 grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-6">
+              {/* Search on the LEFT, view toggle on the right. Rendered at every
+                  project count: hiding it below a threshold left the toggle
+                  floating with nothing to anchor it, and the toolbar read as
+                  broken rather than intentionally empty. */}
               <div className="flex min-w-0 items-center gap-3">
-                {projects.length > 3 && (
-                  <div className="relative min-w-0 flex-1">
-                    <Search className="absolute start-3.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
-                    <input
-                      type="text"
-                      placeholder={t.dashboard.pages.projects.searchPlaceholder}
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      className="w-full ps-10 pe-4 py-2.5 bg-card border border-border/50 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/20 transition-all text-foreground placeholder:text-muted-foreground"
-                    />
-                  </div>
-                )}
-                <div className="ms-auto">
+                <div className="relative min-w-0 flex-1">
+                  <Search className="absolute start-3.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
+                  <input
+                    type="text"
+                    placeholder={t.dashboard.pages.projects.searchPlaceholder}
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full ps-10 pe-4 py-2.5 bg-card border border-border/50 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/20 transition-all text-foreground placeholder:text-muted-foreground"
+                  />
+                </div>
+                <div className="shrink-0">
                   <ViewToggle value={view} onChange={setView} />
                 </div>
               </div>

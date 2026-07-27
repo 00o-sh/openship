@@ -32,6 +32,7 @@ import { safeErrorMessage } from "@repo/core";
 import { env } from "../../config/env";
 import { registerStartupHook } from "./index";
 import { ensureSelfEdgeInfra, type SelfEdgeOptions } from "./self-edge";
+import { linkSelfAppServices } from "./self-services";
 import {
   createQueuedDeployment,
   type DeploymentConfigSnapshot,
@@ -157,6 +158,14 @@ export async function ensureAdoptDeployment(
   await onSuccess(
     { project, dep, buildSessionId, persistLogs: () => [], provisioned: {} },
     { containerId, durationMs: 0 },
+  );
+
+  // A containerized install (`openship up` on Linux) runs Openship as a compose
+  // stack; link those containers to this project so its Apps & Services tab shows
+  // the real thing instead of "No apps or services yet". Best-effort + idempotent
+  // — a bare install has nothing to link and this no-ops.
+  await linkSelfAppServices(projectId, dep.id).catch((err) =>
+    console.warn(`[self-deploy] service linking skipped: ${safeErrorMessage(err)}`),
   );
 
   return dep;
@@ -313,6 +322,37 @@ async function findSelfAppProject(): Promise<Project | null> {
  * Self-hosted only (register.ts modes). NOT gated on OPENSHIP_PUBLIC_URL so
  * free/byo boxes reconcile too. First boot (no self-app) is a clean no-op.
  */
+/**
+ * Point the self-app's PRIMARY domain at the hostname this box is actually
+ * reached on (`OPENSHIP_PUBLIC_URL`, set by the CLI at install time).
+ *
+ * Domain rows accumulate — a free `*.opsh.io` from one run, a custom domain from
+ * the next — and whichever was written last used to keep the primary flag, which
+ * is how a never-verified subdomain came to be displayed as the project's address.
+ * No-ops when the env URL is unset or doesn't match a row (nothing to reconcile:
+ * we never invent a preference the operator didn't express).
+ */
+async function reconcileSelfAppPrimaryDomain(projectId: string): Promise<void> {
+  const raw = env.OPENSHIP_PUBLIC_URL?.trim();
+  if (!raw) return;
+  let host: string;
+  try {
+    host = new URL(raw.includes("://") ? raw : `https://${raw}`).hostname.toLowerCase();
+  } catch {
+    return;
+  }
+  if (!host) return;
+
+  const rows = await repos.domain.listByProject(projectId);
+  const wanted = rows.find((d) => d.hostname.toLowerCase() === host);
+  if (!wanted || wanted.isPrimary) return;
+
+  // The repo owns the promote+demote pair (one primary per project) — don't
+  // re-implement the flag juggling here.
+  await repos.domain.setPrimary(projectId, wanted.id);
+  console.log(`[self-deploy] primary domain set to ${wanted.hostname} (from OPENSHIP_PUBLIC_URL)`);
+}
+
 export function registerSelfAdoptReconcile(): void {
   registerStartupHook({
     id: "self-app:reconcile",
@@ -336,6 +376,29 @@ export function registerSelfAdoptReconcile(): void {
       // (a) Backfill / ensure the adopt deployment (existing installs predate it).
       await ensureAdoptDeployment(project.id, dashPort).catch((err) =>
         console.warn(`[self-deploy] ensureAdoptDeployment failed: ${safeErrorMessage(err)}`),
+      );
+
+      // (a2) Link the stack's own containers as this project's services. Runs on
+      //      EVERY boot, not just when the adopt deployment is created:
+      //      ensureAdoptDeployment early-returns for an install that already has
+      //      one, so an existing install would otherwise never get its services —
+      //      which is exactly the "No apps or services yet" a CLI-installed box
+      //      showed while five Openship containers were running. Also keeps the
+      //      image tags current after an upgrade.
+      const activeDeploymentId = (await repos.project.findById(project.id))?.activeDeploymentId ?? null;
+      await linkSelfAppServices(project.id, activeDeploymentId).catch((err) =>
+        console.warn(`[self-deploy] service linking failed: ${safeErrorMessage(err)}`),
+      );
+
+      // (a3) Make the domain the operator actually reaches this box on the PRIMARY
+      //      one. An install that registered a free `*.opsh.io` and later attached
+      //      a real domain ended up with the stale free row still flagged primary,
+      //      so the Domains tab presented a "Pending" subdomain as the project's
+      //      address while the box was being served on the custom one. The env
+      //      public URL is the unambiguous signal (it's what the CLI configured
+      //      the box with), so trust it over insertion order.
+      await reconcileSelfAppPrimaryDomain(project.id).catch((err) =>
+        console.warn(`[self-deploy] primary-domain reconcile failed: ${safeErrorMessage(err)}`),
       );
 
       // (b) Sync project.port to the live dashboard port (it can change across

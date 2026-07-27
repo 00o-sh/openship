@@ -8,14 +8,18 @@
 @custom-variant dim (&:where([data-theme="dim"], [data-theme="dim"] *));
 
 /*
- * The desktop app's own header row (DesktopChrome). This is a REAL row, not an
- * overlay: it used to be an invisible fixed strip with no layout height, which
- * forced every surface near the top to be padded out of its way by hand (the
- * sidebar header and the auth shell each had their own dodge rule). The app read
- * as inflated at the top, and each new top-anchored surface needed another hack.
+ * The desktop app's own header row (DesktopChrome). A REAL row, not an overlay:
+ * it used to be an invisible fixed strip with no layout height, which forced every
+ * surface near the top to be padded out of its way by hand (the sidebar header and
+ * the auth shell each had their own dodge rule). The app read as inflated at the
+ * top, and each new top-anchored surface needed another hack.
  *
  * It stays `fixed` so it never scrolls away, and `body` carries a matching inset
  * so content genuinely starts below it instead of underneath it.
+ *
+ * NO bottom border by design. A hairline there cut the window in two; the bar and
+ * the page share one background and the sidebar/cards provide all the structure
+ * the eye needs — same reasoning as the borderless cards.
  */
 .is-desktop {
   --titlebar-h: 2.75rem;
@@ -23,6 +27,7 @@
 .is-desktop body {
   padding-top: var(--titlebar-h);
 }
+
 /* Inside the desktop app, "full height" means the viewport MINUS the header row.
  *
  * Anything sized to 100dvh/100vh sits below the body inset, so its last
@@ -47,6 +52,7 @@
 .is-desktop .h-screen {
   height: calc(100vh - var(--titlebar-h));
 }
+
 .is-desktop .app-titlebar {
   position: fixed;
   inset: 0 0 auto 0;
@@ -54,63 +60,105 @@
   z-index: 40;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding-inline: 0.75rem;
+  padding-inline: 0.5rem;
   background: var(--th-bg-page);
-  /* Hairline under the bar is the ONE border we keep in dark mode: it separates
-   * two same-coloured surfaces (bar and page), which is the job a border is
-   * actually for — see the card-surface note below. */
-  box-shadow: inset 0 -1px 0 var(--th-bd-subtle);
   -webkit-app-region: drag;
   user-select: none;
 }
 /* macOS draws its native traffic lights over the start of the bar
- * (trafficLightPosition x:18 y:16), so reserve room for them. Windows/Linux have
- * no inlaid controls, so the brand starts at the normal padding. */
+ * (trafficLightPosition x:18 y:16), so reserve room before the nav chevrons.
+ * Windows/Linux have no inlaid controls, so nav starts at the normal padding. */
 .is-desktop-mac .app-titlebar {
-  padding-inline-start: 5rem;
+  /* Clear the native traffic lights (they end around x:70) and leave a modest
+   * gap, so the chevrons read as ours rather than a fourth light crowded up
+   * against the green one. 6.75rem overshot and stranded them mid-bar. */
+  padding-inline-start: 5.75rem;
 }
-/* Holds the space `justify-content: space-between` needs so the controls stay
- * pinned to the end. The bar carries no brand — the sidebar header renders the
- * mark and name immediately below it, and having both read as a doubled logo. */
-.app-titlebar-spacer {
+
+/* Navigation — Spotify-style: chevrons at the start, quiet until hovered. Bigger
+ * than the trailing icons on purpose; these are the only controls in the bar
+ * anyone clicks repeatedly, and a chevron needs more room than a 15px logo to not
+ * look cramped. */
+.app-titlebar-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  -webkit-app-region: no-drag;
+}
+.app-titlebar-nav .app-titlebar-btn {
+  width: 2rem;
+  height: 2rem;
+}
+
+/* Everything between nav and the end zone is pure drag surface. */
+.app-titlebar-drag {
   flex: 1;
   min-width: 0;
+  align-self: stretch;
 }
-.app-titlebar-controls {
+
+.app-titlebar-end {
   display: flex;
   align-items: center;
   gap: 0.125rem;
-  /* Buttons must opt OUT of the drag region or they can't be clicked. */
   -webkit-app-region: no-drag;
 }
-.app-titlebar-btn {
+
+/* One button style for nav, socials, the ⋯ menu and the window controls.
+ * Deliberately quiet at rest — this is chrome, and at full strength it competed
+ * with the page's own controls. Opacity carries the state so the icon colour stays
+ * a single token. */
+.app-titlebar-btn,
+.app-titlebar-menu > button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 2.25rem;
+  width: 1.75rem;
   height: 1.75rem;
-  border-radius: 0.5rem;
-  color: var(--th-text-muted);
-  transition: background-color 0.15s, color 0.15s;
+  flex-shrink: 0;
+  border-radius: 999px;
+  color: var(--th-text-title);
+  opacity: 0.45;
+  transition: background-color 0.15s, opacity 0.15s;
 }
-.app-titlebar-btn svg {
+.app-titlebar-btn:hover,
+.app-titlebar-menu > button:hover {
+  background: var(--th-sf-06);
+  opacity: 1;
+}
+/* Nothing to go back/forward to — visibly inert and not hoverable, so the bar
+ * never offers a control that would do nothing. */
+.app-titlebar-btn:disabled {
+  opacity: 0.15;
+  pointer-events: none;
+}
+/* Window-control glyphs are hand-drawn 12x12 strokes, unlike the lucide icons. */
+.app-titlebar-wc {
   width: 12px;
   height: 12px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.2;
   stroke-linecap: round;
+  stroke-linejoin: round;
 }
-.app-titlebar-btn:hover {
-  background: var(--th-sf-06);
-  color: var(--th-text-title);
+/* The ⋯ dropdown lives in a 44px bar, so its popup has to escape downward. */
+.app-titlebar-menu {
+  position: relative;
+  -webkit-app-region: no-drag;
 }
 /* Close goes red on hover, like every other desktop app. */
 .app-titlebar-btn--close:hover {
   background: var(--st-danger-solid);
   color: #fff;
+  opacity: 1;
+}
+
+/* An in-page navigation control the desktop titlebar supersedes. Hidden only in
+ * the app — the web/SaaS build has no titlebar, so it is the ONLY way back there
+ * and must keep rendering. */
+.is-desktop .app-nav-fallback {
+  display: none;
 }
 
 /*

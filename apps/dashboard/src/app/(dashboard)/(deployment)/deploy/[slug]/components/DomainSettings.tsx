@@ -6,6 +6,7 @@ import { useToast } from "@/context/ToastContext";
 import { useI18n } from "@/components/i18n-provider";
 import { RoutingModePicker, type RoutingMode } from "@/components/routing/RoutingModePicker";
 import { createPublicEndpoint, type PublicEndpoint } from "@/context/deployment/types";
+import { normalizeSubdomain } from "@/utils/subdomain";
 
 interface DomainSettingsProps {
   projectId?: string;
@@ -115,16 +116,47 @@ const DomainSettings: React.FC<DomainSettingsProps> = ({
     (next: RoutingMode) => {
       if (next === "none") {
         setNoPublicRoute(true);
+        // Picking None is a REMOVAL, not just a flag. Clear the endpoint set and
+        // persist `publicEndpoints: []` right away:
+        //   - the wizard has ONE source of truth again, so nothing downstream
+        //     (deploy summary, cloud gate) can keep reading a domain the user
+        //     just turned off — the summary went on showing `<slug>.opsh.io`
+        //     because it read the endpoints and never checked this flag;
+        //   - the project record stops carrying a domain the user didn't ask
+        //     for, even if they abandon the wizard here. An explicit [] makes
+        //     the API drop the domain rows and deregister the live route
+        //     (undefined would make it auto-derive the free subdomain again).
+        setEndpoints([]);
+        if (projectId) {
+          void projectsApi
+            .update(projectId, { publicEndpoints: [] })
+            .catch((error) => {
+              showToast(
+                getApiErrorMessage(error, t.deploy.domainSettings.saveFailed),
+                "error",
+                t.deploy.domainSettings.toastTitle,
+              );
+            });
+        }
         return;
       }
       setNoPublicRoute(false);
       // Free/Custom set the (first) endpoint's domainType — seed one if the set
-      // was emptied. The inner card's own type toggle is hidden, so this is the
-      // single source of the free-vs-custom choice.
-      const base = endpoints[0] ?? createPublicEndpoint({ domainType: next });
+      // was emptied (by None, above). The inner card's own type toggle is hidden,
+      // so this is the single source of the free-vs-custom choice. A fresh free
+      // endpoint takes the project's own subdomain label, so coming back from
+      // None lands on the same URL it would have had, not a blank field (the
+      // card only shows the project name as a PLACEHOLDER, which persists as an
+      // empty domain and silently saves nothing).
+      const base =
+        endpoints[0] ??
+        createPublicEndpoint({
+          domainType: next,
+          domain: next === "free" ? normalizeSubdomain(projectName) : "",
+        });
       void handleChange([{ ...base, domainType: next }, ...endpoints.slice(1)]);
     },
-    [endpoints, handleChange, setNoPublicRoute],
+    [endpoints, handleChange, projectId, projectName, setEndpoints, setNoPublicRoute, showToast, t],
   );
 
   return (

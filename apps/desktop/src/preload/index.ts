@@ -140,6 +140,22 @@ contextBridge.exposeInMainWorld("desktop", {
     toggleMaximize: () => ipcRenderer.invoke("window:toggle-maximize"),
     close: () => ipcRenderer.invoke("window:close"),
     isMaximized: (): Promise<boolean> => ipcRenderer.invoke("window:is-maximized"),
+
+    /** Titlebar navigation. canGoBack/canGoForward can only be answered by the
+     *  main process — see the note on the IPC handlers. */
+    back: () => ipcRenderer.invoke("window:nav-back"),
+    forward: () => ipcRenderer.invoke("window:nav-forward"),
+    reload: () => ipcRenderer.invoke("window:reload"),
+    navState: (): Promise<{ canGoBack: boolean; canGoForward: boolean }> =>
+      ipcRenderer.invoke("window:nav-state"),
+    /** Only route to DevTools on Windows/Linux — those are frameless and have no
+     *  menu bar. macOS also has Electron's default View menu. */
+    toggleDevTools: () => ipcRenderer.invoke("window:toggle-devtools"),
+    onNavStateChange: (cb: (s: { canGoBack: boolean; canGoForward: boolean }) => void) => {
+      const h = (_e: unknown, s: { canGoBack: boolean; canGoForward: boolean }) => cb(s);
+      ipcRenderer.on("window:nav-state-change", h);
+      return () => ipcRenderer.removeListener("window:nav-state-change", h);
+    },
     /** Track real maximize state so the restore icon can't drift out of sync
      *  (the window can also be maximized by the OS, a double-click, or a
      *  keyboard shortcut — none of which go through toggleMaximize). */

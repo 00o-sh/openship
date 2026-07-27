@@ -17,6 +17,7 @@ import { resolveOrgCloudUserId } from "./cloud/transport";
 import { platform } from "./controller-helpers";
 import { buildSshConfig, sshManager } from "./ssh-manager";
 import { createProvisionLock } from "./provision-lock";
+import { isLocalHostRow } from "./box-org";
 
 /**
  * The shape of `deployment.meta` JSONB. Snapshotted per-deploy —
@@ -403,7 +404,19 @@ export async function resolveServerExecutor(
     port: server.sshPort ?? 22,
     user: server.sshUser || "root",
   };
-  if (server.isLocal) {
+  // isLocal "This Server" OR a row that actually points at THIS host (a plain SSH
+  // row for the local box — loopback / SERVER_IP — in the box-owning org). Both
+  // resolve to the local host executor + mounted docker socket (DooD); dialing SSH
+  // to them hits the API's own loopback (no sshd) — the "Can't reach 127.0.0.1"
+  // failure. Org-gated (isLocalHostRow) so a teammate's org can't mint a host-root
+  // target from a loopback row.
+  if (await isLocalHostRow(server)) {
+    // Self-heal the persisted flag so EVERY `server.isLocal` consumer (edge,
+    // domains, tunnels, the servers list) agrees — not just this resolver.
+    // One-time, idempotent, best-effort; never blocks or fails the deploy.
+    if (!server.isLocal) {
+      repos.server.update(server.id, { isLocal: true }).catch(() => {});
+    }
     return { id: server.id, executor: createHostExecutor(), conn, isLocal: true, ssh: null };
   }
   const executor = await sshManager.acquire(server.id);

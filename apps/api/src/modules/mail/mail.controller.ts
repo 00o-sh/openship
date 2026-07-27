@@ -30,6 +30,7 @@ import crypto from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { buildMailBackupPayload } from "./admin/backup-plan";
 import { streamSSE } from "../../lib/sse";
+import { invalidatePlatformTransport } from "../../lib/mail";
 import { env } from "../../config";
 import { safeErrorMessage } from "@repo/core";
 import { sshManager } from "../../lib/ssh-manager";
@@ -953,6 +954,10 @@ export async function startSetup(c: Context) {
         const { ensureOpenshipPlatformMailbox } = await import(
           "./admin/platform-mailbox.service"
         );
+        // Clear any cached "platform mailbox unavailable" marker from BEFORE the
+        // install finished — otherwise the send path keeps skipping this server
+        // for the rest of the failure window right after a successful install.
+        invalidatePlatformTransport(serverId);
         const creds = await ensureOpenshipPlatformMailbox(serverId);
         await stream.writeSSE({
           event: "log",

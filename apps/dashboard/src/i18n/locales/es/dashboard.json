@@ -47,7 +47,9 @@
       "hours": "hace {n} h",
       "days": "hace {n} d",
       "months": "hace {n} meses"
-    }
+    },
+    "appsEmptyTitle": "Aún no hay apps",
+    "appsEmptyDesc": "Un clic, totalmente autoalojado: bases de datos, automatización, analítica, gestores de contraseñas y más, en tus propios servidores."
   },
   "nav": {
     "home": "Inicio",
@@ -66,7 +68,9 @@
       "settings": "Configuración",
       "infrastructure": "Infraestructura",
       "account": "Cuenta"
-    }
+    },
+    "apps": "Apps",
+    "jobs": "Trabajos"
   },
   "sidebar": {
     "expand": "Expandir barra lateral",
@@ -80,7 +84,38 @@
   },
   "pages": {
     "apps": {
-      "moreApps": "+{count} más"
+      "moreApps": "+{count} más",
+      "title": "Apps",
+      "description": "Servicios gestionados con un clic: instala y ejecuta Convex, WordPress, correo y más.",
+      "createButton": "Instalar app",
+      "loading": "Cargando apps…",
+      "countOne": "{count} app instalada",
+      "countOther": "{count} apps instaladas",
+      "emptyTitle": "Instala tu primera app",
+      "emptyDescription": "Levanta Convex, n8n, Ghost y más: un clic, totalmente autoalojado. Elige uno para empezar.",
+      "popular": "Apps populares",
+      "alsoDeploy": "También puedes desplegar",
+      "browseAll": "Ver todas las apps",
+      "catalogTitle": "Instalar una app",
+      "catalogDescription": "Servicios gestionados con un clic. Elige uno para instalarlo como app.",
+      "catalogSearchPlaceholder": "Buscar apps…",
+      "catalogNoResults": "Ninguna app coincide con tu búsqueda.",
+      "cancel": "Cancelar",
+      "install": "Instalar",
+      "installing": "Instalando…",
+      "comingSoon": "Próximamente",
+      "configTitle": "Configurar {app}",
+      "nameLabel": "Nombre",
+      "categories": {
+        "all": "Todas",
+        "backend": "Backend",
+        "database": "Base de datos",
+        "cms": "CMS",
+        "analytics": "Analítica",
+        "automation": "Automatización",
+        "mail": "Correo",
+        "other": "Herramientas"
+      }
     },
     "projects": {
       "title": "Proyectos",
@@ -111,6 +146,11 @@
         "rollbacks": "Reversiones",
         "rollbacksDesc": "Revierte con un clic",
         "commandPalette": "O pulsa {key} para abrir la paleta de comandos"
+      },
+      "view": {
+        "label": "Vista",
+        "list": "Lista",
+        "grid": "Cuadrícula"
       }
     },
     "deployments": {

@@ -11,12 +11,16 @@
 import { Bug, BookOpen, ExternalLink, HelpCircle, MessageSquare, MoreVertical } from "lucide-react";
 import DropdownMenu, { type MenuAction } from "@/components/ui/DropdownMenu";
 import { useI18n } from "@/components/i18n-provider";
+import { BRAND_LINKS } from "@repo/core";
 
-const SUPPORT_URL = "https://openship.io/support";
-const ISSUE_URL = "https://github.com/oblien/openship/issues/new";
-const FEEDBACK_URL = "https://openship.io/contact";
-const DOCS_URL = "https://openship.io/docs";
-const COMMUNITY_URL = "https://discord.gg/Q9eWNCeXjg";
+/* Shared with the desktop app's NATIVE Help menu (apps/desktop/src/main/menu.ts),
+   which cannot import from here. They were the same five URLs typed twice — which
+   is how a docs link goes dead in one menu and stays fine in the other. */
+const SUPPORT_URL = BRAND_LINKS.support;
+const ISSUE_URL = BRAND_LINKS.issues;
+const FEEDBACK_URL = BRAND_LINKS.contact;
+const DOCS_URL = BRAND_LINKS.docs;
+const COMMUNITY_URL = BRAND_LINKS.community;
 
 const open = (url: string) => window.open(url, "_blank", "noopener,noreferrer");
 

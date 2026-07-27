@@ -10,6 +10,8 @@ import { hostControlDisabled } from "@repo/adapters";
 import { invalidateOpenRestyPaths } from "@/lib/openresty-paths";
 import { env } from "../../config";
 import { sshManager } from "../../lib/ssh-manager";
+import { resolvesToLocalHost } from "@/lib/self-host";
+import { boxOwningOrgId } from "@/lib/box-org";
 import { encryptSecretField } from "@/lib/credential-encryption";
 import { getRequestContext } from "../../lib/request-context";
 import { permission } from "../../lib/permission";
@@ -105,6 +107,36 @@ export async function createServer(c: Context) {
   if (!host) return c.json({ error: "SSH host is required" }, 400);
 
   const ctx = getRequestContext(c);
+
+  // Adding THIS host as a server (loopback / the box's own SERVER_IP on a
+  // server-host) must NOT create a plain SSH row — deploys/probes would dial the
+  // API's own loopback (the container's, when compose-deployed) where there is no
+  // sshd → the "Can't reach 127.0.0.1" failure.
+  if (resolvesToLocalHost({ sshHost: host, sshPort: body.sshPort, sshJumpHost: body.sshJumpHost })) {
+    // Only the box-owning org may register the local host — running on it is
+    // code execution on the control plane (host executor + mounted docker socket,
+    // DooD ≈ root). A teammate's org (any member can POST /servers) is refused so
+    // it can't mint itself a host-root deploy target.
+    if (ctx.organizationId !== (await boxOwningOrgId())) {
+      return c.json(
+        { error: "The local host can't be added as a server in this workspace." },
+        400,
+      );
+    }
+    // Adopt the canonical isLocal "This Server" row (create it if the boot
+    // reconcile hasn't run yet) so the box is a first-class, working deploy
+    // target with the right transport — never a duplicate loopback SSH row.
+    const local =
+      (await repos.server.findLocal(ctx.organizationId)) ??
+      (await repos.server.create({
+        organizationId: ctx.organizationId,
+        name: body.name?.trim() || "This Server",
+        sshHost: host,
+        isLocal: true,
+      }));
+    return c.json(serializeServer(local), 201);
+  }
+
   const server = await repos.server.create({
     organizationId: ctx.organizationId,
     name: body.name?.trim() || null,

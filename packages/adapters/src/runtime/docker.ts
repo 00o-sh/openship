@@ -496,11 +496,12 @@ export class DockerRuntime implements RuntimeAdapter {
   }
 
   /**
-   * Assert the Docker daemon is reachable, RETHROWING the transport's detailed
-   * diagnostic instead of collapsing it to false. For the SSH transport,
-   * `preflight()` (verifyDockerSshBridge) builds a rich message — socket path,
-   * streamlocal/permission hints, and remote diagnostics — which `ping()`
-   * otherwise swallows. Use on user-facing paths (e.g. the migration scan) so
+   * Assert the Docker daemon is reachable, RETHROWING the underlying error
+   * instead of collapsing it to false. For the SSH transport, `preflight()`
+   * decides the upstream transport (SSH socket forwarding where it works, else
+   * `docker system dial-stdio` over an exec channel — the streamlocal-free path
+   * the Bun-compiled desktop needs), then `ping()` is the real end-to-end check
+   * over that transport. Use on user-facing paths (e.g. the migration scan) so
    * the real cause reaches the user instead of a generic "not reachable".
    */
   async assertReachable(): Promise<void> {

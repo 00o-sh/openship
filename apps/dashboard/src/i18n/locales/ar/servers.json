@@ -61,7 +61,9 @@
     "projects": "المشاريع",
     "regions": "المناطق",
     "thisServer": "هذا الخادم",
-    "currentHost": "المضيف الحالي"
+    "currentHost": "المضيف الحالي",
+    "projectCountOne": "مشروع {n}",
+    "projectCountMany": "{n} مشاريع"
   },
   "form": {
     "sshConnection": "اتصال SSH",

@@ -4,22 +4,25 @@ import React from "react";
 import Link from "next/link";
 import { Plus, Github } from "lucide-react";
 import { useI18n } from "@/components/i18n-provider";
+import { OPENSHIP_LOGO_PATH, logoHeight, logoTransform } from "@/components/ui/logo-path";
 
 /**
  * First-run welcome shown on the home page when the user has no projects.
  *
- * The motif is what Openship actually IS: a hub wired to the things it runs —
- * repo, services, database, public domain — rather than a generic empty card.
- * Neutral --th-* vars only (works in light/dark/dim); the primary accent stays on
- * the CTA, and the one green dot marks the live edge, matching the traffic-light
- * precedent elsewhere in the illustration family.
+ * The motif is what Openship IS: the brand mark at the centre, wired to the four
+ * things it handles — repo in, build/deploy, data, public domain.
  *
- * Kept deliberately compact: this renders INSIDE the home page's Projects card,
- * directly above the 4 shortcut cards — every extra 40px here pushes those below
- * the fold on a laptop.
+ * TOKENS: only steps that EXIST in styles/theme.css. The --th-on-* scale is
+ * 05/08/10/12/16/20/30/40/50+ — an in-between step like --th-on-35 resolves to
+ * nothing, the stroke never paints, and the tile renders EMPTY. That is exactly
+ * what happened to the first version of this illustration.
+ *
+ * Kept compact: this renders INSIDE the home page's Projects card, directly above
+ * the 4 shortcut cards — every extra 40px pushes those below the fold.
  */
 
-/** One satellite node: rounded tile + hand-drawn glyph (no icon fonts in SVG). */
+/** Rounded tile + its glyph, centred on (x, y). Glyphs are hand-drawn: an icon
+ *  font/component can't be embedded in the same SVG coordinate space. */
 function Node({
   x,
   y,
@@ -32,102 +35,110 @@ function Node({
   return (
     <g transform={`translate(${x} ${y})`}>
       <rect
-        x="-17"
-        y="-15"
-        width="34"
-        height="30"
-        rx="9"
+        x="-19"
+        y="-17"
+        width="38"
+        height="34"
+        rx="10"
         fill="var(--th-card-bg)"
         stroke="var(--th-bd-default)"
         strokeWidth="1.5"
       />
-      {children}
+      <g
+        fill="none"
+        stroke="var(--th-on-40)"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        {children}
+      </g>
     </g>
   );
 }
 
+/** Width the brand mark is drawn at, in the illustration's user units. */
+const LOGO_W = 44;
+
+/** Label under each tile — names what the node is, so the graph reads without a key. */
+function NodeLabel({ x, y, children }: { x: number; y: number; children: string }) {
+  return (
+    <text
+      x={x}
+      y={y}
+      textAnchor="middle"
+      fill="var(--th-on-30)"
+      fontSize="7"
+      fontWeight="500"
+      style={{ fontFamily: "inherit", letterSpacing: "0.02em" }}
+    >
+      {children}
+    </text>
+  );
+}
 const HomeWelcome: React.FC = () => {
   const { t } = useI18n();
   return (
     <div className="px-6 pt-5 pb-7 sm:pt-7 sm:pb-8">
       {/* Illustration — the graph: hub ↔ repo / services / data / domain */}
-      <div className="relative mx-auto mb-3 h-32 w-72">
-        <svg className="absolute inset-0 h-full w-full" viewBox="0 0 288 128" fill="none">
-          {/* Orbit the whole graph sits in. Kept inside the node tiles' bounds so
-              it never clips at the canvas edge. */}
-          <ellipse
-            cx="144"
-            cy="64"
-            rx="118"
-            ry="49"
-            stroke="var(--th-bd-subtle)"
-            strokeWidth="1.5"
-            strokeDasharray="4 8"
-          />
-
-          {/* Links, drawn first so the nodes sit on top. Dashed = wiring. */}
-          <g stroke="var(--th-on-15)" strokeWidth="1.5" strokeDasharray="4 4" fill="none">
-            <path d="M76 34 Q 104 44 124 56" />
-            <path d="M76 94 Q 104 84 124 72" />
-            <path d="M164 56 Q 184 44 212 34" />
-            <path d="M164 72 Q 184 84 212 94" />
+      <div className="relative mx-auto mb-3 h-36 w-72">
+        <svg className="absolute inset-0 h-full w-full" viewBox="0 0 288 132" fill="none" aria-hidden="true">
+          {/* Links, behind everything. Dashed = wiring; --th-on-20 is a real step. */}
+          <g stroke="var(--th-on-20)" strokeWidth="1.5" strokeDasharray="4 4" fill="none">
+            <path d="M77 36 Q 104 44 118 55" />
+            <path d="M77 96 Q 104 88 118 77" />
+            <path d="M170 55 Q 184 44 211 36" />
+            <path d="M170 77 Q 184 88 211 96" />
           </g>
+          {/* Packets at each curve's midpoint (quadratic t=0.5). */}
+          <circle cx="101" cy="47.8" r="2.4" fill="var(--th-on-30)" />
+          <circle cx="101" cy="84.2" r="2" fill="var(--th-on-20)" />
+          <circle cx="187" cy="47.8" r="2.4" fill="var(--th-on-30)" />
+          <circle cx="187" cy="84.2" r="2" fill="var(--th-on-20)" />
 
-          {/* Packets in flight — one per link, at each curve's midpoint, with
-              stepped opacity so the graph reads as active rather than static. */}
-          <circle cx="101" cy="45" r="2.5" fill="var(--th-on-30)" />
-          <circle cx="101" cy="83" r="2" fill="var(--th-on-20)" />
-          <circle cx="187" cy="45" r="2.5" fill="var(--th-on-25)" />
-          <circle cx="187" cy="83" r="2" fill="var(--th-on-20)" />
-
-          {/* ── Hub: Openship. The ring is the brand mark. ── */}
-          <rect x="120" y="42" width="48" height="44" rx="14" fill="var(--th-sf-05)" />
-          <rect
-            x="118"
-            y="40"
-            width="48"
-            height="44"
-            rx="14"
-            fill="var(--th-card-bg)"
-            stroke="var(--th-bd-strong)"
-            strokeWidth="2"
-          />
-          <circle cx="142" cy="62" r="10" stroke="var(--th-on-40)" strokeWidth="3" fill="none" />
-          {/* live indicator */}
-          <circle cx="160" cy="48" r="3.5" fill="#22c55e" fillOpacity="0.75" />
-
-          {/* ── Repo (top-left) — two commits on a branch ── */}
-          <Node x={52} y={30}>
-            <circle cx="-6" cy="4" r="3.5" stroke="var(--th-on-35)" strokeWidth="1.8" fill="none" />
-            <circle cx="7" cy="-5" r="3.5" stroke="var(--th-on-35)" strokeWidth="1.8" fill="none" />
-            <path d="M-6 0v-4a4 4 0 0 1 4-4h5" stroke="var(--th-on-25)" strokeWidth="1.6" fill="none" />
+          {/* Repo */}
+          <Node x={52} y={32}>
+            <circle cx="-6" cy="5" r="3.2" />
+            <circle cx="6" cy="-6" r="3.2" />
+            <path d="M-6 1.8v-3.8a4 4 0 0 1 4-4h4.8" />
           </Node>
+          <NodeLabel x={52} y={60}>Repo</NodeLabel>
 
-          {/* ── Data (bottom-left) — stacked disks ── */}
-          <Node x={52} y={98}>
-            <ellipse cx="0" cy="-6" rx="9" ry="3.4" stroke="var(--th-on-35)" strokeWidth="1.6" fill="none" />
-            <path d="M-9-6v8c0 1.9 4 3.4 9 3.4s9-1.5 9-3.4v-8" stroke="var(--th-on-35)" strokeWidth="1.6" fill="none" />
-            <path d="M-9-1c0 1.9 4 3.4 9 3.4s9-1.5 9-3.4" stroke="var(--th-on-20)" strokeWidth="1.4" fill="none" />
+          {/* Deploy — the build shipping upward. */}
+          <Node x={52} y={96}>
+            <path d="M0 7V-6" />
+            <path d="M-5 -1l5 -5.5 5 5.5" />
+            <path d="M-7 9.5h14" />
           </Node>
+          <NodeLabel x={52} y={124}>Deploy</NodeLabel>
 
-          {/* ── Domain (top-right) — globe ── */}
-          <Node x={236} y={30}>
-            <circle cx="0" cy="0" r="9" stroke="var(--th-on-35)" strokeWidth="1.6" fill="none" />
-            <path d="M-9 0h18M0-9c4.5 4 4.5 14 0 18M0-9c-4.5 4-4.5 14 0 18" stroke="var(--th-on-22)" strokeWidth="1.4" fill="none" />
+          {/* Domain */}
+          <Node x={236} y={32}>
+            <circle cx="0" cy="0" r="8" />
+            <path d="M-8 0h16" />
+            <path d="M0 -8c4 3.6 4 12.4 0 16" />
+            <path d="M0 -8c-4 3.6-4 12.4 0 16" />
           </Node>
+          <NodeLabel x={236} y={60}>Domain</NodeLabel>
 
-          {/* ── Services (bottom-right) — container ── */}
-          <Node x={236} y={98}>
-            <rect x="-9" y="-6" width="18" height="13" rx="2.5" stroke="var(--th-on-35)" strokeWidth="1.6" fill="none" />
-            <path d="M-3-6v13M3-6v13" stroke="var(--th-on-20)" strokeWidth="1.4" />
+          {/* Data */}
+          <Node x={236} y={96}>
+            <ellipse cx="0" cy="-5" rx="8" ry="3" />
+            <path d="M-8 -5v9.5c0 1.7 3.6 3 8 3s8-1.3 8-3V-5" />
+            <path d="M-8 -0.5c0 1.7 3.6 3 8 3s8-1.3 8-3" />
           </Node>
+          <NodeLabel x={236} y={124}>Data</NodeLabel>
 
-          {/* Decorative accents — same vocabulary as the other illustrations.
-              Kept clear of the orbit path so nothing reads as a stray dash. */}
-          <path d="M12 40l2-4 2 4-4-2 4 0-4 2z" fill="var(--th-on-16)" />
-          <path d="M272 90l1.6-3.2 1.6 3.2-3.2-1.6 3.2 0-3.2 1.6z" fill="var(--th-on-12)" />
-          <circle cx="20" cy="86" r="4" fill="var(--th-on-08)" />
-          <circle cx="266" cy="42" r="3" fill="var(--th-on-10)" />
+          {/* Hub: the REAL brand mark on a soft round plate. (A rounded square
+              with a ring inside read as the Instagram glyph.) */}
+          <circle cx="144" cy="66" r="30" fill="var(--th-sf-05)" />
+          <circle cx="144" cy="66" r="30" fill="none" stroke="var(--th-bd-default)" strokeWidth="1.5" />
+          <g fill="var(--th-on-80)" transform={logoTransform(144 - LOGO_W / 2, 66 - logoHeight(LOGO_W) / 2, LOGO_W)}>
+            <path d={OPENSHIP_LOGO_PATH} />
+          </g>
+          {/* Live dot on the plate's edge — the one spot of colour. */}
+          <circle cx="165" cy="45" r="4" fill="var(--th-card-bg)" />
+          <circle cx="165" cy="45" r="2.8" fill="#22c55e" fillOpacity="0.85" />
         </svg>
       </div>
 

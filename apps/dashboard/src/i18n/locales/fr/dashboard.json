@@ -112,6 +112,11 @@
         "rollbacks": "Restaurations",
         "rollbacksDesc": "Rétablissement en un clic",
         "commandPalette": "Ou appuyez sur {key} pour ouvrir la palette de commandes"
+      },
+      "view": {
+        "label": "Affichage",
+        "list": "Liste",
+        "grid": "Grille"
       }
     },
     "deployments": {
@@ -169,7 +174,8 @@
       "install": "Installer",
       "cancel": "Annuler",
       "nameLabel": "Nom",
-      "configTitle": "Configurer {app}"
+      "configTitle": "Configurer {app}",
+      "comingSoon": "Bientôt disponible"
     }
   },
   "quickLinks": {

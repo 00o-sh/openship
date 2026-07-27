@@ -60,7 +60,6 @@ export function DraftProjectView({ onDeleteProject }: DraftProjectViewProps) {
   const router = useRouter();
 
   const [attemptCount, setAttemptCount] = useState(0);
-  const [confirmOpen, setConfirmOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
   const status = getProjectStatus(projectData);
@@ -152,7 +151,6 @@ export function DraftProjectView({ onDeleteProject }: DraftProjectViewProps) {
       await onDeleteProject();
     } finally {
       setDeleting(false);
-      setConfirmOpen(false);
     }
   };
 
@@ -304,55 +302,48 @@ export function DraftProjectView({ onDeleteProject }: DraftProjectViewProps) {
           )}
         </SectionCard>
 
-        {/* Delete — de-emphasized. The section header owns the icon/title/
-            "can't be undone" copy; a single quiet trigger lives in the header's
-            action slot (right), escalating to a red confirm in the body only
-            when the user opts in — no duplicated "Delete project" row. */}
+        {/* Delete — always in its final state, no reveal step. A draft has no
+            workload to lose, and hiding Delete behind a quiet trigger only made
+            it take two clicks to bin an abandoned draft (which is most of what
+            this view is for).
+            Its counterpart is the constructive half of the same decision —
+            finish this draft, or drop it — so the pair reads as one fork rather
+            than a lone red button. That slot used to hold "Cancel", which had
+            nothing left to cancel once the confirm is permanent. */}
         <SectionCard
           icon={Trash2}
           title={t.projects.draft.deleteTitle}
           description={t.projects.draft.deleteDescription}
-          action={
-            confirmOpen ? undefined : (
+        >
+          <div className="space-y-3">
+            <p className="text-sm text-foreground">
+              {t.projects.draft.deleteConfirmPrefix}{" "}
+              <span className="font-medium">{projectData?.name}</span>
+              {t.projects.draft.deleteConfirmSuffix}
+            </p>
+            <div className="flex items-center gap-2">
               <button
-                onClick={() => setConfirmOpen(true)}
-                className="inline-flex shrink-0 items-center rounded-xl border border-border/60 px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:border-danger/40 hover:text-danger"
+                onClick={handleDeploy}
+                disabled={deleting}
+                className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl border border-border px-3 py-2 text-sm font-medium text-foreground transition-colors hover:bg-muted disabled:opacity-50"
               >
+                <Rocket className="size-4" />
+                {hasSource ? t.projects.draft.deployNow : t.projects.draft.connectSource}
+              </button>
+              <button
+                onClick={confirmDelete}
+                disabled={deleting}
+                className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-danger-solid px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-danger-solid/90 disabled:opacity-50"
+              >
+                {deleting ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <Trash2 className="size-4" />
+                )}
                 {t.projects.draft.delete}
               </button>
-            )
-          }
-        >
-          {confirmOpen && (
-            <div className="space-y-3">
-              <p className="text-sm text-foreground">
-                {t.projects.draft.deleteConfirmPrefix}{" "}
-                <span className="font-medium">{projectData?.name}</span>
-                {t.projects.draft.deleteConfirmSuffix}
-              </p>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setConfirmOpen(false)}
-                  disabled={deleting}
-                  className="flex-1 rounded-xl border border-border px-3 py-2 text-sm font-medium text-foreground transition-colors hover:bg-muted disabled:opacity-50"
-                >
-                  {t.projects.draft.cancel}
-                </button>
-                <button
-                  onClick={confirmDelete}
-                  disabled={deleting}
-                  className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-danger-solid px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-danger-solid/90 disabled:opacity-50"
-                >
-                  {deleting ? (
-                    <Loader2 className="size-4 animate-spin" />
-                  ) : (
-                    <Trash2 className="size-4" />
-                  )}
-                  {t.projects.draft.delete}
-                </button>
-              </div>
             </div>
-          )}
+          </div>
         </SectionCard>
       </div>
     </div>

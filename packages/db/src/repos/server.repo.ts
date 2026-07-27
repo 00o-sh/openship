@@ -52,6 +52,10 @@ export function createServerRepo(db: Database) {
     async findLocal(organizationId: string): Promise<Server | undefined> {
       return db.query.servers.findFirst({
         where: and(eq(servers.organizationId, organizationId), eq(servers.isLocal, true)),
+        // Deterministic: if more than one row was ever flagged local (a boot
+        // reconcile row + an adopted/self-healed one), always return the oldest —
+        // the canonical "This Server" — never an arbitrary pick.
+        orderBy: (s, { asc }) => asc(s.createdAt),
       });
     },
 
