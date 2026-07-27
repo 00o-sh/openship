@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Logo } from "@/components/logo";
 import { useI18n } from "@/components/i18n-provider";
 
 type DesktopBridge = {
@@ -80,10 +79,11 @@ export function DesktopChrome() {
 
   return (
     <header className="app-titlebar" onDoubleClick={onDoubleClick}>
-      <div className="app-titlebar-brand">
-        <Logo size={16} />
-        <span className="app-titlebar-name">{t.brand}</span>
-      </div>
+      {/* No brand here on purpose. The sidebar header already renders the mark +
+          "Openship" directly below this row, so repeating it put the same logo
+          twice within ~40px. The bar's job is the drag region and the window
+          controls; the app identifies itself once, in the sidebar. */}
+      <div className="app-titlebar-spacer" />
 
       {/* Windows/Linux only — macOS draws the real traffic lights over the
           reserved inset at the start of the bar. */}

@@ -280,6 +280,13 @@ export async function startLocalServices(internalToken: string): Promise<void> {
     }
     Object.assign(apiEnv, {
       DEPLOY_MODE: "desktop",
+      // DECLARE the auth mode. The API no longer infers zero-auth from
+      // DEPLOY_MODE, and it no longer lets a persisted instance_settings row
+      // override this — a stale "cloud" row used to send this loopback-only app to
+      // a remote sign-in screen with no way back. The API refuses to boot in
+      // desktop mode without this, so it can never silently become a lockout.
+      // Not a bypass: zeroAuthAllowed() still requires a loopback peer.
+      OPENSHIP_AUTH_MODE: "none",
       OPENSHIP_TARGET: "local",
       OPENSHIP_JOB_RUNNER: "in-process", // no Redis in desktop; skip the probe
       NODE_ENV: "production",

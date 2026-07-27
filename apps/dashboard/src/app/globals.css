@@ -23,10 +23,29 @@
 .is-desktop body {
   padding-top: var(--titlebar-h);
 }
-/* Full-height shells measure against the viewport, so they have to lose the row's
- * height or the page overflows by exactly that much and grows a scrollbar. */
-.is-desktop .th-page {
+/* Inside the desktop app, "full height" means the viewport MINUS the header row.
+ *
+ * Anything sized to 100dvh/100vh sits below the body inset, so its last
+ * --titlebar-h pixels fall off the bottom of the window. That is not cosmetic:
+ * the dashboard shell is `h-dvh` (app/(dashboard)/layout.tsx) and the sidebar is
+ * its child, so the account switcher at the sidebar's foot was clipped out of
+ * reach. Redefining the full-height utilities in one place beats hunting every
+ * shell — and beats a per-surface padding hack, which is what the old overlay
+ * titlebar forced and what this whole change removed.
+ *
+ * Unlayered on purpose: these must outrank Tailwind's `utilities` layer. */
+.is-desktop .th-page,
+.is-desktop .min-h-dvh {
   min-height: calc(100dvh - var(--titlebar-h));
+}
+.is-desktop .h-dvh {
+  height: calc(100dvh - var(--titlebar-h));
+}
+.is-desktop .min-h-screen {
+  min-height: calc(100vh - var(--titlebar-h));
+}
+.is-desktop .h-screen {
+  height: calc(100vh - var(--titlebar-h));
 }
 .is-desktop .app-titlebar {
   position: fixed;
@@ -52,18 +71,12 @@
 .is-desktop-mac .app-titlebar {
   padding-inline-start: 5rem;
 }
-.app-titlebar-brand {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
+/* Holds the space `justify-content: space-between` needs so the controls stay
+ * pinned to the end. The bar carries no brand — the sidebar header renders the
+ * mark and name immediately below it, and having both read as a doubled logo. */
+.app-titlebar-spacer {
+  flex: 1;
   min-width: 0;
-}
-.app-titlebar-name {
-  font-size: 0.8125rem;
-  font-weight: 500;
-  letter-spacing: -0.01em;
-  color: var(--th-text-secondary);
-  white-space: nowrap;
 }
 .app-titlebar-controls {
   display: flex;

@@ -48,6 +48,14 @@ export async function syncCloudEdgeProxy(
 
   if (!existing) {
     await client.edgeProxy.create({ name: hostname, slug, domain: baseDomain, target, namespace });
+    // A freshly created proxy is NOT assumed active. The update path below
+    // explicitly enables a `disabled` proxy, which means Oblien can hold one in
+    // that state — and a created-but-disabled proxy is indistinguishable from
+    // success here: we return ok, the slug reads as taken on the next attempt, and
+    // `<slug>.opsh.io` resolves to the zone wildcard with no origin (Cloudflare
+    // error 1000). Re-read and enable so "synced" means "serving".
+    const created = (await client.edgeProxy.list()).proxies.find((p) => p.slug === slug);
+    if (created?.status === "disabled") await client.edgeProxy.enable(created.id);
   } else {
     if (
       existing.name !== hostname ||

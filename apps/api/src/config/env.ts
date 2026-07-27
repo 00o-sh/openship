@@ -92,6 +92,29 @@ const envSchema = z.object({
   OPENSHIP_REQUIRE_AUTH: envBool("false"),
 
   /**
+   * The instance's auth mode, DECLARED by whoever launches the API. When set it is
+   * the ONLY source — `getAuthMode()` returns it without reading the DB, without a
+   * fallback, and without inferring anything from DEPLOY_MODE.
+   *
+   * This exists because authMode decides whether a request needs a login at all,
+   * and it used to be *inferred*: a mutable `instanceSettings.authMode` row on top
+   * of a `DEPLOY_MODE === "desktop" ? "none" : "local"` guess on top of a catch-all
+   * default. A single stale row was enough to send the loopback-only desktop app to
+   * a remote sign-in screen with no way back.
+   *
+   * `.optional()` with NO default is deliberate: unset means "not declared", which
+   * keeps the DB-backed path for self-hosted instances that legitimately change
+   * mode at runtime (bootstrap-admin, upgrade-to-auth). An invalid value fails the
+   * boot rather than quietly degrading — see the DEPLOY_MODE=desktop assertion
+   * further down.
+   *
+   * NOT a bypass: `zeroAuthAllowed()` still independently requires desktop (or an
+   * explicit OPENSHIP_ALLOW_ZERO_AUTH) AND a kernel-reported loopback peer, so
+   * declaring "none" on a network-reachable box grants nothing on its own.
+   */
+  OPENSHIP_AUTH_MODE: z.enum(["none", "local", "cloud"]).optional(),
+
+  /**
    * Managed edge: at boot, install OpenResty + certbot on THIS machine and
    * route OPENSHIP_PUBLIC_URL's host → the local dashboard with a free Let's
    * Encrypt cert (reusing the app-deploy route/SSL pipes). Set by the CLI
@@ -411,6 +434,23 @@ if (env.DEPLOY_MODE !== "desktop" && !env.INTERNAL_TOKEN) {
   throw new Error(
     `INTERNAL_TOKEN is required when DEPLOY_MODE="${env.DEPLOY_MODE}". ` +
       `Set a 32+ byte random secret in the environment, or run the API in desktop mode.`,
+  );
+}
+
+// ─── desktop must DECLARE its auth mode ───────────────────────────────────
+//
+// getAuthMode() no longer infers "none" from DEPLOY_MODE — the launcher says so.
+// If the desktop app ever spawned the API without declaring it, the unpinned path
+// would resolve "local" and present a login screen on a box that has no admin
+// account: an unrecoverable lockout. Fail at boot with something actionable
+// instead. Electron sets this in apps/desktop/src/main/services.ts, and the two
+// are built + packaged in one stage.ts run so they cannot drift apart in a real
+// install. NODE_ENV=test is exempt so unit tests can exercise the unpinned path.
+if (env.DEPLOY_MODE === "desktop" && !env.OPENSHIP_AUTH_MODE && env.NODE_ENV !== "test") {
+  throw new Error(
+    `OPENSHIP_AUTH_MODE is required when DEPLOY_MODE="desktop". ` +
+      `The launcher must declare the auth mode (the desktop app sets "none"); ` +
+      `it is no longer inferred from the deploy mode.`,
   );
 }
 

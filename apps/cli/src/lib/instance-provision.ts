@@ -209,6 +209,13 @@ async function drainProvisionStream(
   return { completed: false, detail };
 }
 
+/** The SaaS reports a shared-zone slug conflict as 409 + code `slug_taken`. */
+function isSlugTaken(data: unknown): boolean {
+  const body = data as { code?: string; error?: string } | undefined;
+  if (body?.code === "slug_taken") return true;
+  return /already taken|slug_taken/i.test(body?.error ?? "");
+}
+
 export interface ProvisionResult {
   adminReady: boolean;
   domainRegistered: boolean;
@@ -234,6 +241,9 @@ export async function headlessProvision(opts: {
    *  OPENSHIP_EDGE_MODE, so the CLI doesn't branch on it. */
   method?: "bare" | "compose";
   onLog?: (msg: string) => void;
+  /** Interactive recovery for a taken free subdomain: return a new slug, or null
+   *  to give up. Omitted on headless runs, which just report the conflict. */
+  onSlugTaken?: (taken: string) => Promise<string | null>;
 }): Promise<ProvisionResult> {
   const { port, inputs, token } = opts;
   const log = opts.onLog ?? (() => {});
@@ -311,20 +321,42 @@ export async function headlessProvision(opts: {
       warnings.push(`Custom domain provisioning returned: ${res.data?.error || "failed"}`);
     }
   } else {
-    // free — requires the box to be Cloud-connected already; the server rejects
-    // otherwise (we surface that as a warning rather than inventing a token flow).
-    const res = await internalPost(
+    // free — needs the box Cloud-connected (done just before this on the wizard
+    // path). The slug lives in a SHARED zone, so it can be taken by someone else;
+    // availability can't be checked at prompt time because Cloud isn't connected
+    // yet then. So we check HERE, where a retry is still possible: `onSlugTaken`
+    // lets an interactive caller pick another name instead of the run ending with
+    // a domain that was never created.
+    let slug = d.slug;
+    let res = await internalPost(
       port,
       "/api/system/self-register",
-      { domainType: "free", slug: d.slug, publicHost: d.publicHost, dashPort },
+      { domainType: "free", slug, publicHost: d.publicHost, dashPort },
       token,
     );
+    for (let attempt = 0; !res.ok && isSlugTaken(res.data) && opts.onSlugTaken && attempt < 5; attempt++) {
+      const next = await opts.onSlugTaken(slug);
+      if (!next) break; // caller declined to choose another
+      slug = next;
+      res = await internalPost(
+        port,
+        "/api/system/self-register",
+        { domainType: "free", slug, publicHost: d.publicHost, dashPort },
+        token,
+      );
+    }
     domainRegistered = res.ok;
     liveUrl = res.data?.url;
     if (!res.ok) {
+      // Say what actually went wrong. This used to append "needs the box connected
+      // to Openship Cloud first" to EVERY failure, which flatly contradicts the
+      // "Connected to Openship Cloud as …" line printed seconds earlier when the
+      // real cause was a taken slug.
       warnings.push(
-        `Free .opsh.io domain not registered: ${res.data?.error || "failed"}. ` +
-          `A free domain needs the box connected to Openship Cloud first — connect it, or use --domain-kind byo/custom.`,
+        isSlugTaken(res.data)
+          ? `Free domain not created: "${slug}.opsh.io" is already taken. Re-run and choose a different subdomain, or add one later in Settings → Domains.`
+          : `Free .opsh.io domain not registered: ${res.data?.error || "failed"}. ` +
+              `A free domain needs the box connected to Openship Cloud — connect it in Settings → Cloud, or use --domain-kind byo/custom.`,
       );
     }
   }

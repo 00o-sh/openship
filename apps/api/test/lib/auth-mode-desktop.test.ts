@@ -1,28 +1,40 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * getAuthMode() on the desktop app.
+ * getAuthMode() — one direct source, no inference.
  *
- * The bug: a persisted `instanceSettings.authMode = "cloud"` won outright, so a
- * desktop launch rendered the Openship Cloud sign-in screen — delegating login to
- * a remote IdP for an app that only ever serves 127.0.0.1 — and the only way out
- * was wiping the local DB. A stale row from a cloud connect or an old onboarding
- * run was enough to trigger it.
+ * authMode decides whether a request needs a login at all, and it used to be
+ * *inferred*: a mutable `instanceSettings.authMode` row on top of a
+ * `DEPLOY_MODE === "desktop" ? "none" : "local"` guess on top of a catch-all
+ * default that failed OPEN (a DB error handed out zero-auth on desktop). A single
+ * stale "cloud" row — written by self-app.controller when a box with no local admin
+ * connects Openship Cloud — was enough to send the loopback-only desktop app to a
+ * remote sign-in screen with no way back.
  *
- * The fix is deliberately narrow, and these tests pin that narrowness:
- *   - desktop + stored "cloud"  → downgraded to "none"
- *   - desktop + stored "local"  → HONOURED (someone put a password on a shared
- *                                 machine; silently ignoring it is a downgrade)
- *   - OPENSHIP_REQUIRE_AUTH / OPENSHIP_PUBLIC_URL → the stored value stands, so
- *                                 the CLI-managed and publicly-served escape
- *                                 hatches keep working
- *   - non-desktop (docker/bare/SaaS) → untouched
+ * The contract these tests pin:
+ *   - OPENSHIP_AUTH_MODE, when set, is the ONLY source. It outranks any stored row,
+ *     and the DB is not read at all.
+ *   - Undeclared, the stored value is the source — so self-hosted keeps its runtime
+ *     upgrades (bootstrap-admin, upgrade-to-auth) with no restart.
+ *   - Undeclared and unreadable → "local". FAIL CLOSED. "none" must never be the
+ *     consequence of a failed query.
+ *   - Nothing is inferred from DEPLOY_MODE.
  */
 
 const settings: { authMode?: string | null } = {};
+let getCalls = 0;
+let getThrows = false;
 
 vi.mock("@repo/db", () => ({
-  repos: { instanceSettings: { get: async () => settings } },
+  repos: {
+    instanceSettings: {
+      get: async () => {
+        getCalls++;
+        if (getThrows) throw new Error("settings table unavailable");
+        return settings;
+      },
+    },
+  },
 }));
 
 const envMock: Record<string, unknown> = {};
@@ -37,6 +49,8 @@ async function resolve(): Promise<string> {
 beforeEach(() => {
   for (const k of Object.keys(envMock)) delete envMock[k];
   delete settings.authMode;
+  getCalls = 0;
+  getThrows = false;
 });
 
 afterEach(async () => {
@@ -44,48 +58,89 @@ afterEach(async () => {
   clearAuthModeCache();
 });
 
-describe("getAuthMode() — desktop", () => {
-  it("downgrades a stale persisted 'cloud' to zero-auth", async () => {
-    envMock.DEPLOY_MODE = "desktop";
+describe("getAuthMode() — declared (OPENSHIP_AUTH_MODE)", () => {
+  it.each(["none", "local", "cloud"])("returns the declared mode (%s)", async (mode) => {
+    envMock.OPENSHIP_AUTH_MODE = mode;
+    expect(await resolve()).toBe(mode);
+  });
+
+  it("outranks a contradicting stored row", async () => {
+    // The exact desktop bug: a stale "cloud" row must not win.
+    envMock.OPENSHIP_AUTH_MODE = "none";
     settings.authMode = "cloud";
     expect(await resolve()).toBe("none");
   });
 
-  it("honours a deliberate persisted 'local' (never a silent downgrade)", async () => {
+  it("never reads the DB when declared", async () => {
+    envMock.OPENSHIP_AUTH_MODE = "none";
+    settings.authMode = "cloud";
+    await resolve();
+    expect(getCalls).toBe(0);
+  });
+
+  it("is unaffected by an unreadable settings table", async () => {
+    envMock.OPENSHIP_AUTH_MODE = "none";
+    getThrows = true;
+    expect(await resolve()).toBe("none");
+  });
+
+  it("ignores DEPLOY_MODE entirely", async () => {
+    // A declared "local" on desktop stands: someone putting a password on a shared
+    // machine must not be silently downgraded to zero-auth.
     envMock.DEPLOY_MODE = "desktop";
-    settings.authMode = "local";
+    envMock.OPENSHIP_AUTH_MODE = "local";
     expect(await resolve()).toBe("local");
-  });
-
-  it("defaults to zero-auth when nothing is persisted", async () => {
-    envMock.DEPLOY_MODE = "desktop";
-    expect(await resolve()).toBe("none");
-  });
-
-  it("keeps 'cloud' when OPENSHIP_REQUIRE_AUTH is set", async () => {
-    envMock.DEPLOY_MODE = "desktop";
-    envMock.OPENSHIP_REQUIRE_AUTH = true;
-    settings.authMode = "cloud";
-    expect(await resolve()).toBe("cloud");
-  });
-
-  it("keeps 'cloud' when the box is publicly served", async () => {
-    envMock.DEPLOY_MODE = "desktop";
-    envMock.OPENSHIP_PUBLIC_URL = "https://openship.example.com";
-    settings.authMode = "cloud";
-    expect(await resolve()).toBe("cloud");
   });
 });
 
-describe("getAuthMode() — not desktop", () => {
-  it.each(["docker", "bare", "cloud"])("leaves a stored 'cloud' alone (%s)", async (mode) => {
-    envMock.DEPLOY_MODE = mode;
-    settings.authMode = "cloud";
-    expect(await resolve()).toBe("cloud");
+describe("getAuthMode() — undeclared (DB-backed)", () => {
+  it.each(["none", "local", "cloud"])("uses the stored mode (%s)", async (mode) => {
+    settings.authMode = mode;
+    expect(await resolve()).toBe(mode);
   });
 
-  it("defaults a fresh self-hosted install to 'local'", async () => {
-    envMock.DEPLOY_MODE = "docker";
+  it("fails CLOSED to local when the settings lookup throws", async () => {
+    getThrows = true;
     expect(await resolve()).toBe("local");
+  });
+
+  it("fails CLOSED to local on desktop too — nothing is inferred from DEPLOY_MODE", async () => {
+    // The old code returned "none" here: a DB error granted zero-auth.
+    envMock.DEPLOY_MODE = "desktop";
+    getThrows = true;
+    expect(await resolve()).toBe("local");
+  });
+
+  it("defaults to local when no mode has been written", async () => {
+    expect(await resolve()).toBe("local");
+  });
+
+  it("rejects a garbage stored value rather than trusting it", async () => {
+    settings.authMode = "definitely-not-a-mode";
+    expect(await resolve()).toBe("local");
+  });
+
+  it("caches so authMiddleware doesn't query per request", async () => {
+    settings.authMode = "local";
+    const { clearAuthModeCache, getAuthMode } = await import("../../src/lib/auth-mode");
+    clearAuthModeCache();
+    await getAuthMode();
+    await getAuthMode();
+    expect(getCalls).toBe(1);
+  });
+});
+
+describe("pin helpers", () => {
+  it("reports the declared mode", async () => {
+    envMock.OPENSHIP_AUTH_MODE = "none";
+    const { isAuthModePinned, pinnedAuthMode } = await import("../../src/lib/auth-mode");
+    expect(isAuthModePinned()).toBe(true);
+    expect(pinnedAuthMode()).toBe("none");
+  });
+
+  it("reports unpinned when nothing was declared", async () => {
+    const { isAuthModePinned, pinnedAuthMode } = await import("../../src/lib/auth-mode");
+    expect(isAuthModePinned()).toBe(false);
+    expect(pinnedAuthMode()).toBeNull();
   });
 });

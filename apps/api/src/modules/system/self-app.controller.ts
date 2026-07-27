@@ -129,7 +129,7 @@ export async function cloudConnect(c: Context) {
     const { exchangeCodeWithCloud, mirrorCloudUser, storeCloudSession } = await import(
       "../../lib/cloud-auth-proxy"
     );
-    const { clearAuthModeCache } = await import("../../lib/auth-mode");
+    const { clearAuthModeCache, isAuthModePinned } = await import("../../lib/auth-mode");
     const data = await exchangeCodeWithCloud(body.code, body.codeVerifier);
     if (!data) return c.json({ error: "Could not verify with Openship Cloud" }, 401);
     const email = (data.user as { email?: string | null }).email ?? null;
@@ -160,8 +160,18 @@ export async function cloudConnect(c: Context) {
     await storeCloudSession(userId, data.sessionToken);
     // Fresh box → local login becomes cloud-backed (passwordless). Reuse the
     // singleton upsert; clear the cached mode so the change takes effect now.
-    await repos.instanceSettings.upsert({ authMode: "cloud" });
-    clearAuthModeCache();
+    //
+    // Skipped when the launcher DECLARED the mode (OPENSHIP_AUTH_MODE). This line
+    // is where the desktop bug came from: desktop has no local admin by design
+    // (zero-auth auto-provisions), so foundingAdminId() returns null and every
+    // "connect Openship Cloud" from Settings fell through to here and converted a
+    // loopback-only app to remote login — with no way back short of wiping the
+    // local DB. Linking a cloud account must not change how you log in to a box
+    // whose login method was declared at launch.
+    if (!isAuthModePinned()) {
+      await repos.instanceSettings.upsert({ authMode: "cloud" });
+      clearAuthModeCache();
+    }
     return c.json({ ok: true, userId, organizationId: `org_${userId}`, email });
   } catch (err) {
     return c.json({ error: safeErrorMessage(err) }, 500);

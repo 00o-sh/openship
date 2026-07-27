@@ -764,8 +764,33 @@ export async function runWizard(): Promise<void> {
       token: provisionToken,
       method: "compose",
       onLog: (msg) => log.message(chalk.dim(msg)),
+      // .opsh.io is a SHARED zone, and Cloud only connects after the stack is up —
+      // so a taken subdomain can't be detected at prompt time. Recover here, where
+      // we still have a TTY, instead of ending the run with no domain.
+      onSlugTaken: async (taken) => {
+        log.warn(`"${taken}.opsh.io" is already taken.`);
+        const next = await text({
+          message: "Choose a different subdomain (or leave empty to skip the free domain)",
+          placeholder: "my-openship",
+          validate: (v) => {
+            const value = (v ?? "").trim().toLowerCase();
+            if (!value) return undefined; // empty = skip
+            return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(value)
+              ? undefined
+              : "Lowercase letters, digits and hyphens only";
+          },
+        });
+        if (isCancel(next)) return null;
+        const value = String(next ?? "").trim().toLowerCase();
+        return value || null;
+      },
     });
     if (result.liveUrl) liveUrl = result.liveUrl;
+    // The domain FAILED: don't present the planned hostname as the live URL. The
+    // summary used to print `https://<slug>.opsh.io` for a domain that was never
+    // created, because liveUrl was seeded from the plan and only overwritten on
+    // success — so a hard failure read as a success.
+    else if (!result.domainRegistered) liveUrl = `http://localhost:${started.dashPort}`;
     for (const w of result.warnings) log.warn(w);
     finishSetup({
       liveUrl,
