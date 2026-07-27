@@ -509,6 +509,17 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
+          NAME="$(npm pkg get name | tr -d '"')"
+          VERSION="$(npm pkg get version | tr -d '"')"
+          # Idempotent re-release. npm versions are IMMUTABLE, so a re-run of a
+          # release whose CLI version is already published must SKIP npm rather
+          # than hard-fail — that's what lets a partial failure (a desktop
+          # installer, a Docker image, a GitHub release asset) be re-published
+          # for the SAME tag without the already-done npm step aborting the run.
+          if [ -n "$(npm view "${NAME}@${VERSION}" version 2>/dev/null || true)" ]; then
+            echo "::notice::${NAME}@${VERSION} already on npm — skipping publish (re-run of an existing release)."
+            exit 0
+          fi
           # tsup bundles the @repo/* deps into dist/, so strip them from the
           # published manifest — otherwise npm emits uninstallable workspace:*
           # specifiers for packages that aren't on the registry.
@@ -566,16 +577,28 @@ jobs:
           if [[ "${TAG}" == *-* ]]; then
             PRERELEASE_FLAG="--prerelease"
           fi
-          gh release create "${TAG}" \
-            --title "Openship ${TAG}" \
-            --notes-from-tag \
-            ${PRERELEASE_FLAG} \
-            dist/openship-${TAG}-linux-amd64.tar.gz \
-            dist/openship-${TAG}-linux-amd64.tar.gz.sha256 \
-            dist/openship-email-${TAG}-linux-amd64.tar.gz \
-            dist/openship-email-${TAG}-linux-amd64.tar.gz.sha256 \
-            dist/openship-dashboard-${TAG}.tar.gz \
-            dist/openship-dashboard-${TAG}.tar.gz.sha256
+          CORE_ASSETS=(
+            "dist/openship-${TAG}-linux-amd64.tar.gz"
+            "dist/openship-${TAG}-linux-amd64.tar.gz.sha256"
+            "dist/openship-email-${TAG}-linux-amd64.tar.gz"
+            "dist/openship-email-${TAG}-linux-amd64.tar.gz.sha256"
+            "dist/openship-dashboard-${TAG}.tar.gz"
+            "dist/openship-dashboard-${TAG}.tar.gz.sha256"
+          )
+          # Idempotent: on a re-run the release already exists and `gh release
+          # create` would fail — re-upload the core assets with --clobber instead
+          # (matches the desktop-installer upload below), so a partial failure can
+          # be re-published for the SAME tag. Fresh tag → create it.
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "::notice::Release ${TAG} exists — re-uploading core assets (--clobber)."
+            gh release upload "${TAG}" "${CORE_ASSETS[@]}" --clobber
+          else
+            gh release create "${TAG}" \
+              --title "Openship ${TAG}" \
+              --notes-from-tag \
+              ${PRERELEASE_FLAG} \
+              "${CORE_ASSETS[@]}"
+          fi
 
       - name: Attach desktop installers
         env:
