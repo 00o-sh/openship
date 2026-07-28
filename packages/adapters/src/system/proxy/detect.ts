@@ -16,6 +16,7 @@ import {
 } from "../../runtime/port-conflict";
 import { OPENRESTY_LUA_DIR } from "../../infra/openresty-lua";
 import type {
+  SystemLog,
   EdgeOccupant,
   EdgePolicy,
   EdgeStatus,
@@ -95,40 +96,84 @@ export function isOurEdgeContainer(name?: string, image?: string): boolean {
 }
 
 /**
- * Is OUR edge actually SERVING on `port` (default 80), on the box `executor` reaches?
+ * Make carried vhosts safe to `include` inside the edge image.
  *
- * Running is not serving: `docker compose up -d` returns as soon as the container
- * is CREATED, and a crash-looping edge reads as "up" while every hostname on the
- * box is dark. So this asks two questions — is the container running, and does it
- * answer — and only both count.
+ * The image's own nginx.conf includes `sites-enabled/*.conf` and THEN declares the
+ * catch-all (`listen 80 default_server; server_name _;`) that proxies ACME
+ * http-01 to certbot and 404s unmanaged hosts. A bare host edge has its own
+ * equivalent, so a blind `cp -a` hands the container two default servers for
+ * 0.0.0.0:80 — `[emerg] a duplicate default server`, which crash-loops the
+ * container. The operator then sees only Docker's "container is restarting"
+ * message, and the box gets rolled back to the bare edge it was trying to leave.
  *
- * Executor-based on purpose: the same check has to work from the CLI on its own box
- * and from the API over SSH. It used to be a `spawnSync` in the CLI, which meant a
- * second way of running a command on a machine the codebase already has an executor
- * for, and a helper that couldn't be reused for a remote server.
+ * Two rules, both because the IMAGE owns the catch-all role:
+ *   - a conf with no real `server_name` (catch-all only) is dropped — keeping it
+ *     would also shadow the image's ACME location, breaking issuance;
+ *   - `default_server` is stripped from every remaining `listen`, so a real vhost
+ *     that happened to carry the flag stops claiming a role it doesn't need.
+ *
+ * Runs before EVERY edge start, not only after a carry. A conf left by an older or
+ * failed attempt lives in the HOST bind mount, so it poisons every later start —
+ * including compose, which never carried anything. That is how one bad conversion
+ * became `[emerg] duplicate default server` on every subsequent `openship up`.
+ *
+ * Best-effort: a box where this can't run is no worse off than before, and
+ * `openresty -t` is still the gate that catches a bad tree.
  */
-export async function edgeIsServing(
-  executor: CommandExecutor,
-  port = 80,
-): Promise<boolean> {
-  const running = await tryExec(
-    executor,
-    `docker inspect -f '{{.State.Running}}' ${sq(EDGE_CONTAINER_NAME)} 2>/dev/null`,
-  );
-  if ((running ?? "").trim() !== "true") return false;
-  // wget exits 8 on an HTTP error status — the server ANSWERED, which is what's
-  // being proven. Only a connection failure means "not serving".
-  const probe = await tryExec(
-    executor,
-    containerShell(`wget -q -O /dev/null -T 3 http://127.0.0.1:${port}/ >/dev/null 2>&1; echo $?`),
-  );
-  const code = (probe ?? "").trim().split("\n").pop() ?? "1";
-  return code === "0" || code === "8";
+function vhostLog(message: string, level: SystemLog["level"] = "info"): SystemLog {
+  return { timestamp: new Date().toISOString(), message, level };
 }
 
-/** `sh -c` inside the edge container. Local to this module so it stays dependency-free. */
-function containerShell(command: string): string {
-  return `docker exec ${sq(EDGE_CONTAINER_NAME)} sh -c ${sq(command)}`;
+export async function sanitizeEdgeVhosts(
+  executor: CommandExecutor,
+  sitesDir: string,
+  onLog: (l: SystemLog) => void,
+): Promise<void> {
+  // POSIX sh, one pass, no per-file round trips (this runs over SSH).
+  const script = [
+    `for f in ${sq(sitesDir)}/*.conf; do`,
+    `  [ -f "$f" ] || continue;`,
+    // A real server_name is anything that isn't the `_` wildcard.
+    `  if ! grep -qE '^[[:space:]]*server_name[[:space:]]+[^_;[:space:]]' "$f"; then`,
+    `    echo "dropped-catchall $f"; rm -f "$f"; continue;`,
+    `  fi;`,
+    `  if grep -qE '[[:space:]]default_server' "$f"; then`,
+    `    sed -i -E 's/([[:space:]]listen[^;]*)[[:space:]]+default_server/\\1/g' "$f" && echo "unset-default $f";`,
+    `  fi;`,
+    `done`,
+  ].join(" ");
+  const out = await executor.exec(script).catch(() => "");
+  for (const line of out.split("\n").map((l) => l.trim()).filter(Boolean)) {
+    const [action, file] = [line.slice(0, line.indexOf(" ")), line.slice(line.indexOf(" ") + 1)];
+    if (action === "dropped-catchall") {
+      onLog(vhostLog(`Dropped catch-all vhost ${file} — the edge image provides it.`, "warn"));
+    } else if (action === "unset-default") {
+      onLog(vhostLog(`Removed default_server from ${file} — the edge image owns it.`, "warn"));
+    }
+  }
+}
+
+/**
+ * Is our edge DEFINITIVELY broken — crash-looping, exited, dead?
+ *
+ * Asks the negative on purpose, and answers "no" when it can't tell. The caller acts
+ * on `true` by stopping our edge and restoring the operator's proxy, so a false
+ * positive TAKES DOWN A WORKING EDGE. The previous version probed `wget` inside the
+ * container (no guarantee the image has it; host networking makes 127.0.0.1
+ * ambiguous), false-negatived a box serving live traffic, and reported it as dark —
+ * the guard became the outage.
+ *
+ * `.State.Status` can't be misread: `restarting` for a crash loop, `exited` for dead.
+ * Anything else — including an unreadable answer — is treated as fine, so the worst
+ * case is missing a broken edge (which the next step reports anyway).
+ */
+export async function edgeIsBroken(executor: CommandExecutor): Promise<boolean> {
+  const status = await tryExec(
+    executor,
+    `docker inspect -f '{{.State.Status}}' ${sq(EDGE_CONTAINER_NAME)} 2>/dev/null`,
+  );
+  const state = (status ?? "").trim();
+  return state === "restarting" || state === "exited" || state === "dead";
 }
 
 /**
@@ -164,7 +209,10 @@ export function edgeFailureReason(containerLog: string): string | null {
     .filter(Boolean);
   const emerg = lines.find((l) => l.includes("[emerg]"));
   if (emerg) return emerg.replace(/^.*\[emerg\]\s*\d*#\d*:\s*/, "");
-  return lines.at(-1) ?? null;
+  // No `[emerg]` → nothing here explains a failure. Do NOT fall back to the last
+  // line: on a RUNNING edge that's an access-log entry, and reporting
+  // `"GET /favicon.ico" 404` as the reason it's down is worse than silence.
+  return null;
 }
 
 /**

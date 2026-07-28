@@ -29,7 +29,7 @@ import {
   type EdgeAction,
 } from "../lib/edge-preflight";
 import { importMigratedSites } from "../lib/edge-import";
-import { edgeIsServing, edgeCrashReason } from "@repo/adapters/proxy";
+import { edgeIsBroken, edgeCrashReason } from "@repo/adapters/proxy";
 import { LocalExecutor } from "@repo/adapters";
 import {
   resolveInstallInputs,
@@ -393,7 +393,7 @@ async function runCompose(opts: UpOpts & { yes?: boolean }): Promise<{ apiPort: 
       ? `Building Openship from ${fromSource} and starting the stack…`
       : "Starting Openship via Docker Compose…",
   ).start();
-  const res = composeUp({
+  const res = await composeUp({
     apiPort: opts.port,
     dashboardPort: opts.dashboardPort,
     publicUrl,
@@ -426,10 +426,10 @@ async function runCompose(opts: UpOpts & { yes?: boolean }): Promise<{ apiPort: 
   //
   // The takeover journal is deliberately left open: it is the record of what to
   // restart, and `completeHostEdge()` below (not reached) is what discards it.
-  if (edgePlan.action && !(await edgeIsServing(new LocalExecutor()))) {
+  if (edgePlan.action && (await edgeIsBroken(new LocalExecutor()))) {
     const reason = await edgeCrashReason(new LocalExecutor());
     console.error(
-      chalk.red(`\n  Openship's edge is not serving :80${reason ? ` — ${reason}` : "."}`),
+      chalk.red(`\n  Openship's edge container is not running${reason ? ` — ${reason}` : "."}`),
     );
     const restored = await rollbackHostEdge();
     console.error(
