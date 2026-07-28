@@ -12,6 +12,7 @@ import { ensureDashboard } from "../lib/dashboard";
 import { installAndStart, preview } from "../lib/service";
 import {
   composeUp,
+  composePrefetch,
   composeIsViableDefault,
   ensureDocker,
   composeInternalToken,
@@ -341,6 +342,33 @@ async function runCompose(opts: UpOpts & { yes?: boolean }): Promise<{ apiPort: 
   // if a foreign proxy holds them we detect + (on consent) migrate/stop it on the
   // HOST first, reusing the native pipe (lib/edge-preflight.ts). The core delegates
   // this to `openship up` in docker-edge mode (apps/api/.../self-edge.ts).
+  // Resolved here rather than after the preflight: the prefetch below writes the
+  // same `.env` `composeUp` will, and both need the effective public URL.
+  const publicUrl = effectivePublicUrl(opts.publicUrl);
+
+  // Fetch the images BEFORE the preflight can stop anyone's proxy. A takeover that
+  // pulls afterwards keeps the box dark for the whole download, and a pull that
+  // fails takes their sites down for a problem we could have hit while they were
+  // still serving. See composePrefetch.
+  const prefetch = ora(
+    sourceBuildDir() ? "Building images before touching :80/:443…" : "Pulling images before touching :80/:443…",
+  ).start();
+  const fetched = composePrefetch({
+    apiPort: opts.port,
+    dashboardPort: opts.dashboardPort,
+    publicUrl,
+    trustProxy: opts.trustProxy,
+    noHostControl: opts.hostControl === false ? true : undefined,
+  });
+  if (!fetched) {
+    prefetch.fail("Couldn't fetch the stack's images — nothing was changed on this box.");
+    console.error(
+      chalk.dim("\n  Your current proxy is untouched and still serving. Fix the pull/build error above and re-run.\n"),
+    );
+    process.exit(1);
+  }
+  prefetch.succeed("Images ready — nothing on :80/:443 has changed yet.");
+
   let edgePlan;
   try {
     edgePlan = await planAndApplyHostEdge({ edge: opts.edge as EdgeAction | undefined });
@@ -359,7 +387,6 @@ async function runCompose(opts: UpOpts & { yes?: boolean }): Promise<{ apiPort: 
     process.exit(1);
   }
 
-  const publicUrl = effectivePublicUrl(opts.publicUrl);
   const fromSource = sourceBuildDir();
   const spinner = ora(
     fromSource

@@ -841,6 +841,32 @@ function compose(args: string[], opts?: { quiet?: boolean; withBuildOverride?: b
 }
 
 /**
+ * Fetch everything the stack needs WITHOUT starting it — so the operator's proxy
+ * can keep serving while we do.
+ *
+ * The takeover order matters: pulling ~500MB of images takes minutes, and stopping
+ * nginx first meant every hostname on the box was dark for all of it. Worse, a pull
+ * that FAILED left them down for a problem that hadn't touched their proxy yet.
+ * Fetch first, cut over second — the same "pull before anything stops" rule
+ * `ensureContainerEdge` already follows for a bare→container conversion.
+ *
+ * Idempotent, and `composeUp` repeats these steps: after this they're cache hits, so
+ * the actual downtime is the `up -d` swap (seconds), not the download.
+ */
+export function composePrefetch(opts: ComposeUpOpts): boolean {
+  const { buildDir } = materialize(opts);
+  if (buildDir) {
+    // From-source: the BUILD is the slow part, so it belongs on this side of the
+    // cutover too. Only the upstream images can be pulled for it.
+    return (
+      compose(["pull", "postgres", "redis"], { withBuildOverride: true }) === 0 &&
+      compose(["build"], { withBuildOverride: true }) === 0
+    );
+  }
+  return compose(["pull"]) === 0;
+}
+
+/**
  * `openship up` (compose): write files, then either PULL the pinned images
  * (normal install) or BUILD api/dashboard/edge from the source checkout (dev
  * install). Postgres/redis are upstream images and are pulled either way.
