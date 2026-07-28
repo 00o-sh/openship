@@ -41,7 +41,7 @@ const e = vi.hoisted(() => ({
   rollbacks: 0,
   completes: 0,
   restored: true,
-  /** Our edge is up and answering :80 (the normal case). */
+  /** Our edge container is crash-looping / exited (the abnormal case). */
   edgeBroken: false,
   edgeCrashReason: null as string | null,
   /** Set once a stopped proxy's sites are imported (suppresses re-offering). */

@@ -138,7 +138,7 @@ export async function sanitizeEdgeVhosts(
     `    echo "dropped-catchall $f"; rm -f "$f"; continue;`,
     `  fi;`,
     `  if grep -qE '[[:space:]]default_server' "$f"; then`,
-    `    sed -i -E 's/([[:space:]]listen[^;]*)[[:space:]]+default_server/\\1/g' "$f" && echo "unset-default $f";`,
+    `    sed -E 's/([[:space:]]listen[^;]*)[[:space:]]+default_server/\\1/g' "$f" > "$f.osh" && mv "$f.osh" "$f" && echo "unset-default $f";`,
     `  fi;`,
     `done`,
   ].join(" ");
@@ -192,10 +192,9 @@ export async function edgeCrashReason(executor: CommandExecutor): Promise<string
  * The one line of an edge container's log that explains why it isn't running.
  *
  * nginx reports a fatal config problem as `[emerg]` — that line IS the diagnosis,
- * and the surrounding 40 lines are startup noise. When there is no `[emerg]` the
- * edge died for a non-config reason (bad mount, missing cert, wrong-arch image,
- * OOM), so fall back to the last thing it said rather than returning nothing:
- * "not serving" with no reason is what sent people digging by hand.
+ * and the surrounding 40 lines are startup noise. Returns null when there is no
+ * `[emerg]`: the log of a running edge is access lines, and quoting one of those as
+ * "the reason" is how a healthy box got reported as broken.
  *
  * Pure string work, deliberately: the two callers read the log through completely
  * different channels (the CLI shells out locally, the installer execs over SSH),
