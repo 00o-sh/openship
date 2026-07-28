@@ -40,24 +40,6 @@ export const SYSTEM_COMPONENTS_BY_NAME = new Map(
   SYSTEM_COMPONENTS.map((component) => [component.name, component]),
 );
 
-/**
- * Names that USED to be components and are now folded into one.
- *
- * A stale dashboard bundle or an older CLI still asks to install/check
- * "openresty" or "certbot" — and a cached setup-state file on any already-provisioned
- * server still has those keys. Mapping them here means the rename can't turn an
- * in-flight request into "no installer for openresty", and old state simply reads
- * as the edge.
- */
-const COMPONENT_ALIASES: Record<string, string> = {
-  openresty: "edge",
-  certbot: "edge",
-};
-
-/** The current name for a possibly-legacy component name. */
-export function canonicalComponentName(name: string): string {
-  return COMPONENT_ALIASES[name] ?? name;
-}
 
 export function getSystemComponentDefinition(
   name: string,

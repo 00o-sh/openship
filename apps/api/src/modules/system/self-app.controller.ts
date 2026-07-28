@@ -277,7 +277,7 @@ export async function selfRegister(c: Context) {
     if (body.localEdge) {
       const session = createSetupSession(
         [
-          { name: "openresty", label: "Install the edge (OpenResty on 80/443)" },
+          { name: "edge", label: "Install the edge (80/443)" },
           { name: "route", label: "Route domain to Openship" },
         ],
         "self",
@@ -343,7 +343,7 @@ export async function selfRegister(c: Context) {
 
     const session = createSetupSession(
       [
-        { name: "openresty", label: "Install OpenResty + certbot" },
+        { name: "edge", label: "Install the edge" },
         { name: "route", label: "Route domain to Openship" },
         { name: "ssl", label: "Issue SSL certificate" },
       ],

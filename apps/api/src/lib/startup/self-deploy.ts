@@ -174,7 +174,7 @@ export async function ensureAdoptDeployment(
 export interface SelfEdgeStepProgress {
   onLog?: (message: string, level?: "info" | "warn" | "error") => void;
   onStep?: (
-    step: "openresty" | "route" | "ssl",
+    step: "edge" | "route" | "ssl",
     status: "installing" | "installed" | "failed",
   ) => void;
   backoffs?: number[];
@@ -226,13 +226,13 @@ export async function provisionSelfAppEdge(
   const log = progress.onLog;
 
   // 1. Toolchain install + optional 80/443 takeover/migrate (no route/cert).
-  progress.onStep?.("openresty", "installing");
+  progress.onStep?.("edge", "installing");
   const infra = await ensureSelfEdgeInfra({ onLog: log }, options);
   if (!infra.ok) {
-    progress.onStep?.("openresty", "failed");
+    progress.onStep?.("edge", "failed");
     return { verified: false, reason: infra.reason };
   }
-  progress.onStep?.("openresty", "installed");
+  progress.onStep?.("edge", "installed");
 
   // Hard gate: never touch routing/cert unless OUR OpenResty owns 80/443 (takeover
   // skipped / partial / respawned would otherwise 404 the ACME challenge opaquely).

@@ -445,28 +445,6 @@ export async function uninstallRsync(
   }
 }
 
-export async function uninstallCertbot(
-  executor: CommandExecutor,
-  onLog: SystemLogCallback,
-): Promise<InstallResult> {
-  const prep = await prepareExecutor(executor, "certbot");
-  if (!prep.ok) return prep.result;
-  executor = prep.executor;
-  const cmd = buildRemoveCommand(prep.profile.packageManager, ["certbot"]);
-  if (!cmd) return { component: "certbot", success: false, error: "Certbot removal not supported" };
-
-  onLog(log("Removing certbot..."));
-  try {
-    const { code } = await executor.streamExec(cmd, onLog as (log: LogEntry) => void);
-    if (code !== 0) return { component: "certbot", success: false, error: "Certbot removal failed" };
-    onLog(log("Certbot removed"));
-    return { component: "certbot", success: true };
-  } catch (err) {
-    const msg = safeErrorMessage(err);
-    return { component: "certbot", success: false, error: msg };
-  }
-}
-
 export async function uninstallEdge(
   executor: CommandExecutor,
   onLog: SystemLogCallback,
@@ -474,88 +452,25 @@ export async function uninstallEdge(
   const prep = await prepareExecutor(executor, "edge");
   if (!prep.ok) return prep.result;
   executor = prep.executor;
-  const profile = prep.profile;
 
-  // Container edge → remove the CONTAINER and stop. Falling through to the host
-  // path would be actively wrong: `pkill -f openresty` below matches a
-  // host-networked container's own master process, and the apt purge would then
-  // report failure over a package that was never installed.
-  // `fresh`: we're about to REMOVE it. A stale positive here would `docker rm` a
-  // name that no longer exists and then return "uninstalled" over an untouched
-  // bare OpenResty; a stale negative would fall through to the host path, whose
-  // `pkill -f openresty` kills a host-networked edge container's master process.
+  // `fresh`: we are about to REMOVE it, so a stale positive would `docker rm` a
+  // name that no longer exists and report success over an untouched box.
   const container = await resolveOurEdgeContainer(executor, { fresh: true }).catch(() => null);
-  if (container) {
-    onLog(log(`Removing the edge container ${container}...`));
-    // Clear the restart policy first, or the daemon brings it straight back.
-    await execSafe(executor, `docker update --restart=no ${sq(container)} 2>/dev/null || true`);
-    await execSafe(executor, `docker rm -f ${sq(container)} 2>/dev/null || true`);
-    invalidateEdgeContainer(executor);
-    // Certs and vhosts stay on the host on purpose — same rule as the compose
-    // uninstall: issued certificates outlive a reinstall, and /etc/letsencrypt may
-    // be shared with the mail server. Removing them is the operator's call.
-    onLog(log("Edge removed. Certificates and vhosts were left on the host."));
+  if (!container) {
+    onLog(log("No edge container on this server — nothing to remove."));
     return { component: "edge", success: true };
   }
 
-  try {
-    // 1. Stop
-    onLog(log("Stopping OpenResty..."));
-    await execSafe(executor, "systemctl stop openresty 2>/dev/null || true");
-    await execSafe(executor, "pkill -f '[o]penresty' 2>/dev/null || true");
-    // Force-clear port 80 only if it's not held by a foreign proxy — we never
-    // take down someone else's service while removing our own. And free it by
-    // killing only what still LISTENS on :80 (a lingering openresty worker),
-    // never a blind `fuser -k 80/tcp` — fuser matches ANY socket on the port,
-    // so a process merely holding an outbound/established :80 connection would
-    // be killed too. probeListeningPort is LISTEN-state filtered.
-    const edge = await probeEdge(executor).catch(() => null);
-    const foreignOn80 = edge?.occupants.some((o) => o.port === 80) ?? false;
-    if (!foreignOn80) {
-      const stray = await probeListeningPort(executor, 80).catch(() => null);
-      if (stray?.pid) {
-        await execSafe(executor, `kill -9 ${stray.pid} 2>/dev/null || true`);
-      }
-    }
-
-    // 2. Remove package
-    const removeCmd = buildRemoveCommand(profile.packageManager, ["openresty"]);
-    if (removeCmd) {
-      if (profile.packageManager === "apt") {
-        await ensureAptReady(executor, onLog);
-      }
-      onLog(log("Removing OpenResty package..."));
-      const { code } = await executor.streamExec(removeCmd, onLog as (log: LogEntry) => void);
-      if (code !== 0) return { component: "openresty", success: false, error: "Package removal failed" };
-    }
-
-    // 3. Clean up leftover files
-    onLog(log("Cleaning up files..."));
-    let paths: OpenRestyPaths;
-    try {
-      paths = await detectOpenRestyPaths(executor);
-    } catch {
-      paths = OPENRESTY_DEFAULT_PATHS;
-    }
-    const root = paths.bin.includes("/openresty/") ? paths.bin.replace(/\/bin\/[^/]+$/, "") : "/usr/local/openresty";
-
-    await execSafe(executor, [
-      `rm -rf ${root}`,
-      `rm -rf ${paths.confDir}`,
-      "rm -rf /etc/openresty",
-      "rm -rf /usr/local/openresty",
-      "rm -f /etc/apt/sources.list.d/openresty.list",
-      "rm -f /usr/share/keyrings/openresty.gpg",
-      "rm -f /etc/yum.repos.d/openresty.repo",
-    ].join(" && "));
-
-    onLog(log("OpenResty removed"));
-    return { component: "openresty", success: true };
-  } catch (err) {
-    const msg = safeErrorMessage(err);
-    onLog(log(`OpenResty removal failed: ${msg}`, "error"));
-    return { component: "openresty", success: false, error: msg };
-  }
+  onLog(log(`Removing the edge container ${container}...`));
+  // Clear the restart policy first, or the daemon brings it straight back.
+  await execSafe(executor, `docker update --restart=no ${sq(container)} 2>/dev/null || true`);
+  await execSafe(executor, `docker rm -f ${sq(container)} 2>/dev/null || true`);
+  invalidateEdgeContainer(executor);
+  // Certs and vhosts stay on the host on purpose — same rule as the compose
+  // uninstall: issued certificates outlive a reinstall, and /etc/letsencrypt may be
+  // shared with the mail server. Removing them is the operator's call.
+  onLog(log("Edge removed. Certificates and vhosts were left on the host."));
+  return { component: "edge", success: true };
 }
 
 // ─── Removal support check ──────────────────────────────────────────────────
@@ -564,10 +479,9 @@ export async function getRemovalSupport(
   executor: CommandExecutor,
   componentName: string,
 ): Promise<{ supported: boolean; reason?: string }> {
+  // The edge is a container: removal needs the daemon, not a package manager.
+  if (componentName === "edge") return { supported: true };
   const profile = await resolveEnvironment(executor);
-  if (profile.os !== "linux" && componentName === "openresty") {
-    return { supported: false, reason: "OpenResty removal only supported on Linux" };
-  }
   const cmd = buildRemoveCommand(profile.packageManager, [componentName]);
   return cmd
     ? { supported: true }

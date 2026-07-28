@@ -371,7 +371,7 @@ export async function installRespond(c: Context) {
  * POST /system/install
  *
  * Install a specific component on a server.
- * Body: { serverId: string, component: "docker" | "openresty" | ..., config?: InstallerConfig }
+ * Body: { serverId: string, component: "docker" | "edge" | ..., config?: InstallerConfig }
  *
  * Returns: { success: boolean, component: string, version?: string, error?: string }
  */
@@ -431,7 +431,7 @@ export async function installComponent(c: Context) {
  * POST /system/remove
  *
  * Remove a specific component from a server.
- * Body: { serverId: string, component: "openresty" | "certbot" | "rsync" }
+ * Body: { serverId: string, component: "edge" | "rsync" }
  *
  * Returns: { success: boolean, component: string, error?: string, logs?: string[] }
  */
@@ -488,7 +488,7 @@ export async function removeComponent(c: Context) {
  * POST /system/install/stream
  *
  * Install multiple components with real-time SSE log streaming.
- * Body: { serverId: string, components: ["docker", "openresty", ...], config?: InstallerConfig }
+ * Body: { serverId: string, components: ["docker", "edge", ...], config?: InstallerConfig }
  *
  * Returns an SSE stream with events:
  *   - progress: component status updates
@@ -554,14 +554,14 @@ export async function installStream(c: Context) {
     const installPromise = (async () => {
       let hasFailure = false;
 
-      // Before installing OpenResty, self-heal a takeover that crashed mid-flight
+      // Before installing the edge, self-heal a takeover that crashed mid-flight
       // on this server on a prior attempt (restores the previous proxy if the
       // migrate didn't finish). No-op when there's no leftover journal.
-      if (validNames.includes("openresty")) {
+      if (validNames.includes("edge")) {
         try {
           await sshManager.withExecutor(serverId, (executor) =>
             recoverInterruptedTakeover(executor, (l) =>
-              appendSetupLog(session.id, "openresty", l.message, l.level),
+              appendSetupLog(session.id, "edge", l.message, l.level),
             ),
           );
         } catch {

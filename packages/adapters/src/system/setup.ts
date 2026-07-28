@@ -22,7 +22,6 @@
 
 import type { CommandExecutor, LogEntry, ProvisionLock } from "../types";
 import { checkAll, checkComponents, COMPONENT_CHECKS } from "./checks";
-import { canonicalComponentName } from "./components";
 import { COMPONENT_INSTALLERS } from "./installer";
 import {
   type SetupStateStore,
@@ -499,13 +498,10 @@ export class SystemManager {
   }
 
   private async runInstaller(
-    rawName: string,
+    name: string,
     logFn: SystemLogCallback,
     installerConfig: InstallerConfig,
   ): Promise<InstallResult> {
-    // A stale dashboard bundle or an older CLI still asks for "openresty" /
-    // "certbot"; both are the edge now (see canonicalComponentName).
-    const name = canonicalComponentName(rawName);
     const installer = COMPONENT_INSTALLERS[name];
     if (!installer) {
       logFn(info(`No installer available for "${name}"`));

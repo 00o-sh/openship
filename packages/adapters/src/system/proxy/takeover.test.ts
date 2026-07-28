@@ -11,7 +11,7 @@ import type { EdgeStatus, ImportedSite } from "../types";
 
 const h = vi.hoisted(() => ({
   installContainerEdge: vi.fn(),
-  checkOpenResty: vi.fn(),
+  checkEdge: vi.fn(),
   detectPaths: vi.fn(),
   registerRoute: vi.fn(),
   provisionCert: vi.fn(),
@@ -22,7 +22,7 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("../installer", () => ({ installContainerEdge: h.installContainerEdge }));
-vi.mock("../checks", () => ({ checkOpenResty: h.checkOpenResty }));
+vi.mock("../checks", () => ({ checkEdge: h.checkEdge }));
 vi.mock("../../infra/openresty-lua", () => ({
   detectOpenRestyPaths: h.detectPaths,
   EDGE_HOST_PATHS: { sitesDir: "/var/lib/openship/edge/sites-enabled" },
@@ -82,7 +82,7 @@ beforeEach(() => {
   h.detectPaths.mockResolvedValue({});
   h.registerRoute.mockResolvedValue(undefined);
   h.provisionCert.mockResolvedValue({ verified: true });
-  h.checkOpenResty.mockResolvedValue({ healthy: true, message: "ok" });
+  h.checkEdge.mockResolvedValue({ healthy: true, message: "ok" });
 });
 
 describe("runEdgeTakeover", () => {

@@ -245,7 +245,7 @@ export {
   type PendingConsent,
   type OnBoxManifest,
 } from "./system/modules";
-export { SYSTEM_COMPONENTS, getSystemComponentDefinition, canonicalComponentName } from "./system/components";
+export { SYSTEM_COMPONENTS, getSystemComponentDefinition } from "./system/components";
 export {
   isRemoteConnectionError,
   isRetryableRemoteConnectionError,

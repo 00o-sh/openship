@@ -115,7 +115,7 @@ export async function ourEdgeContainerRunning(executor: CommandExecutor): Promis
  *
  * The probe is 1–2 `docker ps` shell-outs (over SSH for a remote server), and it
  * sits on read paths that run constantly: every `createPlatform`, every
- * `checkOpenResty`/`checkCertbot`, and once per file in `readEdgeFile` /
+ * `checkEdge`, and once per file in `readEdgeFile` /
  * `writeEdgeFile` — so carrying one cert cost eight round-trips to answer the same
  * question. Uncached, this reproduced the per-poll shell-out storm that made the
  * server page slow in the first place.

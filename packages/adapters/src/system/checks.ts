@@ -12,17 +12,12 @@
 
 import type { CommandExecutor } from "../types";
 import type { ComponentStatus } from "./types";
-import { OPENRESTY_LUA_DIR } from "../infra/openresty-lua";
 import { containerCommand } from "./edge-container-executor";
 import { resolveOurEdgeContainer } from "./proxy/detect";
 import { systemCatalog } from "./catalog";
 import { resolveEnvironment } from "./environment";
 import { enrichAvailableVersions } from "./available-version";
-import {
-  canonicalComponentName,
-  getSystemComponentDefinition,
-  SYSTEM_COMPONENTS,
-} from "./components";
+import { getSystemComponentDefinition, SYSTEM_COMPONENTS } from "./components";
 import { formatDuration, systemDebug } from "./debug";
 import { isRemoteConnectionError } from "./errors";
 import { safeErrorMessage } from "@repo/core";
@@ -159,33 +154,27 @@ export async function checkRsync(
 }
 
 /**
- * The edge: ONE check for the openship-edge container.
+ * The edge: is our openship-edge container up.
  *
- * The edge is a Docker image, and its whole serving path is host-side (host
- * networking, host bind mounts for vhosts/certs/ACME). So the question is "is our
- * edge container up", not "is there an openresty binary on this box" — a converted
- * server has no binary, no unit and no Lua on the host, and every host probe would
- * call a perfectly healthy edge missing.
- *
- * A pre-conversion HOST edge is still reported healthy rather than missing: it is
- * genuinely serving, and the deploy path migrates it to the container (pull-first,
- * with rollback). Calling it "missing" here would offer to install a second edge
- * next to a working one.
+ * That is the whole check. The edge is a Docker image whose serving path is
+ * host-side (host networking, host bind mounts for vhosts/certs/ACME), so there is
+ * no host binary, no unit and no Lua on the box to probe — and nothing to fall back
+ * to. A box without the container has no edge; installing one is a container pull.
  */
 export async function checkEdge(executor: CommandExecutor): Promise<ComponentStatus> {
   const startedAt = Date.now();
-  const recipe = systemCatalog.checks.openresty;
 
   const container = await resolveOurEdgeContainer(executor);
-  if (container) {
-    const containerVersion = await tryExec(
-      executor,
-      containerCommand(container, "openresty -v 2>&1"),
+  if (!container) {
+    systemDebug("checks", `edge:missing (${formatDuration(startedAt)})`);
+    return unhealthy(
+      "edge",
+      "No edge on this server. The edge is the openship-edge container — install it (requires Docker).",
     );
-    if (containerVersion) {
-      systemDebug("checks", `edge:healthy-container (${formatDuration(startedAt)})`);
-      return healthy("edge", recipe.parseVersion(containerVersion), true);
-    }
+  }
+
+  const version = await tryExec(executor, containerCommand(container, "openresty -v 2>&1"));
+  if (!version) {
     systemDebug("checks", `edge:container-unresponsive (${formatDuration(startedAt)})`);
     return unhealthy(
       "edge",
@@ -194,52 +183,8 @@ export async function checkEdge(executor: CommandExecutor): Promise<ComponentSta
     );
   }
 
-  const version = await tryExec(executor, recipe.versionCommand);
-
-  // No container and no binary → there is no edge. The install is a container
-  // pull, so the message points at Docker rather than at an apt package.
-  if (!version) {
-    systemDebug("checks", `edge:missing (${formatDuration(startedAt)})`);
-    return unhealthy(
-      "edge",
-      "No edge on this server. The edge is the openship-edge container — install it (requires Docker).",
-    );
-  }
-
-  // ── Legacy HOST edge (pre-conversion) ──────────────────────────────────────
-  // Still the real serving path on this box, so it reports healthy; the deploy
-  // path migrates it to the container. New installs never land here.
-  const parsed = recipe.parseVersion(version);
-
-  const runningChecks = await Promise.all(
-    recipe.runningCommands!.map((command) => tryExec(executor, command)),
-  );
-  const running = runningChecks.some(Boolean);
-
-  if (!running) {
-    systemDebug("checks", `edge:host-not-running (${formatDuration(startedAt)})`);
-    return unhealthy("edge", recipe.notRunningMessage!, {
-      version: parsed,
-      running: false,
-    });
-  }
-
-  // Binary + process OK - verify Lua analytics/streaming scripts are deployed
-  const hasLua = await tryExec(
-    executor,
-    `test -f ${OPENRESTY_LUA_DIR}/site_logger.lua && test -f ${OPENRESTY_LUA_DIR}/pipe_stream.lua && echo ok`,
-  );
-  if (!hasLua) {
-    systemDebug("checks", `edge:host-missing-lua (${formatDuration(startedAt)})`);
-    return unhealthy(
-      "edge",
-      "The host edge is running but its analytics scripts are not deployed — reinstall to move it into the edge container",
-      { version: parsed, running: true },
-    );
-  }
-
-  systemDebug("checks", `edge:healthy-host (${formatDuration(startedAt)})`);
-  return healthy("edge", parsed, true);
+  systemDebug("checks", `edge:healthy (${formatDuration(startedAt)})`);
+  return healthy("edge", systemCatalog.checks.openresty.parseVersion(version), true);
 }
 
 // ─── Registry ────────────────────────────────────────────────────────────────
@@ -324,14 +269,10 @@ export async function checkComponents(
   names: string[],
 ): Promise<ComponentStatus[]> {
   const startedAt = Date.now();
-  // Canonicalize first (a caller may still ask for "openresty"/"certbot"), then
-  // dedupe — both legacy names map to the edge, and running its check twice would
-  // double the `docker ps` work for one answer.
-  const canonical = [...new Set(names.map(canonicalComponentName))];
-  const fns = canonical
+  const fns = names
     .map((name) => COMPONENT_CHECKS[name])
     .filter((fn): fn is CheckFn => Boolean(fn));
-  systemDebug("checks", `checkComponents:start [${canonical.join(", ")}]`);
+  systemDebug("checks", `checkComponents:start [${names.join(", ")}]`);
   const results = await mapWithConcurrency(fns, CHECK_CONCURRENCY, (fn) =>
     fn(executor),
   );

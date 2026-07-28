@@ -26,9 +26,8 @@ import { pinnedEdgeImage } from "./edge-image";
  * deploy site where the operator is already expecting movement.
  *
  * And it can't ride ON ensureFeature's result either: that returns early when no
- * component is missing, and `checkOpenResty` reports a working BARE edge as
- * healthy — so the boxes that most need converting are precisely the ones it would
- * skip. This runs regardless; `ensureContainerEdge` is idempotent (one memoized
+ * component is missing, so it would skip a box whose edge is present but stale.
+ * This runs regardless; `ensureContainerEdge` is idempotent (one memoized
  * `docker ps` when there's nothing to do).
  *
  * Best-effort by contract: routing/edge problems never fail a deploy (see

@@ -38,9 +38,9 @@ describe("checkEdge", () => {
     expect(status.message).toMatch(/docker logs openship-edge/);
   });
 
-  // A pre-conversion HOST edge is still the real serving path, so it reports
-  // healthy rather than "missing" — the deploy path migrates it to the container.
-  it("still reports a legacy host edge as healthy when no container is running", async () => {
+  // No container = no edge. There is no host fallback to probe any more: the edge
+  // IS the image, so a box without it gets an install, not a second code path.
+  it("reports missing when no container is running, even with a host openresty", async () => {
     const status = await checkEdge(
       host([
         ["openresty -v", "nginx version: openresty/1.25.3.1"],
@@ -49,8 +49,8 @@ describe("checkEdge", () => {
       ]),
     );
 
-    expect(status.healthy).toBe(true);
-    expect(status.version).toBe("1.25.3.1");
+    expect(status.healthy).toBe(false);
+    expect(status.message).toMatch(/openship-edge container/);
   });
 
   it("reports missing on a box with neither, pointing at the container install", async () => {

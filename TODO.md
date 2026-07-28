@@ -87,31 +87,6 @@ If the goal is only "get Python out of the image", **`lego`** (single Go binary)
 is a much smaller change than resty-acme: same executor, same on-disk layout,
 structured exit codes, contained entirely to `nginx.ts`.
 
-### Fold the `certbot` component into the edge (small, do before or after release)
-
-On a container-edge box, `openresty` and `certbot` are one artifact — the image.
-The *checks* already know this (`checks.ts:167`, `checks.ts:235` short-circuit via
-`resolveOurEdgeContainer`), and so does the installer (`installer.ts:220`). The
-**component model does not**:
-
-```
-setup.ts:67,75  { feature: "ssl", requires: ["openresty", "certbot"] }
-setup.ts:82     ["docker", "git", "openresty", "certbot"]
-```
-
-Cost today: two `docker exec` probes to prove one image is present, two rows in
-the server components UI for one thing, and `ensureFeature("ssl")` able to
-report "SSL requires OpenResty and certbot" while naming a component that is not
-independently installable on that box.
-
-- [ ] Key `resolveRules` / `resolveRequired` (`packages/adapters/src/system/setup.ts`)
-      off the same `resolveOurEdgeContainer` predicate the checks use, and drop
-      `certbot` when a container edge is present. Keep the standalone component
-      for the bare / Docker-less branch, which still needs it. Note
-      `assumeInstalled` (`setup.ts:109`) already no-ops this when openship itself
-      runs containerized, so the residue only affects remote SSH servers with a
-      container edge.
-
 ---
 
 ## Auth

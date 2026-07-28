@@ -199,7 +199,7 @@ export async function ensureEdgeStream(c: Context) {
         // console stays alive without a duplicate round-trip.
         // Self-heal a takeover that crashed mid-flight on a prior attempt.
         await recoverInterruptedTakeover(executor, onLog).catch(() => {});
-        const installer = COMPONENT_INSTALLERS["openresty"];
+        const installer = COMPONENT_INSTALLERS["edge"];
         // Same call shape as the deploy pipeline + server-setup: the installer
         // raises the edge-conflict consent via promptUser; on "migrate",
         // ensureEdge runs the takeover (bring up our edge + migrate the foreign

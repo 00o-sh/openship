@@ -13,12 +13,27 @@ import { scanTraefik } from "./traefik";
 
 /**
  * Config markers that prove a proxy is INSTALLED on this host, checked in
- * priority order. Deliberately NOT `/usr/local/openresty/...` — that's ours.
+ * priority order.
+ *
+ * OpenResty ON THE HOST is included, and that is the point: our edge is a
+ * CONTAINER now, so a host OpenResty is a proxy to migrate FROM like any other —
+ * including one an older Openship installed itself. This list used to exclude
+ * `/usr/local/openresty/...` as "ours", which was true only while the bare edge WAS
+ * us; the container edge's own config lives inside the image, and its host-side
+ * state is the `/var/lib/openship/edge` bind mount, so a file at these paths means
+ * a host install, never the container.
+ *
+ * Checked last so a box running both (host OpenResty + a distro nginx) reports the
+ * more likely intentional one first.
  */
 const INSTALLED_MARKERS: Array<{ proxy: ProxyKind; paths: string[] }> = [
   { proxy: "nginx", paths: ["/etc/nginx/nginx.conf"] },
   { proxy: "caddy", paths: ["/etc/caddy/Caddyfile"] },
   { proxy: "apache", paths: ["/etc/apache2/apache2.conf", "/etc/httpd/conf/httpd.conf"] },
+  {
+    proxy: "openresty",
+    paths: ["/usr/local/openresty/nginx/conf/nginx.conf", "/etc/openresty/nginx.conf"],
+  },
 ];
 
 /**
@@ -75,6 +90,11 @@ export async function scanImportableSites(
       return scanApache(executor);
     case "traefik":
       return scanTraefik(executor);
+    case "openresty":
+      // Same parser: OpenResty vhosts ARE nginx syntax. scanOpenshipEdge already
+      // reads the two bare-host sites-enabled layouts, which is exactly where a
+      // host OpenResty (ours or hand-rolled) keeps them.
+      return scanOpenshipEdge(executor);
     default:
       return {
         proxy,
@@ -84,9 +104,22 @@ export async function scanImportableSites(
   }
 }
 
-/** Which recognized proxies can we import config from? */
+/**
+ * Which recognized proxies can we import config from?
+ *
+ * `openresty` is importable for the same reason the marker list includes it: with a
+ * containerized edge, a host OpenResty is a migration SOURCE. Leaving it out meant
+ * the one proxy whose config we can parse most reliably — our own former bare edge —
+ * was offered "takeover only", i.e. drop every vhost it serves.
+ */
 export function canImportProxy(proxy: ProxyKind | undefined): boolean {
-  return proxy === "nginx" || proxy === "caddy" || proxy === "apache" || proxy === "traefik";
+  return (
+    proxy === "nginx" ||
+    proxy === "caddy" ||
+    proxy === "apache" ||
+    proxy === "traefik" ||
+    proxy === "openresty"
+  );
 }
 
 export { scanNginx, scanOpenshipEdge, scanCaddy, scanApache, scanTraefik };
