@@ -17,8 +17,7 @@
  */
 
 import type { CommandExecutor } from "../../../types";
-import { sq } from "../detect";
-import { readMaybeInContainer } from "../cert-material";
+import { containerCommand, readMaybeInContainer } from "../../edge-container-executor";
 import { tryExec } from "./parse-utils";
 
 /** Data roots to search, in priority order. Container paths are tried last. */
@@ -62,7 +61,9 @@ async function findPairIn(
     // keying only off the exit code silently skipped the container leg.
     let certPath = firstCrt(await tryExec(exec, `ls -1 ${glob} 2>/dev/null`));
     if (!certPath && container) {
-      certPath = firstCrt(await tryExec(exec, dockerSh(container, `ls -1 ${glob} 2>/dev/null`)));
+      certPath = firstCrt(
+        await tryExec(exec, containerCommand(container, `ls -1 ${glob} 2>/dev/null`)),
+      );
     }
     if (certPath) return { certPath, keyPath: certPath.replace(/\.crt$/, ".key") };
   }
@@ -75,11 +76,6 @@ function firstCrt(listing: string | null): string | undefined {
     .split("\n")
     .map((l) => l.trim())
     .find((l) => l.endsWith(".crt"));
-}
-
-/** `docker exec <c> sh -c '<cmd>'` — kept local so the glob isn't quoted away. */
-function dockerSh(container: string, command: string): string {
-  return `docker exec ${sq(container)} sh -c ${sq(command)}`;
 }
 
 /**

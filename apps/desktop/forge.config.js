@@ -67,6 +67,10 @@ module.exports = {
       // glob of resources/ — anything staged by build/stage.ts and NOT named here
       // is silently absent from the packaged app.
       path.join(RESOURCES, "geoip"),
+      // iRedMail engine tree → MAIL_SERVER_ENGINE_DIR (services.ts). The mail
+      // server install packs this and streams it to the target VPS; unstaged,
+      // "Transfer iRedMail Engine" fails with tar: could not chdir.
+      path.join(RESOURCES, "engine"),
       // ssh2 + dockerode (external to the API bundle) — resolved at runtime via
       // NODE_PATH=<Resources>/node_modules in services.ts.
       path.join(RESOURCES, "node_modules"),

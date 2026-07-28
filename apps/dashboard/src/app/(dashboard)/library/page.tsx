@@ -181,8 +181,6 @@ export default function LibraryPage() {
               cliAction={cliAction}
               onRefresh={refresh}
               selfHosted={selfHosted}
-              cloudConnected={cloudConnected}
-              onConnectCloud={startCloudConnect}
             />
           ) : needsGhCliConsent ? (
             <GhCliConsent login={state.sources.ghCli.login} onAllow={allowGhCli} />

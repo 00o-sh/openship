@@ -114,6 +114,63 @@ independently installable on that box.
 
 ---
 
+## Auth
+
+### SSO login for self-hosted (OIDC first, SAML only if asked for)
+
+Not started. Goal: an operator points the instance at their IdP (Okta / Entra /
+Keycloak / Authentik / Google Workspace) and staff sign in with that instead of
+email + password.
+
+What's already there:
+
+- better-auth `^1.5.4` (`apps/api/package.json:27`), org plugin at
+  `apps/api/src/lib/auth.ts:442`. The installed plugin set includes
+  **`generic-oauth`** — arbitrary OIDC/OAuth2 issuers, no new dependency. That's
+  the cheap path.
+- Not `better-auth/plugins/oidc-provider` — that makes Openship *an* IdP, the
+  opposite direction. Per-org IdPs and SAML live in the separate
+  `@better-auth/sso` package, which is **not** installed; only pull it in if
+  per-org IdPs or SAML are genuinely required.
+- Providers are already registered only when their creds exist
+  (`auth.ts:174`) — an SSO provider should follow the same env-gated shape.
+
+The prerequisite nobody expects:
+
+- [ ] **The button can't just be added.** Social login is hidden on self-hosted
+      outright today — `{!selfHosted && <OAuthButtons/>}` at
+      `apps/dashboard/src/app/(auth)/login/page.tsx:246` and
+      `register/page.tsx:154` — because an operator with no `GITHUB_CLIENT_ID`
+      would get buttons that fail, and **nothing tells the dashboard which
+      providers are configured**. `OAuthButtons` hardcodes github+google. SSO
+      needs a server-advertised provider list (public, read-only, alongside the
+      `authMode`/`selfHosted` values `useAuthContext` already serves). That
+      endpoint doesn't exist yet and is the real first task.
+
+Decisions to settle before coding:
+
+- [ ] **Account linking.** `accountLinking.trustedProviders` is
+      `["github", "google"]` with `allowDifferentEmails: true`
+      (`auth.ts:202-205`). An SSO provider left out of that list forks a second
+      user row on first login for an email that already exists. Decide whether
+      IdP-asserted email is trusted (it usually is — but say so deliberately).
+- [ ] **Org + role mapping.** In team mode a fresh SSO user arrives with no
+      membership and no role. Invite-only (SSO authenticates, but only into an
+      org they were already invited to) is the safe default; auto-join the
+      instance org needs an email-domain allowlist and a default role.
+- [ ] **Zero-auth interaction.** `authMode === "none"` instances
+      (`apps/api/src/lib/auth-mode.ts`) have no login at all. SSO must be inert
+      there, not a second door into a box that deliberately has none.
+- [ ] **Deprovisioning.** Removing someone from the IdP does not end their
+      Openship session or membership. `session.expiresIn` is 30 days
+      (`auth.ts:211`) — either shorten it when SSO is on, or document the gap
+      honestly. There's no SCIM and shouldn't be one for v1.
+- [ ] Gate on explicit env vars validated in `apps/api/src/config/env.ts`, and
+      show the resolved state in Settings → security so an operator can tell SSO
+      is actually live.
+
+---
+
 ## Open TODO markers in code
 
 Verified present; listed so they aren't lost.

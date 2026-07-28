@@ -334,19 +334,31 @@ export async function connect(c: Context) {
 
   // ── CLI: no token yet ──────────────────────────────────────
   if (mode === "cli") {
-    // No GITHUB_CLIENT_ID → run `gh auth login` in terminal
-    if (!env.GITHUB_CLIENT_ID) {
+    // Dynamic import: gh device flow is self-hosted only; never on the SaaS.
+    const { startDeviceFlow, deviceFlowAvailable } = await import("./github.local-auth");
+
+    // The browser device flow is the DEFAULT path: it needs no app registration,
+    // no cloud account and no shell on the box. Only when no client id resolves at
+    // all do we fall back to telling the operator to run `gh auth login` — which on
+    // a remote self-hosted instance means SSH-ing in, so it's a last resort, not
+    // the first offer.
+    if (!deviceFlowAvailable()) {
+      // No device client id on this instance. Ask for a token IN THE UI rather
+      // than telling the operator to go run `gh auth login` somewhere — on a
+      // container install the api image has no `gh` and cannot see the host's
+      // ~/.config/gh, so that instruction was unactionable on the very topology
+      // that hits this branch. `gh auth login` stays as a secondary hint because
+      // reading hosts.yml still works on a bare install that has it.
       return c.json({
         connected: false,
-        flow: "terminal" as const,
+        flow: "token" as const,
         command: "gh auth login",
-        message: "Run this command in your terminal, then click refresh.",
+        message:
+          "Paste a GitHub token to connect this instance. " +
+          "Needs the `repo` scope (add `read:org` to see organization repos).",
       });
     }
-    // Has CLIENT_ID → start device flow
     try {
-      // Dynamic import: gh device flow is self-hosted only; never on the SaaS.
-      const { startDeviceFlow } = await import("./github.local-auth");
       const verification = await startDeviceFlow(userId);
       return c.json({
         connected: false,
@@ -501,6 +513,68 @@ export async function pollConnect(c: Context) {
   // token onto the wire (and into any client logging). Strip it.
   const { token: _token, ...safe } = status;
   return c.json(safe);
+}
+
+/**
+ * POST /github/instance-token — connect this instance with a pasted GitHub token.
+ *
+ * The no-setup fallback for an instance with no device client id, and the answer
+ * for anyone who'd rather hand over a scoped PAT than sign in interactively. The
+ * token lands in the SAME durable slot the device flow writes
+ * (`instance_settings.ghDeviceTokenEncrypted`), so it participates as the
+ * instance's git identity through `getLocalGhToken()` — one credential source,
+ * not a second competing one.
+ *
+ * Validated before it is stored: `inspectPatScope` proves it works and reports
+ * its scopes, `classifyPatScope` decides reject / warn / accept. Storing an
+ * unvalidated token would surface as a broken clone deep inside a deploy instead
+ * of an error on the field the operator just typed into.
+ *
+ * Self-hosted only — CLOUD_MODE has no instance-wide git identity by design.
+ */
+export async function setInstanceToken(c: Context) {
+  if (env.CLOUD_MODE) {
+    return c.json({ error: "Not available on Openship Cloud", code: "NOT_SUPPORTED" }, 400);
+  }
+  const ctx = getRequestContext(c);
+  const body = await c.req.json<{ token?: string }>().catch(() => null);
+  const token = body?.token?.trim();
+  if (!token) {
+    return c.json({ error: "token is required", code: "INVALID_TOKEN" }, 400);
+  }
+
+  let report: Awaited<ReturnType<typeof githubService.inspectPatScope>>;
+  try {
+    report = await githubService.inspectPatScope(token);
+  } catch (err) {
+    return c.json(
+      { error: err instanceof Error ? err.message : "Could not validate token", code: "INVALID_TOKEN" },
+      400,
+    );
+  }
+  const verdict = githubService.classifyPatScope(report);
+  if (!verdict.ok) {
+    return c.json({ error: verdict.reason, code: "INSUFFICIENT_SCOPE" }, 400);
+  }
+
+  const { setStoredDeviceToken } = await import("./github.local-auth");
+  await setStoredDeviceToken(token);
+  // Clicking connect means "I want to be connected" — clear any prior
+  // Disconnect suppression, same as the interactive connect path does.
+  const { setGithubCliDisabled } = await import("../settings/settings.service");
+  await setGithubCliDisabled(ctx.userId, false);
+
+  if (ctx.organizationId) {
+    audit.recordAsync(auditContextFrom(c, ctx.organizationId, ctx.userId), {
+      eventType: "github.instance_token.set",
+      resourceType: "github",
+      resourceId: "*",
+      // Login + scopes only. The token itself must never reach the audit log.
+      after: { login: report.user, scopes: report.scopes },
+    });
+  }
+
+  return c.json({ connected: true, login: report.user, warning: verdict.warning });
 }
 
 /**

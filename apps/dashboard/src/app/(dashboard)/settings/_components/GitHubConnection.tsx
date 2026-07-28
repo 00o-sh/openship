@@ -8,11 +8,10 @@ import {
   RefreshCw,
   Download,
   Terminal,
-  Cloud,
-  ShieldCheck,
   Key,
   KeyRound,
   Loader2,
+  ChevronDown,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import {
@@ -24,7 +23,8 @@ import {
 import { useCloud } from "@/context/CloudContext";
 import { useModal } from "@/context/ModalContext";
 import { usePlatform } from "@/context/PlatformContext";
-import { githubApi, settingsApi } from "@/lib/api";
+import { githubApi, settingsApi, getApiErrorMessage } from "@/lib/api";
+
 import { SettingsSection } from "./SettingsSection";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 
@@ -174,402 +174,486 @@ export function GitHubConnection() {
     : [];
   const hasInstallations = appAccounts.length > 0;
 
+  // ── One-active-method model ────────────────────────────────────────────────
+  // GitHub auth is a pick-ONE decision, but this card used to render every path
+  // at once: the App CTA, two chips that only navigate elsewhere, a full gh-CLI
+  // sub-card with its own header, and a token footnote. Four competing CTAs,
+  // three of which left the page. Now: show the method actually in use, and put
+  // the rest behind a disclosure.
+  const ghConnected = state.sources.ghCli.available;
+  const ghLogin = state.sources.ghCli.login;
+  const anyConnected = appConnected || ghConnected;
+  // Which one is doing the work. `primary` is the backend's own resolution, so
+  // the badge can't disagree with what clones actually use.
+  const activeIsGh = state.primary === "gh-cli";
+
   return (
-    <>
-      {/* ─── Openship GitHub App card (legacy single-source layout) ─────
-          The clean accounts table that was already good. On self-hosted
-          + not cloud-connected we swap the "Connect GitHub" CTA for a
-          "Connect Openship Cloud" prompt, because the App can't function
-          without cloud minting tokens for the local instance.            */}
-      <SettingsSection
-        icon={Github}
-        title={appConnected && appLogin ? interpolate(t.settings.github.titleWithLogin, { login: appLogin }) : t.settings.github.title}
-        description={
-          appConnected
-            ? hasInstallations
-              ? appAccounts.length === 1
-                ? t.settings.github.connectedOne
-                : interpolate(t.settings.github.connectedMany, { count: String(appAccounts.length) })
-              : t.settings.github.noInstallations
-            : isSelfHosted && !cloudConnected
-              ? t.settings.github.requiresCloud
-              : t.settings.github.connectPrompt
-        }
-        iconBg="bg-foreground/5"
-        iconColor="text-foreground"
-      >
-        {loading ? (
-          <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
-            <div className="size-4 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
-            {t.settings.github.checkingConnection}
-          </div>
-        ) : appConnected ? (
-          <div className="space-y-4">
-            {hasInstallations && (
-              <div className="space-y-2">
-                {appAccounts.map((acct) => (
-                  <div
-                    key={acct.login}
-                    className="flex items-center gap-3 px-3 py-2 bg-muted/30 rounded-lg border border-border/40"
-                  >
-                    {acct.avatar_url ? (
-                      <img
-                        src={acct.avatar_url}
-                        alt={acct.login}
-                        className="size-7 rounded-full"
-                      />
-                    ) : (
-                      <div className="size-7 rounded-full bg-muted flex items-center justify-center">
-                        <Github className="size-3.5 text-muted-foreground" />
-                      </div>
-                    )}
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-foreground truncate">
-                        {acct.login}
-                      </p>
-                    </div>
-                    <span className="text-[10px] font-medium text-muted-foreground bg-muted/50 px-2 py-0.5 rounded-full">
-                      {acct.type === "Organization" ? t.settings.github.orgBadge : t.settings.github.userBadge}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <div className="flex flex-wrap items-center gap-2">
-              {installUrl && (
-                <a
-                  href={installUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={() => {
-                    pendingConnectRef.current = true; // re-pull when the install tab closes
-                  }}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-foreground bg-muted/40 hover:bg-muted/60 rounded-lg border border-border/50 transition-colors"
-                >
-                  <Download className="size-3.5" />
-                  {hasInstallations ? t.settings.github.addAccount : t.settings.github.installApp}
-                </a>
-              )}
-              <a
-                href="https://github.com/settings/installations"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/40 hover:bg-muted/60 rounded-lg border border-border/50 transition-colors"
-              >
-                {t.settings.github.manageOnGithub}
-                <ExternalLink className="size-3" />
-              </a>
-              <button
-                onClick={() =>
-                  promptDisconnect(
-                    "oauth",
-                    t.settings.github.disconnectAppLabel,
-                    t.settings.github.disconnectAppBody,
-                  )
-                }
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-danger bg-danger-bg hover:bg-danger-bg rounded-lg border border-danger-border transition-colors"
-              >
-                <Unplug className="size-3.5" />
-                {t.settings.github.disconnect}
-              </button>
-            </div>
-          </div>
-        ) : isSelfHosted && !cloudConnected ? (
-          /* Self-hosted user without cloud — App is unreachable without
-             cloud minting tokens for them. Route them through the
-             cloud-connect flow first; once cloud is connected the App
-             card flips to the standard not-yet-OAuth'd state. */
-          <div className="space-y-3.5">
-            {/* No explainer paragraph here: the section description already says
-                "Requires Openship Cloud — the App is owned by openship.io", and
-                repeating it directly underneath was the same sentence twice. */}
-            <button
-              onClick={startCloudConnect}
-              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium bg-foreground text-background hover:bg-foreground/90 rounded-xl transition-colors"
-            >
-              <Cloud className="size-4" />
-              {t.settings.github.connectCloud}
-            </button>
-
-            {/* Escape hatches — clone private repos without cloud. SSH keys
-                attach per server (Servers → GitHub); a PAT works everywhere. */}
-            <div className="border-t border-border/40 pt-3">
-              <p className="text-xs font-medium text-muted-foreground/70 mb-2">
-                {t.settings.github.noCloudTitle}
-              </p>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  onClick={() => router.push("/servers")}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-foreground bg-muted/40 hover:bg-muted/60 rounded-lg border border-border/50 transition-colors"
-                >
-                  <KeyRound className="size-3.5" />
-                  {t.settings.github.useSshPerServer}
-                </button>
-                <button
-                  onClick={() => router.push("/settings?tab=tokens")}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-foreground bg-muted/40 hover:bg-muted/60 rounded-lg border border-border/50 transition-colors"
-                >
-                  <Key className="size-3.5" />
-                  {t.settings.github.usePat}
-                </button>
-              </div>
-              {/* The two buttons above ARE the instruction ("SSH key per server"
-                  → Servers, "Access token" → Tokens); the hint line under them
-                  only restated it in prose. */}
-            </div>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            <p className="text-sm text-muted-foreground leading-relaxed">
-              {t.settings.github.linkExplainer}
-            </p>
-            <button
-              onClick={() => connect("oauth")}
-              disabled={connecting}
-              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium bg-foreground text-background hover:bg-foreground/90 rounded-xl transition-colors disabled:opacity-50"
-            >
-              {connecting ? (
-                <>
-                  <RefreshCw className="size-4 animate-spin" />
-                  {t.settings.github.connecting}
-                </>
-              ) : (
-                <>
-                  <Github className="size-4" />
-                  {t.settings.github.connect}
-                </>
-              )}
-            </button>
-          </div>
-        )}
-        {/* ─── gh CLI — a second GitHub auth method, INSIDE this same section
-            (self-hosted only). One "GitHub" card, not two cards for the same
-            provider. A divider separates it from the App block above. ─── */}
-        {isSelfHosted && (
-          <div className="mt-4 border-t border-border/50 pt-4">
-            <GhCliBlock
-              available={state.sources.ghCli.available}
-              login={state.sources.ghCli.login}
+    <SettingsSection
+      icon={Github}
+      title={t.settings.github.title}
+      description={
+        loading
+          ? t.settings.github.checkingConnection
+          : anyConnected
+            ? interpolate(t.settings.github.activeVia, {
+                method: activeIsGh ? t.settings.github.methodDevice : t.settings.github.methodApp,
+              })
+            : t.settings.github.pickMethod
+      }
+      iconBg="bg-foreground/5"
+      iconColor="text-foreground"
+    >
+      {loading ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
+          <div className="size-4 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
+          {t.settings.github.checkingConnection}
+        </div>
+      ) : !anyConnected && cliAction ? (
+        /* A login is in flight. It's the only actionable thing on the card, so it
+           replaces the chooser entirely instead of appearing underneath it. */
+        <DeviceFlowPanel cliAction={cliAction} onRefresh={() => void loadStatus(true)} />
+      ) : anyConnected ? (
+        <div className="space-y-4">
+          {/* The identity that is actually authorizing clones, first. */}
+          {ghConnected && (
+            <ActiveIdentity
+              icon={Terminal}
+              label={ghLogin ? `@${ghLogin}` : t.settings.github.methodDevice}
               avatarUrl={state.sources.ghCli.avatarUrl}
-              active={state.primary === "gh-cli"}
-              onConnect={() => connect("cli")}
-              connecting={connecting && !state.sources.ghCli.available}
-              cliAction={cliAction}
+              method={t.settings.github.methodDevice}
+              active={activeIsGh}
               forwardEnabled={forwardGit}
               onManageForward={() => router.push("/settings?tab=tokens")}
-              onManageTokens={() => router.push("/settings?tab=tokens")}
             />
+          )}
+
+          {appConnected && (
+            <div className="space-y-3">
+              <ActiveIdentity
+                icon={Github}
+                label={appLogin ? `@${appLogin}` : t.settings.github.methodApp}
+                method={t.settings.github.methodApp}
+                active={!activeIsGh}
+              />
+              {/* Installations the App can actually deploy from. */}
+              {hasInstallations && (
+                <div className="space-y-2">
+                  {appAccounts.map((acct) => (
+                    <div
+                      key={acct.login}
+                      className="flex items-center gap-3 px-3 py-2 bg-muted/30 rounded-lg border border-border/40"
+                    >
+                      {acct.avatar_url ? (
+                        <img src={acct.avatar_url} alt={acct.login} className="size-7 rounded-full" />
+                      ) : (
+                        <div className="size-7 rounded-full bg-muted flex items-center justify-center">
+                          <Github className="size-3.5 text-muted-foreground" />
+                        </div>
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-foreground truncate">{acct.login}</p>
+                      </div>
+                      <span className="text-[10px] font-medium text-muted-foreground bg-muted/50 px-2 py-0.5 rounded-full">
+                        {acct.type === "Organization" ? t.settings.github.orgBadge : t.settings.github.userBadge}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="flex flex-wrap items-center gap-2">
+                {installUrl && (
+                  <a
+                    href={installUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => {
+                      pendingConnectRef.current = true; // re-pull when the install tab closes
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-foreground bg-muted/40 hover:bg-muted/60 rounded-lg border border-border/50 transition-colors"
+                  >
+                    <Download className="size-3.5" />
+                    {hasInstallations ? t.settings.github.addAccount : t.settings.github.installApp}
+                  </a>
+                )}
+                <a
+                  href="https://github.com/settings/installations"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/40 hover:bg-muted/60 rounded-lg border border-border/50 transition-colors"
+                >
+                  {t.settings.github.manageOnGithub}
+                  <ExternalLink className="size-3" />
+                </a>
+              </div>
+            </div>
+          )}
+
+          {/* Actions + the switcher. One row, so "disconnect" and "use something
+              else" aren't three paragraphs apart like they used to be. */}
+          <div className="flex flex-wrap items-center gap-2 border-t border-border/40 pt-3">
+            <button
+              onClick={() =>
+                promptDisconnect(
+                  activeIsGh ? "cli" : "oauth",
+                  activeIsGh ? t.settings.github.methodDevice : t.settings.github.disconnectAppLabel,
+                  activeIsGh ? t.settings.github.ghCli.disconnectBody : t.settings.github.disconnectAppBody,
+                )
+              }
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-danger bg-danger-bg hover:bg-danger-bg rounded-lg border border-danger-border transition-colors"
+            >
+              <Unplug className="size-3.5" />
+              {t.settings.github.disconnect}
+            </button>
+            <MethodDisclosure summary={t.settings.github.changeMethod}>
+              <MethodChooser
+                isSelfHosted={isSelfHosted}
+                cloudConnected={cloudConnected}
+                connecting={connecting}
+                showSignIn={!ghConnected}
+                showApp={!appConnected}
+                onSignIn={() => connect("cli")}
+                onConnectApp={() => connect("oauth")}
+                onConnectCloud={startCloudConnect}
+                onSsh={() => router.push("/servers")}
+                onToken={() => router.push("/settings?tab=tokens")}
+              />
+            </MethodDisclosure>
           </div>
-        )}
-      </SettingsSection>
-    </>
+        </div>
+      ) : (
+        /* Nothing connected. Signing in with GitHub is the default because it
+           needs no app registration, no Openship account and no shell on the box;
+           everything else is a deliberate choice behind the disclosure. */
+        <MethodChooser
+          isSelfHosted={isSelfHosted}
+          cloudConnected={cloudConnected}
+          connecting={connecting}
+          showSignIn
+          showApp
+          primary
+          onSignIn={() => connect("cli")}
+          onConnectApp={() => connect("oauth")}
+          onConnectCloud={startCloudConnect}
+          onSsh={() => router.push("/servers")}
+          onToken={() => router.push("/settings?tab=tokens")}
+        />
+      )}
+    </SettingsSection>
   );
 }
 
 /**
- * gh CLI auth — an inline sub-block rendered INSIDE the GitHub section (not its
- * own card), so there's a single "GitHub" section, not two cards for the same
- * provider. Surfaces the auth state, the "Used for deploys" state, git-identity
- * forwarding, and the connect/disconnect action.
+ * A connected GitHub identity: who, by which method, and whether it's the one
+ * actually authorizing clones. Replaces the old gh-CLI sub-card, whose eight
+ * mutually-exclusive prose paragraphs were most of this card's noise — the two
+ * that carried real consequences (remote deploys refused; forwarding is what
+ * lifts that) survive as a single inline note.
  */
-function GhCliBlock(props: {
-  available: boolean;
-  login?: string;
-  avatarUrl?: string;
+function ActiveIdentity(props: {
+  icon: typeof Github;
+  label: string;
+  method: string;
   active: boolean;
-  onConnect: () => void;
-  connecting: boolean;
-  /** In-progress login the shared context returned: a device code (own client
-   *  id) to show inline, or a `gh auth login` instruction for the instance. */
-  cliAction: CliAction | null;
-  /** "Forward my git identity to build servers" is on → gh CLI authenticates
-   *  remote server clones too (not local-only). */
-  forwardEnabled: boolean;
-  /** Jump to the Clone-credentials section (Tokens tab) that owns the toggle. */
-  onManageForward: () => void;
-  /** Jump to the Tokens tab (clone tokens / PAT shortcut). */
-  onManageTokens: () => void;
+  avatarUrl?: string;
+  /** gh-CLI only: identity forwarding is what makes it work for REMOTE builds. */
+  forwardEnabled?: boolean;
+  onManageForward?: () => void;
 }) {
-  const { available, login, avatarUrl, active, onConnect, connecting, cliAction, forwardEnabled, onManageForward, onManageTokens } = props;
+  const { icon: Icon, label, method, active, avatarUrl, forwardEnabled, onManageForward } = props;
   const { t } = useI18n();
   return (
-      <div className="space-y-3">
-        {/* Compact "gh CLI" sub-header — this block lives INSIDE the GitHub
-            section (not a separate card), so it uses a small inline header. */}
-        <div className="flex items-center gap-2.5">
-          <div className="size-8 rounded-lg bg-foreground/5 flex items-center justify-center shrink-0">
-            <Terminal className="size-4 text-foreground" />
-          </div>
-          <div className="min-w-0">
-            <p className="text-sm font-semibold text-foreground leading-tight">{t.settings.github.ghCli.title}</p>
-            {/* When authed, the identity row right below shows the avatar + @login
-                + the deploys badge — so "Logged in as @login" here was the same
-                line twice. Only the not-authed description earns a subtitle. */}
-            {!(available && login) && (
-              <p className="text-xs text-muted-foreground truncate">
-                {t.settings.github.ghCli.fallbackDesc}
-              </p>
-            )}
-          </div>
-        </div>
-        {/* Auth identity row when authenticated — the "Used for deploys" badge
-            rides on the RIGHT of this same row (right-aligned to the avatar)
-            instead of adding its own line above. */}
-        {available && login && (
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3 px-3 py-2 bg-muted/30 rounded-lg border border-border/40">
-              {avatarUrl ? (
-                <img src={avatarUrl} alt={login} className="size-6 rounded-full" />
-              ) : (
-                <Terminal className="size-4 text-muted-foreground" />
-              )}
-              <span className="text-sm font-medium text-foreground">@{login}</span>
-            </div>
-            {active && (
-              <span
-                className="shrink-0 inline-flex items-center rounded-full bg-success/10 px-2 py-0.5 text-[10px] font-medium text-success ring-1 ring-inset ring-success/20"
-                title={t.settings.github.ghCli.usedForDeploysTitle}
-              >
-                {t.settings.github.ghCli.usedForDeploys}
-              </span>
-            )}
-          </div>
-        )}
-
-        {/* Active-source warning — remote deploys get refused. Only when
-            forwarding is OFF; with forwarding on, gh CLI DOES reach remote. */}
-        {active && !forwardEnabled && (
-          <p className="text-sm text-muted-foreground leading-relaxed">
-            <span className="font-medium text-foreground">{t.settings.github.ghCli.activeWarnStrong}</span>{" "}
-            {t.settings.github.ghCli.activeWarnRest}
-          </p>
-        )}
-        {/* Cloud-app mode + CLI available: it's a real fallback now.
-            clone-auth.ts uses gh CLI for local builds when the App
-            doesn't have an installation on the repo's owner (your
-            personal forks, side projects, etc). Remote builds still
-            route through the App regardless. */}
-        {!active && available && (
-          <p className="text-sm text-muted-foreground leading-relaxed">
-            <ShieldCheck className="size-3.5 inline-block align-text-bottom me-1" />
-            {t.settings.github.ghCli.primaryNotePrefix}{" "}
-            <span className="text-foreground font-medium">{t.settings.github.ghCli.primaryNoteStrong}</span>{" "}
-            {t.settings.github.ghCli.primaryNoteSuffix}
-          </p>
-        )}
-        {/* CLI not yet authed but App is connected — explain why
-            setting up gh CLI is still useful. */}
-        {!active && !available && (
-          <p className="text-sm text-muted-foreground leading-relaxed">
-            {t.settings.github.ghCli.optionalPrefix}{" "}
-            <code className="px-1.5 py-0.5 rounded bg-muted/60 text-foreground font-mono text-xs">
-              gh auth login
-            </code>{" "}
-            {t.settings.github.ghCli.optionalSuffix}
-          </p>
-        )}
-
-        {/* Git-identity forwarding — the access point that turns gh CLI from a
-            local-only source into a remote-capable one. Shows the current state
-            and links to the toggle (Clone credentials, Tokens tab). */}
-        {available && (
-          <div className="flex items-start gap-2 rounded-lg border border-border/40 bg-muted/20 px-3 py-2">
-            <KeyRound className="size-3.5 mt-0.5 shrink-0 text-muted-foreground" />
-            <p className="text-xs text-muted-foreground leading-relaxed">
-              {forwardEnabled
-                ? t.settings.github.ghCli.forwardOnNote
-                : t.settings.github.ghCli.forwardOffHint}{" "}
-              <button
-                type="button"
-                onClick={onManageForward}
-                className="font-medium text-foreground underline underline-offset-2 hover:text-primary"
-              >
-                {t.settings.github.ghCli.manageForward}
-              </button>
-            </p>
-          </div>
-        )}
-
-        {/* Login action + in-progress state (not yet authed).
-            A pending cliAction renders inline: a device code (operator's own
-            GITHUB_CLIENT_ID) with the github.com/login/device link, or the
-            `gh auth login` instruction for this instance. Both resolve
-            hands-off — the shared context polls and flips this to authed. */}
-        {!available &&
-          (cliAction ? (
-            <div className="rounded-lg border border-border/50 bg-muted/20 p-3 space-y-2">
-              {cliAction.type === "device_flow" ? (
-                <>
-                  <p className="text-xs text-muted-foreground leading-relaxed">
-                    {t.settings.github.ghCli.deviceHint}
-                  </p>
-                  <div className="flex items-center gap-3">
-                    <code className="rounded-md bg-muted px-3 py-1.5 font-mono text-base font-bold tracking-widest text-foreground">
-                      {cliAction.userCode}
-                    </code>
-                    <a
-                      href={cliAction.verificationUri}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-xs font-medium text-primary underline underline-offset-2"
-                    >
-                      {cliAction.verificationUri}
-                      <ExternalLink className="size-3" />
-                    </a>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <p className="text-xs text-muted-foreground leading-relaxed">{cliAction.message}</p>
-                  <code className="block rounded-md bg-muted px-3 py-1.5 font-mono text-xs text-foreground">
-                    {cliAction.command}
-                  </code>
-                </>
-              )}
-              <p className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-                <Loader2 className="size-3.5 animate-spin" />
-                {t.settings.github.ghCli.waiting}
-              </p>
-            </div>
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 px-3 py-2 bg-muted/30 rounded-lg border border-border/40 min-w-0">
+          {avatarUrl ? (
+            <img src={avatarUrl} alt={label} className="size-6 rounded-full" />
           ) : (
-            <button
-              onClick={onConnect}
-              disabled={connecting}
-              className="inline-flex items-center gap-2 rounded-xl bg-foreground px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-50"
-            >
-              {connecting ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <Github className="size-4" />
-              )}
-              {t.settings.github.ghCli.login}
-            </button>
-          ))}
-
-        {/* Disconnect hint when authed. */}
-        {available && (
-          <p className="text-xs text-muted-foreground/70 leading-relaxed">
-            {t.settings.github.ghCli.disconnectPrefix}{" "}
-            <code className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-[11px] text-foreground/80">
-              gh auth logout
-            </code>{" "}
-            {t.settings.github.ghCli.disconnectSuffix}
-          </p>
+            <Icon className="size-4 text-muted-foreground shrink-0" />
+          )}
+          <span className="text-sm font-medium text-foreground truncate">{label}</span>
+          <span className="text-[10px] text-muted-foreground/70 shrink-0">{method}</span>
+        </div>
+        {active && (
+          <span
+            className="shrink-0 inline-flex items-center rounded-full bg-success/10 px-2 py-0.5 text-[10px] font-medium text-success ring-1 ring-inset ring-success/20"
+            title={t.settings.github.ghCli.usedForDeploysTitle}
+          >
+            {t.settings.github.ghCli.usedForDeploys}
+          </span>
         )}
+      </div>
+      {/* The one consequence worth interrupting for: without forwarding, this
+          identity only authorizes LOCAL builds and remote deploys are refused. */}
+      {onManageForward && !forwardEnabled && (
+        <div className="flex items-start gap-2 rounded-lg border border-border/40 bg-muted/20 px-3 py-2">
+          <KeyRound className="size-3.5 mt-0.5 shrink-0 text-muted-foreground" />
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            {t.settings.github.ghCli.forwardOffHint}{" "}
+            <button
+              type="button"
+              onClick={onManageForward}
+              className="font-medium text-foreground underline underline-offset-2 hover:text-primary"
+            >
+              {t.settings.github.ghCli.manageForward}
+            </button>
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
 
-        {/* Clone-token shortcut — a personal access token is the other way to
-            authorize clones (no gh, no cloud). */}
-        <p className="text-xs text-muted-foreground/70 leading-relaxed">
-          {t.settings.github.ghCli.tokenAltPrefix}{" "}
+/**
+ * The in-flight login. Device flow is the normal case: a code to paste plus a
+ * button that opens GitHub. GitHub's device grant returns no pre-filled URL
+ * (there is no `verification_uri_complete`), so copy-then-open is genuinely the
+ * shortest path — the same thing `gh auth login` does in a terminal.
+ *
+ * The `terminal` variant is the last-resort fallback for an instance with no
+ * device client id at all, and it says "on the server" because that is where the
+ * command has to run.
+ */
+function DeviceFlowPanel(props: { cliAction: CliAction; onRefresh: () => void }) {
+  const { cliAction, onRefresh } = props;
+  const { t } = useI18n();
+
+  if (cliAction.type === "token") {
+    return <TokenForm message={cliAction.message} hint={cliAction.command} onSaved={onRefresh} />;
+  }
+
+  if (cliAction.type === "device_flow") {
+    return (
+      <div className="space-y-3">
+        <p className="text-sm text-muted-foreground leading-relaxed">
+          {t.settings.github.ghCli.deviceHint}
+        </p>
+        <div className="flex flex-wrap items-center gap-3">
           <button
             type="button"
-            onClick={onManageTokens}
-            className="font-medium text-foreground underline underline-offset-2 hover:text-primary"
+            onClick={() => void navigator.clipboard?.writeText(cliAction.userCode ?? "").catch(() => {})}
+            title={t.settings.github.copyCode}
+            className="rounded-md bg-muted px-3 py-1.5 font-mono text-base font-bold tracking-widest text-foreground hover:bg-muted/70 transition-colors"
           >
-            {t.settings.github.ghCli.tokenAltLink}
+            {cliAction.userCode}
           </button>
+          <a
+            href={cliAction.verificationUri}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-2 rounded-xl bg-foreground px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-90"
+          >
+            <ExternalLink className="size-4" />
+            {t.settings.github.openGithub}
+          </a>
+        </div>
+        <p className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+          <Loader2 className="size-3.5 animate-spin" />
+          {t.settings.github.ghCli.waiting}
         </p>
       </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <p className="text-sm text-muted-foreground leading-relaxed">{cliAction.message}</p>
+      <code className="block rounded-md bg-muted px-3 py-2 font-mono text-xs text-foreground">
+        {cliAction.command}
+      </code>
+      <button
+        onClick={onRefresh}
+        className="inline-flex items-center gap-2 rounded-xl bg-foreground px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-90"
+      >
+        <RefreshCw className="size-4" />
+        {t.settings.github.ghCli.recheck}
+      </button>
+    </div>
+  );
+}
+
+/** Collapsible "other methods" — native <details> so it needs no state. */
+function MethodDisclosure(props: { summary: string; children: React.ReactNode }) {
+  return (
+    <details className="group w-full">
+      <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/40 hover:bg-muted/60 rounded-lg border border-border/50 transition-colors">
+        {props.summary}
+        <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
+      </summary>
+      <div className="mt-3">{props.children}</div>
+    </details>
+  );
+}
+
+/**
+ * The method list. `primary` renders the recommended path as a real CTA with the
+ * rest behind a disclosure; without it (the "change method" case) everything is
+ * an equal-weight row, because the operator has already decided to switch.
+ */
+function MethodChooser(props: {
+  isSelfHosted: boolean;
+  cloudConnected: boolean;
+  connecting: boolean;
+  showSignIn: boolean;
+  showApp: boolean;
+  primary?: boolean;
+  onSignIn: () => void;
+  onConnectApp: () => void;
+  onConnectCloud: () => void;
+  onSsh: () => void;
+  onToken: () => void;
+}) {
+  const {
+    isSelfHosted, cloudConnected, connecting, showSignIn, showApp, primary,
+    onSignIn, onConnectApp, onConnectCloud, onSsh, onToken,
+  } = props;
+  const { t } = useI18n();
+
+  const row = (
+    key: string,
+    Icon: typeof Github,
+    label: string,
+    desc: string,
+    onClick: () => void,
+  ) => (
+    <button
+      key={key}
+      onClick={onClick}
+      disabled={connecting}
+      className="flex w-full items-start gap-3 rounded-lg border border-border/50 bg-muted/20 px-3 py-2.5 text-start transition-colors hover:border-primary/40 hover:bg-muted/40 disabled:opacity-50"
+    >
+      <Icon className="size-4 mt-0.5 shrink-0 text-muted-foreground" />
+      <span className="min-w-0">
+        <span className="block text-sm font-medium text-foreground">{label}</span>
+        <span className="block text-xs text-muted-foreground leading-relaxed">{desc}</span>
+      </span>
+    </button>
+  );
+
+  // The App needs Openship Cloud on self-hosted (the private key lives in
+  // openship.io), so the row's action is cloud-connect until that's done.
+  const appRow = row(
+    "app",
+    Github,
+    t.settings.github.methodApp,
+    isSelfHosted && !cloudConnected ? t.settings.github.requiresCloud : t.settings.github.methodAppDesc,
+    isSelfHosted && !cloudConnected ? onConnectCloud : onConnectApp,
+  );
+
+  const others = [
+    ...(showApp ? [appRow] : []),
+    row("ssh", KeyRound, t.settings.github.useSshPerServer, t.settings.github.methodSshDesc, onSsh),
+    row("pat", Key, t.settings.github.usePat, t.settings.github.methodTokenDesc, onToken),
+  ];
+
+  if (!primary) {
+    return (
+      <div className="space-y-2">
+        {showSignIn &&
+          row("signin", Github, t.settings.github.signIn, t.settings.github.signInDesc, onSignIn)}
+        {others}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3.5">
+      <div className="space-y-2">
+        <button
+          onClick={onSignIn}
+          disabled={connecting}
+          className="inline-flex items-center gap-2 rounded-xl bg-foreground px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-50"
+        >
+          {connecting ? <Loader2 className="size-4 animate-spin" /> : <Github className="size-4" />}
+          {t.settings.github.signIn}
+        </button>
+        <p className="text-xs text-muted-foreground leading-relaxed">{t.settings.github.signInDesc}</p>
+      </div>
+      <MethodDisclosure summary={t.settings.github.otherMethods}>
+        <div className="space-y-2">{others}</div>
+      </MethodDisclosure>
+    </div>
+  );
+}
+
+/**
+ * Paste-a-token connect. Shown when the instance has no device client id, which
+ * is the case the old UI answered with "run `gh auth login` on the server" — an
+ * instruction the operator often cannot follow (the api container has no `gh` and
+ * cannot see the host's ~/.config/gh) and shouldn't have to.
+ *
+ * The server validates scope before storing, so an under-scoped token fails HERE,
+ * on the field just typed into, rather than as a confusing clone failure inside a
+ * deploy later. `gh auth login` survives as a secondary hint for bare installs
+ * that do have the binary — reading its hosts.yml still works.
+ */
+function TokenForm(props: { message: string; hint?: string; onSaved: () => void }) {
+  const { message, hint, onSaved } = props;
+  const { t } = useI18n();
+  const [token, setToken] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    const value = token.trim();
+    if (!value || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await githubApi.setInstanceToken(value);
+      setToken(""); // don't leave the secret in component state after success
+      onSaved();
+    } catch (err) {
+      setError(getApiErrorMessage(err, t.settings.github.tokenSaveFailed));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <p className="text-sm text-muted-foreground leading-relaxed">{message}</p>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="password"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void submit();
+          }}
+          placeholder="ghp_…"
+          autoComplete="off"
+          spellCheck={false}
+          className="min-w-0 flex-1 rounded-lg border border-border/50 bg-muted/20 px-3 py-2 font-mono text-sm text-foreground placeholder:text-muted-foreground/50 focus:border-primary/50 focus:outline-none"
+        />
+        <button
+          onClick={() => void submit()}
+          disabled={!token.trim() || saving}
+          className="inline-flex items-center gap-2 rounded-xl bg-foreground px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-90 disabled:opacity-50"
+        >
+          {saving && <Loader2 className="size-4 animate-spin" />}
+          {t.settings.github.tokenConnect}
+        </button>
+      </div>
+      {error && <p className="text-xs text-danger leading-relaxed">{error}</p>}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground/70">
+        <a
+          href="https://github.com/settings/tokens/new?scopes=repo,read:org&description=Openship"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 font-medium text-foreground underline underline-offset-2 hover:text-primary"
+        >
+          {t.settings.github.tokenCreate}
+          <ExternalLink className="size-3" />
+        </a>
+        {hint && (
+          <span>
+            {t.settings.github.tokenGhHint}{" "}
+            <code className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-[11px] text-foreground/80">
+              {hint}
+            </code>
+          </span>
+        )}
+      </div>
+    </div>
   );
 }

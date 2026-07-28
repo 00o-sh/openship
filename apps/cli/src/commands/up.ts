@@ -573,6 +573,13 @@ async function runForeground(opts: UpOpts, source?: FromSourceRun): Promise<void
     if (!source) {
       env.OPENSHIP_MIGRATIONS_DIR = join(SERVER_DIR, "migrations");
       env.OPENSHIP_PGLITE_ASSETS_DIR = join(SERVER_DIR, "pglite");
+      // Pin the mail-server install source to the staged engine tree. The
+      // bundled server has no monorepo, so mail.service.ts's cwd-relative
+      // default (../../apps/email/engine) would miss and "Transfer iRedMail
+      // Engine" would fail with tar: could not chdir. from-source runs from the
+      // clone (apiCwd=apiDir), where the default resolves — so leave it unset.
+      const engineDir = join(SERVER_DIR, "engine");
+      if (existsSync(engineDir)) env.MAIL_SERVER_ENGINE_DIR = engineDir;
     }
     // CLI-managed instances ALWAYS require login (zero-auth is desktop-only).
     // The admin is created by `openship` setup via the internal-token-gated

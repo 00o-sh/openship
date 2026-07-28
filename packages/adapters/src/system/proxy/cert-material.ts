@@ -20,8 +20,7 @@
 import { X509Certificate, createPrivateKey } from "node:crypto";
 import { safeErrorMessage } from "@repo/core";
 import type { CommandExecutor, ManualCert } from "../../types";
-import { containerCommand } from "../edge-container-executor";
-import { sq } from "../local-shell";
+import { readMaybeInContainer } from "../edge-container-executor";
 
 /**
  * A cert we're prepared to adopt: the PEMs plus everything the callers used to
@@ -207,21 +206,4 @@ export async function readDeclaredPair(
   const certPem = await readMaybeInContainer(exec, certPath, container);
   const keyPem = await readMaybeInContainer(exec, keyPath, container);
   return certPem && keyPem ? { certPem, keyPem } : null;
-}
-
-/**
- * Read one file on the host, falling back to inside `container`. Mirrors
- * `readEdgeFile`'s host-then-container rule, but for a FOREIGN proxy's container
- * rather than our own edge (readEdgeFile resolves ours and can't be pointed at
- * someone else's). Returns "" rather than throwing: absence is a normal answer.
- */
-export async function readMaybeInContainer(
-  exec: CommandExecutor,
-  path: string,
-  container?: string | null,
-): Promise<string> {
-  const direct = await exec.readFile(path).catch(() => "");
-  if (direct.trim()) return direct;
-  if (!container) return "";
-  return exec.exec(containerCommand(container, `cat ${sq(path)}`)).catch(() => "");
 }

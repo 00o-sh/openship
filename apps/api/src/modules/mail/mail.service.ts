@@ -43,9 +43,12 @@ const REMOTE_ENGINE_DIR = "/root/iRedMail-engine";
 /**
  * Absolute path to `apps/email/engine/` on the openship API host.
  *
- * `MAIL_SERVER_ENGINE_DIR` overrides for ops who pin a packaged build to a
- * fixed location; otherwise resolved relative to apps/api's cwd so the
- * monorepo dev layout works without configuration.
+ * `MAIL_SERVER_ENGINE_DIR` is the authoritative source when set: the packaged
+ * desktop app (services.ts) and the CLI-bundled server (up.ts) point it at the
+ * engine tree they ship, because they run with a cwd that has no monorepo. The
+ * cwd-relative fallback only holds for the monorepo dev layout (cwd=apps/api)
+ * and from-source runs — anywhere else it resolves to a nonexistent path and
+ * the tar in step "Transfer iRedMail Engine" fails with "could not chdir".
  */
 function resolveLocalEngineDir(): string {
   if (process.env.MAIL_SERVER_ENGINE_DIR) {

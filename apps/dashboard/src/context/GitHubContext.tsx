@@ -130,6 +130,10 @@ interface GitHubContextValue {
 
 export type CliAction =
   | { type: "terminal"; command: string; message: string }
+  /** No device client id on this instance — collect a token in the UI instead of
+   *  sending the operator to a shell they may not have. `command` is the
+   *  secondary `gh auth login` hint for bare installs that do have gh. */
+  | { type: "token"; command: string; message: string }
   | { type: "device_flow"; userCode: string; verificationUri: string; expiresIn: number; interval: number };
 
 const GitHubContext = createContext<GitHubContextValue | undefined>(undefined);
@@ -323,6 +327,12 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
             expiresIn: res.expiresIn,
             interval: res.interval,
           });
+          setConnecting(false);
+          return;
+
+        case "token":
+          // Instance has no device client id — collect a token inline.
+          setCliAction({ type: "token", command: res.command, message: res.message });
           setConnecting(false);
           return;
 

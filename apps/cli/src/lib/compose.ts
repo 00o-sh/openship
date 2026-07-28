@@ -13,8 +13,8 @@
  */
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -285,6 +285,61 @@ function readEnvFile(): Record<string, string> {
  * the host ops the socket can't do. Prereq: the host runs sshd reachable from
  * containers on host.docker.internal:22.
  */
+/** Marks the authorized_keys line as ours, so re-runs can revoke the previous one. */
+const HOST_KEY_COMMENT = "openship-host-executor";
+
+/**
+ * Source addresses allowed to use the host-executor key.
+ *
+ * The container reaches the host over the docker bridge gateway
+ * (`host.docker.internal:host-gateway`), so every legitimate use of this key comes
+ * from RFC1918 space. Without a `from=` restriction the key is a general-purpose
+ * login for this user from ANY address sshd accepts — on a VPS, the whole internet.
+ * That is a materially bigger blast radius than the docker socket this channel is
+ * justified against: the socket is only reachable from inside the container, while
+ * an unrestricted key works from anywhere the private half turns up.
+ */
+const HOST_KEY_FROM = "172.16.0.0/12,192.168.0.0/16,10.0.0.0/8,127.0.0.1";
+
+/**
+ * The authorized_keys line for our public key.
+ *
+ * `restrict` (OpenSSH 7.2+) denies port forwarding, agent forwarding, X11 and user
+ * rc, and is fail-closed: capabilities OpenSSH adds later stay off unless named
+ * here. The no-forwarding part is what matters most — it stops a leaked key from
+ * being turned into a tunnel into other services bound on the host.
+ *
+ * `pty` is added back deliberately: `restrict` also implies `no-pty`, and the host
+ * terminal (`SshExecutor.openShell` → `client.shell({ term, cols, rows })`) needs
+ * one. It costs nothing in privilege — the key already grants command execution, so
+ * a pty only changes how that execution is framed, not what it can do.
+ */
+function hostKeyAuthLine(pub: string): string {
+  return `from="${HOST_KEY_FROM}",restrict,pty ${pub}`;
+}
+
+/**
+ * PURE. The new contents of `authorized_keys` with our host-executor key present
+ * exactly once, restricted, and every earlier openship line revoked.
+ *
+ * Revoking matters twice over. An install whose key dir was wiped (a re-run after
+ * `rm -rf ~/.openship`) used to leave the OLD public key authorized forever — a
+ * credential no amount of re-running could take back. And an install predating the
+ * `from=`/`restrict` hardening would keep its unrestricted line alongside the new
+ * one, so sshd would still honour the wide grant and the hardening would be purely
+ * cosmetic. Lines the operator added themselves are matched by neither rule and are
+ * preserved untouched.
+ *
+ * Exported for tests: this is security-relevant string surgery on a file that
+ * governs who can log into the box, so it's verified directly rather than inferred.
+ */
+export function rewriteHostAuthorizedKeys(existing: string, pub: string): string {
+  const kept = existing
+    .split("\n")
+    .filter((line) => line.trim() && !line.includes(HOST_KEY_COMMENT));
+  return [...kept, hostKeyAuthLine(pub)].join("\n") + "\n";
+}
+
 function provisionHostSshChannel(): { user: string; keyPath: string } | null {
   if (process.platform !== "linux") return null; // host.docker.internal SSH is the Linux compose path
   try {
@@ -294,7 +349,7 @@ function provisionHostSshChannel(): { user: string; keyPath: string } | null {
     if (!existsSync(keyPath)) {
       const g = spawnSync(
         "ssh-keygen",
-        ["-t", "ed25519", "-N", "", "-q", "-f", keyPath, "-C", "openship-host-executor"],
+        ["-t", "ed25519", "-N", "", "-q", "-f", keyPath, "-C", HOST_KEY_COMMENT],
         { stdio: "ignore" },
       );
       if (g.status !== 0) return null;
@@ -302,17 +357,31 @@ function provisionHostSshChannel(): { user: string; keyPath: string } | null {
     const pub = readFileSync(`${keyPath}.pub`, "utf8").trim();
     if (!pub) return null;
 
-    // Authorize the key for the host user running `openship up` (the container
-    // SSHes in as this user). Idempotent — only append if not already present.
+    // Authorize the key for the host user the container SSHes in as. `userInfo()`
+    // rather than $USER: os.homedir() and $USER can disagree under sudo (HOME=/root
+    // with USER preserved, or vice versa), which would write the key into one
+    // account's authorized_keys while telling the container to log in as another —
+    // host ops then fail with a bare "auth failed". userInfo() is the same passwd
+    // entry homedir() resolves from, so the two can't drift.
+    const user = (() => {
+      try {
+        return userInfo().username;
+      } catch {
+        return process.env.USER || process.env.LOGNAME || "root";
+      }
+    })();
+
     const userSshDir = join(homedir(), ".ssh");
     mkdirSync(userSshDir, { recursive: true, mode: 0o700 });
     const authKeys = join(userSshDir, "authorized_keys");
     const existing = existsSync(authKeys) ? readFileSync(authKeys, "utf8") : "";
-    if (!existing.includes(pub)) {
-      const sep = existing && !existing.endsWith("\n") ? "\n" : "";
-      writeFileSync(authKeys, `${existing}${sep}${pub}\n`, { mode: 0o600 });
-    }
-    return { user: process.env.USER || process.env.LOGNAME || "root", keyPath };
+    const next = rewriteHostAuthorizedKeys(existing, pub);
+    if (next !== existing) writeFileSync(authKeys, next, { mode: 0o600 });
+    // mode: on writeFileSync only applies at CREATE, so an authorized_keys that
+    // already existed keeps its old permissions — set them explicitly.
+    chmodSync(authKeys, 0o600);
+
+    return { user, keyPath };
   } catch {
     return null;
   }

@@ -4,6 +4,7 @@ import {
   containerCommand,
   edgeContainerExecutor,
   readEdgeFile,
+  readMaybeInContainer,
   writeEdgeFile,
 } from "./edge-container-executor";
 import type { CommandExecutor } from "../types";
@@ -107,6 +108,35 @@ describe("edgeContainerExecutor", () => {
     const edge = edgeContainerExecutor(inner, "openship-edge");
     await edge.dispose?.();
     expect(inner.dispose).toHaveBeenCalled();
+  });
+});
+
+// The FOREIGN-proxy door: cert/config readers during import + migrate pass a
+// container name they were handed (nginx/caddy/traefik), not our edge. Same rule,
+// same function — these pin that the two doors can't drift apart.
+describe("readMaybeInContainer (a named, foreign container)", () => {
+  it("falls back into that container, not into ours", async () => {
+    const exec = fakeExecutor({
+      readFile: vi.fn(async () => ""),
+      exec: vi.fn(async () => "cert-from-caddy"),
+    });
+    expect(await readMaybeInContainer(exec, "/data/caddy/x.crt", "caddy")).toBe("cert-from-caddy");
+    expect(execCalls(exec)).toEqual([`docker exec 'caddy' sh -c 'cat '\\''/data/caddy/x.crt'\\'''`]);
+  });
+
+  it("prefers the host and never runs docker when the host answers", async () => {
+    const exec = fakeExecutor({ readFile: vi.fn(async () => "cert-on-host") });
+    expect(await readMaybeInContainer(exec, "/etc/ssl/x.crt", "caddy")).toBe("cert-on-host");
+    expect(execCalls(exec)).toEqual([]);
+  });
+
+  it("is a plain host read with no container (absent or null)", async () => {
+    const noArg = fakeExecutor({ readFile: vi.fn(async () => "") });
+    expect(await readMaybeInContainer(noArg, "/etc/ssl/x.crt")).toBe("");
+    expect(execCalls(noArg)).toEqual([]);
+    const nulled = fakeExecutor({ readFile: vi.fn(async () => "") });
+    expect(await readMaybeInContainer(nulled, "/etc/ssl/x.crt", null)).toBe("");
+    expect(execCalls(nulled)).toEqual([]);
   });
 });
 

@@ -26,47 +26,50 @@ export type EdgeFilesAt = "host" | "auto";
  * the read path skip the `docker ps` entirely when the host answers — which is
  * every non-legacy box.
  */
-type EdgeContainerRef = string | null | (() => Promise<string | null>);
+export type EdgeContainerRef = string | null | (() => Promise<string | null>);
 
-function resolveRef(ref: EdgeContainerRef): Promise<string | null> | string | null {
+function resolveRef(
+  ref: EdgeContainerRef | undefined,
+): Promise<string | null> | string | null | undefined {
   return typeof ref === "function" ? ref() : ref;
 }
 
 /**
- * Read a path the edge owns (a cert, a vhost) from wherever its state actually
- * lives, on the box `inner` reaches. `container` names the edge container — already
- * known, null when there is none, or a thunk that resolves one on demand.
+ * Read a file a proxy owns (a cert, a vhost) from wherever its state actually
+ * lives, on the box `exec` reaches. `container` is the fallback — a name, null/
+ * absent when there is none, or a thunk that resolves one on demand.
  *
  * Canonical location is the HOST — certs live at `/etc/letsencrypt` and vhosts at a
  * bind-mounted dir, so a plain read is right for a bare edge and for a containerized
- * one on current mounts. A LEGACY install keeps that state in a Docker-managed named
- * volume the host can't see, where a host read returns nothing and is
- * indistinguishable from "no cert" — so fall back to reading inside the container.
- * Never throws: "" means nothing to reuse, which is what every caller already treats
- * as absence.
+ * one on current mounts. A containerized proxy may instead keep that state in a
+ * Docker-managed named volume the host can't see, where a host read returns nothing
+ * and is indistinguishable from "no cert" — so fall back to reading inside the
+ * container. Never throws: "" means nothing to reuse, which is what every caller
+ * already treats as absence.
  *
- * This is the ONE implementation of that decision. It has two doors — the standalone
- * `readEdgeFile` for callers holding a plain executor, and `files: "auto"` on
- * `edgeContainerExecutor` for callers holding a provider — and they must never be
- * able to answer differently for the same box.
+ * This is the ONE implementation of that rule, for OUR edge and for a FOREIGN proxy
+ * alike — the two only differ in which container they name, not in how the file is
+ * found. Three doors reach it and none may answer differently for the same box:
+ * `readEdgeFile` (our edge, resolved lazily), a plain container name (a foreign
+ * proxy being imported/migrated), and `files: "auto"` on `edgeContainerExecutor`.
  */
-async function readEdgeFileIn(
-  inner: CommandExecutor,
-  container: EdgeContainerRef,
+export async function readMaybeInContainer(
+  exec: CommandExecutor,
   path: string,
+  container?: EdgeContainerRef,
 ): Promise<string> {
-  const direct = await inner.readFile(path).catch(() => "");
+  const direct = await exec.readFile(path).catch(() => "");
   if (direct.trim()) return direct;
   // Resolved only NOW, on the miss: the overwhelmingly common case is a host hit,
   // and it must not pay for a `docker ps` to answer a question it never asks.
   const name = await resolveRef(container);
   if (!name) return "";
-  return inner.exec(containerCommand(name, `cat ${sq(path)}`)).catch(() => "");
+  return exec.exec(containerCommand(name, `cat ${sq(path)}`)).catch(() => "");
 }
 
 /**
  * Write a file the edge must be able to read, wherever its state actually lives.
- * Counterpart to {@link readEdgeFileIn} — see there for why this exists once.
+ * Counterpart to {@link readMaybeInContainer} — see there for why this exists once.
  *
  * Writes to the canonical host path first, then asks the container whether it can
  * see it. A bind mount answers yes and we're done; a named volume answers no, and
@@ -93,9 +96,13 @@ async function writeEdgeFileIn(
   await inner.exec(`docker cp ${sq(path)} ${sq(`${container}:${path}`)}`).catch(() => {});
 }
 
-/** {@link readEdgeFileIn} for a caller that has an executor but no container name. */
+/**
+ * {@link readMaybeInContainer} pointed at OUR edge — for a caller that has an
+ * executor but no container name. The thunk is the point: our container is
+ * resolved only if the host read misses.
+ */
 export function readEdgeFile(exec: CommandExecutor, path: string): Promise<string> {
-  return readEdgeFileIn(exec, () => resolveOurEdgeContainer(exec).catch(() => null), path);
+  return readMaybeInContainer(exec, path, () => resolveOurEdgeContainer(exec).catch(() => null));
 }
 
 /**
@@ -151,7 +158,7 @@ export function edgeContainerExecutor(
     // use — the container is already resolved here, so it's the identical decision
     // with one probe saved.
     Object.assign(overrides, {
-      readFile: (path: string) => readEdgeFileIn(inner, container, path),
+      readFile: (path: string) => readMaybeInContainer(inner, path, container),
       writeFile: (path: string, content: string) =>
         writeEdgeFileIn(inner, container, path, content),
       exists: async (path: string) => {

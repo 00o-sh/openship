@@ -20,7 +20,8 @@
 
 import type { CommandExecutor } from "../../../types";
 import { sq } from "../detect";
-import { readMaybeInContainer, isSafeCertPath } from "../cert-material";
+import { isSafeCertPath } from "../cert-material";
+import { readMaybeInContainer } from "../../edge-container-executor";
 import { tryExec } from "./parse-utils";
 
 /** Fallbacks when the container's config doesn't name a storage path. */

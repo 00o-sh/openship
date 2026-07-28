@@ -148,8 +148,27 @@
       "tokenAltLink": "Clone credentials.",
       "forwardOnNote": "Forwarding is on — gh CLI also authenticates remote server clones. Your identity is tunneled over SSH per clone; nothing is stored on the server.",
       "forwardOffHint": "Local builds only for now. Turn on \"Forward my git identity to build servers\" to use gh CLI for remote server deploys too.",
-      "manageForward": "Manage forwarding"
-    }
+      "manageForward": "Manage forwarding",
+      "disconnectBody": "Openship will stop using this GitHub sign-in for clones. You can sign in again at any time.",
+      "recheck": "Check again"
+    },
+    "activeVia": "Connected via {method}",
+    "pickMethod": "Pick how Openship reaches your repositories.",
+    "methodDevice": "GitHub sign-in",
+    "methodApp": "Openship Cloud GitHub App",
+    "methodAppDesc": "Managed App — deploy to remote servers with short-lived tokens.",
+    "methodSshDesc": "Attach a deploy key to each server (Servers → GitHub).",
+    "methodTokenDesc": "A personal access token, usable everywhere.",
+    "signIn": "Sign in with GitHub",
+    "signInDesc": "Browser sign-in with a device code. Nothing to register, no SSH into the server.",
+    "changeMethod": "Change method",
+    "otherMethods": "Other methods",
+    "openGithub": "Open GitHub",
+    "copyCode": "Click to copy",
+    "tokenConnect": "Connect",
+    "tokenCreate": "Create a token on GitHub",
+    "tokenGhHint": "Already signed in on the server with",
+    "tokenSaveFailed": "Could not save the token."
   },
   "deployDefaults": {
     "title": "Deploy Defaults",
