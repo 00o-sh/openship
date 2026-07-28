@@ -132,6 +132,7 @@ export {
 export { CloudInfraProvider } from "./infra/cloud";
 export { NoopInfraProvider } from "./infra/noop";
 export {
+  ACME_HTTP01_PORT,
   OPENRESTY_MGMT_PORT,
   deployLuaScripts,
   detectOpenRestyPaths,

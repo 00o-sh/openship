@@ -13,6 +13,7 @@
  */
 
 import { resolve } from "node:path";
+import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import type { CommandExecutor, LogEntry, SystemLogCallback, SystemLog } from "@repo/adapters";
 import { updatePostmasterPassword } from "./mail-credentials.service";
@@ -23,6 +24,7 @@ import {
   installCertbot,
   foreignProxyOnEdge,
   ourEdgeContainerRunning,
+  ACME_HTTP01_PORT,
 } from "@repo/adapters";
 
 // ─── Shell quoting helper ─────────────────────────────────────────────────────
@@ -45,14 +47,25 @@ const REMOTE_ENGINE_DIR = "/root/iRedMail-engine";
  * Absolute path to `apps/email/engine/` on the openship API host.
  *
  * `MAIL_SERVER_ENGINE_DIR` overrides for ops who pin a packaged build to a
- * fixed location; otherwise resolved relative to apps/api's cwd so the
- * monorepo dev layout works without configuration.
+ * fixed location. Otherwise the cwd differs by how the API was started, so both
+ * layouts are probed rather than assuming one:
+ *   - dev (`bun dev` in apps/api)      → cwd is apps/api  → ../../apps/email/engine
+ *   - container (CMD from the WORKDIR) → cwd is /app      → apps/email/engine
+ * The container case used to resolve to `/apps/email/engine` (off the
+ * filesystem root) and step 7 died with "tar: /apps/email/engine: Cannot open".
+ * The dev path stays first so a repo checkout keeps behaving exactly as before.
  */
-function resolveLocalEngineDir(): string {
+export function resolveLocalEngineDir(): string {
   if (process.env.MAIL_SERVER_ENGINE_DIR) {
     return process.env.MAIL_SERVER_ENGINE_DIR;
   }
-  return resolve(process.cwd(), "../../apps/email/engine");
+  const candidates = [
+    resolve(process.cwd(), "../../apps/email/engine"),
+    resolve(process.cwd(), "apps/email/engine"),
+  ];
+  // Fall back to the dev path when neither exists so the failure names the
+  // location an operator expects, not the last candidate tried.
+  return candidates.find((dir) => existsSync(dir)) ?? candidates[0]!;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -769,6 +782,13 @@ export async function stepRunInstaller(
     "AUTO_CLEANUP_REPLACE_FIREWALL_RULES=n",
     "AUTO_CLEANUP_RESTART_FIREWALL=n",
     "AUTO_CLEANUP_REPLACE_MYSQL_CONFIG=n",
+    // The engine's own knob for its upstream version check (pkgs/get_all.sh),
+    // which asks l.iredmail.org whether PROG_VERSION is current and `exit 255`s
+    // when it isn't. Our engine is VENDORED and carries its own PROG_VERSION, so
+    // that check can only ever fail — it made every install die at step 9 with
+    // "Your iRedMail version (1.8.1) is out of date". What we ship is what gets
+    // installed; upstream doesn't get a veto.
+    "CHECK_NEW_IREDMAIL=NO",
   ].join(" ");
 
   const installer = await streamCmd(
@@ -812,6 +832,30 @@ export async function stepRunInstaller(
 }
 
 /** Step 10: Reboot server and wait for reconnection */
+/**
+ * Has the post-install reboot already happened?
+ *
+ * Step 10 takes the box down, so it can never record its own success: the
+ * connection (and, when openship runs ON the target, openship itself) dies
+ * mid-step. Resume therefore replays step 10 and reboots a machine that just
+ * came back — taking the control plane and every deployed app down a second
+ * time for nothing.
+ *
+ * `iRedMail.tips` is the installer's last write, so a boot NEWER than that file
+ * IS the post-install reboot. Both probes fail closed (0 → "not done"), so an
+ * unreadable /proc/stat or a missing tips file just reboots as before.
+ */
+async function rebootAlreadyDone(exec: CommandExecutor): Promise<boolean> {
+  const num = async (cmd: string) =>
+    Number((await exec.exec(cmd).catch(() => "0")).trim()) || 0;
+
+  const bootedAt = await num("awk '/^btime/{print $2}' /proc/stat 2>/dev/null || echo 0");
+  const installedAt = await num(
+    `stat -c %Y ${REMOTE_ENGINE_DIR}/iRedMail.tips 2>/dev/null || echo 0`,
+  );
+  return bootedAt > 0 && installedAt > 0 && bootedAt > installedAt;
+}
+
 export async function stepReboot(
   exec: CommandExecutor,
   _domain: string,
@@ -819,6 +863,12 @@ export async function stepReboot(
   reconnectFn: () => Promise<CommandExecutor>,
 ): Promise<StepResult> {
   const stepId = 10;
+
+  if (await rebootAlreadyDone(exec)) {
+    log(stepId, "info", "Server already rebooted since the installer finished - skipping");
+    return { stepId, success: true, message: "Server already rebooted after install" };
+  }
+
   log(stepId, "info", "Rebooting server...");
 
   // Fire-and-forget reboot (will drop connection)
@@ -1198,11 +1248,22 @@ export async function stepRequestSSL(
   }
   log(stepId, "info", `Requesting SSL certificate for ${mailDomain}...`);
 
-  // OpenResty's default server serves the challenge from here — no stop needed.
-  await exec.exec("mkdir -p /var/www/acme");
+  // Same ACME mechanism the rest of openship uses (NginxProvider.provisionCert):
+  // certbot's STANDALONE authenticator on a loopback alt-port, which the edge
+  // proxies /.well-known/acme-challenge/ to (ACME_CHALLENGE_LOCATION). Webroot
+  // was wrong here: the edge's default server PROXIES that path rather than
+  // serving files, so nothing ever read /var/www/acme and every challenge 404'd
+  // — and on a containerized edge the host's /var/www/acme isn't even the
+  // volume the edge mounts. Standalone works bare (host netns) and docker-edge
+  // (host-networked container) alike, since certbot listens on the same
+  // loopback the edge proxies to. `--cert-name` pins the lineage so a stale
+  // renewal config can't push the cert to `<domain>-0001` where step 13's
+  // symlinks would never find it.
   const cert = await streamCmd(
     exec,
-    `certbot certonly --webroot -w /var/www/acme --agree-tos --register-unsafely-without-email -d ${sq(mailDomain)} --non-interactive 2>&1`,
+    `certbot certonly --standalone --http-01-port ${ACME_HTTP01_PORT} ` +
+      `--cert-name ${sq(mailDomain)} -d ${sq(mailDomain)} ` +
+      `--agree-tos --register-unsafely-without-email --non-interactive 2>&1`,
     stepId, log,
   );
 

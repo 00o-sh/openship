@@ -168,16 +168,29 @@ async function materializeLocalSource(sourcePath: string, targetPath: string): P
       const create = spawn("tar", args, { env: getTarCreateEnv() });
       const extract = spawn("tar", ["-xzf", "-", "-C", targetPath]);
       let err = "";
-      create.stderr.on("data", (d) => (err += d.toString()));
+      // Keep the two sides' stderr apart. When the PACK fails (source vanished
+      // mid-read, permission denied, disk full) the stream just ends early, and
+      // the extract's "unexpected end of file" is the only thing that used to
+      // surface — a symptom that says nothing about the cause. The pack's own
+      // stderr is what names it, so it leads the message.
+      let createErr = "";
+      let createCode: number | null = null;
+      create.stderr.on("data", (d) => (createErr += d.toString()));
       extract.stderr.on("data", (d) => (err += d.toString()));
       create.on("error", reject);
       extract.on("error", reject);
+      create.on("close", (code) => (createCode = code));
       create.stdout.pipe(extract.stdin);
-      extract.on("close", (code) =>
-        code === 0
-          ? resolve()
-          : reject(new Error(`context materialize failed (tar ${code}): ${err.trim().slice(-500)}`)),
-      );
+      extract.on("close", (code) => {
+        if (code === 0 && (createCode ?? 0) === 0) return resolve();
+        // A non-zero pack exit is the real failure even when the extract also
+        // complains; report it first and keep the extract's output as context.
+        const parts = [
+          createCode ? `pack exited ${createCode}: ${createErr.trim().slice(-500)}` : "",
+          code ? `extract exited ${code}: ${err.trim().slice(-500)}` : "",
+        ].filter(Boolean);
+        reject(new Error(`context materialize failed (${parts.join(" | ")})`));
+      });
     });
   } finally {
     await cleanup();
