@@ -8,6 +8,9 @@
 
 import type { CommandExecutor } from "../../../types";
 import type { ImportedSite, ProxyScanResult } from "../../types";
+import { EDGE_HOST_PATHS, OPENRESTY_DEFAULT_PATHS } from "../../../infra/openresty-lua";
+import { containerCommand } from "../../edge-container-executor";
+import { resolveOurEdgeContainer } from "../detect";
 import { extractBlocks, stripComments, tryExec } from "./parse-utils";
 
 async function loadNginxConfig(executor: CommandExecutor): Promise<string> {
@@ -220,6 +223,16 @@ export async function scanNginx(executor: CommandExecutor): Promise<ProxyScanRes
 }
 
 /**
+ * Every place our own edge's vhosts can sit: the canonical bind-mounted host dir
+ * (containerized edge), and the two bare-host OpenResty layouts.
+ */
+const OUR_EDGE_SITE_GLOBS = [
+  `${EDGE_HOST_PATHS.sitesDir}/*.conf`,
+  `${OPENRESTY_DEFAULT_PATHS.sitesDir}/*.conf`,
+  "/etc/openresty/sites-enabled/*.conf",
+];
+
+/**
  * Scan OUR OWN OpenResty edge's per-domain `server{}` blocks. NginxProvider
  * writes them to the OpenResty sites-enabled tree (NOT `/etc/nginx`, and the
  * binary is `openresty` so `nginx -T` doesn't apply), so this is how migrate
@@ -228,9 +241,17 @@ export async function scanNginx(executor: CommandExecutor): Promise<ProxyScanRes
  * `ssl_certificate`), so the same parser applies. Read-only; empty if unreadable.
  */
 export async function scanOpenshipEdge(executor: CommandExecutor): Promise<ProxyScanResult> {
-  const raw = await tryExec(
-    executor,
-    "cat /usr/local/openresty/nginx/conf/sites-enabled/*.conf /etc/openresty/sites-enabled/*.conf 2>/dev/null",
-  );
-  return parseNginxConfig(raw ?? "");
+  const cat = `cat ${OUR_EDGE_SITE_GLOBS.join(" ")} 2>/dev/null`;
+  const raw = await tryExec(executor, cat);
+  if (raw?.trim()) return parseNginxConfig(raw);
+
+  // Nothing on the host. On a legacy install the sites tree is a Docker-managed
+  // named volume mounted ONLY into the edge + api containers, so the host paths
+  // above genuinely don't exist and the read above is indistinguishable from "no
+  // sites" — which is exactly how the migrate wizard silently lost every domain
+  // and cert it used to pre-fill. Ask the container directly.
+  const container = await resolveOurEdgeContainer(executor);
+  if (!container) return parseNginxConfig("");
+  const fromContainer = await tryExec(executor, containerCommand(container, cat));
+  return parseNginxConfig(fromContainer ?? "");
 }

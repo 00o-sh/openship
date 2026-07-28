@@ -1,12 +1,14 @@
-import { posix as pathPosix } from "node:path";
 import { repos } from "@repo/db";
-import { BareRuntime, type BuildLogger } from "@repo/adapters";
-import { resolveDeploymentRuntime, type OutputCheckResult } from "../../lib/deployment-runtime";
+import { resolveStaticOutputPath, type BuildLogger } from "@repo/adapters";
+import {
+  resolveDeploymentRuntime,
+  type DeploymentMeta,
+  type OutputCheckResult,
+} from "../../lib/deployment-runtime";
 import { assertResourceInOrg } from "../../lib/controller-helpers";
 import type { RequestContext } from "../../lib/request-context";
 import { resolveProjectRouteState } from "../domains/project-route.service";
-import { normalizeTargetPath } from "../../lib/public-endpoints";
-import { auditStaticOutput } from "../deployments/output-audit.service";
+import { auditStaticOutput, staticOutputTargets } from "../deployments/output-audit.service";
 
 const silentLogger = { log() {} } as unknown as BuildLogger;
 
@@ -26,11 +28,15 @@ const OUTPUT_CHECK_BUDGET_MS = 5000;
  * nothing to probe.
  *
  * Scope: STATIC apps only (`!hasServer`) — server apps have a listening port,
- * which the port check covers. Live signal is BARE-built self-hosted only.
- * A Docker-sandbox-built static (the default now) serves from a host dir too,
- * but its live runtime is DockerRuntime (no file surface), so — like cloud Pages
- * (workspace deleted post-deploy) — it returns [] and relies on the deploy-time
- * output validation instead (deployStatic throws if the doc-root is missing).
+ * which the port check covers.
+ *
+ * Probes through the deployment's ROUTING provider, not its runtime. That's what
+ * makes a Docker-sandbox-built static (the default) checkable at all: its live
+ * runtime is a DockerRuntime with no file surface, so gating on `BareRuntime`
+ * meant the common case silently returned [] and leaned entirely on deploy-time
+ * validation — which only asserts the doc-root DIRECTORY exists, not that anything
+ * servable is in it. The edge, meanwhile, can always be asked. Cloud Pages still
+ * returns [] (its provider serves no local files), as it should.
  */
 export async function checkProjectOutput(
   ctx: RequestContext,
@@ -60,30 +66,27 @@ async function runOutputProbe(
   const containerId = deployment.containerId;
   if (!containerId) return [];
   try {
-    const { runtime } = await resolveDeploymentRuntime(deployment);
-    // Only a bare-built static exposes a post-deploy file surface. A
-    // Docker-sandbox-built static (DockerRuntime) and cloud Pages (workspace
-    // gone, containerId = page:<slug>) have no exec/file surface here —
-    // deploy-time validation already guarantees their doc-root.
-    if (!(runtime instanceof BareRuntime)) return [];
-
-    // Served root mirrors bare.ts deployStatic + route-registration exactly:
-    //   staticRoot = resolveStaticRoot(workDir, outputDirectory)
-    //   servedPath = targetPath === "/" ? staticRoot : join(staticRoot, targetPath.slice(1))
-    const staticRoot = runtime.resolveStaticRoot(containerId, project.outputDirectory ?? "");
+    const { runtime, routing } = await resolveDeploymentRuntime(deployment);
+    const meta = (deployment.meta ?? {}) as DeploymentMeta;
+    // Where this deployment SERVES from, as recorded by the deploy. Falling back to
+    // the project's outputDirectory covers deployments written before that field
+    // existed — correct for a bare build, and the only guess available for an older
+    // sandbox build (whose true root is ""). A wrong guess reads as `found:false`,
+    // which is advisory, so it can never break anything.
+    const staticServeOutputDir = meta.staticServeOutputDir ?? project.outputDirectory ?? "";
+    const staticRoot = resolveStaticOutputPath(containerId, staticServeOutputDir);
     const routeState = await resolveProjectRouteState(project);
-    const seen = new Set<string>();
-    const targets: Array<{ path: string; servedPath: string }> = [];
-    for (const endpoint of routeState.publicEndpoints) {
-      const path = normalizeTargetPath(endpoint.targetPath) ?? "/";
-      if (seen.has(path)) continue;
-      seen.add(path);
-      const servedPath = path === "/" ? staticRoot : pathPosix.join(staticRoot, path.slice(1));
-      targets.push({ path, servedPath });
-    }
-    if (targets.length === 0) targets.push({ path: "/", servedPath: staticRoot });
-
-    return await auditStaticOutput(runtime, containerId, targets, silentLogger);
+    // `routing` (the edge) is asked first — it sees what actually serves the files.
+    // The runtime is only the fallback, which is why this no longer gates on
+    // BareRuntime: a sandbox-built static persists runtimeMode "bare" and so DID
+    // pass that gate, but with the wrong root (project.outputDirectory instead of
+    // the extracted release root) — probing `<root>/dist` where the edge serves
+    // `<root>` and reporting a phantom "nothing found".
+    return await auditStaticOutput(
+      { routing, runtime, containerId },
+      staticOutputTargets(staticRoot, routeState.publicEndpoints),
+      silentLogger,
+    );
   } catch {
     return [];
   }

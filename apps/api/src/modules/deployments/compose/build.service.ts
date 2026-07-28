@@ -194,7 +194,14 @@ export async function buildComposeImages(opts: {
       (!!service.build ||
         (serviceKind(service) === "monorepo" &&
           !service.image &&
-          (!!service.buildCommand || !!service.startCommand))),
+          // Apply the SAME project-snapshot fallback that the build-spec resolver
+          // (resolveSubAppOverrides) and preflight use — a monorepo row whose
+          // command lives on the project snapshot (null on the row: an inheriting
+          // sub-app, or the #231 materialized app row) must be selected as
+          // buildable HERE too. Keying off the raw row dropped it to neither
+          // bucket → the misleading "No image available" the comment above warns of.
+          (!!(service.buildCommand ?? opts.snapshot.buildCommand) ||
+            !!(service.startCommand ?? opts.snapshot.startCommand)))),
   );
   const external = enabled.filter(
     (service) => !isHandedOver(service) && !service.build && !!service.image,

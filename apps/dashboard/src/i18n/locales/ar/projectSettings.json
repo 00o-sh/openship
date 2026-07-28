@@ -493,7 +493,11 @@
     "confirmDeleteWipe": "حذف + مسح البيانات",
     "confirmDeleteEnvWipe": "حذف البيئة + مسح البيانات",
     "confirmDelete": "حذف المشروع",
-    "confirmDeleteEnv": "حذف البيئة"
+    "confirmDeleteEnv": "حذف البيئة",
+    "linkedTitleOne": "مشروع واحد مرتبط بهذا التطبيق",
+    "linkedTitleOther": "{count} مشاريع مرتبطة بهذا التطبيق",
+    "linkedNote": "ستستمر في العمل وبياناتها كما هي — ستفقد هذا الاتصال فقط. أعد نشرها ليصبح ذلك ساريًا.",
+    "linkedNoteRecordOnly": "ستستمر في العمل، لكن الربط يُحذف مع السجل — واستيراد التطبيق لاحقًا لن يعيده."
   },
   "routing": {
     "title": "التوجيه",

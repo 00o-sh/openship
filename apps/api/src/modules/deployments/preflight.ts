@@ -893,7 +893,11 @@ function checkConfig(snapshot: DeploymentConfigSnapshot, opts?: PreflightOptions
     return { id: "config", label: "Service configuration", status: "pass" };
   }
 
-  if (!snapshot.buildImage) missing.push("build image");
+  // A `docker` framework builds from its OWN repo Dockerfile (its FROM is the
+  // image), so buildImage is never consumed — refusing the deploy for a missing
+  // buildImage there is wrong (it blocked repo-Dockerfile + self-app deploys).
+  // Mirrors the multi-service branch's dockerfile/build check. #231
+  if (snapshot.framework !== "docker" && !snapshot.buildImage) missing.push("build image");
 
   if (snapshot.hasBuild && !snapshot.installCommand) {
     missing.push("install command");

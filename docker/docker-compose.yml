@@ -99,16 +99,23 @@ services:
       # API_PORT overrides the port (host + container move together).
       - "${OPENSHIP_BIND_ADDR:-0.0.0.0}:${API_PORT:-4000}:${API_PORT:-4000}"
     # Host Docker socket → the API (dockerode) builds + runs deployed apps on the
-    # host daemon. dockerode's local transport targets this exact path. The four
-    # openship_* volumes are SHARED with the `edge` service: the API WRITES vhosts,
-    # certs, and static doc-roots here; the edge READS/serves them (see
-    # OPENSHIP_EDGE_MODE). openship_static holds static sites' extracted files.
+    # host daemon. dockerode's local transport targets this exact path.
+    #
+    # The four routing mounts are SHARED with the `edge` service (API writes vhosts,
+    # certs and static doc-roots; the edge reads/serves them) and are HOST BIND
+    # MOUNTS, not named volumes. That is deliberate: Docker-managed volumes hide
+    # edge state from every host-side reader we have — the migrate wizard's proxy
+    # scan, migration cert carry, cert reuse, the mail server's cert symlinks — and
+    # each of those silently reported "nothing there" instead of failing. Certs and
+    # static keep the SAME path inside and out, so those readers need no
+    # translation and a bare→container conversion inherits existing certs.
+    # `:z` relabels for SELinux-enforcing hosts; a no-op elsewhere.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - openship_sites:/usr/local/openresty/nginx/conf/sites-enabled
-      - openship_certs:/etc/letsencrypt
-      - openship_acme:/var/www/acme
-      - openship_static:/opt/openship/static
+      - /var/lib/openship/edge/sites-enabled:/usr/local/openresty/nginx/conf/sites-enabled:z
+      - /etc/letsencrypt:/etc/letsencrypt:z
+      - /var/lib/openship/edge/acme:/var/www/acme:z
+      - /opt/openship/static:/opt/openship/static:z
     # Reach the HOST over the internal docker bridge (host.docker.internal →
     # host-gateway) for host-OS ops when configured (OPENSHIP_HOST_SSH_*, set up
     # by `openship up`). Harmless when unset. Linux needs the explicit mapping.
@@ -175,15 +182,11 @@ services:
     restart: unless-stopped
     network_mode: host
     volumes:
-      - openship_sites:/usr/local/openresty/nginx/conf/sites-enabled
-      - openship_certs:/etc/letsencrypt
-      - openship_acme:/var/www/acme
-      - openship_static:/opt/openship/static
+      - /var/lib/openship/edge/sites-enabled:/usr/local/openresty/nginx/conf/sites-enabled:z
+      - /etc/letsencrypt:/etc/letsencrypt:z
+      - /var/lib/openship/edge/acme:/var/www/acme:z
+      - /opt/openship/static:/opt/openship/static:z
 
 volumes:
   postgres_data:
   redis_data:
-  openship_sites:
-  openship_certs:
-  openship_acme:
-  openship_static:

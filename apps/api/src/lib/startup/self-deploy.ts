@@ -40,7 +40,7 @@ import {
 import { onSuccess } from "../../modules/deployments/deployment-lifecycle";
 import type { DeploymentMeta } from "../deployment-runtime";
 import { reapplyProjectLiveRoutes } from "../../modules/domains/project-route.service";
-import { manageDomainSsl } from "../domain-ssl";
+import { describeTlsIssuedElsewhere, manageDomainSsl, tlsIssuedElsewhere } from "../domain-ssl";
 import { refreshSelfAppPublicUrl } from "../public-url";
 
 const APP_SLUG = "openship";
@@ -259,6 +259,23 @@ export async function provisionSelfAppEdge(
   progress.onStep?.("route", "installed");
   log?.(`routing ${hostname} → http://127.0.0.1:${dashPort}`);
 
+  // Does this hostname's TLS come from somewhere else — Cloud's *.opsh.io edge, the
+  // operator's own ingress, an uploaded cert? Asked of the DOMAIN ROW, which is
+  // where that fact already lives, rather than taken as a boolean from the caller:
+  // the free-domain registration writes `domainType: "free"` before calling us, so
+  // the row already says so and can't disagree with the argument.
+  //
+  // Stopping here is an optimization and an honest log line, not the safety net —
+  // `manageDomainSsl` refuses the same domains on its own (see tlsIssuedElsewhere).
+  // Without it we'd announce an "Issue SSL certificate" step that is never going to
+  // issue one.
+  const domainRow = await repos.domain.findByHostname(hostname).catch(() => null);
+  const elsewhere = domainRow ? tlsIssuedElsewhere(domainRow) : null;
+  if (elsewhere) {
+    log?.(describeTlsIssuedElsewhere(elsewhere, hostname));
+    return { verified: true };
+  }
+
   // 3. Issue the cert via the pipeline (ACME HTTP-01 through the resolved local
   //    provider). Retry so a not-yet-propagated A record doesn't hard-fail —
   //    the HTTP vhost keeps answering ACME between tries.
@@ -323,14 +340,31 @@ async function findSelfAppProject(): Promise<Project | null> {
  * free/byo boxes reconcile too. First boot (no self-app) is a clean no-op.
  */
 /**
- * Point the self-app's PRIMARY domain at the hostname this box is actually
+ * Reconcile the self-app's domain ROWS with the hostname this box is actually
  * reached on (`OPENSHIP_PUBLIC_URL`, set by the CLI at install time).
  *
- * Domain rows accumulate — a free `*.opsh.io` from one run, a custom domain from
- * the next — and whichever was written last used to keep the primary flag, which
- * is how a never-verified subdomain came to be displayed as the project's address.
- * No-ops when the env URL is unset or doesn't match a row (nothing to reconcile:
- * we never invent a preference the operator didn't express).
+ * Two jobs:
+ *
+ * 1. CREATE the row when the env hostname has none. An install that set
+ *    OPENSHIP_PUBLIC_URL but never completed a self-register (the compose wizard
+ *    used to skip the custom-domain call entirely) ends up reachable on that
+ *    hostname with ZERO domain rows — so Domains & Routes reads "No domains yet"
+ *    on a box that is plainly serving that domain, and none of the per-domain UI
+ *    (routes, rules, SSL state) has anything to attach to. The env var IS an
+ *    operator-expressed preference: they typed it in the wizard or passed
+ *    --public-url. Recording it is reconciliation, not invention.
+ *
+ *    The row is created BYO-shaped (`externalIngress`, `sslStatus: "external"`):
+ *    if OUR edge had provisioned this domain, self-register would already have
+ *    written the row, so reaching here means TLS is terminated by something we
+ *    don't manage. Claiming otherwise would show a cert lifecycle we don't own.
+ *
+ * 2. Promote it to PRIMARY. Domain rows accumulate — a free `*.opsh.io` from one
+ *    run, a custom domain from the next — and whichever was written last used to
+ *    keep the primary flag, which is how a never-verified subdomain came to be
+ *    displayed as the project's address.
+ *
+ * No-ops when the env URL is unset or unparseable.
  */
 async function reconcileSelfAppPrimaryDomain(projectId: string): Promise<void> {
   const raw = env.OPENSHIP_PUBLIC_URL?.trim();
@@ -344,9 +378,29 @@ async function reconcileSelfAppPrimaryDomain(projectId: string): Promise<void> {
   if (!host) return;
 
   const rows = await repos.domain.listByProject(projectId);
-  const wanted = rows.find((d) => d.hostname.toLowerCase() === host);
-  if (!wanted || wanted.isPrimary) return;
+  let wanted = rows.find((d) => d.hostname.toLowerCase() === host);
 
+  if (!wanted) {
+    // findOrCreate (not create) so a concurrent boot/self-register can't produce
+    // a duplicate row for the same hostname.
+    wanted = await repos.domain.findOrCreate({
+      projectId,
+      hostname: host,
+      domainType: "custom",
+      isPrimary: true,
+      externalIngress: true,
+      verified: true,
+      verifiedAt: new Date(),
+      status: "active",
+      sslStatus: "external",
+    });
+    console.log(
+      `[self-deploy] recorded self-app domain ${host} from OPENSHIP_PUBLIC_URL ` +
+        `(no row existed — install did not register it)`,
+    );
+  }
+
+  if (wanted.isPrimary) return;
   // The repo owns the promote+demote pair (one primary per project) — don't
   // re-implement the flag juggling here.
   await repos.domain.setPrimary(projectId, wanted.id);
@@ -433,8 +487,9 @@ export function registerSelfAdoptReconcile(): void {
           } catch (err) {
             console.warn(`[self-deploy] route reapply failed: ${safeErrorMessage(err)}`);
           }
-          // Free domains are TLS-terminated by Cloud — never run certbot for one.
-          if (primary.domainType !== "free" && primary.sslStatus !== "active") {
+          // Same question as everywhere else, same answer: free (Cloud terminates),
+          // external ingress, and uploaded certs are not certbot's to re-issue.
+          if (!tlsIssuedElsewhere(primary) && primary.sslStatus !== "active") {
             try {
               await manageDomainSsl(primary.hostname, { action: "provision", projectId: project.id });
             } catch (err) {

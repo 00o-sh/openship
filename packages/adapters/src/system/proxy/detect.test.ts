@@ -1,6 +1,11 @@
 import { describe, expect, test } from "vitest";
 import type { CommandExecutor } from "../../types";
-import { probeEdge, stopTargetsForStatus } from "./detect";
+import {
+  invalidateEdgeContainer,
+  probeEdge,
+  resolveOurEdgeContainer,
+  stopTargetsForStatus,
+} from "./detect";
 
 /** Fake executor: maps a command (by substring) to canned stdout. Unmatched → "". */
 function makeExecutor(rules: Array<[string, string]>): CommandExecutor {
@@ -236,5 +241,99 @@ describe("probeEdge classification", () => {
     expect(status.classification).toBe("unknown");
     expect(status.canProceedClean).toBe(false);
     expect(status.occupants[0]?.proxy).toBeUndefined();
+  });
+});
+
+/**
+ * The probe is 1–2 `docker ps` shell-outs — over SSH for a remote server — and it
+ * sits on read paths that run constantly (every platform construction, every
+ * component check, once per file in readEdgeFile/writeEdgeFile). These tests pin
+ * the two things the memo must never get wrong: it must actually stop re-asking,
+ * and it must never answer for the WRONG BOX.
+ */
+describe("resolveOurEdgeContainer memoization", () => {
+  /** Executor that answers `docker ps` with `name` and counts how often it's asked. */
+  function countingExecutor(name: string) {
+    const state = { probes: 0 };
+    const exec = async (cmd: string): Promise<string> => {
+      if (!cmd.startsWith("docker ps")) return "";
+      state.probes++;
+      return name;
+    };
+    return { executor: { exec } as unknown as CommandExecutor, state };
+  }
+
+  test("asks the box once, then answers from the memo", async () => {
+    const { executor, state } = countingExecutor("openship-edge");
+    expect(await resolveOurEdgeContainer(executor)).toBe("openship-edge");
+    expect(await resolveOurEdgeContainer(executor)).toBe("openship-edge");
+    expect(await resolveOurEdgeContainer(executor)).toBe("openship-edge");
+    expect(state.probes).toBe(1);
+  });
+
+  test("caches ABSENCE too — a bare box is the case that shelled out most", async () => {
+    const { executor, state } = countingExecutor("");
+    expect(await resolveOurEdgeContainer(executor)).toBeNull();
+    expect(await resolveOurEdgeContainer(executor)).toBeNull();
+    // A miss costs two commands (by-name, then list-all); it must still happen once.
+    expect(state.probes).toBe(2);
+  });
+
+  test("never serves one box's answer for another", async () => {
+    const a = countingExecutor("openship-edge");
+    const b = countingExecutor("");
+    expect(await resolveOurEdgeContainer(a.executor)).toBe("openship-edge");
+    // Same question, different machine: a bare server must not inherit the
+    // container name from the one probed before it.
+    expect(await resolveOurEdgeContainer(b.executor)).toBeNull();
+    expect(await resolveOurEdgeContainer(a.executor)).toBe("openship-edge");
+  });
+
+  test("fresh: true bypasses the memo — the install/uninstall contract", async () => {
+    const { executor, state } = countingExecutor("openship-edge");
+    await resolveOurEdgeContainer(executor);
+    await resolveOurEdgeContainer(executor, { fresh: true });
+    expect(state.probes).toBe(2);
+  });
+
+  test("invalidating one executor re-probes only that box", async () => {
+    const a = countingExecutor("openship-edge");
+    const b = countingExecutor("openship-edge");
+    await resolveOurEdgeContainer(a.executor);
+    await resolveOurEdgeContainer(b.executor);
+
+    invalidateEdgeContainer(a.executor);
+    await resolveOurEdgeContainer(a.executor);
+    await resolveOurEdgeContainer(b.executor);
+    expect(a.state.probes).toBe(2);
+    expect(b.state.probes).toBe(1);
+  });
+
+  test("invalidating with no executor clears every box", async () => {
+    const a = countingExecutor("openship-edge");
+    const b = countingExecutor("openship-edge");
+    await resolveOurEdgeContainer(a.executor);
+    await resolveOurEdgeContainer(b.executor);
+
+    invalidateEdgeContainer();
+    await resolveOurEdgeContainer(a.executor);
+    await resolveOurEdgeContainer(b.executor);
+    expect(a.state.probes).toBe(2);
+    expect(b.state.probes).toBe(2);
+  });
+
+  test("a re-probe after invalidation reports the NEW state, not the old one", async () => {
+    // The scenario the invalidation calls exist for: the edge is removed (or
+    // created) and the next reader must not be told the previous story.
+    let present = true;
+    const executor = {
+      exec: async (cmd: string) => (cmd.startsWith("docker ps") && present ? "openship-edge" : ""),
+    } as unknown as CommandExecutor;
+
+    expect(await resolveOurEdgeContainer(executor)).toBe("openship-edge");
+    present = false;
+    expect(await resolveOurEdgeContainer(executor)).toBe("openship-edge"); // still memoized
+    invalidateEdgeContainer(executor);
+    expect(await resolveOurEdgeContainer(executor)).toBeNull();
   });
 });

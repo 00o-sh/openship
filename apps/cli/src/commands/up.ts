@@ -579,6 +579,12 @@ async function runForeground(opts: UpOpts, source?: FromSourceRun): Promise<void
     // bootstrap endpoint; both processes share this token file.
     env.OPENSHIP_REQUIRE_AUTH = "true";
     env.INTERNAL_TOKEN = ensureInternalToken();
+    // DEPLOY_MODE is "desktop" here (in-process job runner), and the server no
+    // longer INFERS the auth mode from it — it exits at boot unless the launcher
+    // DECLARES OPENSHIP_AUTH_MODE (see apps/api/src/config/env.ts). Declare
+    // "local": a CLI-managed box logs in with the bootstrap-created admin, never
+    // zero-auth (that is desktop-app-only). Honor an explicit operator override.
+    if (!env.OPENSHIP_AUTH_MODE) env.OPENSHIP_AUTH_MODE = "local";
     // The API ALWAYS binds loopback under the CLI — reachable only by the setup
     // wizard and the dashboard proxy on this same box, never exposed on
     // 0.0.0.0. Only the dashboard is ever public, and only in --public-url mode.

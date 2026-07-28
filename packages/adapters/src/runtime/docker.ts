@@ -27,6 +27,7 @@ import Dockerode from "dockerode";
 
 import type {
   BuildConfig,
+  CommandExecutor,
   DeployConfig,
   BuildResult,
   DeploymentResult,
@@ -88,6 +89,7 @@ import { materializeGitSsh, shellGitSshWriter, type GitSshMaterial } from "./git
 import { githubTarballUrl, downloadTarballOnRemote } from "./source-tarball";
 import { scopeVolumeBinds, isHostPathSource } from "./volume-namespace";
 import { createDockerBuildContext, prepareSourceTree, resolveServiceDockerfile } from "./docker-build-context";
+import { startExecStream, daemonConnectionFrom } from "./docker-exec-stream";
 import { resolveDockerfileCandidates } from "./docker-paths";
 import { generateDockerfile } from "./docker-build-plan";
 import { transferLocalDirectory } from "./transfer";
@@ -1285,45 +1287,9 @@ export class DockerRuntime implements RuntimeAdapter {
       log.log("Extracting static files from the build sandbox...\n");
 
       if (sshExecutor) {
-        // Disk-to-disk on the remote host via native docker — avoids streaming a
-        // large tar over the flaky SSH dockerode bridge (same rationale as
-        // saveImage/pullImage). The trailing `/.` copies CONTENTS into hostOutDir
-        // (no leading `html/` dir), so no strip step is needed here.
-        const cid = (await sshExecutor.exec(`docker create ${sq(tag)}`)).trim();
-        try {
-          await sshExecutor.exec(`mkdir -p ${sq(hostOutDir)}`);
-          await sshExecutor.exec(`docker cp ${sq(`${cid}:${DOC_ROOT}/.`)} ${sq(hostOutDir)}`);
-        } finally {
-          await sshExecutor.exec(`docker rm ${sq(cid)}`).catch(() => { /* best effort */ });
-        }
+        await this.extractDocRootOverSsh(sshExecutor, tag, DOC_ROOT, hostOutDir);
       } else {
-        // Local socket / TCP: pull the tar via dockerode (portable across a
-        // remote TCP daemon where the local `docker` CLI wouldn't apply) and
-        // extract onto the API process's own FS — which in docker-edge mode is
-        // the shared openship_static volume mounted into this container. The
-        // archive is rooted at `html/`, so strip that one leading component.
-        const { mkdir } = await import("node:fs/promises");
-        const { spawn } = await import("node:child_process");
-        await mkdir(hostOutDir, { recursive: true });
-        const container = await this.docker.createContainer({ Image: tag });
-        try {
-          const tarStream = (await container.getArchive({ path: DOC_ROOT })) as unknown as Readable;
-          await new Promise<void>((resolve, reject) => {
-            const extract = spawn("tar", ["-x", "--strip-components=1", "-C", hostOutDir]);
-            let errBuf = "";
-            extract.stderr.on("data", (d) => (errBuf += d.toString()));
-            extract.on("error", reject);
-            tarStream.on("error", reject);
-            tarStream.pipe(extract.stdin);
-            extract.on("close", (code) =>
-              code === 0
-                ? resolve()
-                : reject(new Error(`static extract failed (tar ${code}): ${errBuf.trim().slice(-500)}`)),
-            );
-          });
-        } finally {
-          await container.remove({ force: true }).catch(() => { /* best effort */ });
-        }
+        await this.extractDocRootViaDaemon(tag, DOC_ROOT, hostOutDir);
       }
 
       log.log(`Static files ready at ${hostOutDir}\n`);
@@ -1348,6 +1314,73 @@ export class DockerRuntime implements RuntimeAdapter {
       await this.removeImage(tag).catch(() => { /* best effort */ });
     }
   }
+
+  /**
+   * THE CONTRACT both extractors satisfy: after either one returns, `hostOutDir`
+   * holds the doc-root's CONTENTS directly — `index.html` at the top, no wrapping
+   * `html/` directory. OpenResty's `root` points straight at it, so a stray extra
+   * level is a silent 404 for the whole site.
+   *
+   * The two paths reach that same shape differently, which is why the rule is
+   * stated here once instead of in each branch:
+   *   - `docker cp <cid>:<root>/.` — the trailing `/.` means "contents of", so
+   *     there is nothing to strip.
+   *   - `getArchive({path: <root>})` — the tar IS rooted at `html/`, so exactly
+   *     one leading component must be stripped.
+   */
+
+  /** Remote host: disk-to-disk via the host's own docker CLI — never stream a
+   *  large tar over the SSH dockerode bridge (same rationale as saveImage/pullImage). */
+  private async extractDocRootOverSsh(
+    sshExecutor: CommandExecutor,
+    tag: string,
+    docRoot: string,
+    hostOutDir: string,
+  ): Promise<void> {
+    const cid = (await sshExecutor.exec(`docker create ${sq(tag)}`)).trim();
+    try {
+      await sshExecutor.exec(`mkdir -p ${sq(hostOutDir)}`);
+      // `/.` → contents, so no strip step (see the contract above).
+      await sshExecutor.exec(`docker cp ${sq(`${cid}:${docRoot}/.`)} ${sq(hostOutDir)}`);
+    } finally {
+      await sshExecutor.exec(`docker rm ${sq(cid)}`).catch(() => { /* best effort */ });
+    }
+  }
+
+  /** Local socket / remote TCP: pull the tar through dockerode (portable to a TCP
+   *  daemon where a local `docker` CLI wouldn't apply) and extract onto THIS
+   *  process's filesystem — in docker-edge mode that's /opt/openship/static,
+   *  bind-mounted into both the api and the edge at the same path. */
+  private async extractDocRootViaDaemon(
+    tag: string,
+    docRoot: string,
+    hostOutDir: string,
+  ): Promise<void> {
+    const { mkdir } = await import("node:fs/promises");
+    const { spawn } = await import("node:child_process");
+    await mkdir(hostOutDir, { recursive: true });
+    const container = await this.docker.createContainer({ Image: tag });
+    try {
+      const tarStream = (await container.getArchive({ path: docRoot })) as unknown as Readable;
+      await new Promise<void>((resolve, reject) => {
+        // The archive is rooted at `html/` → strip that ONE component (contract above).
+        const extract = spawn("tar", ["-x", "--strip-components=1", "-C", hostOutDir]);
+        let errBuf = "";
+        extract.stderr.on("data", (d) => (errBuf += d.toString()));
+        extract.on("error", reject);
+        tarStream.on("error", reject);
+        tarStream.pipe(extract.stdin);
+        extract.on("close", (code) =>
+          code === 0
+            ? resolve()
+            : reject(new Error(`static extract failed (tar ${code}): ${errBuf.trim().slice(-500)}`)),
+        );
+      });
+    } finally {
+      await container.remove({ force: true }).catch(() => { /* best effort */ });
+    }
+  }
+
 
   /**
    * Batch build: clone + prune the shared source ONCE, then build every image
@@ -2374,14 +2407,20 @@ export class DockerRuntime implements RuntimeAdapter {
       Env: [`TERM=${term}`],
     });
 
-    // `hijack: true` lifts the underlying TCP connection out of HTTP
-    // and gives us a raw Duplex. With Tty:true the stream carries the
-    // PTY bytes without dockerode's multiplexing frame header.
-    const duplex = (await exec.start({
-      hijack: true,
-      stdin: true,
-      Tty: true,
-    })) as import("node:stream").Duplex;
+    // We need the raw bidirectional socket (with Tty:true it carries PTY bytes
+    // with no multiplexing header), which dockerode gets via `{hijack: true}`.
+    // We do NOT use that: under Bun the hijacked start never settles — the daemon
+    // sends `101 UPGRADED` and Bun's node:http doesn't surface the upgrade to
+    // docker-modem, so the promise hangs forever and the service terminal
+    // connected and then sat silent on every Bun-based api (the Docker image and
+    // the compiled desktop binary). Measured: Node 22 round-trips, Bun 1.3.1
+    // hangs. `startExecStream` performs the same upgrade on a plain socket, so it
+    // behaves identically on both — see docker-exec-stream.ts.
+    const duplex = await startExecStream(
+      daemonConnectionFrom(this.docker),
+      (exec as unknown as { id: string }).id,
+      { tty: true, stdin: true },
+    );
 
     // Set the initial window. Dockerode's resize() POSTs
     // /exec/{id}/resize?h={rows}&w={cols}. Safe to call before any
@@ -2395,6 +2434,9 @@ export class DockerRuntime implements RuntimeAdapter {
     const stdout = new PassThrough();
     const stderr = new PassThrough();
     duplex.on("data", (chunk: Buffer) => stdout.write(chunk));
+    // startExecStream hands back a PAUSED stream (it may hold the shell's first
+    // prompt); flow it now that the sink is attached.
+    duplex.resume();
     duplex.on("end", () => {
       stdout.end();
       stderr.end();

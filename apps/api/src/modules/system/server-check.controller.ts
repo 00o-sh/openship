@@ -32,6 +32,7 @@ import {
 } from "@repo/adapters";
 import { formatDuration, systemDebug } from "@/lib/system-debug";
 import { sshManager, buildSshConfig } from "../../lib/ssh-manager";
+import { withPinnedEdgeImage } from "../../lib/edge-image";
 import { runConnectivityCheck } from "../../lib/connectivity";
 import "../../lib/connectivity-checks"; // registers ssh / ssh-server / backup-destination
 import { repos } from "@repo/db";
@@ -402,7 +403,7 @@ export async function installComponent(c: Context) {
       installerFn(
         executor,
         (log) => logs.push(log.message),
-        body.config ?? {},
+        withPinnedEdgeImage(body.config ?? {}),
       ),
     );
 
@@ -460,7 +461,7 @@ export async function removeComponent(c: Context) {
       uninstallerFn(
         executor,
         (log) => logs.push(log.message),
-        body.config ?? {},
+        withPinnedEdgeImage(body.config ?? {}),
       ),
     );
 
@@ -506,7 +507,8 @@ export async function installStream(c: Context) {
   await permission.assert(getRequestContext(c), { resourceType: "server", resourceId: serverId, action: "admin" });
 
   const requestedComponents = body.components as string[] | undefined;
-  const config = body.config ?? {};
+  // Pinned here, at the boundary — the edge image is never caller-supplied.
+  const config = withPinnedEdgeImage(body.config ?? {});
 
   if (!requestedComponents?.length) {
     return c.json({ error: "No components specified" }, 400);

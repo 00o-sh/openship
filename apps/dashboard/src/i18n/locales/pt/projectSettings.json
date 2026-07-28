@@ -486,7 +486,11 @@
     "confirmDeleteWipe": "Eliminar + apagar dados",
     "confirmDeleteEnvWipe": "Eliminar ambiente + apagar dados",
     "confirmDelete": "Eliminar projeto",
-    "confirmDeleteEnv": "Eliminar ambiente"
+    "confirmDeleteEnv": "Eliminar ambiente",
+    "linkedTitleOne": "{count} projeto está conectado a este app",
+    "linkedTitleOther": "{count} projetos estão conectados a este app",
+    "linkedNote": "Continuam em execução com os dados intactos — perdem apenas esta conexão. Reimplante-os para aplicar.",
+    "linkedNoteRecordOnly": "Continuam em execução, mas o vínculo vai com o registro — reimportar este app depois não o restaura."
   },
   "routing": {
     "title": "Encaminhamento",

@@ -24,7 +24,6 @@ const MISSING_BASELINE: Record<string, number> = {
   migration: 1237,
   settings: 704,
   emailsAdmin: 316,
-  projects: 108,
   widgets: 138,
   misc: 123,
   overview: 120,

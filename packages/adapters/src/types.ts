@@ -451,7 +451,21 @@ export interface SslResult {
    * downgrading a healthy `active` domain to `provisioning`.
    */
   verified: boolean;
-  reason?: "issued" | "renewed" | "missing" | "read_error";
+  /**
+   * `not_local` means no certificate was issued here BY DESIGN — TLS for this
+   * hostname is terminated or supplied elsewhere (an upstream ingress, the managed
+   * `*.opsh.io` edge, an operator-uploaded cert). Distinct from `missing`, which
+   * means a cert was expected and isn't there: persisting `not_local` as
+   * "provisioning" would overwrite a correct `external` status with a lie.
+   */
+  /**
+   * `invalid` means a certificate IS on disk but can't be served for this
+   * hostname — expired, a key that doesn't open it, or issued for other names.
+   * Distinct from `missing` (nothing there) and `read_error` (transient): the file
+   * exists, so a retry won't help, and treating it as valid is what let "Recheck
+   * SSL" report green on a cert browsers reject.
+   */
+  reason?: "issued" | "renewed" | "missing" | "read_error" | "not_local" | "invalid";
 }
 
 // ─── Log streaming callback ──────────────────────────────────────────────────

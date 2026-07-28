@@ -493,7 +493,11 @@
     "confirmDeleteWipe": "Löschen + Daten entfernen",
     "confirmDeleteEnvWipe": "Umgebung löschen + Daten entfernen",
     "confirmDelete": "Projekt löschen",
-    "confirmDeleteEnv": "Umgebung löschen"
+    "confirmDeleteEnv": "Umgebung löschen",
+    "linkedTitleOne": "{count} Projekt ist mit dieser App verbunden",
+    "linkedTitleOther": "{count} Projekte sind mit dieser App verbunden",
+    "linkedNote": "Sie laufen mit unveränderten Daten weiter – nur diese Verbindung entfällt. Deploye sie neu, damit das greift.",
+    "linkedNoteRecordOnly": "Sie laufen weiter, aber die Verknüpfung verschwindet mit dem Eintrag – ein späterer Re-Import stellt sie nicht wieder her."
   },
   "routing": {
     "title": "Routing",

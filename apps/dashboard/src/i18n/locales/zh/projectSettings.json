@@ -486,7 +486,11 @@
     "confirmDeleteWipe": "删除 + 清除数据",
     "confirmDeleteEnvWipe": "删除环境 + 清除数据",
     "confirmDelete": "删除项目",
-    "confirmDeleteEnv": "删除环境"
+    "confirmDeleteEnv": "删除环境",
+    "linkedTitleOne": "{count} 个项目连接到此应用",
+    "linkedTitleOther": "{count} 个项目连接到此应用",
+    "linkedNote": "它们会继续运行，数据不受影响 — 只会失去此连接。重新部署即可生效。",
+    "linkedNoteRecordOnly": "它们会继续运行，但关联会随记录一起删除 — 之后重新导入此应用也不会恢复。"
   },
   "routing": {
     "title": "路由",

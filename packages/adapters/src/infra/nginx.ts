@@ -22,9 +22,10 @@ import {
   mkdir as fsMkdir,
   readFile as fsReadFile,
   rename as fsRename,
+  stat as fsStat,
 } from "node:fs/promises";
 import { execFile as cpExecFile } from "node:child_process";
-import { randomBytes, X509Certificate, createPrivateKey } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { promisify } from "node:util";
 import { dirname, join } from "node:path";
 
@@ -33,6 +34,8 @@ import type { RoutingProvider, SslProvider } from "./types";
 import { LUA_LOGGER_PATH, RULES_GUARD_PATH, luaSourceAvailable, buildReloadCommand, detectOpenRestyPaths, ACME_HTTP01_PORT, ACME_CHALLENGE_LOCATION, type OpenRestyPaths } from "./openresty-lua";
 import { safeErrorMessage, sanitizeProxySettings, PROXY_GZIP_TYPES, type ProxySettings } from "@repo/core";
 import { sq } from "../system/local-shell";
+import { validateCertFor } from "../system/proxy/cert-material";
+import { probeStaticOutput, type OutputProbeResult } from "../system/output-exists";
 
 /** Reverse-proxy headers shared by every proxy_pass location. */
 const PROXY_HEADERS = `proxy_set_header Host $host;
@@ -173,6 +176,15 @@ export interface NginxProviderOptions {
    * When omitted, uses node:fs directly (local).
    */
   executor?: CommandExecutor;
+  /**
+   * Treat `paths` as authoritative and skip the per-reload re-detection.
+   *
+   * REQUIRED for a containerized edge. Re-detection runs `openresty -V`, which on
+   * an edge executor answers from INSIDE the container and reports container
+   * paths — while file ops land on the host. Left unpinned, the first reload would
+   * silently repoint `sitesDir` at a host directory nothing serves from.
+   */
+  pinPaths?: boolean;
 }
 
 const DEFAULT_CERT_DIR = "/etc/letsencrypt/live";
@@ -272,6 +284,7 @@ export class NginxProvider implements RoutingProvider, SslProvider {
   private readonly certDir: string;
   private readonly executor: CommandExecutor | null;
   private reloadCommand: string;
+  private readonly pinPaths: boolean;
 
   constructor(opts: NginxProviderOptions) {
     this.sitesDir = opts.paths.sitesDir;
@@ -279,6 +292,7 @@ export class NginxProvider implements RoutingProvider, SslProvider {
     this.certDir = opts.certDir ?? DEFAULT_CERT_DIR;
     this.executor = opts.executor ?? null;
     this.reloadCommand = buildReloadCommand(opts.paths);
+    this.pinPaths = opts.pinPaths ?? false;
   }
 
   // ── File operation helpers (dual-path: local or remote) ──────────────
@@ -348,6 +362,41 @@ export class NginxProvider implements RoutingProvider, SslProvider {
     }
   }
 
+  /**
+   * Put `fullchain.pem` + `privkey.pem` in `dir` as ONE atomic step.
+   *
+   * Both files are written into a temp sibling dir, then the pair is moved into
+   * place together. A cert and its key are only valid as a set — writing them
+   * individually means a crash, a full disk, or a dropped SSH connection between
+   * the two leaves the new cert next to the previous key, and `openresty -t` then
+   * fails for the WHOLE edge (every domain, not just this one) until someone
+   * notices. `mv -T`/rename of the staged dir also means a concurrent reload sees
+   * either the old pair or the new one, never a half-written PEM.
+   */
+  private async stageCertDir(dir: string, cert: ManualCert): Promise<void> {
+    const staging = `${dir}.staging-${process.pid}-${randomBytes(4).toString("hex")}`;
+    try {
+      await this._mkdir(staging);
+      await this._writeFile(join(staging, "fullchain.pem"), cert.certPem);
+      await this._writeFile(join(staging, "privkey.pem"), cert.keyPem);
+      if (this.executor) {
+        // `mv staging/* dir/` (not `mv staging dir`) so an EXISTING cert dir is
+        // updated rather than nested inside itself, and certbot's own sibling
+        // files (cert.pem, chain.pem, README) are left alone.
+        await this._mkdir(dir);
+        await this.executor.exec(
+          `mv -f ${sq(join(staging, "fullchain.pem"))} ${sq(join(staging, "privkey.pem"))} ${sq(dir)}/`,
+        );
+      } else {
+        await fsMkdir(dir, { recursive: true });
+        await fsRename(join(staging, "fullchain.pem"), join(dir, "fullchain.pem"));
+        await fsRename(join(staging, "privkey.pem"), join(dir, "privkey.pem"));
+      }
+    } finally {
+      await this._rm(staging).catch(() => undefined);
+    }
+  }
+
   private async _exec(command: string, args: string[] = []): Promise<string> {
     if (this.executor) {
       // Remote path runs through a login shell (ssh2 exec), so every arg MUST
@@ -368,6 +417,32 @@ export class NginxProvider implements RoutingProvider, SslProvider {
       const detail = [e.stderr?.trim(), e.stdout?.trim()].filter(Boolean).join("\n");
       throw new Error(detail || e.message || String(err));
     }
+  }
+
+  /**
+   * Does this static `root` resolve where OpenResty looks? (RoutingProvider)
+   *
+   * Runs the probe through `this.executor` — the SAME handle vhost writes and
+   * `openresty -s reload` go through — so it answers from the edge's own vantage
+   * point. That is the whole value: for a containerized edge the executor's `exec`
+   * lands INSIDE the container (DockerEdgeExecutor / edgeContainerExecutor), so a
+   * `root` that exists on the host but was never bind-mounted reads as missing
+   * here, which is exactly the 404 a host-side probe cannot see. With no executor
+   * the edge is bare-local and shares this process's filesystem, so node:fs is
+   * already the right vantage point.
+   *
+   * Advisory: never throws.
+   */
+  async probeStaticRoot(servedPath: string): Promise<OutputProbeResult> {
+    if (this.executor) return probeStaticOutput(this.executor, servedPath);
+    const found = await this._exists(servedPath);
+    if (!found) return { found: false, hasIndex: false, checked: true };
+    // A file IS its own index; a directory needs index.html to serve at that path.
+    const isFile = await fsStat(servedPath)
+      .then((s) => s.isFile())
+      .catch(() => false);
+    const hasIndex = isFile || (await this._exists(join(servedPath, "index.html")));
+    return { found: true, hasIndex, checked: true };
   }
 
   /**
@@ -722,6 +797,16 @@ ${webhookLocation}${extraLocations}
       return this.provisionCert(domain);
     }
 
+    // A cert can be on disk WITHOUT being a certbot lineage — an ACME cert adopted
+    // from a foreign proxy (migration / cert reuse) is written straight to certbot's
+    // path, but certbot has no renewal config for it, and `certbot renew
+    // --cert-name` fails outright with "no certificate found with name". Such a cert
+    // IS ours to reissue (public ACME CA, this box owns the domain), so renewing it
+    // means obtaining a first lineage — `certonly` with force, not `renew`.
+    if (!(await this.hasCertbotLineage(domain))) {
+      return this.provisionCert(domain, { force: true });
+    }
+
     await this._exec("certbot", ["renew", "--cert-name", domain, "--non-interactive"]);
     await this.reload();
 
@@ -729,31 +814,47 @@ ${webhookLocation}${extraLocations}
   }
 
   /**
-   * Install an operator-supplied certificate (no ACME). Validates the PEM pair,
-   * writes it to the same on-disk path certbot uses, then re-registers the vhost
-   * with TLS — mirroring provisionCert's tail so composite routes are preserved.
+   * Does certbot track a renewal lineage for this domain? `/etc/letsencrypt/renewal/
+   * <domain>.conf` is the per-lineage record certbot writes on first issuance and
+   * reads on every `renew`, so its presence is the authoritative answer — the cert
+   * FILES existing is not (they can be adopted, or copied in by hand).
+   */
+  private async hasCertbotLineage(domain: string): Promise<boolean> {
+    // Derived from certDir so a custom cert root (tests, container edge) stays
+    // consistent: /etc/letsencrypt/live → /etc/letsencrypt/renewal.
+    const renewalPath = join(dirname(this.certDir), "renewal", `${domain}.conf`);
+    return this._exists(renewalPath);
+  }
+
+  /**
+   * Install an operator-supplied or adopted certificate (no ACME). Validates the
+   * PEM pair against the domain, writes it to the same on-disk path certbot uses,
+   * then re-registers the vhost with TLS — mirroring provisionCert's tail so
+   * composite routes are preserved.
+   *
+   * The validation is deliberately here, at the last gate before disk, and not
+   * only in the callers: every path that puts a cert on this box (operator upload,
+   * migration carry, cert reuse) funnels through this method, so a check here can't
+   * be bypassed by a new caller that forgets it.
    */
   async installCert(domain: string, cert: ManualCert): Promise<SslResult> {
     assertValidDomain(domain);
 
-    // Validate before touching disk: the cert must parse and the key must
-    // actually match it, or OpenResty would fail to reload on a broken pair.
-    let expiresAt: string;
-    try {
-      const x509 = new X509Certificate(cert.certPem);
-      const key = createPrivateKey(cert.keyPem);
-      if (!x509.checkPrivateKey(key)) {
-        throw new Error("private key does not match certificate");
-      }
-      expiresAt = new Date(x509.validTo).toISOString();
-    } catch (err) {
-      throw new Error(`Invalid certificate: ${safeErrorMessage(err)}`);
-    }
+    // Validate before touching disk. The pair must parse and the key must match,
+    // or OpenResty fails to reload — which takes down every OTHER domain on this
+    // edge too, not just this one. The coverage and expiry checks are what keep a
+    // cert for a DIFFERENT hostname (an adopted vhost naming several hosts off one
+    // single-name cert) from being served under a green padlock.
+    const candidate = validateCertFor(domain, cert, "supplied certificate");
+    if (!candidate.cert) throw new Error(`Invalid certificate: ${candidate.reason}`);
+    const { expiresAt } = candidate.cert;
 
+    // Stage both PEMs in a sibling dir and swap it in with ONE rename. Writing the
+    // two files in place is not atomic: a failure between them leaves the new cert
+    // beside the old key, which is exactly the mismatched pair that breaks the
+    // reload for the whole edge.
     const dir = join(this.certDir, domain);
-    await this._mkdir(dir);
-    await this._writeFile(join(dir, "fullchain.pem"), cert.certPem);
-    await this._writeFile(join(dir, "privkey.pem"), cert.keyPem);
+    await this.stageCertDir(dir, cert);
 
     // Re-register the vhost with TLS now that the cert is on disk. Prefer the
     // persisted RouteConfig sidecar so every location survives (same as
@@ -768,7 +869,13 @@ ${webhookLocation}${extraLocations}
       // No sidecar (domain not routed yet) — cert is staged on disk regardless.
     }
 
-    return { domain, expiresAt, issuer: "manual", verified: true, reason: "issued" };
+    return {
+      domain,
+      expiresAt,
+      issuer: candidate.cert.renewable ? candidate.cert.issuer : "manual",
+      verified: true,
+      reason: "issued",
+    };
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────
@@ -786,12 +893,14 @@ ${webhookLocation}${extraLocations}
    */
   private async reload(): Promise<void> {
     if (this.executor) {
-      try {
-        const freshPaths = await detectOpenRestyPaths(this.executor);
-        this.sitesDir = freshPaths.sitesDir;
-        this.reloadCommand = buildReloadCommand(freshPaths);
-      } catch {
-        // Detection failed - fall through with current cached paths
+      if (!this.pinPaths) {
+        try {
+          const freshPaths = await detectOpenRestyPaths(this.executor);
+          this.sitesDir = freshPaths.sitesDir;
+          this.reloadCommand = buildReloadCommand(freshPaths);
+        } catch {
+          // Detection failed - fall through with current cached paths
+        }
       }
       await this.executor.exec(this.reloadCommand);
       return;
@@ -824,22 +933,37 @@ ${webhookLocation}${extraLocations}
     if (!(await this.certsExist(domain))) {
       return { domain, expiresAt: "", issuer: "certbot", verified: false, reason: "missing" };
     }
+    let certPem: string;
+    let keyPem: string;
     try {
-      const certPath = join(this.certDir, domain, "fullchain.pem");
-      const pem = await this._readFile(certPath);
-      const { X509Certificate } = await import("node:crypto");
-      const cert = new X509Certificate(pem);
-      return {
-        domain,
-        expiresAt: new Date(cert.validTo).toISOString(),
-        issuer: "certbot",
-        verified: true,
-      };
+      certPem = await this._readFile(join(this.certDir, domain, "fullchain.pem"));
+      keyPem = await this._readFile(join(this.certDir, domain, "privkey.pem"));
     } catch {
-      // Cert file exists but couldn't be read/parsed (SSH blip, permissions,
-      // partial write). Transient — caller must NOT treat this as "no cert".
+      // The file exists but couldn't be read (SSH blip, permissions, partial
+      // write). Transient — the caller must NOT treat this as "no cert".
       return { domain, expiresAt: "", issuer: "certbot", verified: false, reason: "read_error" };
     }
+
+    // `verified` used to be true for ANY parseable cert, so an EXPIRED cert — or a
+    // pair whose key doesn't open it, or one issued for a different hostname — read
+    // as healthy. That made "Recheck SSL" report green on a cert browsers reject,
+    // let a deploy short-circuit past reissuing an expired cert, and let cert reuse
+    // adopt whatever happened to be sitting at this path (including a cert a
+    // cross-server migration had just carried in).
+    const candidate = validateCertFor(domain, { certPem, keyPem }, "on-disk certificate");
+    if (!candidate.cert) {
+      // Logged because `reason` is a fixed enum: without this line the operator sees
+      // "provisioning" with no way to learn the cert on disk is expired vs. for the
+      // wrong name — two problems with very different fixes.
+      console.warn(`[SSL] unusable cert on disk for ${domain}: ${candidate.reason}`);
+      return { domain, expiresAt: "", issuer: "certbot", verified: false, reason: "invalid" };
+    }
+    return {
+      domain,
+      expiresAt: candidate.cert.expiresAt,
+      issuer: candidate.cert.issuer || "certbot",
+      verified: true,
+    };
   }
 
   /**

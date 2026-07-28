@@ -106,23 +106,99 @@ export function isOurEdgeContainer(name?: string, image?: string): boolean {
  * a foreign proxy the takeover flow would kill.
  */
 export async function ourEdgeContainerRunning(executor: CommandExecutor): Promise<boolean> {
+  return Boolean(await resolveOurEdgeContainer(executor));
+}
+
+/**
+ * Short-lived memo for {@link resolveOurEdgeContainer}, keyed by the executor —
+ * i.e. by the BOX being asked, since an executor reaches exactly one machine.
+ *
+ * The probe is 1–2 `docker ps` shell-outs (over SSH for a remote server), and it
+ * sits on read paths that run constantly: every `createPlatform`, every
+ * `checkOpenResty`/`checkCertbot`, and once per file in `readEdgeFile` /
+ * `writeEdgeFile` — so carrying one cert cost eight round-trips to answer the same
+ * question. Uncached, this reproduced the per-poll shell-out storm that made the
+ * server page slow in the first place.
+ *
+ * Cache lifetime is deliberately short, and every code path that CREATES or
+ * REMOVES the edge invalidates explicitly (see `invalidateEdgeContainer`), so a
+ * stale answer can only ever come from someone changing the edge out-of-band —
+ * where being wrong for a few seconds costs a retryable reload, not data.
+ */
+const EDGE_CONTAINER_TTL_MS = 20_000;
+
+interface EdgeContainerMemo {
+  value: string | null;
+  at: number;
+  generation: number;
+}
+
+const edgeContainerMemo = new WeakMap<CommandExecutor, EdgeContainerMemo>();
+/** Bumped by a no-arg invalidate; makes every existing entry unreadable at once
+ *  (a WeakMap can't be enumerated, so there's nothing to delete). */
+let edgeMemoGeneration = 0;
+
+/**
+ * Drop the memoized edge-container answer. MUST be called by anything that starts,
+ * replaces or removes the edge container — otherwise the next reader can be told
+ * the old story for up to {@link EDGE_CONTAINER_TTL_MS}.
+ *
+ * With an executor: only that box. Without: every box (used when we can't name the
+ * executor that changed, e.g. a compose stack coming up underneath us).
+ */
+export function invalidateEdgeContainer(executor?: CommandExecutor): void {
+  if (executor) edgeContainerMemo.delete(executor);
+  else edgeMemoGeneration++;
+}
+
+/**
+ * The NAME of our running edge container on this box, or null.
+ *
+ * Same detection as {@link ourEdgeContainerRunning} — it's the same probe, so
+ * this is the single source of truth and the boolean delegates here. Callers that
+ * need to reach INTO the edge (`docker exec`) must use this rather than
+ * `OPENSHIP_EDGE_CONTAINER`: that env names the CONTROL PLANE's own edge, which
+ * says nothing about a remote server we're scanning or deploying to.
+ *
+ * Memoized per executor for a few seconds. Pass `{ fresh: true }` on paths that
+ * are ABOUT TO ACT on the answer (install, uninstall, takeover) — there, a stale
+ * negative would create a second edge and a stale positive would skip creating one.
+ */
+export async function resolveOurEdgeContainer(
+  executor: CommandExecutor,
+  opts?: { fresh?: boolean },
+): Promise<string | null> {
+  if (!opts?.fresh) {
+    const hit = edgeContainerMemo.get(executor);
+    if (hit && hit.generation === edgeMemoGeneration && Date.now() - hit.at < EDGE_CONTAINER_TTL_MS) {
+      return hit.value;
+    }
+  }
+
+  const resolved = await probeOurEdgeContainer(executor);
+  edgeContainerMemo.set(executor, {
+    value: resolved,
+    at: Date.now(),
+    generation: edgeMemoGeneration,
+  });
+  return resolved;
+}
+
+async function probeOurEdgeContainer(executor: CommandExecutor): Promise<string | null> {
   const byName = await tryExec(
     executor,
     `docker ps --filter name=openship-edge --format '{{.Names}}' 2>/dev/null | head -1`,
   );
-  if (byName && byName.trim()) return true;
+  if (byName?.trim()) return byName.trim();
 
   // Renamed container (OPENSHIP_EDGE_CONTAINER): still ours if it runs our image.
   const all = await tryExec(executor, `docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null`);
-  if (!all) return false;
-  return all
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .some((line) => {
-      const [name, image] = line.split("\t");
-      return isOurEdgeContainer(name, image);
-    });
+  if (!all) return null;
+  for (const line of all.split("\n").map((l) => l.trim()).filter(Boolean)) {
+    const [name, image] = line.split("\t");
+    if (name && isOurEdgeContainer(name, image)) return name;
+  }
+  return null;
 }
 
 /**

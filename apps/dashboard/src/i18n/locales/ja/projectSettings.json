@@ -486,7 +486,11 @@
     "confirmDeleteWipe": "削除してデータを消去",
     "confirmDeleteEnvWipe": "環境を削除してデータを消去",
     "confirmDelete": "プロジェクトを削除",
-    "confirmDeleteEnv": "環境を削除"
+    "confirmDeleteEnv": "環境を削除",
+    "linkedTitleOne": "{count} 件のプロジェクトがこのアプリに接続しています",
+    "linkedTitleOther": "{count} 件のプロジェクトがこのアプリに接続しています",
+    "linkedNote": "データはそのままで動作を続けます。失うのはこの接続だけです。反映するには再デプロイしてください。",
+    "linkedNoteRecordOnly": "動作は続きますが、リンクはレコードとともに失われます。後でこのアプリを再インポートしても復元されません。"
   },
   "routing": {
     "title": "ルーティング",

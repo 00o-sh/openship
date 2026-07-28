@@ -126,6 +126,12 @@ export interface InstallerConfig {
    */
   edgePolicy?: EdgePolicy;
   /**
+   * Edge container image ref. The API pins this to its OWN version so the Lua
+   * baked into the edge can never skew from the API driving it; unset falls back
+   * to OPENSHIP_EDGE_IMAGE / registry+OPENSHIP_VERSION.
+   */
+  edgeImage?: string;
+  /**
    * Interactive hold: when the edge ports are held by a foreign proxy and no
    * edgePolicy is set, the installer pauses and asks via this callback — the
    * SAME mechanism as the deploy "a service is already running" prompt. Returns

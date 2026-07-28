@@ -493,7 +493,11 @@
     "confirmDeleteWipe": "Supprimer + effacer les données",
     "confirmDeleteEnvWipe": "Supprimer l'environnement + effacer les données",
     "confirmDelete": "Supprimer le projet",
-    "confirmDeleteEnv": "Supprimer l'environnement"
+    "confirmDeleteEnv": "Supprimer l'environnement",
+    "linkedTitleOne": "{count} projet est connecté à cette app",
+    "linkedTitleOther": "{count} projets sont connectés à cette app",
+    "linkedNote": "Ils continuent de tourner, données intactes — ils perdent seulement cette connexion. Redéployez-les pour l'appliquer.",
+    "linkedNoteRecordOnly": "Ils continuent de tourner, mais le lien part avec l'enregistrement — un réimport ultérieur ne le rétablit pas."
   },
   "routing": {
     "title": "Routage",

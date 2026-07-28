@@ -17,10 +17,36 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { systemCatalog, type EnvironmentProfile } from "@repo/adapters";
+import {
+  EDGE_CONTAINER_MOUNTS,
+  EDGE_HOST_STATE_DIR,
+  invalidateEdgeContainer,
+  systemCatalog,
+  type EnvironmentProfile,
+} from "@repo/adapters";
+import { DEFAULT_IMAGE_REGISTRY } from "@repo/core";
 
 import { OS_DIR } from "./paths";
 import { readSourceInstall } from "./source-install";
+
+/** Host side of the edge's routing mounts — one source of truth with the api. */
+const EDGE_SITES_HOST_DIR = `${EDGE_HOST_STATE_DIR}/sites-enabled`;
+const EDGE_ACME_HOST_DIR = `${EDGE_HOST_STATE_DIR}/acme`;
+
+/**
+ * The edge's bind mounts as compose YAML lines.
+ *
+ * Generated from `EDGE_CONTAINER_MOUNTS` — the same array `buildEdgeRunCommand`
+ * uses — because this list was previously hand-written here TWICE (api + edge) with
+ * the container paths as literals. Adding a mount to the array then silently reached
+ * `docker run` installs and not compose ones, which is the kind of divergence that
+ * shows up as one install mode serving nothing.
+ *
+ * `:z` relabels for SELinux-enforcing hosts; a no-op elsewhere.
+ */
+function edgeVolumeYaml(indent: string): string {
+  return EDGE_CONTAINER_MOUNTS.map((m) => `${indent}- ${m.host}:${m.container}:z`).join("\n");
+}
 
 declare const __CLI_VERSION__: string;
 
@@ -165,11 +191,12 @@ services:
     ports: ["\${OPENSHIP_BIND_ADDR:-0.0.0.0}:\${API_PORT:-4000}:\${API_PORT:-4000}"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - openship_sites:/usr/local/openresty/nginx/conf/sites-enabled
-      - openship_certs:/etc/letsencrypt
-      - openship_acme:/var/www/acme
-      # Static sites' extracted doc-roots — API writes, edge serves (shared).
-      - openship_static:/opt/openship/static
+      # Routing state shared with the edge, as HOST BIND MOUNTS (generated from
+      # EDGE_CONTAINER_MOUNTS): the vhost tree, /etc/letsencrypt, the ACME webroot
+      # and the static doc-roots the API writes and the edge serves. Named volumes
+      # hid all of it from every host-side reader (migrate's proxy scan, cert carry,
+      # cert reuse, mail cert symlinks), each of which then silently saw "nothing".
+${edgeVolumeYaml("      ")}
       # Host-op SSH key (createHostExecutor → host.docker.internal). /dev/null
       # when the host channel isn't provisioned → OPENSHIP_HOST_SSH_HOST stays
       # unset and the API falls back to LocalExecutor.
@@ -218,18 +245,11 @@ services:
     restart: unless-stopped
     network_mode: host
     volumes:
-      - openship_sites:/usr/local/openresty/nginx/conf/sites-enabled
-      - openship_certs:/etc/letsencrypt
-      - openship_acme:/var/www/acme
-      - openship_static:/opt/openship/static
+${edgeVolumeYaml("      ")}
 
 volumes:
   postgres_data:
   redis_data:
-  openship_sites:
-  openship_certs:
-  openship_acme:
-  openship_static:
 `;
 
 /** Persist a stable secret in the compose .env — regenerated only if absent. */
@@ -439,10 +459,66 @@ function removeOrphanedStack(project: string): void {
 }
 
 /**
+ * Move edge state out of the legacy Docker-managed volumes onto the host.
+ *
+ * Installs before this change kept vhosts, certs, the ACME webroot and static
+ * doc-roots in named volumes mounted only into the api + edge containers. The host
+ * could not see any of it, which silently broke every host-side reader — the
+ * migrate wizard's domain/SSL detection, migration cert carry, cert reuse, the mail
+ * server's cert symlinks. The stack now bind-mounts canonical host paths, so
+ * anything still in a legacy volume has to be copied across or the box comes back
+ * up with no certs and no routes.
+ *
+ * Copy-only, never a move: the volumes stay on disk untouched, so this is
+ * reversible and re-runnable. Skipped per-path once the host side is non-empty.
+ */
+function migrateLegacyEdgeVolumes(project: string): void {
+  const pairs = [
+    { volume: `${project}_openship_sites`, host: EDGE_SITES_HOST_DIR },
+    { volume: `${project}_openship_certs`, host: "/etc/letsencrypt" },
+    { volume: `${project}_openship_acme`, host: EDGE_ACME_HOST_DIR },
+    { volume: `${project}_openship_static`, host: "/opt/openship/static" },
+  ];
+  const ls = spawnSync("docker", ["volume", "ls", "--format", "{{.Name}}"], { encoding: "utf8" });
+  if (ls.status !== 0 || !ls.stdout) return;
+  const existing = new Set(ls.stdout.split("\n").map((l) => l.trim()).filter(Boolean));
+
+  for (const { volume, host } of pairs) {
+    if (!existing.has(volume)) continue;
+    mkdirSync(host, { recursive: true });
+    // Only when the host side is still empty — a second `up` must not clobber
+    // certs the containerized edge has since renewed in place.
+    const alreadyThere = spawnSync("sh", ["-c", `ls -A ${JSON.stringify(host)} 2>/dev/null | head -1`], {
+      encoding: "utf8",
+    });
+    if (alreadyThere.stdout?.trim()) continue;
+    console.log(`  Moving edge state from volume ${volume} onto ${host}...`);
+    // A throwaway container is the only way to read a named volume's contents;
+    // `cp -a` preserves the symlink farm certbot builds under live/.
+    const copy = spawnSync(
+      "docker",
+      [
+        "run", "--rm",
+        "-v", `${volume}:/from:ro`,
+        "-v", `${host}:/to`,
+        "alpine:3", "sh", "-c", "cp -a /from/. /to/ 2>/dev/null || true",
+      ],
+      { stdio: "inherit" },
+    );
+    if (copy.status !== 0) {
+      console.log(
+        `  Could not copy ${volume} — the stack will start with an empty ${host}.\n` +
+          `  Recover manually with: docker run --rm -v ${volume}:/from -v ${host}:/to alpine cp -a /from/. /to/`,
+      );
+    }
+  }
+}
+
+/**
  * Warn when a previous project's data volumes exist but won't be mounted, so a
- * project-name change can never look like silent data loss. Our compose declares
- * the volume key `openship_sites`, so any `<project>_openship_sites` names a prior
- * stack of ours.
+ * project-name change can never look like silent data loss. Legacy installs
+ * declared the volume key `openship_sites`, so any `<project>_openship_sites`
+ * names a prior stack of ours.
  */
 function warnOrphanedVolumes(project: string): void {
   const r = spawnSync("docker", ["volume", "ls", "--format", "{{.Name}}"], { encoding: "utf8" });
@@ -458,7 +534,8 @@ function warnOrphanedVolumes(project: string): void {
   if (others.size === 0) return;
   console.log(
     `  Note: volumes from a previous install (project "${[...others].join(", ")}") are still on disk\n` +
-      `  and are NOT mounted by this stack — its database and certificates start fresh.\n` +
+      `  and are NOT mounted by this stack — its database starts fresh. (Certificates and\n` +
+      `  vhosts now live on the host, so those carry over.)\n` +
       `  Remove them with \`docker volume ls | grep _openship_\` once you're sure they aren't needed.`,
   );
 }
@@ -475,7 +552,7 @@ function renderEnv(opts: ComposeUpOpts, host: { user: string; keyPath: string } 
     // Read by createHostExecutor (throws when false) and by the servers list
     // (hides the local row). Written explicitly so the policy is visible in .env.
     `OPENSHIP_HOST_CONTROL=${opts.noHostControl ? "false" : "true"}`,
-    `OPENSHIP_IMAGE_REGISTRY=${opts.registry || "ghcr.io/oblien"}`,
+    `OPENSHIP_IMAGE_REGISTRY=${opts.registry || DEFAULT_IMAGE_REGISTRY}`,
     `OPENSHIP_VERSION=${opts.version || (typeof __CLI_VERSION__ === "string" ? __CLI_VERSION__ : "latest")}`,
     `POSTGRES_PASSWORD=${keepSecret(prev, "POSTGRES_PASSWORD")}`,
     `BETTER_AUTH_SECRET=${keepSecret(prev, "BETTER_AUTH_SECRET")}`,
@@ -586,6 +663,9 @@ export function composeUp(opts: ComposeUpOpts): { ok: boolean; apiPort: string; 
   const env = readEnvFile();
   const project = env.COMPOSE_PROJECT_NAME || "openship";
   removeOrphanedStack(project);
+  // Before anything mounts the new host paths: carry over an older install's
+  // volume-held certs + vhosts, or the stack comes back up serving nothing.
+  migrateLegacyEdgeVolumes(project);
   warnOrphanedVolumes(project);
 
   // Freshly minted secrets + a surviving data volume = the api will fail auth
@@ -608,14 +688,26 @@ export function composeUp(opts: ComposeUpOpts): { ok: boolean; apiPort: string; 
     if (compose(["up", "-d"], { withBuildOverride: true }) !== 0) {
       return { ok: false, apiPort, dashPort };
     }
+    onEdgeContainerChanged();
     writeInstallMethod("compose");
     return { ok: true, apiPort, dashPort };
   }
 
   if (compose(["pull"]) !== 0) return { ok: false, apiPort, dashPort };
   if (compose(["up", "-d"]) !== 0) return { ok: false, apiPort, dashPort };
+  onEdgeContainerChanged();
   writeInstallMethod("compose");
   return { ok: true, apiPort, dashPort };
+}
+
+/**
+ * Compose just created (or replaced) `openship-edge` behind the detector's back —
+ * `ensureContainerEdge` isn't in this path, so nothing else invalidates the
+ * memoized "is our edge running" answer. This process cached `null` during
+ * preflight, moments ago.
+ */
+function onEdgeContainerChanged(): void {
+  invalidateEdgeContainer();
 }
 
 export function composeDown(): boolean {
@@ -627,10 +719,15 @@ export function composeDown(): boolean {
  * `openship uninstall` (compose): tear the stack down INCLUDING its volumes, and
  * optionally delete the images we own.
  *
- * `down -v` is the destructive part — those volumes hold the database, the issued
- * certificates and the edge's vhosts. Only ever called behind an explicit
- * confirmation. `--remove-orphans` also collects containers from an earlier
- * project name so an uninstall doesn't leave a stale edge holding :80/:443.
+ * `down -v` is the destructive part — those volumes hold the database. Only ever
+ * called behind an explicit confirmation. `--remove-orphans` also collects
+ * containers from an earlier project name so an uninstall doesn't leave a stale
+ * edge holding :80/:443.
+ *
+ * Edge state on the HOST (`/etc/letsencrypt`, /var/lib/openship/edge, the static
+ * doc-roots) is deliberately LEFT IN PLACE: issued certificates outlive an
+ * uninstall/reinstall, and `/etc/letsencrypt` may be shared with a mail server or
+ * anything else on the box. Removing it is the operator's call, not ours.
  *
  * Image removal is scoped to the three images we build/pull by exact reference —
  * never a prune, so a box sharing this daemon with the operator's own containers
@@ -647,7 +744,7 @@ export function composeUninstall(opts: { removeImages?: boolean } = {}): {
 
   if (opts.removeImages) {
     const env = readEnvFile();
-    const registry = env.OPENSHIP_IMAGE_REGISTRY || "ghcr.io/oblien";
+    const registry = env.OPENSHIP_IMAGE_REGISTRY || DEFAULT_IMAGE_REGISTRY;
     const version = env.OPENSHIP_VERSION || "latest";
     for (const { service } of BUILT_SERVICES) {
       const ref = `${registry}/openship-${service}:${version}`;

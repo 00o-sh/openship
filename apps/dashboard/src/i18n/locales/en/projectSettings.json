@@ -621,7 +621,11 @@
     "recordOnlyDesc": "Keeps the app and its data running on your server — only the Openship record is removed. You can re-import it later.",
     "recordOnlyReversible": "Reversible — the app stays on your server.",
     "recordOnlyNote": "Nothing on the server is touched — the app keeps running with its data. Only Openship's record is removed, and it can be re-imported later.",
-    "confirmRecordOnly": "Remove record"
+    "confirmRecordOnly": "Remove record",
+    "linkedTitleOne": "{count} project is connected to this app",
+    "linkedTitleOther": "{count} projects are connected to this app",
+    "linkedNote": "They keep running with their data untouched — they only lose this connection. Redeploy them to pick that up.",
+    "linkedNoteRecordOnly": "They keep running, but the link goes with the record — re-importing this app later won't restore it."
   },
   "routing": {
     "title": "Routing",

@@ -13,6 +13,8 @@
 import type { CommandExecutor } from "../types";
 import type { ComponentStatus } from "./types";
 import { OPENRESTY_LUA_DIR } from "../infra/openresty-lua";
+import { containerCommand } from "./edge-container-executor";
+import { resolveOurEdgeContainer } from "./proxy/detect";
 import { systemCatalog } from "./catalog";
 import { resolveEnvironment } from "./environment";
 import { enrichAvailableVersions } from "./available-version";
@@ -157,6 +159,29 @@ export async function checkOpenResty(
 ): Promise<ComponentStatus> {
   const startedAt = Date.now();
   const recipe = systemCatalog.checks.openresty;
+
+  // The edge is a CONTAINER now. Check that first: on a converted box there is no
+  // openresty binary, no unit and no Lua on the host, so every host probe below
+  // would report "missing" for a perfectly healthy edge. The bare path stays for
+  // boxes not yet converted and for Docker-less servers.
+  const container = await resolveOurEdgeContainer(executor);
+  if (container) {
+    const containerVersion = await tryExec(
+      executor,
+      containerCommand(container, "openresty -v 2>&1"),
+    );
+    if (containerVersion) {
+      systemDebug("checks", `openresty:healthy-container (${formatDuration(startedAt)})`);
+      return healthy("openresty", recipe.parseVersion(containerVersion), true);
+    }
+    systemDebug("checks", `openresty:container-unresponsive (${formatDuration(startedAt)})`);
+    return unhealthy(
+      "openresty",
+      `The edge container ${container} is running but not responding — check \`docker logs ${container}\``,
+      { running: false },
+    );
+  }
+
   const version = await tryExec(executor, recipe.versionCommand);
 
   // OpenResty binary must be installed - a plain nginx process doesn't count
@@ -203,6 +228,19 @@ export async function checkCertbot(
 ): Promise<ComponentStatus> {
   const startedAt = Date.now();
   const recipe = systemCatalog.checks.certbot;
+
+  // certbot ships INSIDE the edge image (apps/edge/Dockerfile), so on a converted
+  // box the host has none — and reporting "missing" there would offer to apt-install
+  // a certbot nothing uses, next to a component that is actually working.
+  const container = await resolveOurEdgeContainer(executor);
+  if (container) {
+    const inEdge = await tryExec(executor, containerCommand(container, "certbot --version"));
+    if (inEdge) {
+      systemDebug("checks", `certbot:healthy-container (${formatDuration(startedAt)})`);
+      return healthy("certbot", recipe.parseVersion(inEdge));
+    }
+  }
+
   const version = await tryExec(executor, recipe.versionCommand);
   if (!version) {
     systemDebug("checks", `certbot:missing (${formatDuration(startedAt)})`);

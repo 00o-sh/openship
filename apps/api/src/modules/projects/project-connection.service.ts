@@ -80,6 +80,61 @@ export async function listConnections(
   return out;
 }
 
+/** One project consuming THIS app — the reverse of {@link listConnections}. */
+export interface ConnectionConsumerView {
+  id: string;
+  targetProjectId: string;
+  targetName: string;
+  targetSlug: string | null;
+  outputId: string;
+  envKey: string;
+  mode: ConnectionMode;
+}
+
+/**
+ * Who consumes this app — the SOURCE side of the graph.
+ *
+ * A shared database is the normal case (app A and app B both wired to Postgres
+ * app C: the unique index is on `(targetProjectId, envKey)`, so one source feeds
+ * as many consumers as you like). Without this the relationship was only visible
+ * from each consumer, so the shared app's own page couldn't show what depends on
+ * it — and deleting it hit an FK error naming a constraint instead of the apps.
+ *
+ * Read access on the source is enough: it exposes which projects in the SAME org
+ * consume it and under which env key, no connection values.
+ */
+export async function listConsumers(
+  ctx: RequestContext,
+  sourceProjectId: string,
+): Promise<ConnectionConsumerView[]> {
+  await permission.assert(ctx, {
+    resourceType: "project",
+    resourceId: sourceProjectId,
+    action: "read",
+  });
+  const source = await repos.project.findById(sourceProjectId);
+  assertResourceInOrg(source, "Project", ctx.organizationId, sourceProjectId);
+
+  const links = await repos.projectConnection.listBySource(sourceProjectId);
+  const out: ConnectionConsumerView[] = [];
+  for (const l of links) {
+    const target = await repos.project.findById(l.targetProjectId).catch(() => null);
+    // Same-org only. A link can't be cross-org (createConnection enforces it), so
+    // a mismatch here means data drift — skip rather than leak a foreign name.
+    if (target && target.organizationId !== ctx.organizationId) continue;
+    out.push({
+      id: l.id,
+      targetProjectId: l.targetProjectId,
+      targetName: target?.name ?? "Unknown",
+      targetSlug: target?.slug ?? null,
+      outputId: l.outputId,
+      envKey: l.envKey,
+      mode: l.mode as ConnectionMode,
+    });
+  }
+  return out;
+}
+
 export interface CreateConnectionInput {
   sourceProjectId: string;
   outputId: string;
@@ -333,4 +388,67 @@ export async function deleteConnection(
   // Refresh the running consumer so the removed env leaves the live container.
   if (!opts?.defer) await applyConnectionToTarget(ctx, targetProjectId);
   return { requiresRedeploy: true };
+}
+
+/**
+ * Unlink a SOURCE app from every project it was wired into, because that app is
+ * being deleted. Removes each injected env var and drops the link row.
+ *
+ * Deliberately NOT `deleteConnection` in a loop:
+ *
+ *   • No permission assert on the consumers. This isn't a user editing another
+ *     project's env — it's the unavoidable consequence of deleting the app they
+ *     already have admin on (`sourceProjectId` is ON DELETE RESTRICT, so the link
+ *     cannot outlive it). Requiring write on every consumer would make a
+ *     narrowly-scoped token unable to delete its own app.
+ *   • No redeploy of the consumer. The app is going away, so redeploying would
+ *     boot it WITHOUT the env var (likely crash-looping) instead of leaving the
+ *     running container alone with a now-dead URL. Callers report who to redeploy.
+ *
+ * Best-effort per link: a failure is collected, not thrown, so one stuck consumer
+ * doesn't hide the rest. Teardown keeps the project row when `errors` is
+ * non-empty — the FK would refuse the drop anyway.
+ */
+export async function unlinkConsumersOfSource(
+  links: Array<{ id: string; targetProjectId: string; envKey: string }>,
+): Promise<{
+  unlinked: Array<{ linkId: string; projectId: string; projectName: string; envKey: string }>;
+  errors: string[];
+}> {
+  const unlinked: Array<{
+    linkId: string;
+    projectId: string;
+    projectName: string;
+    envKey: string;
+  }> = [];
+  const errors: string[] = [];
+
+  for (const link of links) {
+    const target = await repos.project.findById(link.targetProjectId).catch(() => null);
+    const name = target?.name ?? link.targetProjectId;
+    try {
+      // A target that's already gone leaves nothing to clean up — its own delete
+      // cascaded the link away (target FK is ON DELETE CASCADE).
+      if (target) {
+        await mergeEnvVars(link.targetProjectId, target.organizationId, {
+          environment: ENVIRONMENT,
+          upserts: [],
+          deletes: [link.envKey],
+        });
+      }
+      await repos.projectConnection.delete(link.id);
+      unlinked.push({
+        linkId: link.id,
+        projectId: link.targetProjectId,
+        projectName: name,
+        envKey: link.envKey,
+      });
+    } catch (err) {
+      errors.push(
+        `${link.envKey} on ${name}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  return { unlinked, errors };
 }

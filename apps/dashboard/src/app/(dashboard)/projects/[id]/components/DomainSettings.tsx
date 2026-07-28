@@ -2254,7 +2254,7 @@ function SectionCard({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-2xl border border-border/50 bg-card sadwq">
+    <div className="rounded-2xl border border-border/50 bg-card">
       <div className="border-b border-border/40 px-5 py-4">
         <div className="flex min-w-0 items-start justify-between gap-3">
           <div
@@ -2429,7 +2429,7 @@ function DomainOverviewCard({
   }, [autoOpenRecords, openRecords]);
 
   return (
-    <div className="rounded-2xl border border-border/50 bg-card sadwq">
+    <div className="rounded-2xl border border-border/50 bg-card">
       <div className="flex items-start justify-between gap-2 border-b border-border/40 px-5 py-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap">

@@ -33,6 +33,9 @@ import {
   transferVolume,
   transferImage,
   scopedVolumeName,
+  readEdgeFile,
+  writeEdgeFile,
+  edgeProxy,
   type ServiceHandle,
   type TransferEndpoint,
   type TransferMode,
@@ -1479,37 +1482,54 @@ class MigrationOrchestratorImpl {
     targetServerId: string,
     organizationId: string,
     chosen: Array<{
-      existingRoute?: Array<{ domains: string[]; ssl: { certPath?: string; keyPath?: string } }>;
+      existingRoute?: Array<{ domains: string[]; ssl: { enabled?: boolean } }>;
     }>,
   ): Promise<void> {
-    // domain → source cert/key file paths, from the proxy scan attached to each
-    // discovered service (one entry per proxied path). First writer wins per domain.
-    const domainCerts = new Map<string, { certPath: string; keyPath: string }>();
+    // Every TLS-served domain among the kept services. The cert MATERIAL comes from
+    // the source proxy's own reader, not from cert paths on the discovered route:
+    // caddy and traefik declare no paths (their certs live in a data dir and in
+    // acme.json), so a path-driven carry silently moved nothing from those boxes and
+    // every migrated domain re-issued through ACME on the target.
+    const domains = new Set<string>();
     for (const s of chosen) {
       for (const r of s.existingRoute ?? []) {
-        if (!r.ssl?.certPath || !r.ssl.keyPath) continue;
+        if (r.ssl?.enabled === false) continue;
         for (const domain of r.domains) {
           // Hostname-only guard — the domain becomes a filesystem path segment.
           if (!/^[a-z0-9.-]+$/i.test(domain) || domain.includes("..")) continue;
-          if (!domainCerts.has(domain)) {
-            domainCerts.set(domain, { certPath: r.ssl.certPath, keyPath: r.ssl.keyPath });
-          }
+          domains.add(domain);
         }
       }
     }
-    if (domainCerts.size === 0) return;
+    if (domains.size === 0) return;
 
     const source = await createServerCommandExecutor(sourceServerId, organizationId);
     const target = await createServerCommandExecutor(targetServerId, organizationId);
-    for (const [domain, paths] of domainCerts) {
+    const proxy = await edgeProxy(source.executor).catch(() => null);
+    if (!proxy) return;
+
+    for (const domain of domains) {
       try {
-        const certPem = await source.executor.readFile(paths.certPath);
-        const keyPem = await source.executor.readFile(paths.keyPath);
-        if (!certPem?.includes("BEGIN CERTIFICATE") || !keyPem?.includes("PRIVATE KEY")) continue;
+        // certFor validates that the cert covers THIS domain and hasn't expired
+        // before we plant it at the target's certbot path. That gate matters here
+        // more than anywhere: whatever lands at that path is what the target's
+        // `verifyExistingCert` will later accept as this domain's cert, so an
+        // unchecked carry writes a mismatched cert straight into the trusted spot.
+        const candidate = await proxy.certCandidateFor(domain);
+        if (!candidate.cert) {
+          console.log(`[migration] no cert carried for ${domain}: ${candidate.reason}`);
+          continue;
+        }
+        // writeEdgeFile, not plain writeFile: the target may run a containerized
+        // edge whose cert dir the HOST can't see, where a plain write lands
+        // somewhere the edge never reads.
         const dir = `/etc/letsencrypt/live/${domain}`;
-        await target.executor.writeFile(`${dir}/fullchain.pem`, certPem);
-        await target.executor.writeFile(`${dir}/privkey.pem`, keyPem);
-        console.log(`[migration] carried TLS cert for ${domain} → target ${dir}`);
+        await writeEdgeFile(target.executor, `${dir}/fullchain.pem`, candidate.cert.certPem);
+        await writeEdgeFile(target.executor, `${dir}/privkey.pem`, candidate.cert.keyPem);
+        console.log(
+          `[migration] carried TLS cert for ${domain} → target ${dir} ` +
+            `(from ${candidate.cert.source}, expires ${candidate.cert.expiresAt})`,
+        );
       } catch (err) {
         console.warn(`[migration] cert carry failed for ${domain}: ${safeErrorMessage(err)}`);
       }

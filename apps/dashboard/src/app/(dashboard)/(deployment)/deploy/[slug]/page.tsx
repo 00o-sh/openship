@@ -18,7 +18,7 @@ import DeployTargetStep, { DeployTargetSummary, lastPickStore, useDesktopTargets
 import { decodeSlug } from "@/utils/repoSlug";
 import { useDeployment } from "@/context/DeploymentContext";
 import { usesServiceDeployment } from "@/context/deployment/types";
-import { usePlatform } from "@/context/PlatformContext";
+import { usePlatform, canUseCloudConnection } from "@/context/PlatformContext";
 import SkeletonLoader from "./components/SkeletonLoader";
 import ErrorState from "@/components/shared/ErrorState";
 import { PageContainer } from "@/components/ui/PageContainer";
@@ -59,7 +59,7 @@ const DeployRepository: React.FC = () => {
     const params = useParams();
     const slug = params.slug as string;
     const { config, initializeFromRepo, initializeFromLocal, initializeFromUpload, initializeFromProject, updateConfig } = useDeployment();
-    const { deployMode } = usePlatform();
+    const { deployMode, selfHosted } = usePlatform();
     const { t } = useI18n();
     const searchParams = useSearchParams();
     const force = searchParams.get("force") || undefined;
@@ -71,7 +71,13 @@ const DeployRepository: React.FC = () => {
     const uploadName = searchParams.get("name") || undefined;
     // Edit-from-Runtime-tab: hydrate from SAVED settings, skip repo re-detection.
     const isConfigEdit = searchParams.get("mode") === "config" && !!projectId;
-    const isDesktop = deployMode === "desktop";
+    // Desktop AND self-hosted pick a deploy target (this box / a registered server
+    // / cloud) — only the multi-tenant SaaS always deploys to cloud. Self-hosted
+    // was wrongly excluded, so its target picker never mounted and the "cloud"
+    // DEFAULT_CONFIG value silently shipped ("Build Location: Openship Cloud").
+    // Reuse the shared "self-managed, not SaaS" predicate instead of re-deriving
+    // it inline; the picker's own auto-select already prefers "This Server". #263
+    const canPickTarget = canUseCloudConnection({ selfHosted, deployMode });
 
     // Decode the slug at render time so the skeleton can name the source
     // ("Fetching owner/repo from GitHub") on the very first paint, before the
@@ -119,7 +125,7 @@ const DeployRepository: React.FC = () => {
     // The settings-API default is still authoritative and gets applied
     // if the user clicks "edit" to reopen the picker.
     const [step, setStep] = useState<"target" | "config">(() => {
-        if (!isDesktop) return "config";
+        if (!canPickTarget) return "config";
         if (typeof window === "undefined") return "target";
         return lastPickStore.read() ? "config" : "target";
     });
@@ -136,7 +142,7 @@ const DeployRepository: React.FC = () => {
     const appliedLastPickRef = useRef(false);
 
     const applyLastPick = useCallback(() => {
-        if (!isDesktop || appliedLastPickRef.current) return;
+        if (!canPickTarget || appliedLastPickRef.current) return;
         const last = typeof window !== "undefined" ? lastPickStore.read() : null;
         if (!last) return;
         appliedLastPickRef.current = true;
@@ -147,7 +153,7 @@ const DeployRepository: React.FC = () => {
         } else if (last.target === "local") {
             updateConfig({ deployTarget: "local", serverId: undefined });
         }
-    }, [isDesktop, updateConfig]);
+    }, [canPickTarget, updateConfig]);
 
     useLayoutEffect(() => {
         applyLastPick();
@@ -321,7 +327,7 @@ const DeployRepository: React.FC = () => {
                     DeployTargetStep owns its own max-width: it widens to two columns
                     when a right-hand panel (cloud power / server runtime) is shown, and
                     stays narrow single-column otherwise. The page just centers it. */}
-                {step === "target" && isDesktop && (
+                {step === "target" && canPickTarget && (
                     <div className="flex items-center justify-center min-h-[calc(100vh-8rem)] py-8">
                         <DeployTargetStep
                             targets={targets}
@@ -335,8 +341,8 @@ const DeployRepository: React.FC = () => {
                 {step === "config" && (
                     <div className="grid lg:grid-cols-[1fr_340px] gap-6">
                         <div className="space-y-5">
-                            {/* Target summary bar - click to go back to step 1 (desktop only) */}
-                            {isDesktop && (
+                            {/* Target summary bar — click to go back to step 1 (desktop + self-hosted) */}
+                            {canPickTarget && (
                                 <DeployTargetSummary
                                     deployTarget={config.deployTarget}
                                     buildStrategy={config.buildStrategy}

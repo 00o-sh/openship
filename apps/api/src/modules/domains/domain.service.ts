@@ -26,9 +26,9 @@ import { reconcileProjectRoutes } from "../../lib/route-apply.service";
 import { generateToken } from "../../lib/domain-token";
 import { sshManager } from "../../lib/ssh-manager";
 import type { DeploymentMeta } from "../../lib/deployment-runtime";
-import { scanProxyRoutesWithExecutor } from "../migration/proxy-route-scan";
 import type { TAddDomainBody } from "./domain.schema";
-import type { CloudRuntime, CommandExecutor, ManualCert } from "@repo/adapters";
+import { edgeProxy, readEdgeFile, validateCertFor } from "@repo/adapters";
+import type { AdoptedCert, CloudRuntime, CommandExecutor, ManualCert } from "@repo/adapters";
 
 // ─── List ────────────────────────────────────────────────────────────────────
 
@@ -276,19 +276,35 @@ async function promoteCustomDomainToPrimary(domain: Domain, domainId: string): P
   }
 }
 
-/** Flip a row to verified + SSL active (+ promote), reusing an existing cert. */
+/** Should this row take primary? See {@link promoteCustomDomainToPrimary}. */
+async function shouldPromoteToPrimary(domain: Domain, domainId: string): Promise<boolean> {
+  if (!domain.projectId || domain.domainType !== "custom") return false;
+  const peers = await repos.domain.listByProject(domain.projectId);
+  return !peers.some((p) => p.id !== domainId && p.isPrimary && p.domainType === "custom");
+}
+
+/**
+ * Flip a row to verified + SSL active (+ promote), reusing an existing cert.
+ *
+ * One transaction, because the three writes describe one outcome. As separate
+ * awaits, a failure in the middle left the row verified with no active SSL — and
+ * the cert is already on disk by this point, so the box serves the domain while the
+ * dashboard still shows it pending, with nothing to retry.
+ */
 async function markDomainVerifiedActive(
   domain: Domain,
   domainId: string,
   ssl: { issuer?: string; expiresAt?: string; manualSsl?: boolean },
 ): Promise<void> {
-  await repos.domain.markVerified(domainId);
-  await promoteCustomDomainToPrimary(domain, domainId);
-  await repos.domain.updateSsl(domainId, {
+  const promote = (await shouldPromoteToPrimary(domain, domainId)) && domain.projectId
+    ? { projectId: domain.projectId }
+    : undefined;
+  await repos.domain.markVerifiedActive(domainId, {
     sslStatus: "active",
     ...(ssl.manualSsl ? { manualSsl: true } : {}),
     ...(ssl.issuer ? { sslIssuer: ssl.issuer } : {}),
     ...(ssl.expiresAt ? { sslExpiresAt: new Date(ssl.expiresAt) } : {}),
+    ...(promote ? { promote } : {}),
   });
 }
 
@@ -368,20 +384,28 @@ function isPathSafeHostname(hostname: string): boolean {
 /**
  * Migration / first-publish SSL reuse. When a custom-domain row is freshly minted
  * for a hostname the SERVER ALREADY serves — an Openship re-migration on the same
- * box, or a foreign reverse proxy (nginx bare OR container) we're taking over —
- * adopt the cert that's already there instead of re-issuing via ACME (which fails
- * behind Cloudflare, or when the cert isn't at certbot's standard path). Sources,
- * in order, all read on the HOST executor so it works when the API is containerized:
+ * box, or a foreign reverse proxy (nginx/caddy/apache/traefik, bare OR container)
+ * we're taking over — adopt the cert that's already there instead of re-issuing via
+ * ACME (which fails behind Cloudflare, or when the cert isn't at certbot's standard
+ * path). Sources, in order, all read on the HOST executor so it works when the API
+ * is containerized:
  *   1. certbot's /etc/letsencrypt on the serving host, via the platform provider
  *      (verifyExistingCert).
- *   2. the host's /etc/letsencrypt/live/<host>/{fullchain,privkey}.pem read
- *      directly on the HOST executor — the bare-edge case where the API
- *      container's own /etc/letsencrypt is a different volume.
- *   3. the edge vhost's cert files (scanProxyRoutes → certPath/keyPath), read off
- *      the host and installed as a manual cert (foreign-proxy migration).
+ *   2. the host's certbot lineage dir read directly on the HOST executor — the
+ *      bare-edge case where the API container's own /etc/letsencrypt is a
+ *      different volume. Includes the `-0001` re-issue lineages, which a bare
+ *      `live/<host>` lookup misses entirely.
+ *   3. whatever the edge proxy itself serves, via `edgeProxy().certFor()` — our
+ *      OpenResty at a non-standard path, an nginx/apache declared path, caddy's
+ *      own cert store, or traefik's acme.json.
+ *
+ * Every candidate goes through `validateCertFor`, so a cert that doesn't cover this
+ * hostname or has already expired is REJECTED rather than installed — the row stays
+ * pending for the ACME path instead of serving a name-mismatched cert under a green
+ * padlock.
+ *
  * Self-hosted only; best-effort + non-fatal (domains never fail a deploy, see
- * [[domains-never-fail-deploy]]). No-op when nothing is reusable → the row stays
- * pending for the manual Verify (ACME) path. Returns true when it adopted a cert.
+ * [[domains-never-fail-deploy]]). Returns true when it adopted a cert.
  */
 export async function reuseServerCertForDomain(ctx: RequestContext, domainId: string): Promise<boolean> {
   try {
@@ -396,16 +420,31 @@ export async function reuseServerCertForDomain(ctx: RequestContext, domainId: st
       return false;
     }
 
-    const installReused = async (cert: ManualCert) => {
+    /**
+     * Install an adopted cert and flip the row.
+     *
+     * `manualSsl` is set ONLY for a cert certbot can't reissue. It used to be set
+     * unconditionally, and `tlsIssuedElsewhere` reads it as "not ours to renew", so
+     * the SSL scheduler filtered the row out of every renewal batch — an adopted
+     * 90-day Let's Encrypt cert was never renewed and the domain went dark on day
+     * 90. A public-ACME-issued cert is ours to renew; a Cloudflare Origin CA or
+     * internal-PKI cert genuinely isn't.
+     */
+    const installReused = async (cert: AdoptedCert) => {
       const result = await installDomainCert(domain.hostname, cert, {
         projectId: domain.projectId ?? undefined,
         allowUnverified: true,
       });
       await markDomainVerifiedActive(domain, domainId, {
-        issuer: "reused",
-        manualSsl: true,
-        expiresAt: result.expiresAt || undefined,
+        issuer: cert.renewable ? "reused" : cert.issuer,
+        ...(cert.renewable ? {} : { manualSsl: true }),
+        expiresAt: result.expiresAt || cert.expiresAt,
       });
+      console.log(
+        `[DOMAIN] adopted cert for ${domain.hostname} from ${cert.source} ` +
+          `(issuer "${cert.issuer}", expires ${cert.expiresAt}, ` +
+          `${cert.renewable ? "renewable by certbot" : "manual — certbot can't reissue"})`,
+      );
     };
 
     // 1. A cert is already at certbot's standard path, reachable via the platform
@@ -421,15 +460,22 @@ export async function reuseServerCertForDomain(ctx: RequestContext, domainId: st
       return true;
     }
 
-    // 2. Read the host's /etc/letsencrypt directly on the HOST executor — covers a
+    const rejections: string[] = [];
+
+    // 2. Read the host's certbot store directly on the HOST executor — covers a
     //    bare-metal edge whose certs live on the host while the API container's own
     //    /etc/letsencrypt is a separate, empty volume.
     if (isPathSafeHostname(domain.hostname)) {
-      const base = `/etc/letsencrypt/live/${domain.hostname}`;
       const hostCert = await withServerHostExecutor(ctx, project, async (exec) => {
-        const certPem = await exec.readFile(`${base}/fullchain.pem`).catch(() => "");
-        const keyPem = await exec.readFile(`${base}/privkey.pem`).catch(() => "");
-        return certPem.trim() && keyPem.trim() ? { certPem, keyPem } : null;
+        for (const base of await certbotLineageDirs(exec, domain.hostname)) {
+          const certPem = await readEdgeFile(exec, `${base}/fullchain.pem`);
+          const keyPem = await readEdgeFile(exec, `${base}/privkey.pem`);
+          if (!certPem.trim() || !keyPem.trim()) continue;
+          const candidate = validateCertFor(domain.hostname, { certPem, keyPem }, base);
+          if (candidate.cert) return candidate.cert;
+          rejections.push(candidate.reason);
+        }
+        return null;
       }).catch(() => null);
       if (hostCert) {
         await installReused(hostCert);
@@ -437,26 +483,56 @@ export async function reuseServerCertForDomain(ctx: RequestContext, domainId: st
       }
     }
 
-    // 3. A cert served by the edge vhost (our OpenResty at a non-standard path, or
-    //    a foreign proxy we're migrating from) — scan the edge + read the
-    //    referenced files, all on the HOST executor so it works on the local
-    //    host-server too (scanProxyRoutes' own sshManager can't reach that box).
-    const host = domain.hostname.toLowerCase();
-    const cert = await withServerHostExecutor(ctx, project, async (exec) => {
-      const routes = await scanProxyRoutesWithExecutor(exec);
-      const match = [...routes.values()].flat().find(
-        (r) => r.ssl.enabled && r.ssl.certPath && r.ssl.keyPath && r.domains.some((d) => d.toLowerCase() === host),
-      );
-      if (!match?.ssl.certPath || !match.ssl.keyPath) return null;
-      return { certPem: await exec.readFile(match.ssl.certPath), keyPem: await exec.readFile(match.ssl.keyPath) };
+    // 3. Whatever the edge proxy currently serves for this host — one reader for
+    //    every proxy kind, so caddy's store and traefik's acme.json are reachable
+    //    here and not just declared nginx/apache paths.
+    const fromProxy = await withServerHostExecutor(ctx, project, async (exec) => {
+      const proxy = await edgeProxy(exec);
+      if (!proxy) return null;
+      const candidate = await proxy.certCandidateFor(domain.hostname);
+      if (candidate.cert) return candidate.cert;
+      rejections.push(candidate.reason);
+      return null;
     }).catch(() => null);
-    if (!cert?.certPem?.trim() || !cert?.keyPem?.trim()) return false;
-    await installReused(cert);
-    return true;
+    if (fromProxy) {
+      await installReused(fromProxy);
+      return true;
+    }
+
+    // Nothing adoptable. Say WHY when we found material and turned it down — a
+    // silent fallthrough to ACME looks identical to "there was no cert", and these
+    // are the two cases an operator debugging a pending domain needs to tell apart.
+    if (rejections.length > 0) {
+      console.warn(`[DOMAIN] no reusable cert for ${domain.hostname}: ${rejections.join("; ")}`);
+    }
+    return false;
   } catch (err) {
     console.error(`[DOMAIN] cert reuse failed for ${domainId}:`, safeErrorMessage(err));
     return false;
   }
+}
+
+/**
+ * Certbot lineage directories that could hold this hostname's cert, best first.
+ *
+ * Certbot names a lineage after the first domain in it, and on re-issue with a
+ * changed name set it creates a SIBLING — `example.com-0001` — leaving the original
+ * behind. Only checking `live/<host>` therefore misses the live cert on any box
+ * that's had its domain set edited, and the reuse silently fell through to ACME.
+ * The glob is sorted descending so the newest lineage is tried first.
+ */
+async function certbotLineageDirs(exec: CommandExecutor, hostname: string): Promise<string[]> {
+  const base = `/etc/letsencrypt/live/${hostname}`;
+  const listing = await exec
+    .exec(`ls -1d ${base} ${base}-[0-9][0-9][0-9][0-9] 2>/dev/null`)
+    .catch(() => "");
+  const dirs = listing
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith(base))
+    .sort()
+    .reverse();
+  return dirs.length > 0 ? dirs : [base];
 }
 
 // ─── Verify ──────────────────────────────────────────────────────────────────

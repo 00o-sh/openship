@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { ConnectionCard } from "./ConnectionCard";
 import { ConnectedServicesCard } from "./ConnectedServicesCard";
+import { UsedByCard } from "./UsedByCard";
 import { useProjectInfo, useAnalyticsData } from "@/hooks/useProjectEndpoints";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import type { Dictionary } from "@/i18n";
@@ -186,6 +187,10 @@ export const OverviewTab = () => {
 
       {/* Databases/apps wired INTO this project (renders nothing when none). */}
       {projectData.id && <ConnectedServicesCard projectId={projectData.id} />}
+
+      {/* …and the mirror: projects consuming THIS one. A shared database backs many
+          apps, so its own page has to show what depends on it. */}
+      {projectData.id && <UsedByCard projectId={projectData.id} />}
 
       {/* ── Info sections ─────────────────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">

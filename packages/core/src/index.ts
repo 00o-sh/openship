@@ -1,6 +1,7 @@
 export * from "./types";
 export * from "./stacks";
 export * from "./constants";
+export * from "./edge-image-ref";
 export * from "./system";
 export * from "./utils";
 export * from "./errors";

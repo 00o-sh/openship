@@ -99,7 +99,13 @@
     "teardownFailedAt": "Le démantèlement a échoué à : {reasons}. Réessayez ou forcez la suppression pour les rendre orphelines.",
     "teardownFailed": "Échec du démantèlement",
     "cleanupFailedTitle": "Échec du nettoyage",
-    "alreadyDeleted": "Projet déjà supprimé"
+    "alreadyDeleted": "Projet déjà supprimé",
+    "forceModalTitle": "Suppression impossible à la source",
+    "forceModalBody": "Le runtime était injoignable (ou a continué d'échouer), donc ce projet n'a pas été démonté. Vous pouvez tout de même le supprimer d'Openship — l'enregistrement part maintenant et les ressources restantes sont récupérées automatiquement dès que le serveur est joignable.",
+    "forceModalConfirm": "Supprimer du stockage",
+    "forceModalCancel": "Annuler",
+    "unlinked": "Dissocié de {projects} — redéployez-les pour appliquer.",
+    "unlinkedTitle": "Projets connectés mis à jour"
   },
   "sidebar": {
     "project": "Projet",
@@ -337,7 +343,16 @@
     "guideIntroFallback": "Votre projet reçoit cette connexion, prête à l'emploi.",
     "whatYouGet": "Ce que votre app reçoit",
     "advancedValues": "Avancé",
-    "copy": "Copier"
+    "copy": "Copier",
+    "usedByTitle": "Utilisé par",
+    "usedByOpen": "Ouvrir le projet",
+    "usedByHint": "{count} projet(s) dépendent de la connexion de cette app. Dissociez-la depuis le projet consommateur.",
+    "linkedCountOne": "{count} app liée",
+    "linkedCountOther": "{count} apps liées",
+    "linkedHint": "Utilisées par ce projet, mais pas exécutées par lui.",
+    "linkedBadge": "Liée",
+    "unlink": "Dissocier",
+    "openApp": "Ouvrir l'app"
   },
   "incomingWebhooks": {
     "title": "Webhooks entrants",

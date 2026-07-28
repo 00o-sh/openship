@@ -224,23 +224,50 @@ async function createInfraProvider(
   executor: CommandExecutor,
   edgeContainer?: string,
 ): Promise<{ routing: RoutingProvider; ssl: SslProvider }> {
-  // Containerized edge (compose): route through the `openship-edge` container —
-  // the api writes vhosts to the shared sites-enabled volume and reloads /
-  // runs certbot via `docker exec` (DockerEdgeExecutor). nginx.conf + the Lua
-  // are BAKED into the image, so there's nothing to detect/install/patch here.
+  // Both container-edge branches delegate to ensure-container-edge, which owns the
+  // paths/pin decision for the edge image. Constructing the provider here too is
+  // what let the two drift — and pointing `sitesDir` at a directory the edge never
+  // reads fails silently, with the box dark.
+  const { containerEdgeProvider, localContainerEdgeProvider } = await import(
+    "./system/proxy/ensure-container-edge"
+  );
+
+  // LOCAL containerized edge (compose): the api shares the routing mounts with the
+  // `openship-edge` container and reaches it over the mounted Docker socket.
   if (edgeContainer) {
-    const { OPENRESTY_DEFAULT_PATHS } = await import("./infra/openresty-lua");
-    const { DockerEdgeExecutor } = await import("./system/docker-edge-executor");
-    const { NginxProvider } = await import("./infra/nginx");
-    const edgeExec = new DockerEdgeExecutor({ containerName: edgeContainer });
-    const nginx = new NginxProvider({
-      paths: OPENRESTY_DEFAULT_PATHS,
-      ...config.nginx,
-      executor: edgeExec,
-    });
+    const nginx = await localContainerEdgeProvider(edgeContainer, config.nginx);
     return { routing: nginx, ssl: nginx };
   }
 
+  // REMOTE box already running our edge container — same edge, reached over the
+  // pooled SSH executor rather than a socket.
+  const { resolveOurEdgeContainer } = await import("./system/proxy/detect");
+  const remoteEdge = await resolveOurEdgeContainer(executor).catch(() => null);
+  if (remoteEdge) {
+    const nginx = await containerEdgeProvider(executor, remoteEdge, config.nginx);
+    return { routing: nginx, ssl: nginx };
+  }
+
+  // No bare edge on a non-Linux host. The paths below are Linux FHS (`/var/www/acme`,
+  // `/usr/local/openresty/...`) and provisioning them needs root, so on macOS this
+  // failed the deploy outright with `EACCES: mkdir '/var/www'` — before the workload
+  // was even built. Nothing here is installable there either: `installOpenResty` only
+  // implements apt.
+  //
+  // Gated on the executor being LOCAL, because `process.platform` describes THIS
+  // process, not the target: a Mac driving a remote Linux box must still get the real
+  // provider. Both container-edge branches above are checked first, so a Mac running
+  // the compose stack keeps its edge — this only replaces the bare path, where the
+  // alternative is a hard failure.
+  const { LocalExecutor } = await import("./system/local-executor");
+  if (executor instanceof LocalExecutor && process.platform !== "linux") {
+    const { NoopInfraProvider } = await import("./infra/noop");
+    const noop = new NoopInfraProvider();
+    return { routing: noop, ssl: noop };
+  }
+
+  // Bare host OpenResty: legacy boxes not yet converted, and Docker-less servers.
+  // No longer something we install — see `installContainerEdge`.
   const { detectOpenRestyPaths, ensureOpenRestyConfig, ensureLuaScripts } = await import(
     "./infra/openresty-lua"
   );
@@ -249,7 +276,19 @@ async function createInfraProvider(
   // Idempotent, but writes the SHARED nginx.conf (grep||sed). Concurrent deploys
   // would race the non-atomic edit and lose/duplicate the include — serialize it.
   const ensureConfig = async () => {
-    await ensureOpenRestyConfig(executor, paths);
+    // Best-effort HERE, not in `ensureOpenRestyConfig` itself: the INSTALL path
+    // (deployLuaScripts) must still fail loudly when it can't write nginx.conf.
+    // On the DEPLOY path an unwritable edge is a routing gap, and routing gaps
+    // never fail a deploy — the app still builds and runs. Left unguarded, this
+    // threw during platform CONSTRUCTION, upstream of every best-effort routing
+    // step, so the invariant never got a chance to apply (that's what turned a
+    // macOS `mkdir /var/www` EACCES into "Deployment Failed").
+    await ensureOpenRestyConfig(executor, paths).catch((err: unknown) => {
+      console.error(
+        `[openresty] ensureOpenRestyConfig failed (deploy continues, routing may be ` +
+          `incomplete): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
     // Self-heal the edge Lua on EVERY deploy — a box that lost rules_guard.lua
     // (reinstall, manual rm, a pre-embed release) would otherwise 500 every
     // request. Cheap: one listing, writes only what's missing, reloads only if
@@ -266,10 +305,11 @@ async function createInfraProvider(
 async function createSelfHostedPlatform(config: PlatformConfig): Promise<Platform> {
   const runtimeMode = config.runtime ?? "docker";
 
-  // Containerized-edge (compose) mode applies ONLY to the local target — never a
-  // remote server (those carry an injected pooled executor / ssh config and
-  // manage their own host's bare OpenResty). Gated on the local case so remote
-  // routing is untouched.
+  // The LOCAL edge-in-compose case only: here the api process shares the routing
+  // mounts with the edge container and talks to the daemon over its own socket, so
+  // it needs the dockerode executor. A REMOTE box's container edge is resolved by
+  // probing that box (createInfraProvider) — not from this env, which describes
+  // the control plane and says nothing about the target.
   const useDockerEdge =
     !config.executor && !config.ssh && process.env.OPENSHIP_EDGE_MODE === "docker";
   const edgeContainer = process.env.OPENSHIP_EDGE_CONTAINER?.trim() || "openship-edge";

@@ -2,8 +2,8 @@
  * Service business logic - CRUD and compose sync.
  */
 
-import { normalizeRoutingFields, repos, composeSpecDiff, type Service, type ServicePublicEndpoint } from "@repo/db";
-import { ForbiddenError, isValidCustomHostname, ValidationError, withTimeout, type ServiceContainerState } from "@repo/core";
+import { normalizeRoutingFields, repos, composeSpecDiff, type Project, type Service, type ServicePublicEndpoint } from "@repo/db";
+import { ForbiddenError, getProjectType, isValidCustomHostname, ValidationError, withTimeout, type ServiceContainerState, type StackId } from "@repo/core";
 import {
   BuildLogger,
   DockerRuntime,
@@ -30,6 +30,8 @@ import { parseVolumeSpec, type VolumeKind } from "./volume-spec";
 import { sq } from "../migration/direct-transfer";
 import { bounded, duBytes, volumeBytes } from "../migration/migration-size";
 import { deployComposeServices } from "../deployments/compose/deploy.service";
+import { deriveProjectRouteState } from "../domains/project-route.service";
+import { registerStartupHook } from "../../lib/startup";
 import { buildServiceRouteDomains, serviceCustomHostnames } from "../../lib/routing-domains";
 import { resolveServicePublicEndpoints } from "../../lib/public-endpoints";
 import { assertFreeEndpointsAllowed } from "../../lib/free-domain-guard";
@@ -193,6 +195,85 @@ export async function keepServiceDrift(
 
 // ─── Create / Update ─────────────────────────────────────────────────────────
 
+/**
+ * #231: An app-framework project's own app is NOT a `service` row. The compose
+ * deploy fans out over service rows, so the moment a sidecar (Postgres/Redis/…)
+ * is added the deploy runs ONLY the sidecars and the app disappears — while still
+ * reporting "ready". Materialize the app as a `monorepo` service row so the single
+ * compose pipeline deploys app + sidecars together.
+ *
+ * The row carries NULL build fields → they fall back to the project snapshot in
+ * compose/build.service.ts, so it builds identically to the single-app path — and
+ * it mirrors the project's unified port→domain route (exposedPort + the project's
+ * public endpoints). Idempotent, and guarded to a real app-framework SERVER
+ * project's first compose sidecar; genuine docker-compose / services / monorepo
+ * projects and static/no-server apps are left alone.
+ */
+async function materializeAppServiceRow(project: Project): Promise<void> {
+  if (!project.hasServer) return; // no long-running app container to keep
+  let projectType: string;
+  try {
+    projectType = getProjectType((project.framework ?? "") as StackId);
+  } catch {
+    return; // unknown framework → leave shape resolution to the existing paths
+  }
+  if (projectType !== "app") return; // services / docker-compose / monorepo already multi-unit
+
+  const rows = await repos.service.listByProject(project.id);
+  const hasSidecar = rows.some((s) => s.kind === "compose");
+  const hasAppRow = rows.some((s) => s.kind === "monorepo");
+  // Nothing to pair the app with, or the app row already exists. Idempotent, so
+  // it is safe to call on every sidecar add AND from the boot backfill.
+  if (!hasSidecar || hasAppRow) return;
+
+  const projectDomains = await repos.domain.listByProject(project.id).catch(() => []);
+  const routeState = deriveProjectRouteState(project, { projectDomains });
+  // Reuse the SAME normalizer createService uses so the mirrored project route
+  // lands as ServicePublicEndpoint[] (exposed/exposedPort/domain scalars + the
+  // per-port endpoints), keeping the unified port→domain mapping.
+  const routing = normalizeRoutingPatch({
+    exposed: true,
+    exposedPort: project.port != null ? String(project.port) : null,
+    publicEndpoints: routeState.publicEndpoints,
+  });
+
+  await repos.service.create({
+    projectId: project.id,
+    name: project.slug,
+    kind: "monorepo",
+    rootDirectory: project.rootDirectory ?? ".",
+    enabled: true,
+    sortOrder: -1, // app first in the fan-out
+    ...routing,
+    // build fields left undefined → project-snapshot fallback (identical single-app build)
+  });
+}
+
+/**
+ * #231 backfill: app-framework projects that gained sidecars BEFORE the
+ * materialization above shipped have a compose row but no app row, so their
+ * deploy drops the app. Run the same (idempotent) materialization once per boot
+ * for every project — the helper no-ops unless the project has a sidecar and no
+ * app row. Self-hosted + desktop only (the whole startup module is a no-op under
+ * CLOUD_MODE).
+ */
+export function registerAppServiceMaterializeBackfill(): void {
+  registerStartupHook({
+    id: "services:materialize-app-backfill",
+    modes: ["selfhosted", "desktop"],
+    run: async () => {
+      const projects = await repos.project.listAllForScan().catch(() => []);
+      for (const project of projects) {
+        await materializeAppServiceRow(project).catch((err) =>
+          console.warn(
+            `[services] app-materialize backfill skipped for ${project.id}: ${(err as Error).message}`,
+          ),
+        );
+      }
+    },
+  });
+}
+
 export async function createService(
   ctx: RequestContext,
   projectId: string,
@@ -276,6 +357,14 @@ export async function createService(
   // flow, not here.
   for (const hostname of serviceCustomHostnames(created)) {
     await ensurePendingServiceDomain({ projectId, serviceId: created.id, hostname });
+  }
+
+  // #231: keep the app deployable once it gains a compose sidecar (see helper).
+  // Best-effort — a failure here must never block adding the service.
+  if (kind === "compose") {
+    await materializeAppServiceRow(project).catch((err) =>
+      console.warn(`[services] app materialization skipped: ${(err as Error).message}`),
+    );
   }
 
   return created;

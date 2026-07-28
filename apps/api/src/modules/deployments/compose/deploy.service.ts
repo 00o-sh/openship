@@ -51,6 +51,7 @@ import {
 } from "../../../lib/routing-domains";
 import { resolveServiceEndpointUrls, resolveServicePublicEndpoints } from "../../../lib/public-endpoints";
 import { ensureManagedEdgeProxy } from "../../../lib/managed-edge-proxy";
+import { ensureRoutingReady } from "../../../lib/edge-reconcile";
 import * as sessionManager from "../session-manager";
 import { auditPorts } from "../port-audit.service";
 import type { PortCheckResult } from "../../../lib/deployment-runtime";
@@ -506,7 +507,14 @@ export async function deployComposeServices(
     // routing is flagged action-required and retried later.
     try {
       if (plannedRoutes.length > 0) {
-        await opts.system.ensureFeature("routing", systemLog);
+        // Components + edge convergence as ONE step — see ensureRoutingReady for why
+        // the second half can't live inside ensureFeature. Without an executor
+        // there's no box to converge (cloud), so components alone are correct.
+        if (opts.executor) {
+          await ensureRoutingReady(opts.executor, opts.system, { onLog: systemLog });
+        } else {
+          await opts.system.ensureFeature("routing", systemLog);
+        }
       }
       if (plannedRoutes.some((route) => route.provisionSsl)) {
         await opts.system.ensureFeature("ssl", systemLog);

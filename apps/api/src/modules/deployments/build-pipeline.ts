@@ -23,6 +23,7 @@ import {
   CloudRuntime,
   DockerRuntime,
   STATIC_RELEASE_BASE,
+  resolveStaticOutputPath,
   DEFAULT_BUILD_RESOURCE_CONFIG,
   ensurePortAvailable,
   allocateHostPort,
@@ -40,6 +41,7 @@ import {
   resolveDeploymentPlatform,
   resolveEffectiveTarget,
 } from "../../lib/deployment-runtime";
+import { ensureRoutingReady } from "../../lib/edge-reconcile";
 import {
   resolveBuildRuntimeModes,
   resolveDeployRouting,
@@ -71,6 +73,7 @@ import { buildBackgroundContext } from "../../lib/request-context";
 import * as sessionManager from "./session-manager";
 import { onFailure, onSuccess, onCancelled, setDeploymentStatus, type LifecycleContext } from "./deployment-lifecycle";
 import { auditPorts } from "./port-audit.service";
+import { auditStaticOutput, staticOutputTargets } from "./output-audit.service";
 import { createBuildConfig } from "./build-config";
 import { resolveClonePlan } from "./clone-plan";
 import { collapseTerminalLogs } from "./terminal-logs";
@@ -1063,7 +1066,11 @@ function buildDeployEnvironment(
                 // cancel) — the same session prompt flow used for port conflicts.
                 const edge = await ensureEdge(
                   targetExecutor,
-                  (p) => system.ensureFeature("routing", systemLog, { promptUser: p }),
+                  (p) =>
+                    ensureRoutingReady(targetExecutor, system, {
+                      onLog: systemLog,
+                      promptUser: p,
+                    }),
                   { promptUser, onLog: systemLog },
                 );
                 if (edge.migrated && !edge.ok) {
@@ -1138,7 +1145,7 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
   // the built dir into a release and hands the edge a `root`. Its executor is
   // the platform executor, which is exactly the FS the build wrote to (SSH for a
   // remote server; local for a local / docker-edge host where the extract landed
-  // on the shared openship_static volume).
+  // on the shared /opt/openship/static mount).
   const isStaticFileServe = phase.deployRouting.deployMode === "static-file-serve";
   const staticServeRuntime = isStaticFileServe
     ? new BareRuntime({
@@ -1172,7 +1179,7 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
         activate: (cfg) =>
           staticServeRuntime!.deployStatic({ ...cfg, outputDirectory: staticServeOutputDir }),
         resolveRoute: async (id) => ({
-          staticRoot: staticServeRuntime!.resolveStaticRoot(id, staticServeOutputDir),
+          staticRoot: resolveStaticOutputPath(id, staticServeOutputDir),
         }),
         healthCheck: undefined,
       }
@@ -1519,10 +1526,35 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
       ? []
       : await auditPorts(runtime, deployResult.containerId, auditedPorts, logger);
 
+  // The file-side twin, for the case that HAS no port: a static site 404s when the
+  // edge's `root` doesn't resolve to something servable, and until this ran the
+  // static branch above just returned [] with nothing in its place — so the one
+  // deploy shape whose only failure mode IS a 404 was the one shape we never
+  // checked. Probed through `routing`, so it answers from where OpenResty looks
+  // (a `root` present on the host but not bind-mounted into the edge container
+  // reads as missing here — exactly the 404 a host-side probe can't see).
+  const outputCheck =
+    isStaticFileServe && deployResult.containerId
+      ? await auditStaticOutput(
+          { routing, runtime: staticServeRuntime, containerId: deployResult.containerId },
+          staticOutputTargets(
+            resolveStaticOutputPath(deployResult.containerId, staticServeOutputDir),
+            routeState.publicEndpoints,
+          ),
+          logger,
+        )
+      : [];
+
   // `metaPatch` is spread into deployment.meta (persisted) and read back for the
   // SSE payload in onSuccess, so both live + refresh see the same result.
   const metaPatch: Record<string, unknown> = {};
   if (portCheck.length > 0) metaPatch.portCheck = portCheck;
+  if (outputCheck.length > 0) metaPatch.outputCheck = outputCheck;
+  // Persist WHERE this deploy serves from. It can't be recomputed later: the read
+  // path sees runtimeMode "bare" (the serve identity) and would answer
+  // `project.outputDirectory`, while a sandbox-built static actually serves the
+  // release root. See DeploymentMeta.staticServeOutputDir.
+  if (isStaticFileServe) metaPatch.staticServeOutputDir = staticServeOutputDir;
   // Surface a free-domain edge-sync failure so the deploy doesn't read as cleanly
   // green with a dead .opsh.io URL. `edgeUnsynced` is the structured signal the
   // project status reads to flag "Action Required" + offer Retry routing;
