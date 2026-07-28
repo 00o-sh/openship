@@ -816,6 +816,7 @@ class MigrationOrchestratorImpl {
           log,
           onProgress,
           runId,
+          scannedContainerIds,
         );
       }
 
@@ -1061,6 +1062,7 @@ class MigrationOrchestratorImpl {
     log: (message: string) => void,
     onProgress?: (u: ProgressUpdate) => void,
     runId?: string,
+    scannedContainerIds: Record<string, string> = {},
   ): Promise<MoveResult> {
     const [source, target] = await Promise.all([
       createServerCommandExecutor(sourceServerId, organizationId),
@@ -1112,7 +1114,19 @@ class MigrationOrchestratorImpl {
           image: svc.image ?? null,
           env: {},
           volumes: svc.volumes ?? [],
-          containerId: null,
+          // The service's ORIGINAL container on the SOURCE, if we scanned one
+          // (adopting sets this at discovery time) — NOT null. listSources()
+          // treats a null containerId as "not deployed yet" and falls back to
+          // GUESSING the volume name from service.volumes + namespaceVolumes
+          // (the name OpenShip's OWN deploy pipeline would assign) — correct
+          // for the backup/restore use case listSources was built for, but
+          // wrong here: an adopted source service (e.g. from Coolify) was never
+          // namespaced by OpenShip, so the guess doesn't match any volume that
+          // actually exists on the source, and enumeration silently produces a
+          // volume name the source (or target) rejects with "no such volume".
+          // Passing the real id makes listSources inspect the live container's
+          // actual Mounts instead, which is always correct.
+          containerId: scannedContainerIds[svc.name] ?? null,
           projectSlug,
           namespaceVolumes: svc.namespaceVolumes,
         };
@@ -1811,7 +1825,12 @@ class MigrationOrchestratorImpl {
           const src = overrides[item.key] ?? item.source;
           try {
             if (item.kind === "volume") {
-              await link.transferVolume(item.source, () => {});
+              // BUG (fixed): this used to call transferVolume(item.source, …)
+              // — the STALE name from before an override — silently ignoring
+              // any override the caller supplied for a "no such volume" pending
+              // item. `src` (the override, falling back to item.source when
+              // none was given) is what must actually be transferred.
+              await link.transferVolume(src, () => {});
             } else if (item.kind === "bind") {
               // An override reads from a NEW source path but still writes to the
               // ORIGINAL bind path (where the target container mounts it).

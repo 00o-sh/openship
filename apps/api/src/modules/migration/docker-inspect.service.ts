@@ -39,6 +39,13 @@ export { reconcileStack } from "./docker-reconcile";
 // Cap the connect+reachability probe so a hung SSH docker forward can't leave the
 // migration scan spinning on "Connecting to Docker…" forever (the reported bug).
 const REACHABILITY_TIMEOUT_MS = 25_000;
+// Cap the rest of discovery (listing + inspecting containers/volumes/networks,
+// reading compose files, scanning the proxy, image env lookups, project
+// recovery) as one unit — see the comment at its call site. Generous: a large
+// stack (hundreds of containers) legitimately needs more than a few seconds
+// at mapLimit's concurrency of 5, but this still guarantees the scan fails
+// loudly well under a minute instead of hanging indefinitely.
+const DISCOVERY_TIMEOUT_MS = 90_000;
 
 async function mapLimit<T, R>(
   items: T[],
@@ -140,6 +147,17 @@ export async function discoverServerStack(
       throw new Error(`Docker daemon is not reachable on this server. ${safeErrorMessage(err)}`);
     }
 
+    // Every step below makes several Docker API calls over the SAME SSH
+    // bridge the reachability ping above just proved is up. In rare cases
+    // (observed empirically; no reproducible trigger found) ONE such call can
+    // still hang indefinitely with no error even on an otherwise-healthy
+    // bridge — without a bound here, that stalls the whole migration scan
+    // forever past the point REACHABILITY_TIMEOUT_MS already cleared. Bound
+    // the rest of discovery as one unit so a stuck call surfaces as a clear,
+    // retryable error (`step`'s last message tells you which stage) instead
+    // of a silent "stuck on Listing containers…" spinner.
+    return await withTimeout(
+      (async (): Promise<DiscoveredStack> => {
     step("Listing containers, volumes and networks…");
     const [containers, volumes, networks] = await Promise.all([
       rt.listAllContainers(),
@@ -290,6 +308,10 @@ export async function discoverServerStack(
       openshipProjects,
       proxyRoutesByPort,
     });
+      })(),
+      DISCOVERY_TIMEOUT_MS,
+      `timed out after ${DISCOVERY_TIMEOUT_MS / 1000}s scanning the server's containers, volumes and networks — the server may be under heavy load or a Docker API call over SSH stalled; retrying usually succeeds`,
+    );
   } finally {
     await rt.dispose();
   }
