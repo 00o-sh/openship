@@ -35,8 +35,18 @@ WORKDIR /app
 #     — so a containerized install could not deploy a private repo at all unless
 #     the server had its own credential. It is a build dependency of the control
 #     plane, not an optional extra.
+#   • ca-certificates — the TRUST STORE that `git` needs and `bun` does not.
+#     Bun embeds its own CA bundle, so every API call (repo listing, token mint,
+#     GitHub REST) worked from this image while `git clone https://…` died with
+#     `server certificate verification failed. CAfile: none CRLfile: none` —
+#     libcurl looks for a bundle ON DISK and this base image ships none. It is a
+#     Recommends of `git`, so `--no-install-recommends` (rightly kept, for
+#     everything else) is exactly what dropped it. Naming it explicitly means the
+#     flag can't take it away again. Symptom to recognise: authenticated in the
+#     UI, repos listing fine, every clone failing at the TLS handshake — before
+#     any credential is even presented.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends openssh-client rsync git \
+ && apt-get install -y --no-install-recommends openssh-client rsync git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 # @repo/* are TypeScript-SOURCE workspace packages (package.json main =

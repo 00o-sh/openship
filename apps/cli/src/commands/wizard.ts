@@ -54,6 +54,11 @@ import {
   composeUp,
   composeInternalToken,
   sourceBuildDir,
+  readInstallMethod,
+  composeDown,
+  composeStart,
+  composeRestart,
+  composeRunning,
 } from "../lib/compose";
 import {
   planAndApplyHostEdge,
@@ -1029,6 +1034,11 @@ function storedPorts(): { api?: number; dashboard?: number } {
  */
 export async function runControl(): Promise<void> {
   const svc = serviceStatus();
+  const isCompose = readInstallMethod() === "compose";
+  // A compose install has no systemd/launchd unit for serviceStatus() to read,
+  // so derive liveness + drive start/stop/restart through docker compose instead.
+  const running = isCompose ? composeRunning() : svc.running;
+  const managerLabel = isCompose ? "docker compose" : svc.kind === "unsupported" ? "none" : svc.kind;
   const ports = storedPorts();
   const apiPort = String(ports.api ?? 4000);
   const dashUrl = `http://localhost:${ports.dashboard ?? 3001}`;
@@ -1039,10 +1049,10 @@ export async function runControl(): Promise<void> {
   intro(`${chalk.bgCyan(chalk.black(" Openship "))}${chalk.dim(" control")}`);
   note(
     `${chalk.dim("URL".padEnd(11))}${chalk.bold(primaryUrl)}\n` +
-      `${chalk.dim("Service".padEnd(11))}${svc.running ? chalk.green("running") : chalk.yellow("stopped")}\n` +
+      `${chalk.dim("Service".padEnd(11))}${running ? chalk.green("running") : chalk.yellow("stopped")}\n` +
       `${chalk.dim("Dashboard".padEnd(11))}${dashUrl}\n` +
       (ports.api ? `${chalk.dim("API".padEnd(11))}http://localhost:${ports.api}\n` : "") +
-      `${chalk.dim("Manager".padEnd(11))}${svc.kind === "unsupported" ? "none" : svc.kind}`,
+      `${chalk.dim("Manager".padEnd(11))}${managerLabel}`,
     "Openship is already set up",
   );
 
@@ -1059,7 +1069,7 @@ export async function runControl(): Promise<void> {
       options: [
         ...(corrupted ? [{ value: "repair", label: "Repair database", hint: "backup → heal → verify" }] : []),
         { value: "open", label: "Open the dashboard" },
-        svc.running
+        running
           ? { value: "restart", label: "Restart the service" }
           : { value: "start", label: "Start the service" },
         { value: "stop", label: "Stop the service", hint: "won't restart on boot" },
@@ -1081,15 +1091,31 @@ export async function runControl(): Promise<void> {
       await open(primaryUrl).catch(() => {});
       outro(chalk.dim(`Opening ${primaryUrl}`));
       return;
-    case "start":
+    case "start": {
+      if (isCompose) {
+        const ok = composeStart();
+        outro(ok ? chalk.green("Started.") : chalk.yellow("Couldn't start the stack — run `openship up` to see the error."));
+        return;
+      }
       await startService({});
       return;
+    }
     case "restart": {
+      if (isCompose) {
+        const ok = composeRestart();
+        outro(ok ? chalk.green("Restarted.") : chalk.yellow("Couldn't restart the stack."));
+        return;
+      }
       const r = restartService();
       outro(r.restarted ? chalk.green("Restarted.") : chalk.yellow(r.detail));
       return;
     }
     case "stop": {
+      if (isCompose) {
+        const ok = composeDown();
+        outro(ok ? chalk.green("Stopped. Won't restart on boot.") : chalk.yellow("Couldn't stop the stack."));
+        return;
+      }
       const r = stopService();
       outro(chalk.green(`Stopped. ${chalk.dim(r.detail)}`));
       return;

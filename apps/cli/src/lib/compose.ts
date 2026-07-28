@@ -967,6 +967,30 @@ export function composePs(): number {
   return compose(["ps"]);
 }
 
+/** True when at least one service in the stack is running — a clean boolean for
+ *  the control panel (composePs prints a table + returns an exit code, which
+ *  isn't a usable "is it up?" signal). */
+export function composeRunning(): boolean {
+  const r = spawnSync(
+    "docker",
+    ["compose", "-f", COMPOSE_FILE, "ps", "--status", "running", "-q"],
+    { cwd: COMPOSE_DIR, encoding: "utf8" },
+  );
+  return r.status === 0 && r.stdout.trim().length > 0;
+}
+
+/** Bring the stack up in place (re-attach containers) — the control panel's
+ *  "Start" for a compose install. Files already exist, so this is a plain
+ *  `up -d`, NOT the full composeUp (materialize + pull/build). */
+export function composeStart(): boolean {
+  return compose(["up", "-d"], { quiet: true }) === 0;
+}
+
+/** Restart the running stack in place — the control panel's "Restart". */
+export function composeRestart(): boolean {
+  return compose(["restart"], { quiet: true }) === 0;
+}
+
 /**
  * The stack's INTERNAL_TOKEN, read from the generated compose `.env` — NOT the
  * bare-mode `~/.openship/internal-token`. The compose api container is booted

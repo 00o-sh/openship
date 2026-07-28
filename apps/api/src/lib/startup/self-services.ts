@@ -139,6 +139,19 @@ export async function linkSelfAppServices(
           .catch(() => {});
       }
     }
+    // Heal an already-seeded phantom: the #231 app-materialize backfill once
+    // created a `monorepo` row named after the slug on this app project — a
+    // PUBLIC service on the dashboard port that matches no container (shows
+    // "Stopped") and carries a stray {slug}-{slug} free-subdomain route. The
+    // self-app's only real units are the compose rows linked above, so drop any
+    // monorepo leftover. (The dashboard can't: assertNotControlPlaneService
+    // blocks deleting control-plane services.) Prevention lives in
+    // materializeAppServiceRow; this clears instances that predate that guard.
+    const stale = await repos.service.listByProjectKind(projectId, "monorepo").catch(() => []);
+    for (const row of stale) {
+      await repos.service.remove(row.id).catch(() => {});
+    }
+
     return linked;
   } catch (err) {
     console.warn(`[self-services] linking skipped: ${safeErrorMessage(err)}`);

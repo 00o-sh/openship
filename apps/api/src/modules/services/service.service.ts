@@ -211,6 +211,13 @@ export async function keepServiceDrift(
  */
 async function materializeAppServiceRow(project: Project): Promise<void> {
   if (!project.hasServer) return; // no long-running app container to keep
+  // A catalog / self-managed app (appTemplateId set — e.g. the control plane's
+  // own "openship" project) is NOT a source-built single app: its real units are
+  // the compose rows linked by the app/self-app installer, never a slug-named
+  // `monorepo` row. Materializing one here seeds a PHANTOM public service that no
+  // container ever matches (shows perpetually "Stopped") with an unwanted
+  // {slug}-{slug} free-subdomain route. Leave these projects to their linker.
+  if (project.appTemplateId) return;
   let projectType: string;
   try {
     projectType = getProjectType((project.framework ?? "") as StackId);
