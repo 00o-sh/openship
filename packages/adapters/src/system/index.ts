@@ -72,10 +72,9 @@ export { elevatedExecutor, elevateCommand } from "./elevated-executor";
 export {
   checkAll,
   checkComponents,
-  checkCertbot,
   checkDocker,
   checkGit,
-  checkOpenResty,
+  checkEdge,
   checkRsync,
   COMPONENT_CHECKS,
 } from "./checks";
@@ -90,8 +89,7 @@ export {
   installGit,
   installOpenResty,
   installRsync,
-  uninstallCertbot,
-  uninstallOpenResty,
+  uninstallEdge,
   uninstallRsync,
 } from "./installer";
 

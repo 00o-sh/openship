@@ -245,7 +245,7 @@ export {
   type PendingConsent,
   type OnBoxManifest,
 } from "./system/modules";
-export { SYSTEM_COMPONENTS, getSystemComponentDefinition } from "./system/components";
+export { SYSTEM_COMPONENTS, getSystemComponentDefinition, canonicalComponentName } from "./system/components";
 export {
   isRemoteConnectionError,
   isRetryableRemoteConnectionError,
@@ -303,10 +303,9 @@ export {
 export {
   checkAll as checkAllComponents,
   checkComponents,
-  checkCertbot,
   checkDocker,
   checkGit,
-  checkOpenResty,
+  checkEdge,
   COMPONENT_CHECKS,
 } from "./system/checks";
 export {
@@ -319,8 +318,7 @@ export {
   installGit,
   installOpenResty,
   installRsync,
-  uninstallCertbot,
-  uninstallOpenResty,
+  uninstallEdge,
   uninstallRsync,
 } from "./system/installer";
 export { SystemManager, type SystemManagerOptions } from "./system/setup";

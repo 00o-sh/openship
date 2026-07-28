@@ -486,41 +486,66 @@ function reconcileDbPassword(user: string, password: string): void {
   // Postgres must be RUNNING to accept the ALTER, and healthy before the api
   // needs it — bring up just this one service first.
   if (compose(["up", "-d", "--wait", "postgres"], { quiet: true }) !== 0) return;
-  const r = spawnSync(
-    "docker",
-    [
-      "compose",
-      "-f",
-      COMPOSE_FILE,
-      "exec",
-      "-T",
-      "postgres",
-      "psql",
-      "-U",
-      user,
-      "-d",
-      "postgres",
-      "-v",
-      "ON_ERROR_STOP=1",
-      // Read the statement from STDIN, not `-c`: psql has no bind parameters for
-      // ALTER USER, so the password has to be inlined in SQL — and an argv copy
-      // would be readable in `ps` for the life of the call. stdin keeps it to this
-      // process and the socket. Our generated password is hex, so it cannot break
-      // out of the quoted literal either.
-      "-f",
-      "-",
-    ],
-    {
-      cwd: COMPOSE_DIR,
-      encoding: "utf8",
-      input: `ALTER USER "${user}" WITH PASSWORD '${password}';\n`,
-    },
-  );
+
+  // Try as the configured role, then as `postgres`. The second attempt is not
+  // redundant: a volume initialized under a DIFFERENT POSTGRES_USER has no such
+  // role, so `psql -U <user>` fails before the ALTER is ever parsed. The image's
+  // pg_hba trusts local socket connections, so both work without a password —
+  // which is the only reason we can fix an install whose password we don't know.
+  const attempt = (asRole: string) =>
+    spawnSync(
+      "docker",
+      [
+        "compose",
+        "-f",
+        COMPOSE_FILE,
+        "exec",
+        "-T",
+        "postgres",
+        "psql",
+        "-U",
+        asRole,
+        "-d",
+        "postgres",
+        "-v",
+        "ON_ERROR_STOP=1",
+        // Read the statement from STDIN, not `-c`: psql has no bind parameters for
+        // ALTER USER, so the password has to be inlined in SQL — and an argv copy
+        // would be readable in `ps` for the life of the call. stdin keeps it to this
+        // process and the socket. Our generated password is hex, so it cannot break
+        // out of the quoted literal either.
+        "-f",
+        "-",
+      ],
+      {
+        cwd: COMPOSE_DIR,
+        encoding: "utf8",
+        // Create the role if the volume predates it, else just realign it. Both
+        // branches leave exactly the credentials this `.env` will present.
+        input:
+          `DO $$ BEGIN\n` +
+          `  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${user}') THEN\n` +
+          `    ALTER ROLE "${user}" WITH LOGIN PASSWORD '${password}';\n` +
+          `  ELSE\n` +
+          `    CREATE ROLE "${user}" WITH LOGIN SUPERUSER PASSWORD '${password}';\n` +
+          `  END IF;\n` +
+          `END $$;\n`,
+      },
+    );
+
+  let r = attempt(user);
+  if (r.status !== 0) r = attempt("postgres");
   if (r.status !== 0) {
+    // Loud, not a footnote: with the gate removed this is the ONE thing standing
+    // between a surviving volume and an api that crash-loops on 28P01 behind a
+    // compose message that blames "dependency failed to start".
     console.log(
-      `  Note: couldn't reconcile the database password (${(r.stderr ?? "").trim() || "psql failed"}).\n` +
-        `  If the api reports "password authentication failed", the data volume predates this install —\n` +
-        `  either restore the old .env or remove the volume to start fresh.`,
+      `\n  ! Could not realign the database password (${(r.stderr ?? "").trim() || "psql failed"}).\n` +
+        `    The api will fail with "password authentication failed for user \"${user}\"" because the\n` +
+        `    existing data volume was initialized with a different password.\n\n` +
+        `    Fix it one of two ways:\n` +
+        `      • restore the .env that created the volume, or\n` +
+        `      • start fresh (DESTROYS DB DATA):  openship uninstall  then  openship up\n`,
     );
   }
 }
@@ -762,7 +787,6 @@ ${services}`;
 function materialize(opts: ComposeUpOpts): {
   buildDir: string | null;
   /** True when this run MINTED the db password (no prior .env to preserve it from). */
-  regeneratedSecrets: boolean;
   /** The effective config that was written (flags over previous `.env`). */
   cfg: ReturnType<typeof resolveEnvConfig>;
   /**
@@ -774,11 +798,7 @@ function materialize(opts: ComposeUpOpts): {
   envChanged: boolean;
 } {
   mkdirSync(COMPOSE_DIR, { recursive: true, mode: 0o700 });
-  // Read BEFORE the write: a missing POSTGRES_PASSWORD here means the one we're
-  // about to write is brand new, which is the case that can mismatch a surviving
-  // data volume (see reconcileDbPassword).
   const prev = readEnvFile();
-  const regeneratedSecrets = !prev.POSTGRES_PASSWORD;
   const cfg = resolveEnvConfig(prev, opts);
   // --no-host-control: never generate/authorize a host key in the first place.
   // Not just "don't use it" — there is nothing on disk to steal. Resolved through
@@ -798,7 +818,7 @@ function materialize(opts: ComposeUpOpts): {
   if (buildDir) writeFileSync(BUILD_FILE, renderBuildOverride(buildDir));
   // `before === ""` is a first install: the containers don't exist yet and will be
   // created with this env, so there is nothing to force.
-  return { buildDir, regeneratedSecrets, cfg, envChanged: before !== "" && rendered !== before };
+  return { buildDir, cfg, envChanged: before !== "" && rendered !== before };
 }
 
 /** Does this project's postgres data volume already exist (i.e. predate this run)? */
@@ -826,7 +846,7 @@ function compose(args: string[], opts?: { quiet?: boolean; withBuildOverride?: b
  * install). Postgres/redis are upstream images and are pulled either way.
  */
 export function composeUp(opts: ComposeUpOpts): { ok: boolean; apiPort: string; dashPort: string } {
-  const { buildDir, regeneratedSecrets, cfg, envChanged } = materialize(opts);
+  const { buildDir, cfg, envChanged } = materialize(opts);
   // The EFFECTIVE ports, not the flags: a re-run with no flags keeps the ports the
   // install was configured with, so the summary must report those.
   const apiPort = cfg.apiPort;
@@ -853,11 +873,17 @@ export function composeUp(opts: ComposeUpOpts): { ok: boolean; apiPort: string; 
   migrateLegacyEdgeVolumes(project);
   warnOrphanedVolumes(project);
 
-  // Freshly minted secrets + a surviving data volume = the api will fail auth
-  // against a password only the volume knows. Realign it before anything depends
-  // on the db (see reconcileDbPassword).
-  if (regeneratedSecrets && dbVolumeExists(project)) {
-    console.log("  Existing database volume with regenerated credentials — realigning the password...");
+  // A surviving data volume can hold a password this `.env` doesn't know, and the
+  // api then crash-loops on 28P01 behind a compose error that blames the wrong
+  // thing. Realign it before anything depends on the db (see reconcileDbPassword).
+  //
+  // Runs whenever the volume exists — NOT only when this run minted new secrets.
+  // Gating on "the .env had no password" only caught the first bad run: after it,
+  // the .env HAS a password, so the guard never fired again and the install stayed
+  // broken through every subsequent `openship up`. The mismatch is between the
+  // VOLUME and the `.env`, which is not something the `.env`'s own history can tell
+  // us. The ALTER is idempotent, so on a healthy install this is a no-op.
+  if (dbVolumeExists(project)) {
     reconcileDbPassword(env.POSTGRES_USER || "openship", env.POSTGRES_PASSWORD ?? "");
   }
 

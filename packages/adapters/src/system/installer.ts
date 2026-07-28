@@ -366,32 +366,32 @@ export async function installOpenResty(
 }
 
 /**
- * Install the edge as a CONTAINER — the default for the `openresty` component.
+ * Install the edge — the `edge` component. It is a CONTAINER, always.
  *
- * Same component name, same InstallResult contract, same consent gate: only the
- * mechanism changes (image pull instead of apt + systemd + Lua templating). Keeping
- * the name means the DB component rows, the Server page and every caller
- * (`ensure-edge.controller`, `server-check.controller`, self-app setup) are
- * untouched. {@link installOpenResty} remains for a Docker-less box and for the
- * mail server's own proxy.
+ * The edge is the openship-edge image and its serving path is host-side (host
+ * networking, host bind mounts for vhosts/certs/ACME). There is deliberately NO
+ * host-package fallback: a Docker-less box gets an explicit, actionable failure
+ * instead of a second, divergent edge implementation that then has to be migrated.
+ * {@link installOpenResty} stays for the mail server's own proxy and to convert a
+ * pre-existing host edge, but it is no longer reachable as "install the edge".
  */
 export async function installContainerEdge(
   executor: CommandExecutor,
   onLog: SystemLogCallback,
   config?: InstallerConfig,
 ): Promise<InstallResult> {
-  // Elevate the same way the bare path does — `docker` may need sudo, and the
-  // host state dirs live under /var/lib and /etc.
-  const prep = await prepareExecutor(executor, "openresty");
+  // Elevate: `docker` may need sudo, and the host state dirs live under /var/lib
+  // and /etc.
+  const prep = await prepareExecutor(executor, "edge");
   if (!prep.ok) return prep.result;
   executor = prep.executor;
 
-  // No Docker on the box → the host install is the only edge available. `routing`
-  // doesn't require docker in bare runtime mode (setup.ts resolveRules), so this is
-  // reachable by design; failing here would leave such a server with no edge at all.
   if (!(await dockerAvailable(executor))) {
-    onLog(log("No Docker on this server — installing the host OpenResty edge instead.", "warn"));
-    return installOpenResty(executor, onLog, config);
+    const error =
+      "The edge is a container image and needs Docker on this server. " +
+      "Install the Docker component first, then install the edge.";
+    onLog(log(error, "error"));
+    return { component: "edge", success: false, error };
   }
 
   try {
@@ -407,7 +407,7 @@ export async function installContainerEdge(
       .exec(containerCommand(result.container, "openresty -v 2>&1"))
       .catch(() => "");
     return {
-      component: "openresty",
+      component: "edge",
       success: true,
       version: version ? systemCatalog.checks.openresty.parseVersion(version) : undefined,
     };
@@ -417,7 +417,7 @@ export async function installContainerEdge(
     if (err instanceof EdgeMigrateRequested) throw err;
     const msg = safeErrorMessage(err);
     onLog(log(`Edge setup failed: ${msg}`, "error"));
-    return { component: "openresty", success: false, error: msg };
+    return { component: "edge", success: false, error: msg };
   }
 }
 
@@ -467,11 +467,11 @@ export async function uninstallCertbot(
   }
 }
 
-export async function uninstallOpenResty(
+export async function uninstallEdge(
   executor: CommandExecutor,
   onLog: SystemLogCallback,
 ): Promise<InstallResult> {
-  const prep = await prepareExecutor(executor, "openresty");
+  const prep = await prepareExecutor(executor, "edge");
   if (!prep.ok) return prep.result;
   executor = prep.executor;
   const profile = prep.profile;
@@ -495,7 +495,7 @@ export async function uninstallOpenResty(
     // uninstall: issued certificates outlive a reinstall, and /etc/letsencrypt may
     // be shared with the mail server. Removing them is the operator's call.
     onLog(log("Edge removed. Certificates and vhosts were left on the host."));
-    return { component: "openresty", success: true };
+    return { component: "edge", success: true };
   }
 
   try {
@@ -584,16 +584,15 @@ type InstallerFn = (
 
 export const COMPONENT_INSTALLERS: Record<string, InstallerFn> = {
   docker: (exec, log) => installDocker(exec, log),
-  // The edge is a container image, not a host package. `installOpenResty` is still
-  // exported for the Docker-less fallback and the mail server's own proxy.
-  openresty: (exec, log, config) => installContainerEdge(exec, log, config),
-  certbot: (exec, log) => installCertbot(exec, log),
+  // The edge is ONE component and it is a container image. `installOpenResty` /
+  // `installCertbot` are NOT reachable from here — they remain only for the mail
+  // server's own proxy (mail.service.ts) and for converting a legacy host edge.
+  edge: (exec, log, config) => installContainerEdge(exec, log, config),
   git: (exec, log) => installGit(exec, log),
   rsync: (exec, log) => installRsync(exec, log),
 };
 
 export const COMPONENT_UNINSTALLERS: Record<string, InstallerFn> = {
-  openresty: (exec, log) => uninstallOpenResty(exec, log),
-  certbot: (exec, log) => uninstallCertbot(exec, log),
+  edge: (exec, log) => uninstallEdge(exec, log),
   rsync: (exec, log) => uninstallRsync(exec, log),
 };

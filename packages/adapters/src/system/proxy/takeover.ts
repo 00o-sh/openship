@@ -21,7 +21,7 @@ import { isSafeCertPath, readDeclaredPair, validateCertFor } from "./cert-materi
 import { buildJournal, clearJournal, rollback, writeJournal } from "./takeover-journal";
 import { installContainerEdge } from "../installer";
 import { containerEdgeProvider } from "./ensure-container-edge";
-import { checkOpenResty } from "../checks";
+import { checkEdge } from "../checks";
 import { NginxProvider } from "../../infra/nginx";
 import { detectOpenRestyPaths } from "../../infra/openresty-lua";
 
@@ -274,7 +274,7 @@ export async function runEdgeTakeover(
       }
     }
 
-    const health = await checkOpenResty(executor);
+    const health = await checkEdge(executor);
     if (!health.healthy) {
       warnings.push(`OpenResty came up but isn't fully healthy: ${health.message}`);
     }

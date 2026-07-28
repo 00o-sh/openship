@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { checkOpenResty } from "./checks";
-import { uninstallOpenResty } from "./installer";
+import { checkEdge } from "./checks";
+import { uninstallEdge } from "./installer";
 import type { CommandExecutor } from "../types";
 
 function host(answers: Array<[string, string]>): CommandExecutor {
@@ -13,12 +13,12 @@ function host(answers: Array<[string, string]>): CommandExecutor {
   } as unknown as CommandExecutor;
 }
 
-describe("checkOpenResty", () => {
+describe("checkEdge", () => {
   it("reports healthy from the edge CONTAINER", async () => {
     // A converted box has no openresty binary, no unit and no Lua on the host, so
     // every host probe reads "missing" — the component would show broken while the
     // edge is serving fine.
-    const status = await checkOpenResty(
+    const status = await checkEdge(
       host([
         ["docker ps --filter name=openship-edge", "openship-edge"],
         ["openresty -v", "nginx version: openresty/1.27.1.1"],
@@ -30,7 +30,7 @@ describe("checkOpenResty", () => {
   });
 
   it("flags a running-but-unresponsive edge container", async () => {
-    const status = await checkOpenResty(
+    const status = await checkEdge(
       host([["docker ps --filter name=openship-edge", "openship-edge"]]),
     );
 
@@ -38,8 +38,10 @@ describe("checkOpenResty", () => {
     expect(status.message).toMatch(/docker logs openship-edge/);
   });
 
-  it("still checks the bare host edge when no container is running", async () => {
-    const status = await checkOpenResty(
+  // A pre-conversion HOST edge is still the real serving path, so it reports
+  // healthy rather than "missing" — the deploy path migrates it to the container.
+  it("still reports a legacy host edge as healthy when no container is running", async () => {
+    const status = await checkEdge(
       host([
         ["openresty -v", "nginx version: openresty/1.25.3.1"],
         ["pgrep", "555"],
@@ -51,13 +53,15 @@ describe("checkOpenResty", () => {
     expect(status.version).toBe("1.25.3.1");
   });
 
-  it("reports missing on a box with neither", async () => {
-    const status = await checkOpenResty(host([]));
+  it("reports missing on a box with neither, pointing at the container install", async () => {
+    const status = await checkEdge(host([]));
     expect(status.healthy).toBe(false);
+    expect(status.name).toBe("edge");
+    expect(status.message).toMatch(/openship-edge container/);
   });
 });
 
-describe("uninstallOpenResty on a container edge", () => {
+describe("uninstallEdge on a container edge", () => {
   it("removes the container and never pkills openresty on the host", async () => {
     // `pkill -f openresty` matches a HOST-NETWORKED container's own master process,
     // so the bare uninstall path would kill the edge it's supposed to be removing
@@ -70,7 +74,7 @@ describe("uninstallOpenResty on a container edge", () => {
       return "";
     });
 
-    const result = await uninstallOpenResty(
+    const result = await uninstallEdge(
       { exec, streamExec: vi.fn(async () => ({ code: 0, output: "" })) } as unknown as CommandExecutor,
       () => {},
     );
