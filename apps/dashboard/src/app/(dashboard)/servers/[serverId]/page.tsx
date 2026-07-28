@@ -329,7 +329,7 @@ export default function ServerDetailPage({
     const modalId = showModal({
       title: interpolate(t.servers.detail.removeComponentTitle, { label: component.label }),
       message:
-        component.name === "openresty"
+        component.name === "edge"
           ? t.servers.detail.removeOpenrestyMessage
           : interpolate(t.servers.detail.removeComponentMessage, { label: component.label }),
       icon: "warning",

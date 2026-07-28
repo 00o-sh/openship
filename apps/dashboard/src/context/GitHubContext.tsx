@@ -88,6 +88,10 @@ export interface GitHubConnectionState {
       available: boolean;
       login?: string;
       avatarUrl?: string;
+      /** How it was connected — "host-cli" (probed off the host's gh login),
+       *  "device" (browser sign-in) or "token" (pasted PAT). Drives the label and
+       *  the first-run consent prompt; absent on older API responses. */
+      method?: "host-cli" | "device" | "token";
     };
   };
   primary: "openship-app" | "gh-cli" | null;
@@ -107,6 +111,14 @@ interface GitHubContextValue {
    * flow even when gh CLI is already authenticated. Omit on legacy modes.
    */
   connect: (source?: "oauth" | "cli") => Promise<void>;
+  /**
+   * Connect with a pasted token. Goes through the SHARED context (not a local
+   * fetch inside whichever form was used) so every consumer — the Settings card,
+   * the library, the New Project importer — sees the new identity immediately.
+   * Doing it locally is what made a fresh token need a page reload before the
+   * importer would use it.
+   */
+  connectWithToken: (token: string) => Promise<void>;
   disconnect: (source?: "oauth" | "cli" | "all") => Promise<void>;
 
   /* CLI / Device flow */
@@ -126,10 +138,35 @@ interface GitHubContextValue {
 
   /* App mode */
   installUrl: string | null;
+
+  /**
+   * Backend-declared connect methods (see api github.capabilities.ts). Null until
+   * the first /github/home or /github/status resolves, or when an older API doesn't
+   * send it — consumers treat null as "no opinion" and fall back to showing what
+   * they can prove is safe, never to re-deriving platform policy.
+   */
+  capabilities: GitHubCapabilities | null;
+}
+
+export interface GitHubCapabilities {
+  platform: "saas" | "selfhosted";
+  desktop: boolean;
+  primary: "device" | "token" | "app" | "ssh-key" | "forwarding" | null;
+  methods: Array<{
+    kind: "device" | "token" | "app" | "ssh-key" | "forwarding";
+    available: boolean;
+    configured: boolean;
+    requiresCloud?: boolean;
+    unavailableReason?: string;
+  }>;
 }
 
 export type CliAction =
   | { type: "terminal"; command: string; message: string }
+  /** No device client id on this instance — collect a token in the UI instead of
+   *  sending the operator to a shell they may not have. `command` is the
+   *  secondary `gh auth login` hint for bare installs that do have gh. */
+  | { type: "token"; command: string; message: string }
   | { type: "device_flow"; userCode: string; verificationUri: string; expiresIn: number; interval: number };
 
 const GitHubContext = createContext<GitHubContextValue | undefined>(undefined);
@@ -178,6 +215,9 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
   const [repos, setRepos] = useState<GitHubRepo[]>(initialData?.repos || []);
   const [loadingRepos, setLoadingRepos] = useState(false);
   const [installUrl, setInstallUrl] = useState<string | null>(initialData?.installUrl || null);
+  const [capabilities, setCapabilities] = useState<GitHubCapabilities | null>(
+    initialData?.capabilities ?? null,
+  );
   const initRef = useRef(false);
   // In-flight refresh promise — multiple triggers (mount effect,
   // connect-flow follow-ups, pollConnect tick, etc.) collapse to ONE
@@ -208,6 +248,7 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
 
       if (res?.installUrl) setInstallUrl(res.installUrl);
       else setInstallUrl(null);
+      if (res?.capabilities) setCapabilities(res.capabilities as GitHubCapabilities);
 
       if (nextState.primary !== null) {
         setCliAction(null);
@@ -326,6 +367,12 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
           setConnecting(false);
           return;
 
+        case "token":
+          // Instance has no device client id — collect a token inline.
+          setCliAction({ type: "token", command: res.command, message: res.message });
+          setConnecting(false);
+          return;
+
         case "terminal":
           // Show terminal instruction
           setCliAction({ type: "terminal", command: res.command, message: res.message });
@@ -345,6 +392,19 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
       );
     }
   }, [refresh, showToast]);
+
+  /* ── Connect with a pasted token ────────────────────────────── */
+  const connectWithToken = useCallback(
+    async (token: string) => {
+      // Throws on an invalid / under-scoped token so the caller can render the
+      // server's reason on the field it came from. refresh() drops the cached
+      // status and re-pulls, which is what propagates the identity app-wide.
+      await githubApi.setInstanceToken(token);
+      setCliAction(null);
+      await refresh();
+    },
+    [refresh],
+  );
 
   /* ── Disconnect GitHub ──────────────────────────────────────── */
   const disconnect = useCallback(
@@ -470,7 +530,9 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
         connected,
         connecting,
         loading,
+        capabilities,
         connect,
+        connectWithToken,
         disconnect,
         cliAction,
         accounts,

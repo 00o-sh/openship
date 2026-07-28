@@ -197,6 +197,20 @@ const envSchema = z.object({
   /* ---------- OAuth Providers ---------- */
   GITHUB_CLIENT_ID: z.string().optional(),
   GITHUB_CLIENT_SECRET: z.string().optional(),
+  /**
+   * Client id used for the GitHub DEVICE flow (browser code + verification URL),
+   * when the operator has not registered their own OAuth app.
+   *
+   * Separate from GITHUB_CLIENT_ID on purpose: that one is the operator's OAuth
+   * app and needs a SECRET to complete a redirect flow. The device flow has no
+   * secret at all — the user's approval in their browser IS the credential — so a
+   * client id can ship publicly and still be safe. Without this, a fresh
+   * self-hosted instance had no in-UI GitHub login at all: it fell through to
+   * "SSH into the box and run `gh auth login`".
+   *
+   * @see DEVICE_FLOW_CLIENT_ID for the shipped default.
+   */
+  GITHUB_DEVICE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
 

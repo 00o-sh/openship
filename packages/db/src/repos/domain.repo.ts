@@ -208,6 +208,62 @@ export function createDomainRepo(db: Database) {
     },
 
     /**
+     * Flip a row to verified + SSL active (+ promote to primary) in ONE
+     * transaction.
+     *
+     * These three writes describe a single outcome — "this domain is live on TLS" —
+     * and the callers ran them as separate awaits, so a failure between them left a
+     * row that read `verified` with no active SSL, or verified-and-active but not
+     * primary. The infra work (the cert on disk) has already succeeded by the time
+     * this runs, so a half-applied row is pure drift: the box serves the domain
+     * while Openship shows it pending.
+     *
+     * `promote` demotes the project's other primaries first, and is skipped when
+     * the caller has decided this row shouldn't take primary.
+     */
+    async markVerifiedActive(
+      id: string,
+      data: {
+        sslStatus: string;
+        sslIssuer?: string;
+        sslExpiresAt?: Date;
+        manualSsl?: boolean;
+        promote?: { projectId: string };
+      },
+    ) {
+      const { promote, ...ssl } = data;
+      await db.transaction(async (tx) => {
+        const now = new Date();
+        await tx
+          .update(domain)
+          .set({
+            verified: true,
+            verifiedAt: now,
+            status: "active",
+            verifyAttempts: 0,
+            lastVerifyError: null,
+            lastCheckedAt: now,
+            ...ssl,
+            updatedAt: now,
+          })
+          .where(eq(domain.id, id));
+        if (promote) {
+          await tx
+            .update(domain)
+            .set({ isPrimary: false, updatedAt: now })
+            .where(
+              and(
+                eq(domain.projectId, promote.projectId),
+                eq(domain.isPrimary, true),
+                ne(domain.id, id),
+              ),
+            );
+          await tx.update(domain).set({ isPrimary: true, updatedAt: now }).where(eq(domain.id, id));
+        }
+      });
+    },
+
+    /**
      * Record a failed verification attempt: bump the counter, stamp the time +
      * reason, and flip status to `failed` only once attempts cross `failAfter`
      * (so a still-propagating domain stays `pending`, a misconfigured one
@@ -233,9 +289,12 @@ export function createDomainRepo(db: Database) {
       return attempts;
     },
 
+    /** `manualSsl` is declared because callers pass it (via spread, which slips
+     *  past excess-property checking) — the flag decides whether the SSL scheduler
+     *  will renew this row, so it must be visible in the type. */
     async updateSsl(
       id: string,
-      data: { sslStatus: string; sslIssuer?: string; sslExpiresAt?: Date },
+      data: { sslStatus: string; sslIssuer?: string; sslExpiresAt?: Date; manualSsl?: boolean },
     ) {
       await this.update(id, data);
     },

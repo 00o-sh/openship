@@ -859,8 +859,9 @@ function checkConfig(snapshot: DeploymentConfigSnapshot, opts?: PreflightOptions
       const installFallback = svc.installCommand ?? snapshot.installCommand;
       const buildFallback = svc.buildCommand ?? snapshot.buildCommand;
       const startFallback = svc.startCommand ?? snapshot.startCommand;
-      // A static sub-app is served as files by the generated nginx image, so it
-      // needs a build (to produce the output dir) but NO start command.
+      // A static sub-app is served as FILES — on self-hosted straight off the host
+      // by the edge, on cloud by a generated nginx image. Either way it needs a
+      // build (to produce the output dir) and NO start command.
       if (isStaticService(svc)) {
         if (!buildFallback) {
           subAppFailures.push(`sub-app "${svc.name}" missing build command`);
@@ -893,7 +894,11 @@ function checkConfig(snapshot: DeploymentConfigSnapshot, opts?: PreflightOptions
     return { id: "config", label: "Service configuration", status: "pass" };
   }
 
-  if (!snapshot.buildImage) missing.push("build image");
+  // A `docker` framework builds from its OWN repo Dockerfile (its FROM is the
+  // image), so buildImage is never consumed — refusing the deploy for a missing
+  // buildImage there is wrong (it blocked repo-Dockerfile + self-app deploys).
+  // Mirrors the multi-service branch's dockerfile/build check. #231
+  if (snapshot.framework !== "docker" && !snapshot.buildImage) missing.push("build image");
 
   if (snapshot.hasBuild && !snapshot.installCommand) {
     missing.push("install command");

@@ -10,6 +10,15 @@ export { LocalExecutor } from "./local-executor";
 export { SshExecutor } from "./ssh-executor";
 export { SystemSshExecutor } from "./system-ssh-executor";
 
+/**
+ * One shared local executor. LocalExecutor holds no instance state (no client, no
+ * channel, `dispose()` is a no-op), and every instance reaches the same machine, so
+ * separate objects were pure allocation — and worse, they defeated per-executor
+ * memoization: caches keyed by "which box is this" (see `resolveOurEdgeContainer`)
+ * missed on every call because each platform construction handed them a new object.
+ */
+const localExecutor = new LocalExecutor();
+
 export function createExecutor(ssh?: SshConfig): CommandExecutor {
   if (ssh) {
     // "agent" auth routes through the OS `ssh` binary (see SystemSshExecutor);
@@ -17,7 +26,7 @@ export function createExecutor(ssh?: SshConfig): CommandExecutor {
     if (ssh.useSystemSsh) return new SystemSshExecutor(ssh);
     return new SshExecutor(ssh);
   }
-  return new LocalExecutor();
+  return localExecutor;
 }
 
 /**
@@ -51,7 +60,7 @@ export function createHostExecutor(): CommandExecutor {
     );
   }
   const host = process.env.OPENSHIP_HOST_SSH_HOST?.trim();
-  if (!host) return new LocalExecutor();
+  if (!host) return localExecutor;
   const keyPath = process.env.OPENSHIP_HOST_SSH_KEY?.trim();
   const portRaw = Number(process.env.OPENSHIP_HOST_SSH_PORT || "22");
   const port = Number.isInteger(portRaw) && portRaw > 0 && portRaw < 65536 ? portRaw : 22;

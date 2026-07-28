@@ -158,6 +158,28 @@ export interface BuildConfig {
    * monorepo pipeline is container-only).
    */
   isStatic?: boolean;
+  /**
+   * Static build whose output is EXTRACTED, not run.
+   *
+   * `buildStaticToHost` copies the built doc-root onto a host directory the edge
+   * serves, then discards the image — so a web-server runtime stage in that recipe
+   * is pure waste: it pulls `nginx:alpine`, runs six more build steps, and writes an
+   * nginx config nothing ever reads, all to be deleted moments later. With this set,
+   * the recipe stops at the builder and stages the output at
+   * {@link STATIC_EXTRACT_DIR}.
+   *
+   * NOT the same as plain `isStatic`. A static monorepo sub-app in a compose project
+   * (see isStaticService) really is RUN as a container and genuinely needs the nginx
+   * stage — that's why this is a separate flag rather than a change to isStatic.
+   */
+  staticExtractOnly?: boolean;
+  /**
+   * Host directory the extract-only build's files are moved to. Set together with
+   * `staticExtractOnly`; the build's `imageRef` becomes this path instead of an
+   * image tag, matching BareRuntime.build's host-dir contract so the file-backed
+   * serve path consumes it unchanged.
+   */
+  staticOutDir?: string;
   /** Environment variables injected at build time */
   envVars: Record<string, string>;
   /** Resources allocated for the build container */
@@ -427,6 +449,20 @@ export interface StaticRouteConfig extends BaseRouteConfig {
   /** Absolute path on the target machine to serve via Nginx root. */
   staticRoot: string;
   targetUrl?: never;
+  /**
+   * This root is being ADOPTED from a proxy we're taking over, not produced by an
+   * Openship build.
+   *
+   * Openship-managed roots are confined to {@link MANAGED_STATIC_BASE}: a route we
+   * generate must never be able to publish an arbitrary host directory, so a bad or
+   * crafted value fails closed instead of serving `/etc` to the internet.
+   *
+   * Adoption is the one legitimate exception — an imported vhost's root (e.g.
+   * `/var/www/site`) is a path the operator's own nginx is ALREADY serving publicly,
+   * and refusing it would break proxy migration. Opt-in and named so it can only be
+   * used deliberately, never reached by a caller that forgot the base.
+   */
+  staticRootAdopted?: boolean;
 }
 
 export type RouteConfig = ProxyRouteConfig | StaticRouteConfig;
@@ -451,7 +487,21 @@ export interface SslResult {
    * downgrading a healthy `active` domain to `provisioning`.
    */
   verified: boolean;
-  reason?: "issued" | "renewed" | "missing" | "read_error";
+  /**
+   * `not_local` means no certificate was issued here BY DESIGN — TLS for this
+   * hostname is terminated or supplied elsewhere (an upstream ingress, the managed
+   * `*.opsh.io` edge, an operator-uploaded cert). Distinct from `missing`, which
+   * means a cert was expected and isn't there: persisting `not_local` as
+   * "provisioning" would overwrite a correct `external` status with a lie.
+   */
+  /**
+   * `invalid` means a certificate IS on disk but can't be served for this
+   * hostname — expired, a key that doesn't open it, or issued for other names.
+   * Distinct from `missing` (nothing there) and `read_error` (transient): the file
+   * exists, so a retry won't help, and treating it as valid is what let "Recheck
+   * SSL" report green on a cert browsers reject.
+   */
+  reason?: "issued" | "renewed" | "missing" | "read_error" | "not_local" | "invalid";
 }
 
 // ─── Log streaming callback ──────────────────────────────────────────────────
@@ -538,6 +588,22 @@ export interface CommandExecutor {
 
   /** Remove a file or directory recursively. Silently succeeds if already gone. */
   rm(path: string): Promise<void>;
+
+  /**
+   * Rename within the same filesystem — a FILE operation, not a command.
+   *
+   * It exists because expressing it as `exec("mv a b")` is wrong on a decorated
+   * executor: `edgeContainerExecutor` runs commands INSIDE the edge container while
+   * file ops land on the HOST, so nginx's atomic vhost write (write temp → mv into
+   * place) renamed a path the container cannot see and failed with ENOENT on a file
+   * that had just been written successfully. Routing a rename through the file
+   * channel keeps it in the same namespace as the write.
+   *
+   * Optional: callers must fall back to a shell `mv` when an executor doesn't
+   * implement it (correct for any executor whose commands and files share a
+   * namespace, which is all of the plain ones).
+   */
+  rename?(from: string, to: string): Promise<void>;
 
   /**
    * Transfer a local directory into the target environment.

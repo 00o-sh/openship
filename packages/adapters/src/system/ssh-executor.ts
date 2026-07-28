@@ -353,6 +353,10 @@ export class SshExecutor implements CommandExecutor {
     });
   }
 
+  async rename(from: string, to: string): Promise<void> {
+    await this.exec(`mv ${sq(from)} ${sq(to)}`);
+  }
+
   async readFile(path: string): Promise<string> {
     return this.withChannelRetry(async () => {
       const sftp = await this.sftp();

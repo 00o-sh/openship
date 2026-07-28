@@ -3,7 +3,8 @@
     "loading": "読み込み中...",
     "countOne": "{count} 件のプロジェクト",
     "countOther": "{count} 件のプロジェクト",
-    "noTargetProjects": "このターゲットにはまだプロジェクトがデプロイされていません。"
+    "noTargetProjects": "このターゲットにはまだプロジェクトがデプロイされていません。",
+    "noTargetDesc": "このデプロイ先にアプリをデプロイするか、新しいプロジェクトを作成して始めましょう。"
   },
   "status": {
     "live": "稼働中",
@@ -34,7 +35,8 @@
     "services": "サービス",
     "static": "静的",
     "standalone": "スタンドアロン",
-    "updateAvailable": "Update"
+    "updateAvailable": "Update",
+    "appBadge": "アプリ"
   },
   "hosting": {
     "cloud": "クラウド",
@@ -97,7 +99,13 @@
     "teardownFailedAt": "次の箇所でティアダウンに失敗しました: {reasons}。再試行するか、強制削除してリソースを孤立させてください。",
     "teardownFailed": "ティアダウンに失敗しました",
     "cleanupFailedTitle": "クリーンアップに失敗しました",
-    "alreadyDeleted": "プロジェクトはすでに削除されています"
+    "alreadyDeleted": "プロジェクトはすでに削除されています",
+    "forceModalTitle": "ソースから削除できませんでした",
+    "forceModalBody": "ランタイムに到達できなかった（または失敗が続いた）ため、このプロジェクトは削除処理されていません。それでも Openship から削除できます — レコードは今すぐ消え、残ったリソースはサーバーに到達できるようになり次第、自動的に回収されます。",
+    "forceModalConfirm": "ストレージから削除",
+    "forceModalCancel": "キャンセル",
+    "unlinked": "{projects} とのリンクを解除しました — 反映するには再デプロイしてください。",
+    "unlinkedTitle": "接続中のプロジェクトを更新しました"
   },
   "sidebar": {
     "project": "プロジェクト",
@@ -163,7 +171,18 @@
     "deleteConfirmPrefix": "完全に削除",
     "deleteConfirmSuffix": "？",
     "cancel": "キャンセル",
-    "delete": "削除"
+    "delete": "削除",
+    "created": "作成日",
+    "detailsTitle": "詳細",
+    "detailsDescription": "このプロジェクトが何をどこにデプロイするか",
+    "managedImages": "マネージドコンテナイメージ",
+    "managedImagesText": "このアプリはビルド済みイメージから動作します — 接続するリポジトリはありません。そのままデプロイしてください。",
+    "services": "サービス",
+    "target": "デプロイ先",
+    "targetPending": "デプロイ時に選択",
+    "type": "種類",
+    "typeApp": "アプリ",
+    "typeProject": "プロジェクト"
   },
   "overview": {
     "platformCloud": "Openship Cloud",
@@ -324,7 +343,16 @@
     "guideIntroFallback": "プロジェクトはこの接続をすぐに使える形で取得します。",
     "whatYouGet": "アプリが取得するもの",
     "advancedValues": "詳細",
-    "copy": "コピー"
+    "copy": "コピー",
+    "usedByTitle": "使用元",
+    "usedByOpen": "プロジェクトを開く",
+    "usedByHint": "{count} 件のプロジェクトがこのアプリの接続に依存しています。利用側のプロジェクトからリンクを解除してください。",
+    "linkedCountOne": "リンク済みアプリ {count} 件",
+    "linkedCountOther": "リンク済みアプリ {count} 件",
+    "linkedHint": "このプロジェクトが利用するもので、実行はしません。",
+    "linkedBadge": "リンク済み",
+    "unlink": "リンク解除",
+    "openApp": "アプリを開く"
   },
   "incomingWebhooks": {
     "title": "受信 Webhook",

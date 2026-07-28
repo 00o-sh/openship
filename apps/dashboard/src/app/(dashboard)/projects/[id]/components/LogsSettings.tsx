@@ -61,14 +61,20 @@ export const LogsSettings = () => {
   // `effectiveHasServer` as a project-runtime log target was the bug: it offered
   // + defaulted "Project runtime" for services projects, which 404'd.
   const hasProjectRuntime = effectiveHasServer && !hasServices;
-  // Cloud deploys (including static apps) always have edge-access
-  // logs available via the same /server-logs/* endpoints — those
-  // endpoints route by `resolveProjectTrafficSource` server-side and
-  // fall back to Oblien's edge proxy when there's no runtime
-  // container. So a static .opsh.io page still has request logs even
-  // with no runtime stdout to stream.
+  // Request logs come from the EDGE, not from a runtime process — so anything
+  // served through an edge has them, whether or not it has a container to stream
+  // stdout from. That's every project with a domain: cloud (Oblien's edge proxy)
+  // and self-hosted alike (`/server-logs/stream` → the edge's mgmt API, including
+  // a containerized edge via execMgmtStream).
+  //
+  // This used to be `deployTarget === "cloud"`, which meant a STATIC app on a
+  // server — the case with no runtime logs by definition — showed "No runtime
+  // logs, nothing to stream" while its edge was logging every request. The
+  // backend already supported it (ServerLogs handles `kind: "self-hosted"`); only
+  // this gate said no.
   const deployTarget = projectData?.deployTarget as string | null | undefined;
-  const canShowRequestLogs = deployTarget === "cloud";
+  const hasDomain = (projectData?.domains?.length ?? 0) > 0;
+  const canShowRequestLogs = deployTarget === "cloud" || hasDomain;
   const canShowRuntimeLogs = effectiveHasServer || hasServices;
   const canShowLogs = canShowRuntimeLogs || canShowRequestLogs;
   // Terminal (container stdout) still requires an actual runtime —

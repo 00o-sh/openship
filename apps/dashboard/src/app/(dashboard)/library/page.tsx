@@ -75,9 +75,14 @@ export default function LibraryPage() {
     localStorage.setItem(GH_CLI_CONSENT_KEY, "1");
     setGhCliConsent(true);
   }, []);
-  // Gate only the gh-CLI source; the Openship App (OAuth) is already an explicit
-  // connection and needs no extra prompt.
-  const needsGhCliConsent = state.primary === "gh-cli" && !ghCliConsent;
+  // Gate ONLY a credential we found on the host by ourselves. A device sign-in or
+  // a pasted token was handed over by the operator inside Openship — asking them
+  // to consent again to the thing they just did is a dead end that made a fresh
+  // token look broken until the prompt was noticed and accepted.
+  const needsGhCliConsent =
+    state.primary === "gh-cli" &&
+    (state.sources.ghCli.method ?? "host-cli") === "host-cli" &&
+    !ghCliConsent;
 
   // One "Folder" tab, environment-dependent behavior:
   //   - self-hosted / desktop → deploy straight from a path on the box (native
@@ -181,8 +186,6 @@ export default function LibraryPage() {
               cliAction={cliAction}
               onRefresh={refresh}
               selfHosted={selfHosted}
-              cloudConnected={cloudConnected}
-              onConnectCloud={startCloudConnect}
             />
           ) : needsGhCliConsent ? (
             <GhCliConsent login={state.sources.ghCli.login} onAllow={allowGhCli} />

@@ -10,6 +10,7 @@
  *   resources/migrations/             drizzle .sql  → OPENSHIP_MIGRATIONS_DIR
  *   resources/pglite/                 pglite.wasm + pglite.data → OPENSHIP_PGLITE_ASSETS_DIR
  *   resources/geoip/                  GeoLite2-Country.mmdb → OPENSHIP_GEOIP_DB
+ *   resources/engine/                 iRedMail engine tree → MAIL_SERVER_ENGINE_DIR
  *   resources/node_modules/           ssh2 + dockerode (external) resolved via NODE_PATH
  *
  * WHY A NODE BUNDLE, NOT `bun build --compile`:
@@ -45,6 +46,7 @@ const RESOURCES = join(DESKTOP_DIR, "resources");
 const API_DIR = join(REPO_ROOT, "apps/api");
 const DASHBOARD_DIR = join(REPO_ROOT, "apps/dashboard");
 const DB_DRIZZLE_DIR = join(REPO_ROOT, "packages/db/drizzle");
+const EMAIL_ENGINE_DIR = join(REPO_ROOT, "apps/email/engine");
 
 const GEOIP_DB = "GeoLite2-Country.mmdb";
 
@@ -276,6 +278,29 @@ async function main(): Promise<void> {
     mkdirSync(dest, { recursive: true });
     cpSync(join(src, GEOIP_DB), join(dest, GEOIP_DB));
     process.stdout.write(`  ${GEOIP_DB}: ${sizeOf(join(dest, GEOIP_DB))}\n`);
+  });
+
+  // 6. iRedMail engine — the mail-server install source (apps/email/engine, the
+  //    already-slimmed tree that is the source of truth; see mail.service.ts).
+  //    mail.service.ts packs THIS tree into a tar and streams it to the target
+  //    VPS in step "Transfer iRedMail Engine". Its default path is resolved
+  //    relative to apps/api's cwd (the monorepo-dev layout) — which is WRONG in
+  //    the packaged app, where the API runs with cwd=userData. Ship the tree and
+  //    hand its absolute path over as MAIL_SERVER_ENGINE_DIR (services.ts) so the
+  //    resolver never has to guess. Unstaged, mail-server setup fails with
+  //    "tar: could not chdir to '…/Library/apps/email/engine'".
+  await step("copying iRedMail engine → resources/engine/", () => {
+    if (!existsSync(join(EMAIL_ENGINE_DIR, "iRedMail.sh"))) {
+      throw new Error(
+        `iRedMail engine missing or incomplete: expected ${join(EMAIL_ENGINE_DIR, "iRedMail.sh")}`,
+      );
+    }
+    // Skip .DS_Store so the shipped tree is deterministic across dev machines
+    // (apps/email/engine/.gitignore expects it to appear locally).
+    cpSync(EMAIL_ENGINE_DIR, join(RESOURCES, "engine"), {
+      recursive: true,
+      filter: (src) => !src.endsWith("/.DS_Store"),
+    });
   });
 
   // NB: OpenResty Lua is NOT staged here. Unlike migrations/pglite (plain data

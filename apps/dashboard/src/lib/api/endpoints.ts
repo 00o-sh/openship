@@ -196,6 +196,7 @@ export const endpoints = {
     connectRedirect: "github/connect/redirect",
     connectPoll: "github/connect/poll",
     disconnect: "github/disconnect",
+    instanceToken: "github/instance-token",
   },
 
   /* ---------------------------------------------------------------- */

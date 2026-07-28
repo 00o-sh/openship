@@ -84,6 +84,48 @@ export const OPENRESTY_DEFAULT_PATHS: OpenRestyPaths = {
   pidPath: "/usr/local/openresty/nginx/logs/nginx.pid",
 };
 
+// ── Containerized edge ───────────────────────────────────────────────────────
+
+/** Root for edge state that isn't already at a well-known host location. */
+export const EDGE_HOST_STATE_DIR = "/var/lib/openship/edge";
+
+/**
+ * Where the edge container's state lives ON THE HOST, and where it's mounted
+ * inside the container.
+ *
+ * Certs and static docroots keep the SAME path on both sides deliberately: every
+ * host-side reader we already have (the migrate proxy scan, `carrySourceCerts`,
+ * cert reuse, the mail server's cert symlinks) then keeps working with no
+ * translation, and a bare→container conversion inherits the box's existing certs
+ * instead of orphaning them. Bind mounts, never named volumes — Docker-managed
+ * volumes make edge state invisible to host tooling, which is what silently broke
+ * domain/SSL detection in the migrate wizard.
+ */
+export const EDGE_CONTAINER_MOUNTS: ReadonlyArray<{ host: string; container: string }> = [
+  { host: `${EDGE_HOST_STATE_DIR}/sites-enabled`, container: OPENRESTY_DEFAULT_PATHS.sitesDir },
+  { host: "/etc/letsencrypt", container: "/etc/letsencrypt" },
+  { host: `${EDGE_HOST_STATE_DIR}/acme`, container: "/var/www/acme" },
+  { host: "/opt/openship/static", container: "/opt/openship/static" },
+];
+
+/**
+ * Paths for driving a containerized edge from OUTSIDE the container — i.e. over
+ * SSH to the box it runs on.
+ *
+ * Deliberately mixed, and the split is the whole point: `sitesDir` is the HOST
+ * path (vhost files are written straight to the bind-mounted directory), while
+ * `bin` and `pidPath` are CONTAINER paths (commands run via `docker exec`).
+ * `confPath` is baked into the image and must never be written — the container
+ * edge skips `ensureOpenRestyConfig` entirely.
+ */
+export const EDGE_HOST_PATHS: OpenRestyPaths = {
+  bin: OPENRESTY_DEFAULT_PATHS.bin,
+  confPath: OPENRESTY_DEFAULT_PATHS.confPath,
+  confDir: OPENRESTY_DEFAULT_PATHS.confDir,
+  sitesDir: `${EDGE_HOST_STATE_DIR}/sites-enabled`,
+  pidPath: OPENRESTY_DEFAULT_PATHS.pidPath,
+};
+
 /** Well-known nginx.conf locations across OpenResty packages. */
 const KNOWN_CONF_PATHS = [
   "/usr/local/openresty/nginx/conf/nginx.conf",

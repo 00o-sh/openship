@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { registerImportedSites } from "./takeover";
+import { makeTestCert } from "./test-certs";
 import type { CommandExecutor, SslResult } from "../../types";
 import type { ImportedSite } from "../types";
 import type { RoutingProvider, SslProvider } from "../../infra/types";
@@ -18,12 +19,18 @@ function providers() {
   return { routing, ssl };
 }
 
-/** Executor that records `cat` reads (the ONLY thing registerImportedSites execs). */
-function fakeExecutor(catResult: string | null = "PEM"): CommandExecutor {
+/**
+ * Executor serving a fixed cert/key from `readFile` (how the shared cert reader
+ * reads declared paths) and recording `exec` so a test can assert nothing was
+ * shelled for an unsafe path.
+ */
+function fakeExecutor(files: Record<string, string> = {}): CommandExecutor {
   return {
-    exec: vi.fn(async () => {
-      if (catResult === null) throw new Error("not found");
-      return catResult;
+    exec: vi.fn(async () => ""),
+    readFile: vi.fn(async (p: string) => {
+      const hit = files[p];
+      if (hit === undefined) throw new Error(`no such file: ${p}`);
+      return hit;
     }),
   } as unknown as CommandExecutor;
 }
@@ -42,7 +49,14 @@ describe("registerImportedSites", () => {
 
     expect(registered).toEqual(["a.com", "b.com"]);
     expect(routing.registerRoute).toHaveBeenCalledWith({ domain: "a.com", tls: false, targetUrl: "http://127.0.0.1:3000" });
-    expect(routing.registerRoute).toHaveBeenCalledWith({ domain: "b.com", tls: false, staticRoot: "/var/www/b" });
+    // An imported root lives outside the managed base by nature, so it must be
+    // registered as ADOPTED or assertValidStaticRoot refuses it.
+    expect(routing.registerRoute).toHaveBeenCalledWith({
+      domain: "b.com",
+      tls: false,
+      staticRoot: "/var/www/b",
+      staticRootAdopted: true,
+    });
     expect(ssl.installCert).not.toHaveBeenCalled();
     expect(ssl.provisionCert).not.toHaveBeenCalled();
     expect(o.warnings).toEqual([]);
@@ -72,7 +86,8 @@ describe("registerImportedSites", () => {
 
   it("reads a safe cert path via the executor when no inline PEM is given", async () => {
     const { routing, ssl } = providers();
-    const exec = fakeExecutor("FILE-PEM");
+    const cert = makeTestCert(["a.com"]);
+    const exec = fakeExecutor({ "/etc/ssl/a.crt": cert.certPem, "/etc/ssl/a.key": cert.keyPem });
     const sites: ImportedSite[] = [
       {
         serverNames: ["a.com"],
@@ -83,8 +98,11 @@ describe("registerImportedSites", () => {
     ];
     await registerImportedSites(routing as RoutingProvider, ssl as SslProvider, exec, sites, opts());
 
-    expect(exec.exec).toHaveBeenCalled();
-    expect(ssl.installCert).toHaveBeenCalledWith("a.com", { certPem: "FILE-PEM", keyPem: "FILE-PEM" });
+    expect(exec.readFile).toHaveBeenCalledWith("/etc/ssl/a.crt");
+    expect(ssl.installCert).toHaveBeenCalledWith("a.com", {
+      certPem: cert.certPem,
+      keyPem: cert.keyPem,
+    });
   });
 
   it("provisions a fresh cert and warns when the cert path is unsafe", async () => {
@@ -101,10 +119,52 @@ describe("registerImportedSites", () => {
     const o = opts();
     await registerImportedSites(routing as RoutingProvider, ssl as SslProvider, exec, sites, o);
 
-    expect(exec.exec).not.toHaveBeenCalled(); // never `cat` an unsafe path
+    expect(exec.exec).not.toHaveBeenCalled(); // never shell an unsafe path
+    expect(exec.readFile).not.toHaveBeenCalled();
     expect(ssl.installCert).not.toHaveBeenCalled();
     expect(ssl.provisionCert).toHaveBeenCalledWith("a.com");
     expect(o.warnings.some((w) => w.includes("unsafe"))).toBe(true);
+  });
+
+  // The carry must not hand over a cert for the WRONG hostname. A vhost naming two
+  // hosts off a single-name cert used to carry that cert to both, so the second
+  // domain served a mismatched cert under a green padlock.
+  it("refuses a cert that doesn't cover the domain and provisions instead", async () => {
+    const { routing, ssl } = providers();
+    const cert = makeTestCert(["a.com"]);
+    const exec = fakeExecutor({ "/etc/ssl/a.crt": cert.certPem, "/etc/ssl/a.key": cert.keyPem });
+    const sites: ImportedSite[] = [
+      {
+        serverNames: ["a.com", "b.com"],
+        ssl: true,
+        target: { kind: "proxy", url: "http://127.0.0.1:3000" },
+        tls: { certPath: "/etc/ssl/a.crt", keyPath: "/etc/ssl/a.key" },
+      },
+    ];
+    const o = opts();
+    await registerImportedSites(routing as RoutingProvider, ssl as SslProvider, exec, sites, o);
+
+    expect(ssl.installCert).toHaveBeenCalledWith("a.com", expect.anything());
+    expect(ssl.installCert).not.toHaveBeenCalledWith("b.com", expect.anything());
+    expect(ssl.provisionCert).toHaveBeenCalledWith("b.com");
+    expect(o.warnings.some((w) => w.includes("b.com") && w.includes("not b.com"))).toBe(true);
+  });
+
+  it("prefers an inline PEM keyed by HOSTNAME (caddy/traefik have no cert path)", async () => {
+    const { routing, ssl } = providers();
+    const exec = fakeExecutor();
+    const sites: ImportedSite[] = [
+      // No `tls` at all — exactly what the caddy/traefik parsers produce.
+      { serverNames: ["a.com"], ssl: true, target: { kind: "proxy", url: "http://127.0.0.1:3000" } },
+    ];
+    await registerImportedSites(routing as RoutingProvider, ssl as SslProvider, exec, sites, {
+      onLog: () => {},
+      warnings: [],
+      certPems: { "a.com": { certPem: "CERT", keyPem: "KEY" } },
+    });
+
+    expect(ssl.installCert).toHaveBeenCalledWith("a.com", { certPem: "CERT", keyPem: "KEY" });
+    expect(ssl.provisionCert).not.toHaveBeenCalled();
   });
 
   it("skips wildcard/regex server names with a warning", async () => {

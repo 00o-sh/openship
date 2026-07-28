@@ -649,6 +649,8 @@ export async function remove(c: Context) {
       ok: result.ok,
       rowDeleted: result.rowDeleted,
       steps: result.steps,
+      // Projects this app was unlinked from on the way out.
+      unlinkedProjectIds: [...new Set(result.unlinked.map((u) => u.projectId))],
     },
   });
 
@@ -662,6 +664,7 @@ export async function remove(c: Context) {
         message: "Project deleted, but some external cleanup failed",
         steps: result.steps,
         unrecoverable: result.unrecoverable,
+        unlinked: result.unlinked,
       },
       207,
     );
@@ -677,10 +680,14 @@ export async function remove(c: Context) {
       {
         ok: false,
         code: "PROJECT_TEARDOWN_FAILED",
-        canForceOrphan: true,
+        // forceOrphan only helps a resource-destroy failure — it records the leak
+        // for GC and drops the row. A failed unlink is a DB problem, so offering
+        // the storage-only escape there would just fail the same way.
+        canForceOrphan: result.unrecoverable.every((s) => s.step !== "unlink_consumers"),
         message: result.unrecoverable[0]?.error ?? "Teardown failed",
         steps: result.steps,
         unrecoverable: result.unrecoverable,
+        unlinked: result.unlinked,
       },
       409,
     );
@@ -694,6 +701,9 @@ export async function remove(c: Context) {
     // reclaim once the server is back. Drives the "will be cleaned up when the
     // server is reachable" toast. Empty on a fully-clean delete.
     orphaned: result.orphaned,
+    // Projects this app was linked into: they keep running, minus the injected
+    // env var, so their live container holds a dead value until the next deploy.
+    unlinked: result.unlinked,
   });
 }
 

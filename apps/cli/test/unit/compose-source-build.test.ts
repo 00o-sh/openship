@@ -41,9 +41,22 @@ vi.mock("../../src/lib/source-install", () => ({
   readSourceInstall: () => h.sourceInstall,
 }));
 
-// Keep the heavy adapters barrel out of this unit test.
-vi.mock("@repo/adapters", () => ({ systemCatalog: { installs: { docker: () => ({ supported: false }) } } }));
+// Keep the heavy adapters barrel out of this unit test — but reach through to the
+// REAL mount list, because one of the tests below asserts the compose YAML is
+// generated from it. Faking that array would make the assertion vacuous.
+vi.mock("@repo/adapters", async () => {
+  const lua = await import("../../../../packages/adapters/src/infra/openresty-lua");
+  return {
+    systemCatalog: { installs: { docker: () => ({ supported: false }) } },
+    // compose.ts imports these for the edge's host state mounts — a partial
+    // mock makes the import undefined and vitest fails the whole file.
+    EDGE_HOST_STATE_DIR: lua.EDGE_HOST_STATE_DIR,
+    EDGE_CONTAINER_MOUNTS: lua.EDGE_CONTAINER_MOUNTS,
+    invalidateEdgeContainer: () => {},
+  };
+});
 
+import { EDGE_CONTAINER_MOUNTS } from "../../../../packages/adapters/src/infra/openresty-lua";
 import { composeUp, sourceBuildDir } from "../../src/lib/compose";
 
 const REPO = "/root/.openship-dev/cli-src";
@@ -123,5 +136,51 @@ describe("composeUp — from-source install", () => {
 
     composeUp({ version: "0.3.0", build: false });
     expect(verbs()).toEqual([["pull"], ["up", "-d"]]);
+  });
+});
+
+/**
+ * The api and the edge must mount the SAME host paths — the api writes vhosts,
+ * certs and static doc-roots, the edge serves them. That list used to be typed out
+ * by hand here (twice) next to a third copy in `buildEdgeRunCommand`, so a mount
+ * added for `docker run` installs silently never reached compose ones.
+ */
+describe("composeUp — edge bind mounts", () => {
+  const composeYaml = () =>
+    [...h.written.entries()].find(([p]) => p.endsWith("docker-compose.yml"))?.[1] ?? "";
+
+  it("gives BOTH api and edge every mount in EDGE_CONTAINER_MOUNTS", () => {
+    composeUp({ version: "0.3.0" });
+    const yaml = composeYaml();
+
+    expect(EDGE_CONTAINER_MOUNTS.length).toBeGreaterThan(0);
+    for (const m of EDGE_CONTAINER_MOUNTS) {
+      const line = `- ${m.host}:${m.container}:z`;
+      expect(yaml.split(line).length - 1).toBe(2); // api + edge
+    }
+  });
+
+  it("indents them as list items under each service's `volumes:`", () => {
+    // Generated lines are spliced into a template literal, so a wrong indent is the
+    // one way this breaks — and it breaks as an unparseable compose file.
+    composeUp({ version: "0.3.0" });
+    const lines = composeYaml().split("\n");
+
+    for (const m of EDGE_CONTAINER_MOUNTS) {
+      for (const i of lines.flatMap((l, idx) => (l.includes(`${m.host}:${m.container}:z`) ? [idx] : []))) {
+        expect(lines[i]).toBe(`      - ${m.host}:${m.container}:z`);
+      }
+    }
+    // Nothing landed at top level, which is what a missing indent would look like.
+    expect(lines.some((l) => /^- \//.test(l))).toBe(false);
+  });
+
+  it("no longer hardcodes a container path the mount list owns", () => {
+    composeUp({ version: "0.3.0" });
+    const sites = EDGE_CONTAINER_MOUNTS.find((m) => m.container.includes("sites-enabled"));
+    expect(sites).toBeDefined();
+    // Present via the generated line only — twice, not four times (which is what a
+    // leftover hand-written copy alongside the generated one would produce).
+    expect(composeYaml().split(sites!.container).length - 1).toBe(2);
   });
 });

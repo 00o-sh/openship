@@ -102,9 +102,13 @@ describe("NginxProvider config generation", () => {
 
   test("static route → root + try_files, app is not proxied", async () => {
     const { nginx, conf } = setup();
-    await nginx.registerRoute({ domain: "site.example.com", tls: false, staticRoot: "/var/www/site" });
+    await nginx.registerRoute({
+      domain: "site.example.com",
+      tls: false,
+      staticRoot: "/opt/openship/static/site/dist",
+    });
     const c = conf("site-example-com")!;
-    expect(c).toContain("root /var/www/site;");
+    expect(c).toContain("root /opt/openship/static/site/dist;");
     expect(c).toContain("try_files $uri $uri/ /index.html;");
     // The ONLY proxy_pass allowed on a static vhost is the ACME-challenge
     // location (→ certbot's standalone server); the app itself is served, not
@@ -244,5 +248,52 @@ describe("default catch-all rejects unmatched HTTPS hosts", () => {
     files.set(`${SITES}/_default.conf`, "server {\n    listen 80 default_server;\n}\n");
     await ensureOpenRestyConfig(makeExecutor(files, {}, []), PATHS);
     expect(files.get(`${SITES}/_default.conf`)).toContain("ssl_reject_handshake on;");
+  });
+});
+
+describe("static root confinement", () => {
+  test("refuses a managed root outside /opt/openship", async () => {
+    const { nginx } = setup();
+    // The whole point: a route we generate must not be able to publish an arbitrary
+    // host directory. Fails closed rather than serving it.
+    await expect(
+      nginx.registerRoute({ domain: "evil.example.com", tls: false, staticRoot: "/etc" }),
+    ).rejects.toThrow(/Refusing to serve static root outside/);
+  });
+
+  test("prefix alone is not enough — a sibling dir cannot pose as a child", async () => {
+    const { nginx } = setup();
+    await expect(
+      nginx.registerRoute({
+        domain: "evil.example.com",
+        tls: false,
+        staticRoot: "/opt/openship-evil/dist",
+      }),
+    ).rejects.toThrow(/Refusing to serve static root outside/);
+  });
+
+  test("allows an ADOPTED root outside the base (proxy migration)", async () => {
+    const { nginx, conf } = setup();
+    // An imported vhost's root is already public on the operator's own nginx;
+    // refusing it would break taking that proxy over.
+    await nginx.registerRoute({
+      domain: "legacy.example.com",
+      tls: false,
+      staticRoot: "/var/www/legacy",
+      staticRootAdopted: true,
+    });
+    expect(conf("legacy-example-com")).toContain("root /var/www/legacy;");
+  });
+
+  test("still refuses traversal and injection even when adopted", async () => {
+    const { nginx } = setup();
+    await expect(
+      nginx.registerRoute({
+        domain: "x.example.com",
+        tls: false,
+        staticRoot: "/var/www/../../etc",
+        staticRootAdopted: true,
+      }),
+    ).rejects.toThrow(/must be an absolute path, no traversal/);
   });
 });

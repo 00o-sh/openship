@@ -103,7 +103,9 @@
     "forceModalTitle": "Couldn't remove it from the source",
     "forceModalBody": "The runtime couldn't be reached (or kept failing), so this project wasn't torn down. You can delete it from Openship anyway — the record is removed now and any leftover resources are reclaimed automatically once the server is reachable.",
     "forceModalConfirm": "Delete from storage",
-    "forceModalCancel": "Cancel"
+    "forceModalCancel": "Cancel",
+    "unlinked": "Unlinked from {projects} — redeploy them to apply.",
+    "unlinkedTitle": "Connected projects updated"
   },
   "connections": {
     "useInProject": "Use in a project",
@@ -132,7 +134,16 @@
     "guideIntroFallback": "Your project gets this connection, ready to use.",
     "whatYouGet": "What your app gets",
     "advancedValues": "Advanced",
-    "copy": "Copy"
+    "copy": "Copy",
+    "usedByTitle": "Used by",
+    "usedByHint": "{count} project(s) depend on this app's connection. Unlink from the consuming project.",
+    "usedByOpen": "Open project",
+    "linkedCountOne": "{count} linked app",
+    "linkedCountOther": "{count} linked apps",
+    "linkedHint": "Run against, not run by this project.",
+    "linkedBadge": "Linked",
+    "unlink": "Unlink",
+    "openApp": "Open app"
   },
   "sidebar": {
     "project": "Project",

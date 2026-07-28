@@ -1,9 +1,10 @@
 import { serve } from "@hono/node-server";
-import { setBackupCredentialSecret } from "@repo/adapters";
+import { setBackupCredentialSecret, setDefaultEdgeImage } from "@repo/adapters";
 import { isDevWatchReload } from "@repo/db";
 import { app } from "./app";
 import { cloudRuntimeTarget, cloudRuntimeTargetId, env, runtimeTargetId } from "./config/env";
 import { getAuthMode } from "./lib/auth-mode";
+import { pinnedEdgeImage } from "./lib/edge-image";
 import { getJobRunner } from "./lib/job-runner";
 import { enforceRouteScanAtBoot } from "./lib/route-scanner";
 import { attachTunnelingLifecycle, type TunnelingLifecycle } from "./modules/tunneling";
@@ -18,6 +19,12 @@ const hostname = process.env.OPENSHIP_API_HOST?.trim() || undefined;
 // encrypts with (env applies the BETTER_AUTH_SECRET default; process.env may
 // not). Single source, no process.env mutation — see backup/common/credentials.
 setBackupCredentialSecret(env.BETTER_AUTH_SECRET);
+
+// Same pattern, same reason: adapters can't derive the pinned edge image (it comes
+// from APP_VERSION, i.e. apps/api/package.json), so declare it once here. Without
+// this, any edge install that forgot to pass the pin fell back to `:latest` and
+// could run edge Lua from a different build than the API driving it.
+setDefaultEdgeImage(pinnedEdgeImage());
 
 // Refuse to start if any registered route is mis-tagged or any
 // mutation route was mounted on a raw Hono instance (bypassing

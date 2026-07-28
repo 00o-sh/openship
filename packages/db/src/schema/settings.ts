@@ -141,6 +141,37 @@ export const instanceSettings = pgTable("instance_settings", {
   /** From header, e.g. "Openship <no-reply@example.com>". Falls back to smtpUser. */
   smtpFrom: text("smtp_from"),
 
+  // ── GitHub device sign-in ───────────────────────────────────────────────────
+  //
+  // The token from the in-UI GitHub device flow, encrypted at rest.
+  //
+  // Instance-scoped, not per-user, because it stands in for the HOST's `gh`
+  // login: `getLocalGhToken()` answers "what git identity does this machine
+  // have" with no user context, and the separate `ghCliOperatorOptedIn` gate
+  // decides who may use it. Putting it on a user row would mean threading a
+  // userId through every clone path for no gain.
+  //
+  // Durable ON PURPOSE. It used to live only in the 8-hour `gh-cli-token`
+  // cache, whose fallbacks are `gh auth token` and ~/.config/gh/hosts.yml —
+  // neither of which exists in the api container, which is exactly where this
+  // flow is used. So the operator signed in and was silently signed out 8 hours
+  // later. GitHub's own OAuth-app tokens don't expire; only our storage did.
+  ghDeviceTokenEncrypted: text("gh_device_token_encrypted"),
+  ghDeviceTokenSetAt: timestamp("gh_device_token_set_at"),
+  /**
+   * HOW that credential was established: "device" (browser device flow) or
+   * "token" (operator pasted a PAT). Null = no stored credential.
+   *
+   * Stored rather than inferred because the UI has to name it correctly. Every
+   * stored identity used to surface as "gh CLI" — the label for a token probed
+   * off the HOST's `gh` login — so pasting a PAT showed up as a gh-CLI
+   * connection, which is simply not what happened. It also decides whether the
+   * library's first-run consent prompt applies: probing the host's pre-existing
+   * gh login warrants asking before enumerating repos; a credential the operator
+   * just typed into Openship is already consent.
+   */
+  ghDeviceTokenMethod: text("gh_device_token_method").$type<"device" | "token" | null>(),
+
   // ── Timestamps ─────────────────────────────────────────────────────────────
 
   createdAt: timestamp("created_at").notNull().defaultNow(),

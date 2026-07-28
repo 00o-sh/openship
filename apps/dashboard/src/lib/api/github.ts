@@ -111,6 +111,17 @@ export const githubApi = {
   connect: (source?: "oauth" | "cli") =>
     api.post<any>(endpoints.github.connect, source ? { source } : undefined),
 
+  /**
+   * Connect this instance with a pasted GitHub token. Validated server-side
+   * before it is stored, so a bad scope comes back as a 400 on the field rather
+   * than a broken clone mid-deploy. Self-hosted only.
+   */
+  setInstanceToken: (token: string) =>
+    api.post<{ connected: boolean; login?: string; warning?: string }>(
+      endpoints.github.instanceToken,
+      { token },
+    ),
+
   /** Poll device flow status */
   pollConnect: () => api.get<any>(endpoints.github.connectPoll),
 

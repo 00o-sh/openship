@@ -13,6 +13,7 @@
  */
 
 import { env } from "../../config/env";
+import { pinnedEdgeImage, withPinnedEdgeImage } from "../edge-image";
 
 export interface SelfEdgeInfraProgress {
   onLog?: (message: string, level?: "info" | "warn" | "error") => void;
@@ -100,7 +101,17 @@ async function runEnsure(
     const scan = await importSites(executor, status);
     const res = await runEdgeTakeover(
       executor,
-      { status, sites: scan.sites, acmeEmail: env.OPENSHIP_ACME_EMAIL, extraRoutes: [] },
+      {
+        status,
+        sites: scan.sites,
+        acmeEmail: env.OPENSHIP_ACME_EMAIL,
+        extraRoutes: [],
+        // Pin the edge the takeover installs. `setDefaultEdgeImage` at boot already
+        // covers this, but state it here too: this is the ONE caller of
+        // runEdgeTakeover, so leaving its `edgeImage` unset is what made the option
+        // dead code — and a dead pin reads as "the takeover doesn't need one".
+        edgeImage: pinnedEdgeImage(),
+      },
       (entry) => log(entry.message, entry.level),
     );
     if (!res.ok) return { ok: false, reason: "migrate_failed" };
@@ -131,11 +142,14 @@ async function runEnsure(
     }
   }
 
-  // Install OpenResty + certbot (idempotent). edgeTakeover authorizes reclaiming
-  // 80/443 from an existing proxy without prompting.
-  const installerConfig = options?.edgeTakeover
-    ? { edgePolicy: { mode: "takeover" as const, stopTargets: [] } }
-    : undefined;
+  // Bring up the edge (idempotent — the container edge, or bare OpenResty on a
+  // Docker-less box). edgeTakeover authorizes reclaiming 80/443 from an existing
+  // proxy without prompting.
+  const installerConfig = withPinnedEdgeImage(
+    options?.edgeTakeover
+      ? { edgePolicy: { mode: "takeover" as const, stopTargets: [] } }
+      : {},
+  );
   const system = new SystemManager("bare", { executor, installerConfig });
   await system.ensureFeature("ssl", (entry) => log(entry.message));
   return { ok: true };

@@ -124,6 +124,12 @@ function resourcePaths() {
     // misses and it silently downloads 8.8 MB from GitHub on the first
     // server-flag lookup (and shows no flags at all offline).
     geoipDb: join(root, "geoip", "GeoLite2-Country.mmdb"),
+    // The iRedMail engine tree the mail-server install packs and streams to the
+    // target VPS. Handed to the API as MAIL_SERVER_ENGINE_DIR below — its own
+    // default resolves relative to apps/api's cwd, which is WRONG here (the API
+    // runs with cwd=userData), producing "tar: could not chdir to
+    // '…/Library/apps/email/engine'".
+    engineDir: join(root, "engine"),
     dashboardDir: join(root, "dashboard", "apps", "dashboard"),
     // ssh2 + dockerode live here (external to the API bundle); the API resolves
     // them via NODE_PATH — see startApi below.
@@ -294,7 +300,7 @@ export async function startLocalServices(internalToken: string): Promise<void> {
   if (started) return;
   started = true;
 
-  const { apiEntry, migrationsDir, pgliteDir, geoipDb, dashboardDir, nodeModulesDir } =
+  const { apiEntry, migrationsDir, pgliteDir, geoipDb, engineDir, dashboardDir, nodeModulesDir } =
     resourcePaths();
   const userData = app.getPath("userData");
   const dataDir = join(userData, "data");
@@ -375,6 +381,10 @@ export async function startLocalServices(internalToken: string): Promise<void> {
       // actually there, so a stale/partial Resources dir falls back to geo-ip's
       // own download path instead of pinning a bad override.
       ...(existsSync(geoipDb) ? { OPENSHIP_GEOIP_DB: geoipDb } : {}),
+      // Pin the mail-server install source to the staged engine tree. Gated on
+      // existsSync so a stale/partial Resources dir falls back to the resolver's
+      // default rather than pinning a path that definitely isn't there.
+      ...(existsSync(engineDir) ? { MAIL_SERVER_ENGINE_DIR: engineDir } : {}),
       // The dashboard + API run on dynamic ports not in the API's static origin
       // table — trust both loopback spellings of each explicitly so CORS /
       // origin-guard / auth accept them regardless of which a client resolves.

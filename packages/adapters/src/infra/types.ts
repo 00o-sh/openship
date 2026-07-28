@@ -14,6 +14,7 @@
  */
 
 import type { ManualCert, RouteConfig, SslResult } from "../types";
+import type { OutputProbeResult } from "../system/output-exists";
 
 // ─── Routing ─────────────────────────────────────────────────────────────────
 
@@ -23,6 +24,20 @@ export interface RoutingProvider {
 
   /** Remove a reverse-proxy route */
   removeRoute(domain: string): Promise<void>;
+
+  /**
+   * Does a static `root` actually resolve WHERE THE PROXY LOOKS?
+   *
+   * Optional: only a provider that serves files from a path answers. The point is
+   * the vantage point, not the check — for a containerized edge the vhost `root`
+   * is a HOST path that must be bind-mounted into the container, so probing the
+   * host FS reports the files present while nginx sees an empty directory and
+   * 404s. Only the provider knows which executor sees what nginx sees, so the
+   * probe belongs here rather than in a caller guessing at edge topology.
+   *
+   * Advisory: implementations never throw — `checked:false` means "no signal".
+   */
+  probeStaticRoot?(servedPath: string): Promise<OutputProbeResult>;
 }
 
 // ─── SSL ─────────────────────────────────────────────────────────────────────

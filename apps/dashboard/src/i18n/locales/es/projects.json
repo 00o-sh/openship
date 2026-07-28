@@ -3,7 +3,8 @@
     "loading": "Cargando...",
     "countOne": "{count} proyecto",
     "countOther": "{count} proyectos",
-    "noTargetProjects": "Aún no hay proyectos desplegados en este destino."
+    "noTargetProjects": "Aún no hay proyectos desplegados en este destino.",
+    "noTargetDesc": "Despliega una app en este destino o crea un proyecto nuevo para empezar."
   },
   "status": {
     "live": "En vivo",
@@ -34,7 +35,8 @@
     "services": "Servicios",
     "static": "Estático",
     "standalone": "Independiente",
-    "updateAvailable": "Update"
+    "updateAvailable": "Update",
+    "appBadge": "App"
   },
   "hosting": {
     "cloud": "Cloud",
@@ -97,7 +99,13 @@
     "teardownFailedAt": "El desmontaje falló en: {reasons}. Reintenta o fuerza la eliminación para dejarlos huérfanos.",
     "teardownFailed": "Falló el desmontaje",
     "cleanupFailedTitle": "Falló la limpieza",
-    "alreadyDeleted": "El proyecto ya fue eliminado"
+    "alreadyDeleted": "El proyecto ya fue eliminado",
+    "forceModalTitle": "No se pudo eliminar en el origen",
+    "forceModalBody": "No se pudo alcanzar el runtime (o siguió fallando), así que este proyecto no se desmontó. Puedes eliminarlo de Openship igualmente: el registro se borra ahora y los recursos restantes se reclaman automáticamente cuando el servidor vuelva a estar accesible.",
+    "forceModalConfirm": "Eliminar del almacenamiento",
+    "forceModalCancel": "Cancelar",
+    "unlinked": "Se desvinculó de {projects}: vuelve a desplegarlos para aplicarlo.",
+    "unlinkedTitle": "Proyectos conectados actualizados"
   },
   "sidebar": {
     "project": "Proyecto",
@@ -163,7 +171,18 @@
     "deleteConfirmPrefix": "Eliminar permanentemente",
     "deleteConfirmSuffix": "?",
     "cancel": "Cancelar",
-    "delete": "Eliminar"
+    "delete": "Eliminar",
+    "created": "Creado",
+    "detailsTitle": "Detalles",
+    "detailsDescription": "Qué despliega este proyecto y dónde",
+    "managedImages": "Imágenes de contenedor gestionadas",
+    "managedImagesText": "Esta app se ejecuta desde imágenes prediseñadas: no hay repositorio que conectar. Solo despliégala.",
+    "services": "Servicios",
+    "target": "Destino",
+    "targetPending": "Se elige al desplegar",
+    "type": "Tipo",
+    "typeApp": "App",
+    "typeProject": "Proyecto"
   },
   "overview": {
     "platformCloud": "Openship Cloud",
@@ -324,7 +343,16 @@
     "guideIntroFallback": "Tu proyecto obtiene esta conexión, lista para usar.",
     "whatYouGet": "Lo que obtiene tu app",
     "advancedValues": "Avanzado",
-    "copy": "Copiar"
+    "copy": "Copiar",
+    "usedByTitle": "Usado por",
+    "usedByOpen": "Abrir proyecto",
+    "usedByHint": "{count} proyecto(s) dependen de la conexión de esta app. Desvincúlala desde el proyecto que la consume.",
+    "linkedCountOne": "{count} app vinculada",
+    "linkedCountOther": "{count} apps vinculadas",
+    "linkedHint": "Este proyecto las usa, pero no las ejecuta.",
+    "linkedBadge": "Vinculada",
+    "unlink": "Desvincular",
+    "openApp": "Abrir app"
   },
   "incomingWebhooks": {
     "title": "Webhooks entrantes",

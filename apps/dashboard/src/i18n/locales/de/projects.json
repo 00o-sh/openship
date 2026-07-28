@@ -3,7 +3,8 @@
     "loading": "Wird geladen...",
     "countOne": "{count} Projekt",
     "countOther": "{count} Projekte",
-    "noTargetProjects": "Noch keine Projekte auf diesem Ziel bereitgestellt."
+    "noTargetProjects": "Noch keine Projekte auf diesem Ziel bereitgestellt.",
+    "noTargetDesc": "Stelle eine App auf diesem Ziel bereit oder erstelle ein neues Projekt, um zu starten."
   },
   "status": {
     "live": "Live",
@@ -34,7 +35,8 @@
     "services": "Dienste",
     "static": "Statisch",
     "standalone": "Standalone",
-    "updateAvailable": "Update"
+    "updateAvailable": "Update",
+    "appBadge": "App"
   },
   "hosting": {
     "cloud": "Cloud",
@@ -97,7 +99,13 @@
     "teardownFailedAt": "Abbau fehlgeschlagen bei: {reasons}. Erneut versuchen oder erzwungenes Löschen, um sie zu verwaisen.",
     "teardownFailed": "Abbau fehlgeschlagen",
     "cleanupFailedTitle": "Bereinigung fehlgeschlagen",
-    "alreadyDeleted": "Projekt bereits gelöscht"
+    "alreadyDeleted": "Projekt bereits gelöscht",
+    "forceModalTitle": "Entfernen an der Quelle fehlgeschlagen",
+    "forceModalBody": "Die Runtime war nicht erreichbar (oder schlug weiter fehl), daher wurde dieses Projekt nicht abgebaut. Du kannst es trotzdem aus Openship löschen — der Datensatz verschwindet jetzt, und übrige Ressourcen werden automatisch zurückgeholt, sobald der Server erreichbar ist.",
+    "forceModalConfirm": "Aus dem Speicher löschen",
+    "forceModalCancel": "Abbrechen",
+    "unlinked": "Verknüpfung zu {projects} entfernt – dort neu deployen, um es anzuwenden.",
+    "unlinkedTitle": "Verbundene Projekte aktualisiert"
   },
   "sidebar": {
     "project": "Projekt",
@@ -163,7 +171,18 @@
     "deleteConfirmPrefix": "Endgültig löschen:",
     "deleteConfirmSuffix": "?",
     "cancel": "Abbrechen",
-    "delete": "Löschen"
+    "delete": "Löschen",
+    "created": "Erstellt",
+    "detailsTitle": "Details",
+    "detailsDescription": "Was dieses Projekt bereitstellt und wo",
+    "managedImages": "Verwaltete Container-Images",
+    "managedImagesText": "Diese App läuft aus vorgefertigten Images — es gibt kein Repository zu verbinden. Einfach bereitstellen.",
+    "services": "Services",
+    "target": "Ziel",
+    "targetPending": "Beim Deploy gewählt",
+    "type": "Typ",
+    "typeApp": "App",
+    "typeProject": "Projekt"
   },
   "overview": {
     "platformCloud": "Openship Cloud",
@@ -324,7 +343,16 @@
     "guideIntroFallback": "Dein Projekt erhält diese Verbindung, sofort nutzbar.",
     "whatYouGet": "Was deine App bekommt",
     "advancedValues": "Erweitert",
-    "copy": "Kopieren"
+    "copy": "Kopieren",
+    "usedByTitle": "Verwendet von",
+    "usedByOpen": "Projekt öffnen",
+    "usedByHint": "{count} Projekt(e) hängen von der Verbindung dieser App ab. Trenne sie im nutzenden Projekt.",
+    "linkedCountOne": "{count} verknüpfte App",
+    "linkedCountOther": "{count} verknüpfte Apps",
+    "linkedHint": "Wird von diesem Projekt genutzt, aber nicht betrieben.",
+    "linkedBadge": "Verknüpft",
+    "unlink": "Verknüpfung entfernen",
+    "openApp": "App öffnen"
   },
   "incomingWebhooks": {
     "title": "Eingehende Webhooks",

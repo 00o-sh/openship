@@ -14,6 +14,7 @@
 
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { tbValidator } from "@hono/typebox-validator";
 import { secureRouter } from "../../lib/secure-router";
 import { cloudProjectProxy } from "../../lib/cloud/project-router";
 import * as ctrl from "./project.controller";
@@ -206,6 +207,9 @@ r.patch(
     mcp: { description: "Merge env var changes (upserts + deletes); untouched vars are preserved.", body: MergeEnvVarsBody },
   },
   cloudProjectProxy,
+  // Validate the body shape → 400 (not a 500 when the service does
+  // data.upserts.map on a wrong-shape-but-valid-JSON body). #231
+  tbValidator("json", MergeEnvVarsBody),
   ctrl.mergeEnvVars,
 );
 
