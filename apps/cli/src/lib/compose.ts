@@ -65,6 +65,14 @@ const BUILT_SERVICES = [
   { service: "edge", dockerfile: "apps/edge/Dockerfile" },
 ] as const;
 
+/**
+ * Services whose BEHAVIOUR comes from `.env` (via `env_file:`), so a changed env
+ * only reaches them on recreate. postgres/redis are deliberately excluded: they
+ * read only credentials, which `keepSecret` never rotates, and recreating them
+ * for an unrelated config change is downtime for nothing.
+ */
+const ENV_CONSUMING_SERVICES = ["api", "dashboard", "edge"] as const;
+
 export type InstallMethod = "compose" | "bare";
 
 export function readInstallMethod(): InstallMethod | null {
@@ -148,6 +156,8 @@ export interface ComposeUpOpts {
   apiPort?: string;
   dashboardPort?: string;
   publicUrl?: string;
+  /** Extra browser origins to trust (comma-separated), e.g. a LAN IP + a domain. */
+  extraTrustedOrigins?: string;
   trustProxy?: boolean;
   registry?: string;
   version?: string;
@@ -609,7 +619,74 @@ function warnOrphanedVolumes(project: string): void {
   );
 }
 
-function renderEnv(opts: ComposeUpOpts, host: { user: string; keyPath: string } | null): string {
+/**
+ * Operator configuration that must SURVIVE a plain re-run.
+ *
+ * `openship up` regenerates `.env` from scratch, so anything it doesn't write is
+ * gone. That made a bare `openship up` (the natural thing to do after
+ * `openship update`) silently drop the public URL — and `OPENSHIP_PUBLIC_URL` is
+ * what puts the operator's domain in the API's `trustedOrigins`. The stack came
+ * back up serving reads fine and 403ing every mutation with
+ * `ORIGIN_REJECTED`, which points at neither the cause nor the fix.
+ *
+ * So: an explicit flag wins, otherwise the previous value is carried forward,
+ * otherwise the default. Re-running `up` with no flags is now a no-op on config,
+ * which is what everyone already assumed it was.
+ */
+function keepConfig(
+  prev: Record<string, string>,
+  key: string,
+  explicit?: string | null,
+): string | undefined {
+  const set = explicit?.trim();
+  if (set) return set;
+  const carried = prev[key]?.trim();
+  return carried || undefined;
+}
+
+/** The effective config for this run: flags over previous `.env` over defaults. */
+export function resolveEnvConfig(
+  prev: Record<string, string>,
+  opts: ComposeUpOpts,
+): {
+  apiPort: string;
+  dashPort: string;
+  publicUrl?: string;
+  trustProxy: boolean;
+  extraTrustedOrigins?: string;
+  registry: string;
+  hostControl: boolean;
+} {
+  const publicUrl = keepConfig(prev, "OPENSHIP_PUBLIC_URL", opts.publicUrl);
+  return {
+    apiPort: keepConfig(prev, "API_PORT", opts.apiPort) ?? "4000",
+    dashPort: keepConfig(prev, "DASHBOARD_PORT", opts.dashboardPort) ?? "3001",
+    ...(publicUrl ? { publicUrl } : {}),
+    // A public URL always implies a proxy in front; otherwise keep whatever the
+    // install was configured with.
+    trustProxy: Boolean(opts.trustProxy) || Boolean(publicUrl) || prev.TRUST_PROXY === "true",
+    ...(keepConfig(prev, "OPENSHIP_EXTRA_TRUSTED_ORIGINS", opts.extraTrustedOrigins)
+      ? {
+          extraTrustedOrigins: keepConfig(
+            prev,
+            "OPENSHIP_EXTRA_TRUSTED_ORIGINS",
+            opts.extraTrustedOrigins,
+          ),
+        }
+      : {}),
+    registry: keepConfig(prev, "OPENSHIP_IMAGE_REGISTRY", opts.registry) ?? DEFAULT_IMAGE_REGISTRY,
+    // Tri-state: the flag is absent on a plain re-run, so fall back to what the
+    // install chose rather than silently re-granting host control.
+    hostControl:
+      opts.noHostControl === undefined ? prev.OPENSHIP_HOST_CONTROL !== "false" : !opts.noHostControl,
+  };
+}
+
+function renderEnv(
+  opts: ComposeUpOpts,
+  host: { user: string; keyPath: string } | null,
+  cfg: ReturnType<typeof resolveEnvConfig>,
+): string {
   const prev = readEnvFile();
   const lines: string[] = [
     "# Managed by `openship up`. Secrets are generated once and preserved.",
@@ -620,17 +697,23 @@ function renderEnv(opts: ComposeUpOpts, host: { user: string; keyPath: string } 
     "OPENSHIP_REQUIRE_AUTH=true",
     // Read by createHostExecutor (throws when false) and by the servers list
     // (hides the local row). Written explicitly so the policy is visible in .env.
-    `OPENSHIP_HOST_CONTROL=${opts.noHostControl ? "false" : "true"}`,
-    `OPENSHIP_IMAGE_REGISTRY=${opts.registry || DEFAULT_IMAGE_REGISTRY}`,
+    `OPENSHIP_HOST_CONTROL=${cfg.hostControl ? "true" : "false"}`,
+    `OPENSHIP_IMAGE_REGISTRY=${cfg.registry}`,
     `OPENSHIP_VERSION=${opts.version || (typeof __CLI_VERSION__ === "string" ? __CLI_VERSION__ : "latest")}`,
     `POSTGRES_PASSWORD=${keepSecret(prev, "POSTGRES_PASSWORD")}`,
     `BETTER_AUTH_SECRET=${keepSecret(prev, "BETTER_AUTH_SECRET")}`,
     `INTERNAL_TOKEN=${keepSecret(prev, "INTERNAL_TOKEN")}`,
+    `API_PORT=${cfg.apiPort}`,
+    `DASHBOARD_PORT=${cfg.dashPort}`,
   ];
-  if (opts.apiPort) lines.push(`API_PORT=${opts.apiPort}`);
-  if (opts.dashboardPort) lines.push(`DASHBOARD_PORT=${opts.dashboardPort}`);
-  if (opts.publicUrl) lines.push(`OPENSHIP_PUBLIC_URL=${opts.publicUrl}`);
-  if (opts.trustProxy || opts.publicUrl) lines.push("TRUST_PROXY=true");
+  // The origin allowlist. Losing either of these is the ORIGIN_REJECTED failure
+  // described on keepConfig — they are written whenever they are known, never
+  // conditionally on this run having been given a flag.
+  if (cfg.publicUrl) lines.push(`OPENSHIP_PUBLIC_URL=${cfg.publicUrl}`);
+  if (cfg.extraTrustedOrigins) {
+    lines.push(`OPENSHIP_EXTRA_TRUSTED_ORIGINS=${cfg.extraTrustedOrigins}`);
+  }
+  if (cfg.trustProxy) lines.push("TRUST_PROXY=true");
   if (host) {
     // Activates createHostExecutor → SSH to the host; OPENSHIP_HOST_KEY_PATH is
     // the compose-side source for the /run/secrets/openship_host_key mount.
@@ -680,21 +763,42 @@ function materialize(opts: ComposeUpOpts): {
   buildDir: string | null;
   /** True when this run MINTED the db password (no prior .env to preserve it from). */
   regeneratedSecrets: boolean;
+  /** The effective config that was written (flags over previous `.env`). */
+  cfg: ReturnType<typeof resolveEnvConfig>;
+  /**
+   * The rendered `.env` DIFFERS from what was on disk. The api/dashboard/edge
+   * services take it via `env_file:`, whose contents are baked into a container
+   * at CREATE time — `up -d` alone reports "up-to-date" and keeps serving the old
+   * environment. So this decides whether they get recreated.
+   */
+  envChanged: boolean;
 } {
   mkdirSync(COMPOSE_DIR, { recursive: true, mode: 0o700 });
   // Read BEFORE the write: a missing POSTGRES_PASSWORD here means the one we're
   // about to write is brand new, which is the case that can mismatch a surviving
   // data volume (see reconcileDbPassword).
-  const regeneratedSecrets = !readEnvFile().POSTGRES_PASSWORD;
+  const prev = readEnvFile();
+  const regeneratedSecrets = !prev.POSTGRES_PASSWORD;
+  const cfg = resolveEnvConfig(prev, opts);
   // --no-host-control: never generate/authorize a host key in the first place.
-  // Not just "don't use it" — there is nothing on disk to steal.
-  const host = opts.noHostControl ? null : provisionHostSshChannel();
+  // Not just "don't use it" — there is nothing on disk to steal. Resolved through
+  // cfg so a plain re-run keeps the install's original choice.
+  const host = cfg.hostControl ? provisionHostSshChannel() : null;
+  let before = "";
+  try {
+    before = readFileSync(ENV_FILE, "utf8");
+  } catch {
+    /* first install — no previous env, so everything is "changed" */
+  }
+  const rendered = renderEnv(opts, host, cfg);
   writeFileSync(COMPOSE_FILE, COMPOSE_YAML);
-  writeFileSync(ENV_FILE, renderEnv(opts, host), { mode: 0o600 });
+  writeFileSync(ENV_FILE, rendered, { mode: 0o600 });
 
   const buildDir = opts.build === false ? null : sourceBuildDir();
   if (buildDir) writeFileSync(BUILD_FILE, renderBuildOverride(buildDir));
-  return { buildDir, regeneratedSecrets };
+  // `before === ""` is a first install: the containers don't exist yet and will be
+  // created with this env, so there is nothing to force.
+  return { buildDir, regeneratedSecrets, cfg, envChanged: before !== "" && rendered !== before };
 }
 
 /** Does this project's postgres data volume already exist (i.e. predate this run)? */
@@ -722,9 +826,21 @@ function compose(args: string[], opts?: { quiet?: boolean; withBuildOverride?: b
  * install). Postgres/redis are upstream images and are pulled either way.
  */
 export function composeUp(opts: ComposeUpOpts): { ok: boolean; apiPort: string; dashPort: string } {
-  const { buildDir, regeneratedSecrets } = materialize(opts);
-  const apiPort = opts.apiPort || "4000";
-  const dashPort = opts.dashboardPort || "3001";
+  const { buildDir, regeneratedSecrets, cfg, envChanged } = materialize(opts);
+  // The EFFECTIVE ports, not the flags: a re-run with no flags keeps the ports the
+  // install was configured with, so the summary must report those.
+  const apiPort = cfg.apiPort;
+  const dashPort = cfg.dashPort;
+  // `env_file:` contents are read when a container is CREATED, so a changed .env
+  // reaches the api/dashboard/edge only if they're recreated. Without this, an
+  // env fix "succeeds" and changes nothing.
+  const up = (extra: { withBuildOverride?: boolean } = {}) =>
+    compose(
+      envChanged
+        ? ["up", "-d", "--force-recreate", ...ENV_CONSUMING_SERVICES]
+        : ["up", "-d"],
+      extra,
+    );
 
   // A previous stack under a different project name would still hold :80/:443
   // (host-networked edge) and 4000/3001, leaving the new edge in a bind() crash
@@ -754,7 +870,7 @@ export function composeUp(opts: ComposeUpOpts): { ok: boolean; apiPort: string; 
     if (compose(["build"], { withBuildOverride: true }) !== 0) {
       return { ok: false, apiPort, dashPort };
     }
-    if (compose(["up", "-d"], { withBuildOverride: true }) !== 0) {
+    if (up({ withBuildOverride: true }) !== 0) {
       return { ok: false, apiPort, dashPort };
     }
     onEdgeContainerChanged();
@@ -763,7 +879,7 @@ export function composeUp(opts: ComposeUpOpts): { ok: boolean; apiPort: string; 
   }
 
   if (compose(["pull"]) !== 0) return { ok: false, apiPort, dashPort };
-  if (compose(["up", "-d"]) !== 0) return { ok: false, apiPort, dashPort };
+  if (up() !== 0) return { ok: false, apiPort, dashPort };
   onEdgeContainerChanged();
   writeInstallMethod("compose");
   return { ok: true, apiPort, dashPort };
@@ -827,28 +943,24 @@ export function composeUninstall(opts: { removeImages?: boolean } = {}): {
   return { ok, removedImages };
 }
 
-/** `openship update` (compose): pull the latest pinned images + recreate. */
+/**
+ * `openship update` (compose): the WHOLE update, so nothing has to be run after it.
+ *
+ * This is `composeUp` with the version repinned, deliberately — not a narrower
+ * pull+up. The new CLI ships a new compose template (services, mounts, env keys)
+ * and `composeUp` is the only thing that writes it, which is why operators ended
+ * up running `openship up` afterwards to pick it up. That follow-up is what broke
+ * installs: it regenerated `.env` from flags it wasn't given. Now the update path
+ * regenerates both files itself, carrying every operator setting forward
+ * (`resolveEnvConfig`), and force-recreates the env-consuming services when the
+ * result differs. `openship up` afterwards is harmless but unnecessary.
+ *
+ * Covers both install shapes: a from-source install rebuilds from its checkout
+ * (no published image for the branch it tracks), a normal one pulls.
+ */
 export function composeUpdate(version?: string): boolean {
   if (!existsSync(COMPOSE_FILE)) return false;
-  // Repin the version if provided, else keep the .env's pin.
-  if (version) {
-    const env = readEnvFile();
-    env.OPENSHIP_VERSION = version;
-    writeFileSync(
-      ENV_FILE,
-      Object.entries(env).map(([k, v]) => `${k}=${v}`).join("\n") + "\n",
-      { mode: 0o600 },
-    );
-  }
-  // A from-source install rebuilds from its checkout — there is no published
-  // image for the branch it tracks.
-  if (sourceBuildDir()) {
-    return (
-      compose(["build"], { withBuildOverride: true }) === 0 &&
-      compose(["up", "-d"], { withBuildOverride: true }) === 0
-    );
-  }
-  return compose(["pull"]) === 0 && compose(["up", "-d"]) === 0;
+  return composeUp(version ? { version } : {}).ok;
 }
 
 export function composePs(): number {

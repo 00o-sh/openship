@@ -33,6 +33,30 @@ const EMPTY_STATE: GitHubConnectionState = {
   primary: null,
 };
 
+/**
+ * What the backend says is offerable here. Mirrors GitHubCapabilities in
+ * apps/api/src/modules/github/github.capabilities.ts.
+ *
+ * The dashboard deliberately derives NOTHING about availability itself anymore —
+ * it used to branch on `selfHosted` / `deployMode` and drifted from the resolver
+ * (a forwarding toggle that could never take effect, a Cloud App row on a box with
+ * no cloud link). Absent (older API / failed probe) → `null`, and the UI falls back
+ * to showing the methods it can prove are safe.
+ */
+type MethodKind = "device" | "token" | "app" | "ssh-key" | "forwarding";
+interface Capabilities {
+  platform: "saas" | "selfhosted";
+  desktop: boolean;
+  primary: MethodKind | null;
+  methods: Array<{
+    kind: MethodKind;
+    available: boolean;
+    configured: boolean;
+    requiresCloud?: boolean;
+    unavailableReason?: string;
+  }>;
+}
+
 export function GitHubConnection() {
   // The Settings card owns the App-connection truth. The library context
   // (useGitHub) is now gh-first and does NOT probe the App, so we fetch
@@ -46,6 +70,7 @@ export function GitHubConnection() {
   const [state, setState] = useState<GitHubConnectionState>(EMPTY_STATE);
   const [accounts, setAccounts] = useState<GitHubAccount[]>([]);
   const [installUrl, setInstallUrl] = useState<string | null>(null);
+  const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
   const [loading, setLoading] = useState(true);
   // "Forward my git identity to build servers" (Settings → Clone credentials).
   // DESKTOP only — `relayConfigEligible` requires isDesktop. When on, the stored
@@ -63,10 +88,12 @@ export function GitHubConnection() {
       setState(res?.state ?? EMPTY_STATE);
       setAccounts(res?.accounts ?? []);
       setInstallUrl(res?.installUrl || null);
+      setCapabilities((res?.capabilities as Capabilities | undefined) ?? null);
     } catch {
       setState(EMPTY_STATE);
       setAccounts([]);
       setInstallUrl(null);
+      setCapabilities(null);
     } finally {
       setLoading(false);
     }
@@ -128,7 +155,15 @@ export function GitHubConnection() {
   const { connected: cloudConnected, startConnect: startCloudConnect } = useCloud();
   const { showModal, hideModal } = useModal();
   const { selfHosted: isSelfHosted, deployMode } = usePlatform();
-  const isDesktop = deployMode === "desktop";
+  // Backend-declared when we have it. `deployMode` remains only as the pre-load
+  // fallback, so a slow /status doesn't flash the wrong affordance.
+  const isDesktop = capabilities?.desktop ?? deployMode === "desktop";
+  const can = (kind: MethodKind) => {
+    const m = capabilities?.methods.find((x) => x.kind === kind);
+    // No capabilities payload → fall back to "offer it", matching prior behaviour
+    // rather than hiding a working method behind a failed probe.
+    return m ? m.available : true;
+  };
 
   const promptDisconnect = (
     source: "oauth" | "cli" | "all",
@@ -322,7 +357,10 @@ export function GitHubConnection() {
             </button>
             <MethodDisclosure summary={t.settings.github.changeMethod}>
               <MethodChooser
-                isSelfHosted={isSelfHosted}
+                can={can}
+                appRequiresCloud={
+                  capabilities?.methods.find((m) => m.kind === "app")?.requiresCloud ?? isSelfHosted
+                }
                 cloudConnected={cloudConnected}
                 connecting={connecting}
                 showSignIn={!ghConnected}
@@ -341,7 +379,10 @@ export function GitHubConnection() {
            needs no app registration, no Openship account and no shell on the box;
            everything else is a deliberate choice behind the disclosure. */
         <MethodChooser
-          isSelfHosted={isSelfHosted}
+          can={can}
+          appRequiresCloud={
+            capabilities?.methods.find((m) => m.kind === "app")?.requiresCloud ?? isSelfHosted
+          }
           cloudConnected={cloudConnected}
           connecting={connecting}
           showSignIn
@@ -524,7 +565,10 @@ function MethodDisclosure(props: { summary: string; children: React.ReactNode })
  * an equal-weight row, because the operator has already decided to switch.
  */
 function MethodChooser(props: {
-  isSelfHosted: boolean;
+  /** Backend-declared availability per method — never re-derived here. */
+  can: (kind: "device" | "token" | "app" | "ssh-key" | "forwarding") => boolean;
+  /** Backend-declared: does the App need an Openship Cloud link on this install? */
+  appRequiresCloud: boolean;
   cloudConnected: boolean;
   connecting: boolean;
   showSignIn: boolean;
@@ -537,7 +581,7 @@ function MethodChooser(props: {
   onToken: () => void;
 }) {
   const {
-    isSelfHosted, cloudConnected, connecting, showSignIn, showApp, primary,
+    can, appRequiresCloud, cloudConnected, connecting, showSignIn, showApp, primary,
     onSignIn, onConnectApp, onConnectCloud, onSsh, onToken,
   } = props;
   const { t } = useI18n();
@@ -565,24 +609,32 @@ function MethodChooser(props: {
 
   // The App needs Openship Cloud on self-hosted (the private key lives in
   // openship.io), so the row's action is cloud-connect until that's done.
+  const needsCloudFirst = appRequiresCloud && !cloudConnected;
   const appRow = row(
     "app",
     Github,
     t.settings.github.methodApp,
-    isSelfHosted && !cloudConnected ? t.settings.github.requiresCloud : t.settings.github.methodAppDesc,
-    isSelfHosted && !cloudConnected ? onConnectCloud : onConnectApp,
+    needsCloudFirst ? t.settings.github.requiresCloud : t.settings.github.methodAppDesc,
+    needsCloudFirst ? onConnectCloud : onConnectApp,
   );
 
+  // Every row is gated on the BACKEND's verdict. A method the resolver would
+  // refuse is never rendered, so the UI cannot advertise a dead path.
   const others = [
-    ...(showApp ? [appRow] : []),
-    row("ssh", KeyRound, t.settings.github.useSshPerServer, t.settings.github.methodSshDesc, onSsh),
-    row("pat", Key, t.settings.github.usePat, t.settings.github.methodTokenDesc, onToken),
+    ...(showApp && can("app") ? [appRow] : []),
+    ...(can("ssh-key")
+      ? [row("ssh", KeyRound, t.settings.github.useSshPerServer, t.settings.github.methodSshDesc, onSsh)]
+      : []),
+    ...(can("token")
+      ? [row("pat", Key, t.settings.github.usePat, t.settings.github.methodTokenDesc, onToken)]
+      : []),
   ];
 
   if (!primary) {
     return (
       <div className="space-y-2">
         {showSignIn &&
+          can("device") &&
           row("signin", Github, t.settings.github.signIn, t.settings.github.signInDesc, onSignIn)}
         {others}
       </div>

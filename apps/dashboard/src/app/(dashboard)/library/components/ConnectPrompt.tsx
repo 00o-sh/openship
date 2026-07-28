@@ -76,6 +76,15 @@ export function ConnectPrompt({
 }) {
   const { t } = useI18n();
   const router = useRouter();
+  // Which methods to offer is the BACKEND's call (github.capabilities.ts). This
+  // component used to branch on `selfHosted` and hardcode the pair of cards, which
+  // is how the empty state ended up advertising Openship Cloud on installs that
+  // had no use for it. `selfHosted` remains only as the pre-load fallback.
+  const { capabilities } = useGitHub();
+  const can = (kind: "device" | "token" | "app" | "ssh-key" | "forwarding") => {
+    const m = capabilities?.methods.find((x) => x.kind === kind);
+    return m ? m.available : selfHosted;
+  };
 
   // No device client id on this instance → collect a token here rather than
   // sending the operator to Settings (or worse, to a shell on the server).
@@ -193,7 +202,7 @@ export function ConnectPrompt({
             : t.library.connect.default.descSaas}
         </p>
 
-        {selfHosted ? (
+        {can("device") || can("token") ? (
           // Two real choices, and both stay on this box: sign in with GitHub
           // (device code, nothing to register), or bring your own credential (a
           // deploy key per server, or an access token) if you'd rather not sign
@@ -202,6 +211,7 @@ export function ConnectPrompt({
           // is only asking for repo access, and as a side-by-side card it read
           // like a requirement. It's still reachable in Settings.
           <div className="grid sm:grid-cols-2 gap-3 max-w-xl mx-auto text-start">
+            {can("device") && (
             <button
               onClick={() => onConnect("cli")}
               disabled={connecting}
@@ -223,9 +233,11 @@ export function ConnectPrompt({
                 )}
               </span>
             </button>
+            )}
 
             {/* Settings owns both halves of "bring your own": the token rows and
                 the per-server deploy keys, so one destination covers it. */}
+            {(can("token") || can("ssh-key")) && (
             <button
               onClick={() => router.push("/settings?tab=tokens")}
               className="group rounded-xl border border-border/60 bg-card p-4 transition-all hover:border-primary/40 hover:bg-primary/[0.02] text-start"
@@ -242,6 +254,7 @@ export function ConnectPrompt({
                 <ArrowRight className="size-3.5 rtl:rotate-180" />
               </span>
             </button>
+            )}
           </div>
         ) : (
           // SaaS: one path — the Openship GitHub App via OAuth.

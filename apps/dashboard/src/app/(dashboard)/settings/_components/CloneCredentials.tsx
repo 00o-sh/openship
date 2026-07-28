@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Key, Loader2, Check, Trash2, Eye, EyeOff } from "lucide-react";
-import { settingsApi, type CloneCredentialsState } from "@/lib/api";
+import { settingsApi, githubApi, type CloneCredentialsState } from "@/lib/api";
 import { getApiErrorMessage } from "@/lib/api";
 import { useToast } from "@/context/ToastContext";
 import { usePlatform } from "@/context/PlatformContext";
@@ -21,6 +21,10 @@ export function CloneCredentials() {
   const { showToast } = useToast();
   const { t } = useI18n();
   const { deployMode } = usePlatform();
+  // Whether identity forwarding applies is the BACKEND's call (it mirrors
+  // relayConfigEligible). `deployMode` is only the pre-load fallback so a slow
+  // /github/status doesn't flash a toggle that then disappears.
+  const [forwardingAvailable, setForwardingAvailable] = useState(deployMode === "desktop");
   const [state, setState] = useState<CloneCredentialsState | null>(null);
   const [loading, setLoading] = useState(true);
   const [tokenInput, setTokenInput] = useState("");
@@ -37,6 +41,14 @@ export function CloneCredentials() {
       const res = await settingsApi.get();
       setState(res.cloneToken);
       setForwardGit(res.forwardGitToServer);
+      // Same source of truth the GitHub card uses, so the two can't disagree.
+      void githubApi
+        .getStatusDeduped<any>()
+        .then((gh) => {
+          const m = gh?.capabilities?.methods?.find((x: any) => x.kind === "forwarding");
+          if (m) setForwardingAvailable(Boolean(m.available));
+        })
+        .catch(() => {});
     } catch {
       // Silent - section just shows empty.
     } finally {
@@ -252,7 +264,7 @@ export function CloneCredentials() {
               server". A self-hosted box has no such boundary and uses per-server
               credentials instead — so on self-hosted this checkbox was flippable
               but could never take effect. */}
-          {deployMode === "desktop" && (
+          {forwardingAvailable && (
           <label className="flex items-start gap-3 cursor-pointer rounded-xl border border-border/50 bg-muted/15 p-3.5">
             <input
               type="checkbox"

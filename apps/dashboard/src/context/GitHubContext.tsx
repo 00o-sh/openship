@@ -138,6 +138,27 @@ interface GitHubContextValue {
 
   /* App mode */
   installUrl: string | null;
+
+  /**
+   * Backend-declared connect methods (see api github.capabilities.ts). Null until
+   * the first /github/home or /github/status resolves, or when an older API doesn't
+   * send it — consumers treat null as "no opinion" and fall back to showing what
+   * they can prove is safe, never to re-deriving platform policy.
+   */
+  capabilities: GitHubCapabilities | null;
+}
+
+export interface GitHubCapabilities {
+  platform: "saas" | "selfhosted";
+  desktop: boolean;
+  primary: "device" | "token" | "app" | "ssh-key" | "forwarding" | null;
+  methods: Array<{
+    kind: "device" | "token" | "app" | "ssh-key" | "forwarding";
+    available: boolean;
+    configured: boolean;
+    requiresCloud?: boolean;
+    unavailableReason?: string;
+  }>;
 }
 
 export type CliAction =
@@ -194,6 +215,9 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
   const [repos, setRepos] = useState<GitHubRepo[]>(initialData?.repos || []);
   const [loadingRepos, setLoadingRepos] = useState(false);
   const [installUrl, setInstallUrl] = useState<string | null>(initialData?.installUrl || null);
+  const [capabilities, setCapabilities] = useState<GitHubCapabilities | null>(
+    initialData?.capabilities ?? null,
+  );
   const initRef = useRef(false);
   // In-flight refresh promise — multiple triggers (mount effect,
   // connect-flow follow-ups, pollConnect tick, etc.) collapse to ONE
@@ -224,6 +248,7 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
 
       if (res?.installUrl) setInstallUrl(res.installUrl);
       else setInstallUrl(null);
+      if (res?.capabilities) setCapabilities(res.capabilities as GitHubCapabilities);
 
       if (nextState.primary !== null) {
         setCliAction(null);
@@ -505,6 +530,7 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
         connected,
         connecting,
         loading,
+        capabilities,
         connect,
         connectWithToken,
         disconnect,

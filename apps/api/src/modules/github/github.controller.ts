@@ -76,11 +76,21 @@ export async function getStatus(c: Context) {
     source.resolveInstallUrl(),
   ]);
   const allowedAccounts = await filterAllowedAccounts(ctx, accounts, (a) => a.login);
+  // Connect methods, derived server-side from the SAME chain table that resolves
+  // credentials. The dashboard used to decide this itself from `selfHosted` /
+  // `deployMode`, which is how it ended up offering a forwarding toggle that could
+  // never take effect and a Cloud App row on a box with no cloud link.
+  const { resolveGitHubCapabilities } = await import("./github.capabilities");
+  const { isCloudConnected } = await import("../../lib/cloud/session");
+  const capabilities = await resolveGitHubCapabilities(ctx, {
+    cloudConnected: await isCloudConnected(ctx.userId).catch(() => false),
+  }).catch(() => null);
   return c.json({
     state,
     accounts: allowedAccounts,
     installUrl: install.url,
     cloudUnreachable: install.cloudUnreachable ?? false,
+    capabilities,
   });
 }
 
@@ -116,6 +126,15 @@ export async function getHome(c: Context) {
     filterAllowedRepos(ctx, data.repos, repoKey),
     filterAllowedAccounts(ctx, data.accounts, (a) => a.login),
   ]);
+  // Same capability payload as /github/status. The library reads /home, so without
+  // it here the empty state would have to fall back to guessing platform policy —
+  // the duplication this whole thing removes.
+  const { resolveGitHubCapabilities } = await import("./github.capabilities");
+  const { isCloudConnected } = await import("../../lib/cloud/session");
+  const capabilities = await resolveGitHubCapabilities(ctx, {
+    cloudConnected: await isCloudConnected(ctx.userId).catch(() => false),
+  }).catch(() => null);
+
   return c.json({
     ...data,
     accounts,
@@ -124,6 +143,7 @@ export async function getHome(c: Context) {
     // cloud-app mode + SaaS down: the card shows "Openship Cloud
     // unreachable" instead of a dead install button (installUrl is "").
     cloudUnreachable,
+    capabilities,
   });
 }
 
