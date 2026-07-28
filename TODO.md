@@ -238,6 +238,85 @@ Decisions to settle before coding:
 
 ---
 
+## Mail
+
+Both items below are steps toward the same end state already sketched in
+`apps/email/ARCHITECTURE.md` ("target state, not current"): openship provisions
+and talks to the mail server over an **HTTP admin API**, and stops reaching into
+the box. Fold changes into that doc rather than writing a competing blueprint.
+
+### Ship the mail server as a Docker image
+
+Today mail is a **host takeover**, not a workload. `mail.service.ts` transfers
+the in-repo engine tree (`apps/email/engine/`, staged to `/root/iRedMail-engine`,
+resolved via `MAIL_SERVER_ENGINE_DIR`) through a `CommandExecutor` and runs
+`iRedMail.sh` on the target — which installs Postfix, Dovecot, Amavis, iRedAPD,
+fail2ban **and its own Postgres** directly onto the OS. That's why mail needs a
+dedicated box, why every admin action is SSH + `psql`, and why the install is a
+resumable multi-step wizard instead of a pull.
+
+The image pipeline is already there to receive it: `.github/workflows/docker-images.yml:42`
+builds matrix `[api, dashboard, edge] × [amd64, arm64]` from `apps/<image>/Dockerfile`,
+push-by-digest with a manifest merge. Adding mail = a Dockerfile + one matrix entry.
+
+The blocker is that **iRedMail itself is a poor container citizen** — its
+installer assumes a whole systemd OS it owns. Two honest paths:
+
+- [ ] **Purpose-built image**: run only Postfix + Dovecot + rspamd against the
+      `vmail` DB we already own via `packages/db-email`, and drop iRedMail's
+      installer entirely. Matches the ARCHITECTURE.md end state (we own `vmail`;
+      amavisd / iredapd / fail2ban DBs belong to upstream and would go away with
+      those daemons). Most work, best result.
+- [ ] **Compose the mail stack** (docker-mailserver-shaped): several containers,
+      keep iRedMail's SQL map layout so Postfix/Dovecot config stays upstream's.
+      Cheaper, but keeps the daemon-config surface we said we wouldn't own.
+
+Either way, resolve before starting:
+
+- [ ] **Host ports.** 25 / 465 / 587 / 143 / 993 must publish on the host, plus a
+      matching PTR/rDNS and HELO hostname — the edge (`apps/edge`) only fronts
+      80/443, so this is not "another vhost". Decide how it coexists with the
+      port-takeover consent flow already built for 80/443.
+- [ ] **State must be host bind mounts, not named volumes** — maildirs, the mail
+      DB, DKIM keys, and `${BRANDING_PATH}/config.json`. This is the exact lesson
+      the edge already paid for (hiding cert state in a named volume silently
+      broke migrate/cert-carry); mail has strictly more state.
+- [ ] **Cert sharing.** `mail.service.ts` reuses the web cert from the standard
+      `/etc/letsencrypt` layout. In a container that becomes a mount, and it ties
+      into the ACME item at the top of this file — sequence them.
+- [ ] **Migration for boxes already installed by `iRedMail.sh`.** There are live
+      installs; an image path that can't adopt them is a fork, not a migration.
+      Scan-and-adopt already exists (`mail.routes.ts:32`) — extend it, or state
+      plainly that containerized mail is new-installs-only.
+
+### Standalone mail admin dashboard
+
+The admin panel is currently **inseparable from openship**: `apps/api/src/modules/mail/admin/*`
+drives the box over SSH and `psql` (`admin/psql-runner.ts`), and the UI lives at
+`apps/dashboard/src/app/(dashboard)/emails/`. So the mail server has no
+administration at all without an openship control plane attached — we deleted
+iRedAdmin and put nothing self-contained in its place.
+
+Goal: mail ships as **server image + admin image**, administrable on its own.
+
+- [ ] **The admin API is the prerequisite, not the UI.** Every operation the
+      `admin/*` services perform via SSH+psql needs an HTTP endpoint on the mail
+      side first (mailboxes, domains, DNS, relay, stats, test-send). This is the
+      same "openship calls the email server's admin API over HTTP" line already
+      in ARCHITECTURE.md — do it once and both consumers get it.
+- [ ] **Then openship's `/emails` becomes a client of that API**, not a second
+      implementation. Two code paths to the same mailbox table is how they drift.
+- [ ] **Auth for the standalone case.** openship authenticates its own admins
+      today; a standalone admin UI needs its own login, and `vmail.mailbox`
+      accounts are explicitly *not* admins (ARCHITECTURE.md identity table).
+      Decide: bootstrap postmaster credential, or refuse to run standalone
+      without an operator-supplied admin secret.
+- [ ] Note `apps/dashboard` is **already** a standalone image
+      (`apps/dashboard/Dockerfile`, in the matrix above) — this item is the *mail*
+      admin UI, which does not exist as a separate artifact yet.
+
+---
+
 ## Open TODO markers in code
 
 Verified present; listed so they aren't lost.

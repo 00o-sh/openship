@@ -333,7 +333,17 @@ export class NginxProvider implements RoutingProvider, SslProvider {
     if (this.executor) {
       try {
         await this.executor.writeFile(tmpPath, content);
-        await this.executor.exec(`mv ${sq(tmpPath)} ${sq(path)}`);
+        // `rename` (a FILE op), not `exec("mv")`. On a container edge, commands run
+        // INSIDE the container while file ops land on the HOST — so the mv renamed a
+        // path the container can't see and failed with ENOENT on the file we had just
+        // written ("mv: can't rename '…/x.conf.tmp-…': No such file or directory"),
+        // taking routing down while the deploy reported success. The shell fallback is
+        // correct for any executor whose commands and files share one namespace.
+        if (this.executor.rename) {
+          await this.executor.rename(tmpPath, path);
+        } else {
+          await this.executor.exec(`mv ${sq(tmpPath)} ${sq(path)}`);
+        }
       } catch (err) {
         await this.executor.rm(tmpPath).catch(() => undefined);
         throw err;

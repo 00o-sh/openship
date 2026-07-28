@@ -103,6 +103,38 @@ describe("edgeContainerExecutor", () => {
     expect(execCalls(inner).some((c) => c.startsWith("docker ps"))).toBe(false);
   });
 
+  // The routing failure this guards: an atomic vhost write is writeFile(tmp) on the
+  // HOST + rename(tmp, final). Sending the rename through this decorator's `exec`
+  // put the `mv` inside the container, where the host path doesn't exist — ENOENT on
+  // a file that had just been written, and routing silently down.
+  it("renames on the HOST, never inside the container", async () => {
+    const renamed: Array<[string, string]> = [];
+    const inner = fakeExecutor({ rename: vi.fn(async (a: string, b: string) => { renamed.push([a, b]); }) });
+    const wrapped = edgeContainerExecutor(inner, "openship-edge");
+
+    await wrapped.rename!(
+      "/var/lib/openship/edge/sites-enabled/x.conf.tmp-1",
+      "/var/lib/openship/edge/sites-enabled/x.conf",
+    );
+
+    expect(renamed).toEqual([[
+      "/var/lib/openship/edge/sites-enabled/x.conf.tmp-1",
+      "/var/lib/openship/edge/sites-enabled/x.conf",
+    ]]);
+    expect(execCalls(inner)).toEqual([]); // no docker exec at all
+  });
+
+  it("falls back to the inner SHELL when the inner has no rename", async () => {
+    const inner = fakeExecutor();
+    delete (inner as { rename?: unknown }).rename;
+    const wrapped = edgeContainerExecutor(inner, "openship-edge");
+
+    await wrapped.rename!("/host/path/a.tmp", "/host/path/a");
+
+    // The inner shell (the host), NOT `docker exec` — that's the whole point.
+    expect(execCalls(inner)).toEqual(["mv '/host/path/a.tmp' '/host/path/a'"]);
+  });
+
   it("forwards unknown methods to the inner executor", async () => {
     const inner = fakeExecutor();
     const edge = edgeContainerExecutor(inner, "openship-edge");

@@ -590,6 +590,22 @@ export interface CommandExecutor {
   rm(path: string): Promise<void>;
 
   /**
+   * Rename within the same filesystem — a FILE operation, not a command.
+   *
+   * It exists because expressing it as `exec("mv a b")` is wrong on a decorated
+   * executor: `edgeContainerExecutor` runs commands INSIDE the edge container while
+   * file ops land on the HOST, so nginx's atomic vhost write (write temp → mv into
+   * place) renamed a path the container cannot see and failed with ENOENT on a file
+   * that had just been written successfully. Routing a rename through the file
+   * channel keeps it in the same namespace as the write.
+   *
+   * Optional: callers must fall back to a shell `mv` when an executor doesn't
+   * implement it (correct for any executor whose commands and files share a
+   * namespace, which is all of the plain ones).
+   */
+  rename?(from: string, to: string): Promise<void>;
+
+  /**
    * Transfer a local directory into the target environment.
    *
    * LocalExecutor: cp -a (same filesystem).

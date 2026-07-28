@@ -143,6 +143,16 @@ export class DockerEdgeExecutor implements CommandExecutor {
   // "mounted": the shared volume is in this process's filesystem → node:fs.
   // "container": reach it through the daemon → `docker exec` in the edge.
 
+  /** Same fileMode split as every other file op — never a bare `docker exec mv`. */
+  async rename(from: string, to: string): Promise<void> {
+    if (this.fileMode === "mounted") {
+      await this.files.rename(from, to);
+      return;
+    }
+    const { code, stderr } = await this.run(`mv ${sq(from)} ${sq(to)}`);
+    if (code !== 0) throw new Error(stderr.trim() || `Failed to rename ${from}`);
+  }
+
   async writeFile(path: string, content: string): Promise<void> {
     if (this.fileMode === "mounted") return this.files.writeFile(path, content);
 

@@ -151,6 +151,15 @@ export function edgeContainerExecutor(
       inner.exec(inContainer(command), execOpts),
     streamExec: (command: string, onLog: (log: LogEntry) => void) =>
       inner.streamExec(inContainer(command), onLog),
+    // A rename is a FILE op, so it follows the files, never the commands. Stated
+    // here rather than left to the Proxy's passthrough: if the inner executor has no
+    // `rename`, the fallback must still be the INNER shell (the host) — routing it
+    // through this decorator's `exec` would put a `mv` inside the container, where
+    // the host path it was handed does not exist.
+    rename: async (from: string, to: string) => {
+      if (inner.rename) return inner.rename(from, to);
+      await inner.exec(`mv ${sq(from)} ${sq(to)}`);
+    },
   };
 
   if (opts?.files === "auto") {
@@ -166,6 +175,17 @@ export function edgeContainerExecutor(
         // `test` reports absence via exit code — an answer, not a failure.
         const { code } = await inner.streamExec(inContainer(`test -e ${sq(path)}`), () => {});
         return code === 0;
+      },
+      // The rename half of an atomic write must land in the same namespace as the
+      // write itself, so it follows readFile/writeFile — host first, container only
+      // when the host can't see the file.
+      rename: async (from: string, to: string) => {
+        if (await inner.exists(from).catch(() => false)) {
+          if (inner.rename) return inner.rename(from, to);
+          await inner.exec(`mv ${sq(from)} ${sq(to)}`);
+          return;
+        }
+        await inner.exec(inContainer(`mv ${sq(from)} ${sq(to)}`));
       },
       // mkdir/rm are idempotent and rare (route register/deregister), so both homes
       // get them unconditionally rather than paying a probe to decide.
