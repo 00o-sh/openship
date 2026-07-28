@@ -4,9 +4,9 @@ import React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Github, Loader2, Settings, ExternalLink, ArrowRight, KeyRound } from "lucide-react";
-import type { CliAction } from "@/context/GitHubContext";
+import { useGitHub, type CliAction } from "@/context/GitHubContext";
 import { useI18n } from "@/components/i18n-provider";
-import { githubApi, getApiErrorMessage } from "@/lib/api";
+import { getApiErrorMessage } from "@/lib/api";
 
 /* ── Shared SVG illustration ──────────────────────────────────────── */
 
@@ -288,6 +288,7 @@ export function ConnectPrompt({
  */
 function TokenField({ onSaved }: { onSaved: () => void }) {
   const { t } = useI18n();
+  const { connectWithToken } = useGitHub();
   const [token, setToken] = React.useState("");
   const [saving, setSaving] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -298,7 +299,7 @@ function TokenField({ onSaved }: { onSaved: () => void }) {
     setSaving(true);
     setError(null);
     try {
-      await githubApi.setInstanceToken(value);
+      await connectWithToken(value);
       setToken(""); // don't keep the secret in state after a success
       onSaved();
     } catch (err) {

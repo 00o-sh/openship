@@ -158,6 +158,19 @@ export const instanceSettings = pgTable("instance_settings", {
   // later. GitHub's own OAuth-app tokens don't expire; only our storage did.
   ghDeviceTokenEncrypted: text("gh_device_token_encrypted"),
   ghDeviceTokenSetAt: timestamp("gh_device_token_set_at"),
+  /**
+   * HOW that credential was established: "device" (browser device flow) or
+   * "token" (operator pasted a PAT). Null = no stored credential.
+   *
+   * Stored rather than inferred because the UI has to name it correctly. Every
+   * stored identity used to surface as "gh CLI" — the label for a token probed
+   * off the HOST's `gh` login — so pasting a PAT showed up as a gh-CLI
+   * connection, which is simply not what happened. It also decides whether the
+   * library's first-run consent prompt applies: probing the host's pre-existing
+   * gh login warrants asking before enumerating repos; a credential the operator
+   * just typed into Openship is already consent.
+   */
+  ghDeviceTokenMethod: text("gh_device_token_method").$type<"device" | "token" | null>(),
 
   // ── Timestamps ─────────────────────────────────────────────────────────────
 

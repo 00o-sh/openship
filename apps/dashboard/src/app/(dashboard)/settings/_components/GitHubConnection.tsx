@@ -48,8 +48,9 @@ export function GitHubConnection() {
   const [installUrl, setInstallUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   // "Forward my git identity to build servers" (Settings → Clone credentials).
-  // When on, gh CLI is NOT local-only — its identity is forwarded to remote
-  // build hosts over SSH, so it authenticates remote server clones too.
+  // DESKTOP only — `relayConfigEligible` requires isDesktop. When on, the stored
+  // identity (device sign-in or pasted token) is forwarded to remote build hosts
+  // over the SSH tunnel, so it authenticates remote server clones too.
   const [forwardGit, setForwardGit] = useState(false);
 
   const loadStatus = useCallback(async (force = false) => {
@@ -126,7 +127,8 @@ export function GitHubConnection() {
   // don't require cloud.
   const { connected: cloudConnected, startConnect: startCloudConnect } = useCloud();
   const { showModal, hideModal } = useModal();
-  const { selfHosted: isSelfHosted } = usePlatform();
+  const { selfHosted: isSelfHosted, deployMode } = usePlatform();
+  const isDesktop = deployMode === "desktop";
 
   const promptDisconnect = (
     source: "oauth" | "cli" | "all",
@@ -186,6 +188,15 @@ export function GitHubConnection() {
   // Which one is doing the work. `primary` is the backend's own resolution, so
   // the badge can't disagree with what clones actually use.
   const activeIsGh = state.primary === "gh-cli";
+  // Name the identity by how it was connected. "gh CLI" is only correct for a
+  // credential probed off the host's own gh login.
+  const ghMethod = state.sources.ghCli.method ?? "host-cli";
+  const ghMethodLabel =
+    ghMethod === "token"
+      ? t.settings.github.methodToken
+      : ghMethod === "device"
+        ? t.settings.github.methodDevice
+        : t.settings.github.methodHostCli;
 
   return (
     <SettingsSection
@@ -196,7 +207,7 @@ export function GitHubConnection() {
           ? t.settings.github.checkingConnection
           : anyConnected
             ? interpolate(t.settings.github.activeVia, {
-                method: activeIsGh ? t.settings.github.methodDevice : t.settings.github.methodApp,
+                method: activeIsGh ? ghMethodLabel : t.settings.github.methodApp,
               })
             : t.settings.github.pickMethod
       }
@@ -218,11 +229,16 @@ export function GitHubConnection() {
           {ghConnected && (
             <ActiveIdentity
               icon={Terminal}
-              label={ghLogin ? `@${ghLogin}` : t.settings.github.methodDevice}
+              label={ghLogin ? `@${ghLogin}` : ghMethodLabel}
               avatarUrl={state.sources.ghCli.avatarUrl}
-              method={t.settings.github.methodDevice}
+              method={ghMethodLabel}
               active={activeIsGh}
-              forwardEnabled={forwardGit}
+              // Forwarding is a DESKTOP relay (api: relayConfigEligible requires
+              // isDesktop). Passing it on self-hosted told the operator to flip a
+              // toggle that can't take effect there; the accurate note for that
+              // case is the remote-credential one below.
+              forwardEnabled={isDesktop ? forwardGit : undefined}
+              remoteNeedsOwnCredential={!isDesktop}
               onManageForward={() => router.push("/settings?tab=tokens")}
             />
           )}
@@ -355,11 +371,18 @@ function ActiveIdentity(props: {
   method: string;
   active: boolean;
   avatarUrl?: string;
-  /** gh-CLI only: identity forwarding is what makes it work for REMOTE builds. */
+  /** DESKTOP only: identity forwarding is what makes this reach REMOTE builds.
+   *  `undefined` = not applicable on this install, so the note is suppressed. */
   forwardEnabled?: boolean;
   onManageForward?: () => void;
+  /** Self-hosted: remote builds use each server's OWN credential — forwarding
+   *  isn't available, so say what actually applies instead. */
+  remoteNeedsOwnCredential?: boolean;
 }) {
-  const { icon: Icon, label, method, active, avatarUrl, forwardEnabled, onManageForward } = props;
+  const {
+    icon: Icon, label, method, active, avatarUrl,
+    forwardEnabled, onManageForward, remoteNeedsOwnCredential,
+  } = props;
   const { t } = useI18n();
   return (
     <div className="space-y-2">
@@ -382,13 +405,16 @@ function ActiveIdentity(props: {
           </span>
         )}
       </div>
-      {/* The one consequence worth interrupting for: without forwarding, this
-          identity only authorizes LOCAL builds and remote deploys are refused. */}
-      {onManageForward && !forwardEnabled && (
+      {/* The one consequence worth surfacing: this identity authorizes LOCAL
+          builds only. How you extend it to remote builds differs by install, so
+          exactly one of these renders — never both, never neither-but-wrong.
+            desktop     → turn on identity forwarding (the SSH relay)
+            self-hosted → give each server its own credential (no relay there) */}
+      {forwardEnabled === false && onManageForward && (
         <div className="flex items-start gap-2 rounded-lg border border-border/40 bg-muted/20 px-3 py-2">
           <KeyRound className="size-3.5 mt-0.5 shrink-0 text-muted-foreground" />
           <p className="text-xs text-muted-foreground leading-relaxed">
-            {t.settings.github.ghCli.forwardOffHint}{" "}
+            {t.settings.github.forwardOffHint}{" "}
             <button
               type="button"
               onClick={onManageForward}
@@ -396,6 +422,14 @@ function ActiveIdentity(props: {
             >
               {t.settings.github.ghCli.manageForward}
             </button>
+          </p>
+        </div>
+      )}
+      {remoteNeedsOwnCredential && (
+        <div className="flex items-start gap-2 rounded-lg border border-border/40 bg-muted/20 px-3 py-2">
+          <KeyRound className="size-3.5 mt-0.5 shrink-0 text-muted-foreground" />
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            {t.settings.github.remoteCredentialHint}
           </p>
         </div>
       )}
@@ -589,6 +623,7 @@ function MethodChooser(props: {
 function TokenForm(props: { message: string; hint?: string; onSaved: () => void }) {
   const { message, hint, onSaved } = props;
   const { t } = useI18n();
+  const { connectWithToken } = useGitHub();
   const [token, setToken] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -599,7 +634,9 @@ function TokenForm(props: { message: string; hint?: string; onSaved: () => void 
     setSaving(true);
     setError(null);
     try {
-      await githubApi.setInstanceToken(value);
+      // Shared context, not a bare fetch: this refreshes every consumer, so the
+      // importer works without a reload.
+      await connectWithToken(value);
       setToken(""); // don't leave the secret in component state after success
       onSaved();
     } catch (err) {

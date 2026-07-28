@@ -88,6 +88,10 @@ export interface GitHubConnectionState {
       available: boolean;
       login?: string;
       avatarUrl?: string;
+      /** How it was connected — "host-cli" (probed off the host's gh login),
+       *  "device" (browser sign-in) or "token" (pasted PAT). Drives the label and
+       *  the first-run consent prompt; absent on older API responses. */
+      method?: "host-cli" | "device" | "token";
     };
   };
   primary: "openship-app" | "gh-cli" | null;
@@ -107,6 +111,14 @@ interface GitHubContextValue {
    * flow even when gh CLI is already authenticated. Omit on legacy modes.
    */
   connect: (source?: "oauth" | "cli") => Promise<void>;
+  /**
+   * Connect with a pasted token. Goes through the SHARED context (not a local
+   * fetch inside whichever form was used) so every consumer — the Settings card,
+   * the library, the New Project importer — sees the new identity immediately.
+   * Doing it locally is what made a fresh token need a page reload before the
+   * importer would use it.
+   */
+  connectWithToken: (token: string) => Promise<void>;
   disconnect: (source?: "oauth" | "cli" | "all") => Promise<void>;
 
   /* CLI / Device flow */
@@ -356,6 +368,19 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
     }
   }, [refresh, showToast]);
 
+  /* ── Connect with a pasted token ────────────────────────────── */
+  const connectWithToken = useCallback(
+    async (token: string) => {
+      // Throws on an invalid / under-scoped token so the caller can render the
+      // server's reason on the field it came from. refresh() drops the cached
+      // status and re-pulls, which is what propagates the identity app-wide.
+      await githubApi.setInstanceToken(token);
+      setCliAction(null);
+      await refresh();
+    },
+    [refresh],
+  );
+
   /* ── Disconnect GitHub ──────────────────────────────────────── */
   const disconnect = useCallback(
     async (source: "oauth" | "cli" | "all" = "all") => {
@@ -481,6 +506,7 @@ export function GitHubProvider({ children, initialData }: GitHubProviderProps) {
         connecting,
         loading,
         connect,
+        connectWithToken,
         disconnect,
         cliAction,
         accounts,

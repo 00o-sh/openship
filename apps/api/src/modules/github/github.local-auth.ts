@@ -111,15 +111,34 @@ async function readStoredDeviceToken(): Promise<string | null> {
  * as every other stored secret, and mirrored into the short cache so the sign-in
  * takes effect without waiting on a read-through.
  */
-export async function setStoredDeviceToken(token: string | null): Promise<void> {
+export async function setStoredDeviceToken(
+  token: string | null,
+  method: "device" | "token" = "device",
+): Promise<void> {
   await repos.instanceSettings.upsert(
     token
-      ? { ghDeviceTokenEncrypted: encrypt(token), ghDeviceTokenSetAt: new Date() }
-      : { ghDeviceTokenEncrypted: null, ghDeviceTokenSetAt: null },
+      ? {
+          ghDeviceTokenEncrypted: encrypt(token),
+          ghDeviceTokenSetAt: new Date(),
+          ghDeviceTokenMethod: method,
+        }
+      : { ghDeviceTokenEncrypted: null, ghDeviceTokenSetAt: null, ghDeviceTokenMethod: null },
   );
   const store = await cacheStore<string>("gh-cli-token");
   if (token) await store.set(GH_CLI_TOKEN_KEY, token, GH_CLI_TOKEN_TTL_S);
   else await store.delete(GH_CLI_TOKEN_KEY);
+}
+
+/**
+ * How the instance's git identity was established, for labelling and for the
+ * consent decision. "host-cli" = probed off the host's own `gh` login (nothing
+ * the operator did inside Openship); "device"/"token" = they connected it here.
+ */
+export async function getGitIdentityMethod(): Promise<"host-cli" | "device" | "token" | null> {
+  if (env.CLOUD_MODE) return null;
+  const stored = await repos.instanceSettings.get().catch(() => null);
+  if (stored?.ghDeviceTokenEncrypted) return stored.ghDeviceTokenMethod ?? "device";
+  return (await getLocalGhToken()) ? "host-cli" : null;
 }
 
 /**
@@ -407,14 +426,26 @@ const DEVICE_FLOW_CLIENT_ID = "";
 /**
  * The client id to run a device flow with, or null when none is available.
  *
- * Priority: the operator's own OAuth app → their explicit device-flow override →
- * Openship's shipped id. GITHUB_CLIENT_ID comes first so an instance that has
- * registered its own app keeps authorizing under that app's name.
+ * Priority, most specific first:
+ *   1. GITHUB_DEVICE_CLIENT_ID — declared FOR the device flow. Wins because it is
+ *      the only one of the three whose purpose is unambiguous.
+ *   2. GITHUB_CLIENT_ID        — the operator's OAuth app. DUAL-PURPOSE: `auth.ts`
+ *      also uses it (with GITHUB_CLIENT_SECRET) for GitHub social login. It is a
+ *      fallback, not the default, precisely because "I set up GitHub sign-in for
+ *      my users" must not silently decide which app the device flow authorizes
+ *      under — and an app without "Enable Device Flow" ticked fails here with
+ *      GitHub's opaque error while an explicit override sat ignored.
+ *   3. Openship's shipped id.
+ *
+ * SaaS never reaches this: `deviceFlowAvailable()` returns false under CLOUD_MODE
+ * and `runDeviceFlow` throws there before touching any of it, so the platform's
+ * own GITHUB_CLIENT_ID/SECRET can't leak into a device grant. The secret is never
+ * read here at all — the device grant has no client-secret step.
  */
 export function resolveDeviceClientId(): string | null {
   return (
-    env.GITHUB_CLIENT_ID?.trim() ||
     env.GITHUB_DEVICE_CLIENT_ID?.trim() ||
+    env.GITHUB_CLIENT_ID?.trim() ||
     DEVICE_FLOW_CLIENT_ID.trim() ||
     null
   );

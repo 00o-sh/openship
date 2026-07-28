@@ -803,14 +803,18 @@ export async function getGitHubConnectionState(
   let cliAvailable = false;
   let cliLogin: string | undefined;
   let cliAvatar: string | undefined;
+  let cliMethod: "host-cli" | "device" | "token" | undefined;
   if (onSelfHosted) {
     // Dynamic import: gh probed ONLY when self-hosted; never loaded on the SaaS.
-    const { getLocalGhStatus } = await import("./github.local-auth");
+    const { getLocalGhStatus, getGitIdentityMethod } = await import("./github.local-auth");
     const localStatus = await getLocalGhStatus();
     if (localStatus.available) {
       cliAvailable = true;
       cliLogin = localStatus.login;
       cliAvatar = localStatus.avatar_url;
+      // HOW it was connected. The UI labelled every identity "gh CLI", so a
+      // pasted PAT or a browser sign-in was reported as a gh-CLI connection.
+      cliMethod = (await getGitIdentityMethod().catch(() => null)) ?? "host-cli";
     }
   }
 
@@ -833,6 +837,7 @@ export async function getGitHubConnectionState(
         available: cliAvailable,
         login: cliLogin,
         avatarUrl: cliAvatar,
+        method: cliMethod,
       },
     },
     primary,

@@ -171,6 +171,98 @@ Decisions to settle before coding:
 
 ---
 
+## Git providers
+
+### Provider-agnostic git: GitLab, self-managed GitLab/Gitea/Forgejo, dumb remotes
+
+Not started. Today "connect a repo" means GitHub, and `gitProvider` is a column
+written `"github"` and then read as an assumption. Goal: make it a real
+dimension — GitHub, GitLab (SaaS + self-managed), and a **dumb-remote** tier
+(any HTTPS/SSH remote + a credential, no provider API) — with GitHub as one
+implementation behind the seam rather than the seam itself.
+
+What's already a seam (reuse, don't rebuild):
+
+- `GitHubSource` + `createGitHubSource(ctx)`
+  (`apps/api/src/modules/github/sources/types.ts:78`, `sources/index.ts:24`) —
+  one interface, three impls (App / gh-CLI / merged local), already THE place
+  source selection happens. Generalize this to `GitSource` with a provider
+  dimension and most controllers don't change.
+- `github.http.ts` is the single `api.github.com` primitive, so a sibling
+  `gitlab.http.ts` is additive rather than surgery.
+- `resolveBuildGitToken` (`modules/github/clone-auth.ts:112`) is the one clone
+  credential issuer and `tokenFor` (`github.token.ts:117`) the one minter —
+  provider dispatch belongs there, once, and stays unit-testable.
+- Only three places branch on the column today: `project.controller.ts:955`
+  (`"local"`), `clone-plan.ts:43` (`repoIsGithub`), `project-source.ts:21`
+  (`"release"`).
+
+What actually hardcodes GitHub — each is a decision, not a rename:
+
+- [ ] **The clone URL is BUILT, not stored**: `https://github.com/${owner}/${repo}.git`
+      (`modules/projects/project-crud.service.ts:219`). Any non-GitHub project
+      needs its remote persisted (or a per-provider URL builder). Smallest diff,
+      widest blast radius — do it first.
+- [ ] **Webhooks**: `x-hub-signature-256` HMAC + GitHub's push body
+      (`github.webhook.ts:127,150`, `webhook-push.ts`, `webhook-changed-files.ts`,
+      `webhook-check-run.ts`). GitLab sends `X-Gitlab-Token` — a plain shared
+      secret, not an HMAC — and a different payload. Extend the unified
+      `webhook_delivery` table that already absorbed GitHub dedup; don't fork it.
+- [ ] **Per-repo permissions** are keyed to GitHub: resource type `"github"`
+      (`lib/permission.ts:52`, `lib/route-permission.ts:97,122`) and
+      `assertGitHubRepoAccess` (`github-access.ts:143`). Decide between one
+      `repo` resource with a provider-qualified id (a grant migration) or a
+      second resource type (no migration, two gates to keep in sync forever).
+- [ ] **Tarball fast path is GitHub-only** — `githubTarballUrl`
+      (`packages/adapters/src/runtime/source-tarball.ts:25`). GitLab and
+      Gitea/Forgejo each expose a different archive endpoint. It already falls
+      back to `git clone`, so this is per-provider optional, not blocking.
+- [ ] **The desktop credential relay pins the host**:
+      `req.protocol !== "https" || host !== "github.com"` → reject
+      (`lib/git-forwarding/relay.ts:165`). That pin is a security control, not an
+      oversight. Widening it means an explicit per-provider allowlist — never a
+      wildcard, and never a user-supplied host without validation.
+- [ ] **SSH known-hosts are GitHub's keys** (`github-known-hosts.ts`). A
+      self-managed remote needs operator-supplied host keys or a deliberate,
+      documented TOFU decision.
+- [ ] **Server-side git auth assumes an API to push a key to**:
+      `server-git-ambient.ts`, `server-github.service.ts`,
+      `packages/db/src/repos/github-deploy-key.repo.ts`. A dumb remote has no
+      deploy-key endpoint — that tier is credential-only by construction.
+- [ ] **Release sources**: `ReleaseSource.mode: "github" | "url"`
+      (`packages/core/src/project-source.ts:30`) plus
+      `api.github.com/.../releases/latest` (`lib/release-resolver.ts:183`,
+      `lib/release-download.ts:163`). `mode: "url"` already covers the generic
+      case; GitLab releases would be a third mode.
+- [ ] **Dashboard speaks GitHub throughout**: `ServerGitHubConnect`,
+      `GithubPermissionModal`, `DeployCredentialModal`, the deploy wizard's
+      import step, `ResourcePicker`. Needs a server-advertised provider list —
+      the SAME missing primitive as the SSO item above (`OAuthButtons` hardcodes
+      github+google). Build that endpoint once and both features use it.
+- [ ] **`gh` CLI as an ambient identity** (`sources/gh-cli-source.ts`,
+      `github.local-auth.ts:360` parses `oauth_token` under `github.com:` in
+      hosts.yml) has no equivalent worth matching. `glab` exists; decide
+      deliberately whether to support it or require a PAT for GitLab.
+
+Decisions to settle before coding:
+
+- [ ] **Scope**: GitLab.com only, or self-managed too (custom base URL, possibly
+      a private CA)? Self-managed is the harder half and the one operators
+      actually ask for.
+- [ ] **Is the dumb-remote tier first-class?** "Any remote + PAT" is cheap and
+      covers Gitea/Forgejo/Bitbucket on day one, but it silently loses
+      auto-deploy, repo listing, and per-repo grants. Ship it only if the UI says
+      plainly what it can't do.
+- [ ] **Make `gitProvider` a checked union** (`packages/db/src/schema/project.ts:39,115`
+      — free text defaulting to `"github"`) BEFORE any second provider writes
+      rows. Retrofitting a union over mixed data is the expensive order.
+- [ ] **Naming trap**: `apps/api/src/modules/github/` is 26 files and the module
+      path is load-bearing in imports across the API. Prefer adding
+      `modules/git/` for the provider-agnostic seam and leaving GitHub as one
+      implementation behind it, over a rename that touches every call site.
+
+---
+
 ## Open TODO markers in code
 
 Verified present; listed so they aren't lost.

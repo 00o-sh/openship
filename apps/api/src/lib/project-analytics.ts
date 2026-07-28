@@ -13,9 +13,16 @@
  */
 
 import { repos, type Project } from "@repo/db";
-import { OPENRESTY_MGMT_PORT } from "@repo/adapters";
+import {
+  OPENRESTY_MGMT_PORT,
+  containerCommand,
+  resolveOurEdgeContainer,
+  sq,
+} from "@repo/adapters";
 import { tunnelRequest, tunnelStream } from "./ssh-tunnel";
+import { sshManager } from "./ssh-manager";
 import { isOblienBackedDeployment } from "./platform-mode";
+import { systemDebug } from "./system-debug";
 
 export type { TunnelStreamHandle } from "./ssh-tunnel";
 
@@ -200,8 +207,110 @@ export async function resolveProjectTrafficSources(
 /**
  * GET JSON from the OpenResty management API through SSH tunnel.
  */
+/**
+ * ─── Reaching the edge's management API ─────────────────────────────────────
+ *
+ * The mgmt API listens on `127.0.0.1:9145` INSIDE the edge, and there are two
+ * completely different ways to get there depending on where the edge lives:
+ *
+ *   remote server → SSH port-forward to its loopback (`tunnelRequest`).
+ *   local host    → NO forward is possible. The local/host executor has no
+ *                   `forwardPort` at all (only ssh-executor and
+ *                   system-ssh-executor implement it), so `tunnelConnect` threw
+ *                   "does not support port tunnelling", every fetch returned
+ *                   null, `probeMgmt` said false, and the scraper skipped the
+ *                   server on every tick — analytics could never work on a CLI /
+ *                   compose install, permanently showing zeros.
+ *
+ *                   And a forward wouldn't have helped: the edge runs with
+ *                   network_mode: host, so :9145 is the HOST's loopback while the
+ *                   api container has its own — and the mgmt server binds
+ *                   127.0.0.1 only, so host.docker.internal is refused too.
+ *
+ *                   The one place that loopback IS reachable is inside the edge
+ *                   container, so we exec there — the same route vhost writes and
+ *                   certbot already take. `curl` ships in the edge image.
+ *
+ * Both transports return the same shape so every caller below is unchanged.
+ */
+async function execMgmt(
+  serverId: string,
+  path: string,
+  opts: { method?: string; json?: unknown } = {},
+): Promise<{ statusCode: number; body: string } | null> {
+  try {
+    const executor = await sshManager.acquire(serverId);
+    const container = await resolveOurEdgeContainer(executor);
+    if (!container) return null;
+
+    const url = `http://127.0.0.1:${OPENRESTY_MGMT_PORT}${path}`;
+    // Status to stdout via -w, body to a temp file, emitted as "<status>\n<body>"
+    // — status FIRST so a JSON body containing newlines survives intact.
+    // --fail-with-body isn't usable: we want the mgmt API's own error body.
+    //
+    // mktemp, not a fixed path: the scraper issues several of these per tick
+    // (totals, then one per domain for geo), and a shared /tmp name would let
+    // concurrent calls read each other's bodies. The inner `sh -c` expands "$B";
+    // containerCommand owns the outer quoting.
+    const parts = [`B="$(mktemp)"; curl -s -o "$B" -w '%{http_code}'`];
+    if (opts.method && opts.method !== "GET") parts.push(`-X ${opts.method}`);
+    if (opts.json !== undefined) {
+      parts.push("-H 'Content-Type: application/json'");
+      parts.push(`--data-binary ${sq(JSON.stringify(opts.json))}`);
+    }
+    parts.push(sq(url));
+    const cmd = `${parts.join(" ")}; printf '\\n'; cat "$B"; rm -f "$B"`;
+
+    const out = await executor.exec(containerCommand(container, cmd));
+    // "<status>\n<body>" — status first so a body containing newlines survives.
+    const nl = out.indexOf("\n");
+    if (nl < 0) return null;
+    const statusCode = Number.parseInt(out.slice(0, nl).trim(), 10);
+    if (!Number.isFinite(statusCode)) return null;
+    return { statusCode, body: out.slice(nl + 1) };
+  } catch (err) {
+    systemDebug("analytics", `execMgmt failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
+/** Does this server need the exec transport (no SSH port-forward available)? */
+async function needsExecTransport(serverId: string): Promise<boolean> {
+  try {
+    const executor = await sshManager.acquire(serverId);
+    return typeof executor.forwardPort !== "function";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * One request to the mgmt API over whichever transport this server supports.
+ * Tries the SSH forward first when the executor has one, and falls back to the
+ * exec transport — a remote box whose forward is blocked still gets answered.
+ */
+async function mgmtRequest(
+  serverId: string,
+  path: string,
+  opts: { method?: string; json?: unknown } = {},
+): Promise<{ statusCode: number; body: string } | null> {
+  if (!(await needsExecTransport(serverId))) {
+    const viaTunnel = await tunnelRequest(serverId, OPENRESTY_MGMT_PORT, path, {
+      method: opts.method,
+      ...(opts.json !== undefined
+        ? {
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(opts.json),
+          }
+        : {}),
+    });
+    if (viaTunnel) return { statusCode: viaTunnel.statusCode, body: viaTunnel.body };
+  }
+  return execMgmt(serverId, path, opts);
+}
+
 export async function fetchMgmt<T>(serverId: string, path: string): Promise<T | null> {
-  const res = await tunnelRequest(serverId, OPENRESTY_MGMT_PORT, path);
+  const res = await mgmtRequest(serverId, path);
   if (!res || res.statusCode < 200 || res.statusCode >= 300) return null;
   try {
     return JSON.parse(res.body) as T;
@@ -214,9 +323,7 @@ export async function fetchMgmt<T>(serverId: string, path: string): Promise<T | 
  * POST to the OpenResty management API through SSH tunnel.
  */
 export async function postMgmt<T>(serverId: string, path: string): Promise<T | null> {
-  const res = await tunnelRequest(serverId, OPENRESTY_MGMT_PORT, path, {
-    method: "POST",
-  });
+  const res = await mgmtRequest(serverId, path, { method: "POST" });
   if (!res || res.statusCode < 200 || res.statusCode >= 300) return null;
   try {
     return JSON.parse(res.body) as T;
@@ -234,11 +341,7 @@ export async function postMgmtJson<T>(
   path: string,
   json: unknown,
 ): Promise<T | null> {
-  const res = await tunnelRequest(serverId, OPENRESTY_MGMT_PORT, path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(json),
-  });
+  const res = await mgmtRequest(serverId, path, { method: "POST", json });
   if (!res || res.statusCode < 200 || res.statusCode >= 300) return null;
   try {
     return JSON.parse(res.body) as T;
@@ -251,7 +354,7 @@ export async function postMgmtJson<T>(
  * Lightweight health probe for the OpenResty management port.
  */
 export async function probeMgmt(serverId: string): Promise<boolean> {
-  const res = await tunnelRequest(serverId, OPENRESTY_MGMT_PORT, "/health");
+  const res = await mgmtRequest(serverId, "/health");
   return res?.body.trim() === "ok";
 }
 
@@ -261,5 +364,59 @@ export async function probeMgmt(serverId: string): Promise<boolean> {
  * to the SSE client.
  */
 export async function mgmtStream(serverId: string, path: string) {
-  return tunnelStream(serverId, OPENRESTY_MGMT_PORT, path);
+  if (!(await needsExecTransport(serverId))) {
+    return tunnelStream(serverId, OPENRESTY_MGMT_PORT, path);
+  }
+  return execMgmtStream(serverId, path);
+}
+
+/**
+ * Live log streaming over the exec transport, for a local/containerized edge that
+ * has no SSH forward. Same `TunnelStreamHandle` shape as the tunnel version, so
+ * the SSE controllers piping this are unchanged.
+ *
+ * `curl -N` disables buffering so each line the mgmt API emits arrives as it is
+ * produced rather than in blocks; `streamExec`'s per-line callback is what carries
+ * them. Without this branch the server-logs stream was as dead as the analytics
+ * scrape on every CLI / compose install.
+ */
+async function execMgmtStream(serverId: string, path: string) {
+  const executor = await sshManager.acquire(serverId);
+  const container = await resolveOurEdgeContainer(executor);
+  if (!container) throw new Error("No Openship edge container on this server");
+
+  const { PassThrough } = await import("node:stream");
+  const stream = new PassThrough();
+  const url = `http://127.0.0.1:${OPENRESTY_MGMT_PORT}${path}`;
+
+  let ended = false;
+  const finish = () => {
+    if (ended) return;
+    ended = true;
+    stream.end();
+  };
+
+  // Fire-and-forget: resolves when curl exits (client abort or edge close), which
+  // is exactly when the SSE stream should end.
+  void executor
+    .streamExec(containerCommand(container, `curl -sN ${sq(url)}`), (log) => {
+      if (!ended) stream.write(`${log.message}\n`);
+    })
+    .then(finish)
+    .catch((err) => {
+      systemDebug("analytics", `execMgmtStream ended: ${err instanceof Error ? err.message : String(err)}`);
+      finish();
+    });
+
+  return {
+    stream,
+    // The exec transport has no HTTP response envelope to read — curl consumed it.
+    // Reaching here means the stream is open, so report the equivalent of 200.
+    statusCode: 200,
+    headers: {} as Record<string, string>,
+    destroy: () => {
+      finish();
+      stream.destroy();
+    },
+  };
 }

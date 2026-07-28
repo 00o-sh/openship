@@ -168,7 +168,11 @@
     "tokenConnect": "Connect",
     "tokenCreate": "Create a token on GitHub",
     "tokenGhHint": "Already signed in on the server with",
-    "tokenSaveFailed": "Could not save the token."
+    "tokenSaveFailed": "Could not save the token.",
+    "forwardOffHint": "Local builds only. Turn on \"Forward my git identity to build servers\" to use it for remote server deploys too.",
+    "remoteCredentialHint": "Used for repo browsing and builds that run on this host. Deploys that build on a remote server use that server's own credential — add a deploy key or token per server.",
+    "methodToken": "GitHub token",
+    "methodHostCli": "gh CLI on this host"
   },
   "deployDefaults": {
     "title": "Deploy Defaults",

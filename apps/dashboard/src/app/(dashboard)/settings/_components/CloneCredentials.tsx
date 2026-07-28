@@ -5,6 +5,7 @@ import { Key, Loader2, Check, Trash2, Eye, EyeOff } from "lucide-react";
 import { settingsApi, type CloneCredentialsState } from "@/lib/api";
 import { getApiErrorMessage } from "@/lib/api";
 import { useToast } from "@/context/ToastContext";
+import { usePlatform } from "@/context/PlatformContext";
 import { SettingsSection } from "./SettingsSection";
 import { useI18n } from "@/components/i18n-provider";
 
@@ -19,6 +20,7 @@ import { useI18n } from "@/components/i18n-provider";
 export function CloneCredentials() {
   const { showToast } = useToast();
   const { t } = useI18n();
+  const { deployMode } = usePlatform();
   const [state, setState] = useState<CloneCredentialsState | null>(null);
   const [loading, setLoading] = useState(true);
   const [tokenInput, setTokenInput] = useState("");
@@ -243,6 +245,14 @@ export function CloneCredentials() {
             </div>
           )}
 
+          {/* DESKTOP ONLY. `relayConfigEligible` (api: deployments/clone-plan.ts)
+              hard-requires isDesktop, and that is load-bearing rather than
+              incidental: the relay vends the operator's account-wide token on
+              demand over the SSH tunnel, whose trust boundary is "my machine → my
+              server". A self-hosted box has no such boundary and uses per-server
+              credentials instead — so on self-hosted this checkbox was flippable
+              but could never take effect. */}
+          {deployMode === "desktop" && (
           <label className="flex items-start gap-3 cursor-pointer rounded-xl border border-border/50 bg-muted/15 p-3.5">
             <input
               type="checkbox"
@@ -260,6 +270,7 @@ export function CloneCredentials() {
               </span>
             </span>
           </label>
+          )}
         </div>
       )}
     </SettingsSection>

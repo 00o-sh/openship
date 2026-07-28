@@ -359,6 +359,11 @@ export async function connect(c: Context) {
       });
     }
     try {
+      // Completing a device sign-in is the same explicit operator act as pasting a
+      // token, so record the opt-in up front — otherwise the finished sign-in
+      // stores a credential tokenFor refuses to use.
+      const settingsService = await import("../settings/settings.service");
+      await settingsService.setGhCliOperatorOptedIn(userId, true);
       const verification = await startDeviceFlow(userId);
       return c.json({
         connected: false,
@@ -558,11 +563,21 @@ export async function setInstanceToken(c: Context) {
   }
 
   const { setStoredDeviceToken } = await import("./github.local-auth");
-  await setStoredDeviceToken(token);
+  await setStoredDeviceToken(token, "token");
+  // Sweep this user's cached GitHub state so /status and the importer see the new
+  // identity on the NEXT read. Without it the connection only appeared after the
+  // cached verdict aged out — i.e. "I added a token but New Project still fails".
+  await githubAuth.invalidateUserGitHubCache(ctx.userId);
   // Clicking connect means "I want to be connected" — clear any prior
   // Disconnect suppression, same as the interactive connect path does.
-  const { setGithubCliDisabled } = await import("../settings/settings.service");
-  await setGithubCliDisabled(ctx.userId, false);
+  const settingsService = await import("../settings/settings.service");
+  await settingsService.setGithubCliDisabled(ctx.userId, false);
+  // …and record the operator opt-in `tokenFor` gates the stored-credential branch
+  // on. Nothing ever set that flag, so a pasted token was stored, the UI said
+  // "Connected", and the next deploy still reported "no App/PAT token is
+  // available". Pasting a credential into Openship IS the explicit act the flag
+  // was designed to capture.
+  await settingsService.setGhCliOperatorOptedIn(ctx.userId, true);
 
   if (ctx.organizationId) {
     audit.recordAsync(auditContextFrom(c, ctx.organizationId, ctx.userId), {

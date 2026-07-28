@@ -87,6 +87,35 @@ export async function setGithubCliDisabled(userId: string, disabled: boolean): P
 }
 
 /**
+ * Mark this user as the instance operator allowed to use the instance-wide git
+ * identity (`ghCliOperatorOptedIn`).
+ *
+ * `tokenFor` gates the stored-credential branch on this flag, and nothing ever
+ * SET it — it was read-only, so on a self-hosted install the flag stayed false
+ * and the branch was unreachable unless GITHUB_AUTH_MODE=cli. Result: an operator
+ * could paste a token, see "Connected", and still get "no App/PAT token is
+ * available" on the next deploy.
+ *
+ * Connecting a credential inside Openship (device sign-in or pasted token) is the
+ * explicit act this flag exists to record, so the connect handlers set it.
+ * @scope user
+ */
+export async function setGhCliOperatorOptedIn(userId: string, optedIn: boolean): Promise<void> {
+  const existing = await repos.settings.findByUser(userId);
+  if (existing) {
+    await repos.settings.update(userId, { ghCliOperatorOptedIn: optedIn });
+    return;
+  }
+  const { randomBytes } = await import("node:crypto");
+  await repos.settings.upsert({
+    id: "us_" + randomBytes(12).toString("base64url"),
+    userId,
+    buildMode: "auto",
+    ghCliOperatorOptedIn: optedIn,
+  });
+}
+
+/**
  * Generic (per-operator, instance-wide) "forward my git identity to remote build
  * servers" preference — replaces the old per-deploy `forwardGitCredentials`
  * toggle. Read by the deploy pipeline to decide whether a server clone may

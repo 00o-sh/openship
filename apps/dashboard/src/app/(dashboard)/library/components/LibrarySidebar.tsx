@@ -175,6 +175,16 @@ function SelfHostedConnectionCard({
   const { t } = useI18n();
   const cliConnected = state.sources.ghCli.available;
   const cliLogin = state.sources.ghCli.login;
+  // Name it by how it was actually connected. This row said "gh CLI" for every
+  // identity, so a pasted token or a browser sign-in was reported as a gh-CLI
+  // connection — which is not what happened and sent people looking for a CLI.
+  const cliMethod = state.sources.ghCli.method ?? "host-cli";
+  const cliLabel =
+    cliMethod === "token"
+      ? t.library.sidebar.methodToken
+      : cliMethod === "device"
+        ? t.library.sidebar.methodDevice
+        : t.library.sidebar.ghCli;
 
   // App status is NOT part of the gh-first `state` (GET /github/home is
   // zero-cloud by design). To show the REAL App connection without slowing the
@@ -221,21 +231,26 @@ function SelfHostedConnectionCard({
         {/* PRIMARY: gh CLI */}
         <SourceRow
           icon={Terminal}
-          label={t.library.sidebar.ghCli}
+          label={cliLabel}
           sublabel={cliConnected ? `@${cliLogin}` : t.library.sidebar.runGhAuth}
           connected={cliConnected}
           tone="primary"
         />
 
-        {/* SECONDARY: Openship Cloud App. Real status comes from the async
-            /github/status probe above — accurate without blocking the library. */}
-        <SourceRow
-          icon={Cloud}
-          label={t.library.sidebar.openshipCloudApp}
-          sublabel={appSublabel}
-          connected={appStatus?.connected ?? false}
-          tone="secondary"
-        />
+        {/* SECONDARY: Openship Cloud App — rendered ONLY when it is actually
+            connected. A permanent "Openship Cloud App · Not connected" row on a
+            self-hosted install is an advert, not status: nothing here needs it,
+            and sitting next to the working connection it read like something was
+            half-configured. Connecting it lives in Settings. */}
+        {appStatus?.connected && (
+          <SourceRow
+            icon={Cloud}
+            label={t.library.sidebar.openshipCloudApp}
+            sublabel={appSublabel}
+            connected
+            tone="secondary"
+          />
+        )}
       </div>
 
       {/* Footnote: the library is gh-driven; App status + install live in Settings */}

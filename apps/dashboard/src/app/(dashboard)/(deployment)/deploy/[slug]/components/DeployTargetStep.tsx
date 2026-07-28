@@ -515,6 +515,79 @@ export const lastPickStore = createPersistedValue<LastPick>(
   },
 );
 
+// ─── Silent target seeding (used on the config view) ─────────────────────────
+
+/**
+ * Resolve the deploy target and write it to config ONCE, as soon as the target
+ * list is ready — no UI. Priority mirrors the interactive step: explicit
+ * settings-API default > soft localStorage last-pick > a server (prefer the
+ * local host) > cloud.
+ *
+ * The config wizard calls this so it can land DIRECTLY on the config step with
+ * the right target already in the DeployTargetSummary bar, instead of mounting
+ * the full DeployTargetStep just to auto-pick a default and bounce back — that
+ * async "spin then advance" was the visible flash on entry. The summary bar is
+ * the affordance to change the pick (onEdit → the full step).
+ *
+ * `enabled` is false for existing projects: their saved target hydrates from
+ * initializeFromProject and must never be overwritten by the global default.
+ */
+export function useSeedDeployTarget(targets: ResolvedTargets, enabled: boolean): void {
+  const { updateConfig } = useDeployment();
+  const appliedRef = useRef(false);
+  useEffect(() => {
+    if (!enabled || !targets.ready || appliedRef.current) return;
+    let cancelled = false;
+    const seed = (
+      def?: { defaultDeployTarget?: DeployTarget | null; defaultServerId?: string | null } | null,
+    ) => {
+      if (cancelled || appliedRef.current) return;
+      appliedRef.current = true;
+      const target = def?.defaultDeployTarget ?? null;
+      const savedServerId = def?.defaultServerId ?? null;
+      // 1. Explicit settings-API default.
+      if (target === "server" && savedServerId && targets.servers.some((s) => s.id === savedServerId)) {
+        updateConfig({ deployTarget: "server", serverId: savedServerId });
+        return;
+      }
+      if (target === "cloud") {
+        updateConfig({ deployTarget: "cloud", serverId: undefined, buildStrategy: "server" });
+        return;
+      }
+      if (target === "local") {
+        updateConfig({ deployTarget: "local", serverId: undefined });
+        return;
+      }
+      // 2. Soft last-pick, validated against the current target list.
+      const last = lastPickStore.read();
+      if (last?.target === "server" && last.serverId && targets.servers.some((s) => s.id === last.serverId)) {
+        updateConfig({ deployTarget: "server", serverId: last.serverId });
+        return;
+      }
+      if (last?.target === "cloud") {
+        updateConfig({ deployTarget: "cloud", serverId: undefined, buildStrategy: "server" });
+        return;
+      }
+      if (last?.target === "local") {
+        updateConfig({ deployTarget: "local", serverId: undefined });
+        return;
+      }
+      // 3. A server exists → deploy to it (prefer the local host); else cloud.
+      if (targets.servers.length > 0) {
+        const preferred = targets.servers.find((s) => s.isLocal) ?? targets.servers[0];
+        updateConfig({ deployTarget: "server", serverId: preferred.id });
+        return;
+      }
+      updateConfig({ deployTarget: "cloud", serverId: undefined, buildStrategy: "server" });
+    };
+    settingsApi.get().then((res) => seed(res)).catch(() => seed(null));
+    return () => { cancelled = true; };
+    // One-shot seed keyed off readiness; tight dep array on purpose (matches the
+    // interactive step's seed effect below).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, targets.ready]);
+}
+
 // ─── Main step ───────────────────────────────────────────────────────────────
 
 interface DeployTargetStepProps {
@@ -947,6 +1020,16 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
   const appliedDefaultRef = useRef(false);
   useEffect(() => {
     if (!ready) return;
+    // Existing project: its saved target is authoritative (hydrated from
+    // initializeFromProject). Don't seed a default over it — just mark the
+    // fetch "done" so the picker renders the current config instead of a
+    // perpetual spinner. (The parent seeds NEW deploys via useSeedDeployTarget;
+    // this step now only mounts when the user opens the picker via the summary
+    // bar, so seeding here would fight the user's own reason for opening it.)
+    if (config.projectId) {
+      setDefaultsLoaded(true);
+      return;
+    }
 
     let cancelled = false;
     settingsApi.get()

@@ -281,6 +281,16 @@ export interface GitHubConnectionState {
       available: boolean;
       login?: string;
       avatarUrl?: string;
+      /**
+       * HOW this identity was established, so the UI can name it correctly:
+       *   "host-cli" → probed off the host's own `gh` login
+       *   "device"   → browser device sign-in, completed in Openship
+       *   "token"    → operator pasted a PAT into Openship
+       * Everything used to render as "gh CLI" regardless. Also decides whether
+       * the library's first-run consent prompt applies — only "host-cli" is a
+       * pre-existing credential the operator didn't hand over here.
+       */
+      method?: "host-cli" | "device" | "token";
     };
   };
   /**
