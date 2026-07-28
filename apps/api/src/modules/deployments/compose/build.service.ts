@@ -12,7 +12,7 @@ import type {
   ResourceConfig,
   BuildResult,
 } from "@repo/adapters";
-import { BuildLogger } from "@repo/adapters";
+import { BuildLogger, STATIC_RELEASE_BASE } from "@repo/adapters";
 import { repos, type Deployment, type Project, type Service } from "@repo/db";
 
 import {
@@ -318,10 +318,26 @@ export async function buildComposeImages(opts: {
             ...resolveSubAppOverrides({ service, snapshot: opts.snapshot, logger: serviceLogger }),
             rootDirectory: context,
             port: resolveServicePort(service, opts.snapshot.port) ?? opts.snapshot.port,
-            // A static frontend/static sub-app (no start command) is served as
-            // files by the generated nginx image; a server sub-app runs its start
-            // command. Derived from the sub-app's framework + start command.
-            ...(isStaticService(service) ? { isStatic: true, hasServer: false } : { hasServer: true }),
+            // A static sub-app (no start command) serves FILES; a server sub-app
+            // runs its start command. Derived from framework + start command.
+            //
+            // On self-hosted the files are moved to the host and served by the edge
+            // — no container, no port, no second web server. That is why
+            // `staticExtractOnly` is gated on the runtime: on CLOUD there is no host
+            // directory to serve (Oblien runs the workload), so those keep the
+            // generated nginx image and stay a proxied container.
+            ...(isStaticService(service)
+              ? {
+                  isStatic: true,
+                  hasServer: false,
+                  ...(opts.runtime.name === "cloud"
+                    ? {}
+                    : {
+                        staticExtractOnly: true,
+                        staticOutDir: `${STATIC_RELEASE_BASE}/.builds/${opts.buildSessionId}-${service.id}`,
+                      }),
+                }
+              : { hasServer: true }),
           },
         })
       : createDockerfileBuildConfig({

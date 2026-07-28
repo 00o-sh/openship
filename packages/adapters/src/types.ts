@@ -158,6 +158,28 @@ export interface BuildConfig {
    * monorepo pipeline is container-only).
    */
   isStatic?: boolean;
+  /**
+   * Static build whose output is EXTRACTED, not run.
+   *
+   * `buildStaticToHost` copies the built doc-root onto a host directory the edge
+   * serves, then discards the image — so a web-server runtime stage in that recipe
+   * is pure waste: it pulls `nginx:alpine`, runs six more build steps, and writes an
+   * nginx config nothing ever reads, all to be deleted moments later. With this set,
+   * the recipe stops at the builder and stages the output at
+   * {@link STATIC_EXTRACT_DIR}.
+   *
+   * NOT the same as plain `isStatic`. A static monorepo sub-app in a compose project
+   * (see isStaticService) really is RUN as a container and genuinely needs the nginx
+   * stage — that's why this is a separate flag rather than a change to isStatic.
+   */
+  staticExtractOnly?: boolean;
+  /**
+   * Host directory the extract-only build's files are moved to. Set together with
+   * `staticExtractOnly`; the build's `imageRef` becomes this path instead of an
+   * image tag, matching BareRuntime.build's host-dir contract so the file-backed
+   * serve path consumes it unchanged.
+   */
+  staticOutDir?: string;
   /** Environment variables injected at build time */
   envVars: Record<string, string>;
   /** Resources allocated for the build container */
@@ -427,6 +449,20 @@ export interface StaticRouteConfig extends BaseRouteConfig {
   /** Absolute path on the target machine to serve via Nginx root. */
   staticRoot: string;
   targetUrl?: never;
+  /**
+   * This root is being ADOPTED from a proxy we're taking over, not produced by an
+   * Openship build.
+   *
+   * Openship-managed roots are confined to {@link MANAGED_STATIC_BASE}: a route we
+   * generate must never be able to publish an arbitrary host directory, so a bad or
+   * crafted value fails closed instead of serving `/etc` to the internet.
+   *
+   * Adoption is the one legitimate exception — an imported vhost's root (e.g.
+   * `/var/www/site`) is a path the operator's own nginx is ALREADY serving publicly,
+   * and refusing it would break proxy migration. Opt-in and named so it can only be
+   * used deliberately, never reached by a caller that forgot the base.
+   */
+  staticRootAdopted?: boolean;
 }
 
 export type RouteConfig = ProxyRouteConfig | StaticRouteConfig;

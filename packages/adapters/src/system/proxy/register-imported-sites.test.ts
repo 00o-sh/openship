@@ -49,7 +49,14 @@ describe("registerImportedSites", () => {
 
     expect(registered).toEqual(["a.com", "b.com"]);
     expect(routing.registerRoute).toHaveBeenCalledWith({ domain: "a.com", tls: false, targetUrl: "http://127.0.0.1:3000" });
-    expect(routing.registerRoute).toHaveBeenCalledWith({ domain: "b.com", tls: false, staticRoot: "/var/www/b" });
+    // An imported root lives outside the managed base by nature, so it must be
+    // registered as ADOPTED or assertValidStaticRoot refuses it.
+    expect(routing.registerRoute).toHaveBeenCalledWith({
+      domain: "b.com",
+      tls: false,
+      staticRoot: "/var/www/b",
+      staticRootAdopted: true,
+    });
     expect(ssl.installCert).not.toHaveBeenCalled();
     expect(ssl.provisionCert).not.toHaveBeenCalled();
     expect(o.warnings).toEqual([]);

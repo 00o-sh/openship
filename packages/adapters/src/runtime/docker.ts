@@ -91,7 +91,7 @@ import { scopeVolumeBinds, isHostPathSource } from "./volume-namespace";
 import { createDockerBuildContext, prepareSourceTree, resolveServiceDockerfile } from "./docker-build-context";
 import { startExecStream, daemonConnectionFrom } from "./docker-exec-stream";
 import { resolveDockerfileCandidates } from "./docker-paths";
-import { generateDockerfile } from "./docker-build-plan";
+import { generateDockerfile, staticBuilderOutputPath } from "./docker-build-plan";
 import { transferLocalDirectory } from "./transfer";
 import { safeErrorMessage, type ComposeAdvanced, type ComposeHealthcheck } from "@repo/core";
 import {
@@ -1255,11 +1255,52 @@ export class DockerRuntime implements RuntimeAdapter {
   }
 
   /**
-   * Build a STATIC app in a Docker sandbox, then extract its doc-root onto a
-   * host directory the edge serves via nginx `root`. Reuses `build()` — so
-   * Docker is auto-ensured (ensureDockerFeature) and the static nginx image is
-   * produced (`generateStaticDockerfile` COPYs the output to the fixed
-   * `/usr/share/nginx/html`) — then extracts those files and discards the image.
+   * Move an extract-only static build's files out of its builder image onto
+   * `hostOutDir`, then delete the image.
+   *
+   * The ONE place this happens, shared by the single-app path
+   * ({@link buildStaticToHost}) and the compose batch path ({@link buildImages}) —
+   * they used to be destined to diverge, and the source path is subtle enough
+   * (see `staticBuilderOutputPath`) that two copies would drift into extracting an
+   * empty directory.
+   */
+  private async moveStaticBuildToHost(
+    tag: string,
+    config: BuildConfig,
+    hostOutDir: string,
+    log: BuildLogger,
+  ): Promise<void> {
+    // The builder's own output dir, resolved by the SAME helper the recipe used, so
+    // the extractor can never read a different path than the build wrote.
+    const docRoot = staticBuilderOutputPath(config);
+    const sshExecutor =
+      this.transport.kind === "ssh" ? this.connectionOptions?.executor : null;
+    log.log("Moving built files out of the build container...\n");
+    try {
+      if (sshExecutor) {
+        await this.extractDocRootOverSsh(sshExecutor, tag, docRoot, hostOutDir);
+      } else {
+        await this.extractDocRootViaDaemon(tag, docRoot, hostOutDir);
+      }
+      log.log(`Static files ready at ${hostOutDir}\n`);
+    } finally {
+      // Files are on the host now; the builder image is dead weight. Best-effort —
+      // a lingering image is harmless, a failed deploy over it is not.
+      await this.removeImage(tag).catch(() => { /* best effort */ });
+    }
+  }
+
+  /**
+   * Build a STATIC app in a Docker sandbox, then move the built files onto a host
+   * directory the edge serves via nginx `root`. Reuses `build()` so Docker is
+   * auto-ensured (ensureDockerFeature).
+   *
+   * NO RUNTIME IMAGE. `staticExtractOnly` stops the recipe at the builder stage and
+   * the files are copied straight out of it. This used to build a full
+   * `nginx:alpine` runtime stage — pulling that image, running six more steps, and
+   * writing an nginx config nothing reads — only to `docker cp` the doc-root out
+   * and delete the whole thing moments later. The edge already serves these files;
+   * a second web server was never going to run.
    * Returns the host dir as `imageRef`, matching BareRuntime.build's host-dir
    * contract so the existing file-backed serve path (deployStatic /
    * resolveStaticRoot) consumes it unchanged. Never leaves a long-lived
@@ -1271,7 +1312,10 @@ export class DockerRuntime implements RuntimeAdapter {
     logger?: BuildLogger,
   ): Promise<BuildResult> {
     const log = logger ?? new BuildLogger();
-    const buildResult = await this.build({ ...config, isStatic: true }, log);
+    const buildResult = await this.build(
+      { ...config, isStatic: true, staticExtractOnly: true },
+      log,
+    );
     // Failure / cancel bubbles up unchanged — the pipeline's existing status
     // checks handle it.
     if (buildResult.status !== "deploying" || !buildResult.imageRef) {
@@ -1280,19 +1324,8 @@ export class DockerRuntime implements RuntimeAdapter {
 
     const tag = buildResult.imageRef;
     const extractStart = Date.now();
-    const DOC_ROOT = "/usr/share/nginx/html";
     try {
-      const sshExecutor =
-        this.transport.kind === "ssh" ? this.connectionOptions?.executor : null;
-      log.log("Extracting static files from the build sandbox...\n");
-
-      if (sshExecutor) {
-        await this.extractDocRootOverSsh(sshExecutor, tag, DOC_ROOT, hostOutDir);
-      } else {
-        await this.extractDocRootViaDaemon(tag, DOC_ROOT, hostOutDir);
-      }
-
-      log.log(`Static files ready at ${hostOutDir}\n`);
+      await this.moveStaticBuildToHost(tag, config, hostOutDir, log);
       return {
         sessionId: config.sessionId,
         status: "deploying",
@@ -1308,10 +1341,6 @@ export class DockerRuntime implements RuntimeAdapter {
         durationMs: (buildResult.durationMs ?? 0) + (Date.now() - extractStart),
         errorMessage: `Static extract failed: ${msg}`,
       };
-    } finally {
-      // The files now live on the host dir; the transient nginx image is dead
-      // weight. Best-effort cleanup (a lingering image is harmless).
-      await this.removeImage(tag).catch(() => { /* best effort */ });
     }
   }
 
@@ -1546,6 +1575,28 @@ export class DockerRuntime implements RuntimeAdapter {
           }
 
           await this.verifyImageBuilt(tag);
+
+          // Extract-only static service: the edge serves these files from the host,
+          // so lift them out of the builder and hand back the DIRECTORY as imageRef.
+          // Done inside the batch so the shared clone/transfer is still paid once —
+          // routing it through buildStaticToHost would re-clone per service.
+          if (spec.config.staticExtractOnly && spec.config.staticOutDir) {
+            await this.moveStaticBuildToHost(
+              tag,
+              spec.config,
+              spec.config.staticOutDir,
+              spec.logger,
+            );
+            const result: BuildResult = {
+              sessionId: spec.config.sessionId,
+              status: "deploying",
+              imageRef: spec.config.staticOutDir,
+              durationMs: Date.now() - startedAt,
+            };
+            spec.onResult?.(result);
+            results.push({ serviceName: spec.serviceName, result });
+            continue;
+          }
 
           spec.logger.log(`Image ${tag} is ready.\n`);
           const result: BuildResult = {

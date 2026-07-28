@@ -15,6 +15,7 @@ import {
   Shield,
 } from "lucide-react";
 import type { GitHubRepo, GitHubConnectionState } from "@/context/GitHubContext";
+import { usePlatform } from "@/context/PlatformContext";
 import { useI18n } from "@/components/i18n-provider";
 
 interface LibrarySidebarProps {
@@ -173,6 +174,11 @@ function SelfHostedConnectionCard({
   selectedOwner: string;
 }) {
   const { t } = useI18n();
+  const { deployMode } = usePlatform();
+  // gh CLI / `gh auth login` is a DESKTOP concept. A VPS runs the API in a
+  // container with no `gh` and no shell, so its row must never say "gh CLI" or
+  // "Run gh auth login" — it connects with a token (or the App).
+  const isDesktop = deployMode === "desktop";
   const cliConnected = state.sources.ghCli.available;
   const cliLogin = state.sources.ghCli.login;
   // Name it by how it was actually connected. This row said "gh CLI" for every
@@ -185,6 +191,20 @@ function SelfHostedConnectionCard({
       : cliMethod === "device"
         ? t.library.sidebar.methodDevice
         : t.library.sidebar.ghCli;
+  // Primary row, gated on platform: desktop keeps the gh-CLI framing (Terminal +
+  // "Run gh auth login"); a VPS shows the real method (never "gh CLI") and a
+  // plain "Not connected" instead of a shell instruction it can't follow.
+  const primaryIcon = isDesktop ? Terminal : Github;
+  const primaryLabel = isDesktop
+    ? cliLabel
+    : cliMethod === "device"
+      ? t.library.sidebar.methodDevice
+      : t.library.sidebar.methodToken;
+  const primarySublabel = cliConnected
+    ? `@${cliLogin}`
+    : isDesktop
+      ? t.library.sidebar.runGhAuth
+      : t.library.sidebar.notConnected;
 
   // App status is NOT part of the gh-first `state` (GET /github/home is
   // zero-cloud by design). To show the REAL App connection without slowing the
@@ -228,11 +248,12 @@ function SelfHostedConnectionCard({
       </div>
 
       <div className="space-y-2.5">
-        {/* PRIMARY: gh CLI */}
+        {/* PRIMARY: the instance's own GitHub identity (gh CLI on desktop; a
+            token on a VPS — never gh-CLI framing there). */}
         <SourceRow
-          icon={Terminal}
-          label={cliLabel}
-          sublabel={cliConnected ? `@${cliLogin}` : t.library.sidebar.runGhAuth}
+          icon={primaryIcon}
+          label={primaryLabel}
+          sublabel={primarySublabel}
           connected={cliConnected}
           tone="primary"
         />

@@ -77,6 +77,11 @@ export function GitHubConnection() {
   // identity (device sign-in or pasted token) is forwarded to remote build hosts
   // over the SSH tunnel, so it authenticates remote server clones too.
   const [forwardGit, setForwardGit] = useState(false);
+  // "Change method" disclosure for the connected state. Controlled (not native
+  // <details>) so the toggle sits inline next to Disconnect in one flex row and
+  // the method list drops full-width below, instead of a w-full <details> that
+  // wraps the toggle onto its own line under the button.
+  const [showChangeMethod, setShowChangeMethod] = useState(false);
 
   const loadStatus = useCallback(async (force = false) => {
     setLoading(true);
@@ -257,7 +262,7 @@ export function GitHubConnection() {
       ) : !anyConnected && cliAction ? (
         /* A login is in flight. It's the only actionable thing on the card, so it
            replaces the chooser entirely instead of appearing underneath it. */
-        <DeviceFlowPanel cliAction={cliAction} onRefresh={() => void loadStatus(true)} />
+        <DeviceFlowPanel cliAction={cliAction} onRefresh={() => void loadStatus(true)} isDesktop={isDesktop} />
       ) : anyConnected ? (
         <div className="space-y-4">
           {/* The identity that is actually authorizing clones, first. */}
@@ -339,23 +344,35 @@ export function GitHubConnection() {
             </div>
           )}
 
-          {/* Actions + the switcher. One row, so "disconnect" and "use something
-              else" aren't three paragraphs apart like they used to be. */}
-          <div className="flex flex-wrap items-center gap-2 border-t border-border/40 pt-3">
-            <button
-              onClick={() =>
-                promptDisconnect(
-                  activeIsGh ? "cli" : "oauth",
-                  activeIsGh ? t.settings.github.methodDevice : t.settings.github.disconnectAppLabel,
-                  activeIsGh ? t.settings.github.ghCli.disconnectBody : t.settings.github.disconnectAppBody,
-                )
-              }
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-danger bg-danger-bg hover:bg-danger-bg rounded-lg border border-danger-border transition-colors"
-            >
-              <Unplug className="size-3.5" />
-              {t.settings.github.disconnect}
-            </button>
-            <MethodDisclosure summary={t.settings.github.changeMethod}>
+          {/* Actions + the switcher. Disconnect and the Change-method toggle share
+              ONE flex row; the method list expands full-width below — no w-full
+              <details> pushing the toggle onto its own line. */}
+          <div className="space-y-3 border-t border-border/40 pt-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={() =>
+                  promptDisconnect(
+                    activeIsGh ? "cli" : "oauth",
+                    activeIsGh ? t.settings.github.methodDevice : t.settings.github.disconnectAppLabel,
+                    activeIsGh ? t.settings.github.ghCli.disconnectBody : t.settings.github.disconnectAppBody,
+                  )
+                }
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-danger bg-danger-bg hover:bg-danger-bg rounded-lg border border-danger-border transition-colors"
+              >
+                <Unplug className="size-3.5" />
+                {t.settings.github.disconnect}
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowChangeMethod((v) => !v)}
+                aria-expanded={showChangeMethod}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/40 hover:bg-muted/60 rounded-lg border border-border/50 transition-colors"
+              >
+                {t.settings.github.changeMethod}
+                <ChevronDown className={`size-3.5 transition-transform ${showChangeMethod ? "rotate-180" : ""}`} />
+              </button>
+            </div>
+            {showChangeMethod && (
               <MethodChooser
                 can={can}
                 appRequiresCloud={
@@ -371,7 +388,7 @@ export function GitHubConnection() {
                 onSsh={() => router.push("/servers")}
                 onToken={() => router.push("/settings?tab=tokens")}
               />
-            </MethodDisclosure>
+            )}
           </div>
         </div>
       ) : (
@@ -488,12 +505,14 @@ function ActiveIdentity(props: {
  * device client id at all, and it says "on the server" because that is where the
  * command has to run.
  */
-function DeviceFlowPanel(props: { cliAction: CliAction; onRefresh: () => void }) {
-  const { cliAction, onRefresh } = props;
+function DeviceFlowPanel(props: { cliAction: CliAction; onRefresh: () => void; isDesktop: boolean }) {
+  const { cliAction, onRefresh, isDesktop } = props;
   const { t } = useI18n();
 
   if (cliAction.type === "token") {
-    return <TokenForm message={cliAction.message} hint={cliAction.command} onSaved={onRefresh} />;
+    // `gh auth login` is a desktop-only hint — a VPS runs the API in a container
+    // with no `gh` and no shell, so drop it there and keep the token field clean.
+    return <TokenForm message={cliAction.message} hint={isDesktop ? cliAction.command : undefined} onSaved={onRefresh} />;
   }
 
   if (cliAction.type === "device_flow") {

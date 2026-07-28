@@ -859,8 +859,9 @@ function checkConfig(snapshot: DeploymentConfigSnapshot, opts?: PreflightOptions
       const installFallback = svc.installCommand ?? snapshot.installCommand;
       const buildFallback = svc.buildCommand ?? snapshot.buildCommand;
       const startFallback = svc.startCommand ?? snapshot.startCommand;
-      // A static sub-app is served as files by the generated nginx image, so it
-      // needs a build (to produce the output dir) but NO start command.
+      // A static sub-app is served as FILES — on self-hosted straight off the host
+      // by the edge, on cloud by a generated nginx image. Either way it needs a
+      // build (to produce the output dir) and NO start command.
       if (isStaticService(svc)) {
         if (!buildFallback) {
           subAppFailures.push(`sub-app "${svc.name}" missing build command`);

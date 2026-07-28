@@ -113,7 +113,14 @@ export async function registerImportedSites(
             ...(proxyLocations.length ? { proxyLocations } : {}),
           });
         } else {
-          await routing.registerRoute({ domain, tls: site.ssl, staticRoot: site.target.root });
+          // Adopted: this root is what the operator's own proxy was already serving, so
+          // it is allowed outside the managed base (see assertValidStaticRoot).
+          await routing.registerRoute({
+            domain,
+            tls: site.ssl,
+            staticRoot: site.target.root,
+            staticRootAdopted: true,
+          });
         }
 
         if (site.ssl) {

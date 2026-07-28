@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Github, Loader2, Settings, ExternalLink, ArrowRight, KeyRound } from "lucide-react";
 import { useGitHub, type CliAction } from "@/context/GitHubContext";
+import { usePlatform } from "@/context/PlatformContext";
 import { useI18n } from "@/components/i18n-provider";
 import { getApiErrorMessage } from "@/lib/api";
 
@@ -81,10 +82,16 @@ export function ConnectPrompt({
   // is how the empty state ended up advertising Openship Cloud on installs that
   // had no use for it. `selfHosted` remains only as the pre-load fallback.
   const { capabilities } = useGitHub();
+  const { deployMode } = usePlatform();
+  // gh CLI / `gh auth login` is a DESKTOP concept (the operator's own machine has
+  // `gh`). A remote self-hosted box (VPS) runs the API in a container with no
+  // `gh` and no shell, so it never gets a gh hint — it pastes a token, right here.
+  const isDesktop = capabilities?.desktop ?? deployMode === "desktop";
   const can = (kind: "device" | "token" | "app" | "ssh-key" | "forwarding") => {
     const m = capabilities?.methods.find((x) => x.kind === kind);
     return m ? m.available : selfHosted;
   };
+  const cardCount = (can("device") ? 1 : 0) + (can("token") || can("ssh-key") ? 1 : 0);
 
   // No device client id on this instance → collect a token here rather than
   // sending the operator to Settings (or worse, to a shell on the server).
@@ -202,15 +209,23 @@ export function ConnectPrompt({
             : t.library.connect.default.descSaas}
         </p>
 
-        {can("device") || can("token") ? (
-          // Two real choices, and both stay on this box: sign in with GitHub
-          // (device code, nothing to register), or bring your own credential (a
-          // deploy key per server, or an access token) if you'd rather not sign
-          // in at all. Openship Cloud is deliberately absent — a self-hosted
-          // install has no reason to be sold a cloud account on the screen that
-          // is only asking for repo access, and as a side-by-side card it read
-          // like a requirement. It's still reachable in Settings.
-          <div className="grid sm:grid-cols-2 gap-3 max-w-xl mx-auto text-start">
+        {!isDesktop && selfHosted && can("token") ? (
+          // VPS / remote self-hosted: the API runs in a container with no `gh`
+          // and no shell, so there's no `gh auth login` to hint at and no reason
+          // to bounce to Settings — paste a token right here. This IS the empty
+          // state: one centered, embedded field.
+          <div className="max-w-md mx-auto text-start">
+            <TokenField onSaved={onRefresh} />
+          </div>
+        ) : can("device") || can("token") ? (
+          // Desktop: sign in with GitHub (device code, nothing to register), or
+          // bring your own credential. A single card centers; two go side by side.
+          // Openship Cloud is deliberately absent here — reachable in Settings.
+          <div
+            className={`grid gap-3 mx-auto text-start ${
+              cardCount <= 1 ? "max-w-sm sm:grid-cols-1" : "max-w-xl sm:grid-cols-2"
+            }`}
+          >
             {can("device") && (
             <button
               onClick={() => onConnect("cli")}

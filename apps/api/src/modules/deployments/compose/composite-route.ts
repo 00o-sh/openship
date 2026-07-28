@@ -111,15 +111,30 @@ export function buildCompositeRegistration(input: {
   routingConfig?: RoutingConfig | null;
   resolveTargetUrl: (serviceId: string) => string | null | undefined;
   resolveDomain: (serviceId: string) => { hostname: string; isCustomDomain: boolean } | null;
+  /**
+   * The frontend's built files on the host, when it was extracted rather than
+   * containerized (self-hosted static). Present → the domain serves `/` from disk
+   * and the frontend needs no container, no port and no upstream at all; the
+   * backend still gets its `/api/` proxy location in the SAME vhost.
+   *
+   * Absent (or null) → the previous behaviour: the frontend is an upstream. That is
+   * still the only option on cloud, where Oblien runs the workload and there is no
+   * host directory to serve.
+   */
+  resolveStaticRoot?: (serviceId: string) => string | null | undefined;
 }): CompositeRegistration | null {
   const routing = input.routingConfig ?? undefined;
   const plan = planCompositeRoute(input.services, { rewrites: routing?.rewrites });
   if (!plan) return null;
 
-  const frontendUrl = input.resolveTargetUrl(plan.frontendServiceId);
+  const frontendStaticRoot = input.resolveStaticRoot?.(plan.frontendServiceId) || null;
+  // Only resolve an upstream for the frontend when it isn't served from disk —
+  // asking for one would otherwise fail the whole composite for a static frontend
+  // that has (correctly) no port.
+  const frontendUrl = frontendStaticRoot ? null : input.resolveTargetUrl(plan.frontendServiceId);
   const backendUrl = input.resolveTargetUrl(plan.backendServiceId);
   const domain = input.resolveDomain(plan.frontendServiceId);
-  if (!frontendUrl || !backendUrl || !domain) return null;
+  if ((!frontendStaticRoot && !frontendUrl) || !backendUrl || !domain) return null;
 
   // Compile the full vercel.json routing when present (rewrites → backend proxy
   // locations, redirects, headers); otherwise fall back to the `/api` convention.
@@ -135,7 +150,8 @@ export function buildCompositeRegistration(input: {
     register: {
       hostname: domain.hostname,
       isCustomDomain: domain.isCustomDomain,
-      targetUrl: frontendUrl,
+      // Files at `/`, or an upstream at `/` — never both.
+      ...(frontendStaticRoot ? { staticRoot: frontendStaticRoot } : { targetUrl: frontendUrl! }),
       proxyLocations,
       ...(compiled?.redirects.length ? { redirects: compiled.redirects } : {}),
       ...(compiled?.headerRules.length ? { headerRules: compiled.headerRules } : {}),

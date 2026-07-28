@@ -220,10 +220,38 @@ function assertValidUpstream(targetUrl: string): void {
   }
 }
 
-function assertValidStaticRoot(root: string): void {
+/**
+ * Every directory an Openship-managed static route may serve from lives under here
+ * (build output at `/opt/openship/static/...`, bare release dirs at
+ * `/opt/openship/<project>/...`).
+ */
+export const MANAGED_STATIC_BASE = "/opt/openship";
+
+/**
+ * Validate a doc root before it becomes a public `root` directive.
+ *
+ * Absolute + no traversal + no injection was NOT enough: it accepted any path on the
+ * box, so a wrong value anywhere upstream would have published that directory to the
+ * internet ("routing can only go under the project's own output" was the intent, but
+ * nothing enforced it). Managed roots are now confined to
+ * {@link MANAGED_STATIC_BASE}; only an explicitly adopted root may sit outside it.
+ *
+ * Confinement is on the PREFIX plus a separator so `/opt/openship-evil` cannot pass
+ * as a child of `/opt/openship`.
+ */
+function assertValidStaticRoot(root: string, opts?: { adopted?: boolean }): void {
   assertNoNginxInjection(root, "static root");
   if (!root.startsWith("/") || root.includes("..")) {
     throw new Error(`Invalid static root (must be an absolute path, no traversal): ${root}`);
+  }
+  if (opts?.adopted) return;
+  const confined = root === MANAGED_STATIC_BASE || root.startsWith(`${MANAGED_STATIC_BASE}/`);
+  if (!confined) {
+    throw new Error(
+      `Refusing to serve static root outside ${MANAGED_STATIC_BASE}: ${root}. ` +
+        `Openship-managed routes serve only their own build output; pass ` +
+        `staticRootAdopted when importing a root an existing proxy already serves.`,
+    );
   }
 }
 
@@ -505,7 +533,7 @@ export class NginxProvider implements RoutingProvider, SslProvider {
     const slug = this.domainSlug(route.domain);
     const configPath = join(this.sitesDir, `${slug}.conf`);
     if ("staticRoot" in route && route.staticRoot) {
-      assertValidStaticRoot(route.staticRoot);
+      assertValidStaticRoot(route.staticRoot, { adopted: route.staticRootAdopted });
     } else {
       assertValidUpstream((route as { targetUrl: string }).targetUrl);
     }
@@ -751,7 +779,15 @@ ${webhookLocation}${extraLocations}
 
       const rootMatch = existing.match(/root\s+([^;]+);/);
       if (rootMatch) {
-        await this.registerRoute({ domain, staticRoot: rootMatch[1], tls: true });
+        // Re-registering the root from OUR OWN existing vhost to add TLS. It passed
+        // the floor when first written (possibly as adopted), so re-checking it here
+        // would reject a legitimately imported site at cert time.
+        await this.registerRoute({
+          domain,
+          staticRoot: rootMatch[1],
+          staticRootAdopted: true,
+          tls: true,
+        });
         return this.ensureIssued(domain, certonlyOut);
       }
     } catch {
