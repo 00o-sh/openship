@@ -35,8 +35,9 @@ irm https://git.openship.io/windows | iex
 ```
 
 <Callout title="Pin a version" type="info">
-Want a specific release instead of the latest? Set `OPENSHIP_VERSION` before running the script, e.g.
-`OPENSHIP_VERSION=0.1.9 curl -fsSL https://get.openship.io | sh`.
+Want a specific release instead of the latest? Set `OPENSHIP_VERSION` on the `sh` that runs the script —
+not on `curl` — e.g. `curl -fsSL https://get.openship.io | OPENSHIP_VERSION=0.1.9 sh`. (A `VAR=… curl … | sh`
+prefix sets the variable only for `curl`; the piped `sh` never sees it.)
 </Callout>
 
 <Callout title="Can't find the openship command afterward?" type="info">
@@ -75,10 +76,11 @@ CLI **from source** (the same way `bun dev` does) and installs it as a **separat
 curl -fsSL https://get.openship.io/dev | sh
 ```
 
-Pick a branch/tag with `OPENSHIP_REF` (default `main`):
+Pick a branch/tag with `OPENSHIP_REF` (default `main`) — set it on the `sh` that runs the script, not on
+`curl`, or the piped `sh` never sees it:
 
 ```bash
-OPENSHIP_REF=my-branch curl -fsSL https://get.openship.io/dev | sh
+curl -fsSL https://get.openship.io/dev | OPENSHIP_REF=my-branch sh
 ```
 
 The from-source build runs **fully isolated** from a production install — its own home (`~/.openship-dev`),
