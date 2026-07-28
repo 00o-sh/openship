@@ -170,7 +170,7 @@ describe("teardownProject — deleting a linked app unlinks it from the projects
       total: 1,
       succeeded: 0,
       failed: [{ label: "container c1", error: "ssh timeout" }],
-    });
+    } as never);
 
     const res = await teardownProject(ctx, "p1", { force: false });
 

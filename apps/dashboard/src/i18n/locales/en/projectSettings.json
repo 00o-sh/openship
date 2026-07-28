@@ -502,7 +502,7 @@
   },
   "logs": {
     "noRuntime": "No runtime logs",
-    "noRuntimeDesc": "This project is deployed as a static app, so there is no running server process to stream logs from.",
+    "noRuntimeDesc": "This project has no running server process and no domain, so there is nothing to stream. Add a domain and its edge request logs will appear here.",
     "terminal": "Terminal",
     "server": "Server",
     "requests": "Requests",
