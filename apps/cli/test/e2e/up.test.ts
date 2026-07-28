@@ -6,6 +6,8 @@ const h = vi.hoisted(() => ({
   hasDocker: true,
   composeUpResult: { ok: true, apiPort: "4000", dashPort: "3001" },
   composeUpCalls: 0,
+  prefetchResult: true,
+  prefetchCalls: 0,
   internalToken: "tok" as string | null,
 }));
 vi.mock("../../src/lib/compose", () => ({
@@ -14,6 +16,13 @@ vi.mock("../../src/lib/compose", () => ({
   // `up` now installs Docker rather than degrading to bare (same helper the
   // wizard uses); the fixture reports whether it's present/installable.
   ensureDocker: async () => h.hasDocker,
+  // Images are fetched BEFORE the preflight is allowed to stop the operator's
+  // proxy. Counted so the tests below can pin that ordering down, and failable
+  // so the "fetch failed → nothing was touched" path is covered.
+  composePrefetch: () => {
+    h.prefetchCalls++;
+    return h.prefetchResult;
+  },
   composeUp: () => {
     h.composeUpCalls++;
     return h.composeUpResult;
@@ -90,6 +99,8 @@ beforeEach(() => {
   h.hasDocker = true;
   h.composeUpResult = { ok: true, apiPort: "4000", dashPort: "3001" };
   h.composeUpCalls = 0;
+  h.prefetchResult = true;
+  h.prefetchCalls = 0;
   h.internalToken = "tok";
   e.plan = { proceed: true };
   e.calls = 0;
@@ -125,8 +136,23 @@ describe("openship up --compose (edge chain)", () => {
     e.plan = { proceed: true };
     const r = await runCommand(upCommand, ["--compose"]);
     expect(e.calls).toBe(1);
+    expect(h.prefetchCalls).toBe(1);
     expect(h.composeUpCalls).toBe(1);
     expect(r.code).toBe(0);
+  });
+
+  // The whole point of prefetching: a ~500MB pull must not happen with the
+  // operator's proxy already stopped, and a pull that FAILS must not have taken
+  // their sites down for a problem that never touched the proxy.
+  it("does NOT touch the proxy when the image fetch fails", async () => {
+    h.prefetchResult = false;
+    const r = await runCommand(upCommand, ["--compose"]);
+    expect(r.code).toBe(1);
+    expect(h.prefetchCalls).toBe(1);
+    expect(e.calls).toBe(0); // preflight never ran, so nothing was stopped
+    expect(e.rollbacks).toBe(0); // and nothing needed restoring
+    expect(h.composeUpCalls).toBe(0);
+    expect(con.text()).toContain("untouched");
   });
 
   it("does NOT bring the stack up when the user cancels the edge takeover", async () => {
