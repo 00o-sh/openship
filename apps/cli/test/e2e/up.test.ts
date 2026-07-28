@@ -30,9 +30,21 @@ const e = vi.hoisted(() => ({
   rollbacks: 0,
   completes: 0,
   restored: true,
+  /** Our edge is up and answering :80 (the normal case). */
+  edgeServing: true,
+  edgeCrashReason: null as string | null,
   /** Set once a stopped proxy's sites are imported (suppresses re-offering). */
   marked: 0,
 }));
+// The edge probes run docker through an executor, which no test box has. Fixture
+// controls them like the rest of the edge chain.
+vi.mock("@repo/adapters/proxy", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@repo/adapters/proxy")>()),
+  edgeIsServing: async () => e.edgeServing,
+  edgeCrashReason: async () => e.edgeCrashReason,
+}));
+vi.mock("@repo/adapters", () => ({ LocalExecutor: class {} }));
+
 vi.mock("../../src/lib/edge-preflight", () => ({
   planAndApplyHostEdge: async () => {
     e.calls++;
@@ -84,6 +96,8 @@ beforeEach(() => {
   e.rollbacks = 0;
   e.completes = 0;
   e.restored = true;
+  e.edgeServing = true;
+  e.edgeCrashReason = null;
   // Clear any option values commander retained from a previous parse.
   (upCommand as any).setOptionValue?.("edge", undefined);
   (upCommand as any).setOptionValue?.("compose", undefined);
@@ -151,6 +165,27 @@ describe("openship up --compose (edge chain)", () => {
     // read it as interrupted and restart the proxy we just replaced.
     expect(e.completes).toBe(1);
     expect(e.rollbacks).toBe(0);
+  });
+
+  // The onvo.me run: compose "succeeded" (the container was CREATED), the edge was
+  // crash-looping on a bad conf, nginx was already stopped — so 6 hostnames were
+  // dark and the CLI walked on into an import that could only 409.
+  it("RESTORES the proxy when the edge comes up but isn't serving", async () => {
+    e.plan = { proceed: true, action: "migrate", sites: [{ serverNames: ["a.com"], ssl: false, target: { kind: "proxy", url: "http://127.0.0.1:3000" } }] };
+    e.edgeServing = false;
+    e.edgeCrashReason = "a duplicate default server for 0.0.0.0:80";
+    fetchStub = stubFetch(() => ({ status: 200, json: { ok: true } }));
+
+    const r = await runCommand(upCommand, ["--compose"]);
+
+    expect(r.code).toBe(1);
+    expect(e.rollbacks).toBe(1);
+    // The journal must stay OPEN — it's the record of how to restart their proxy.
+    expect(e.completes).toBe(0);
+    // No import attempted against an edge that can't serve it.
+    expect(fetchStub.calls.some((c) => c.url.endsWith("/api/system/edge/import-sites"))).toBe(false);
+    // (The operator-facing text goes through console.error, which this harness
+    // doesn't capture — same as the existing bring-up-failure test above.)
   });
 
   it("RESTORES the proxy when the stack fails to come up after a takeover", async () => {

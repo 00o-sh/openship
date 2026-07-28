@@ -29,11 +29,14 @@ import {
 import { sq } from "../local-shell";
 import { containerCommand, edgeContainerExecutor } from "../edge-container-executor";
 import { waitForPortListening } from "../port-listen";
-import { invalidateEdgeContainer, ourLuaOnHost, resolveOurEdgeContainer } from "./detect";
+import {
+  EDGE_CONTAINER_NAME,
+  edgeFailureReason,
+  invalidateEdgeContainer,
+  ourLuaOnHost,
+  resolveOurEdgeContainer,
+} from "./detect";
 import { ensureEdgeClear } from "./consent";
-
-/** Pinned name — `docker ps --filter name=openship-edge` is how we recognize ours. */
-export const EDGE_CONTAINER_NAME = "openship-edge";
 
 function log(message: string, level: SystemLog["level"] = "info"): SystemLog {
   return { timestamp: new Date().toISOString(), message, level };
@@ -251,6 +254,69 @@ async function swapEdgeImage(
   return { swapped: false, edgeDown: true };
 }
 
+/** Entry names in a directory, or null when it can't be listed. */
+async function listDir(
+  executor: CommandExecutor,
+  dir: string,
+): Promise<Set<string>> {
+  const out = await executor.exec(`ls -1 ${sq(dir)} 2>/dev/null || true`).catch(() => "");
+  return new Set(
+    out
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean),
+  );
+}
+
+/**
+ * Make carried vhosts safe to `include` inside the edge image.
+ *
+ * The image's own nginx.conf includes `sites-enabled/*.conf` and THEN declares the
+ * catch-all (`listen 80 default_server; server_name _;`) that proxies ACME
+ * http-01 to certbot and 404s unmanaged hosts. A bare host edge has its own
+ * equivalent, so a blind `cp -a` hands the container two default servers for
+ * 0.0.0.0:80 — `[emerg] a duplicate default server`, which crash-loops the
+ * container. The operator then sees only Docker's "container is restarting"
+ * message, and the box gets rolled back to the bare edge it was trying to leave.
+ *
+ * Two rules, both because the IMAGE owns the catch-all role:
+ *   - a conf with no real `server_name` (catch-all only) is dropped — keeping it
+ *     would also shadow the image's ACME location, breaking issuance;
+ *   - `default_server` is stripped from every remaining `listen`, so a real vhost
+ *     that happened to carry the flag stops claiming a role it doesn't need.
+ *
+ * Best-effort: a box where this can't run is no worse off than before, and
+ * `openresty -t` (step 5) is still the gate that catches a bad tree.
+ */
+async function sanitizeCarriedVhosts(
+  executor: CommandExecutor,
+  sitesDir: string,
+  onLog: (l: SystemLog) => void,
+): Promise<void> {
+  // POSIX sh, one pass, no per-file round trips (this runs over SSH).
+  const script = [
+    `for f in ${sq(sitesDir)}/*.conf; do`,
+    `  [ -f "$f" ] || continue;`,
+    // A real server_name is anything that isn't the `_` wildcard.
+    `  if ! grep -qE '^[[:space:]]*server_name[[:space:]]+[^_;[:space:]]' "$f"; then`,
+    `    echo "dropped-catchall $f"; rm -f "$f"; continue;`,
+    `  fi;`,
+    `  if grep -qE '[[:space:]]default_server' "$f"; then`,
+    `    sed -i -E 's/([[:space:]]listen[^;]*)[[:space:]]+default_server/\\1/g' "$f" && echo "unset-default $f";`,
+    `  fi;`,
+    `done`,
+  ].join(" ");
+  const out = await executor.exec(script).catch(() => "");
+  for (const line of out.split("\n").map((l) => l.trim()).filter(Boolean)) {
+    const [action, file] = [line.slice(0, line.indexOf(" ")), line.slice(line.indexOf(" ") + 1)];
+    if (action === "dropped-catchall") {
+      onLog(log(`Dropped the bare edge's catch-all ${file} — the edge image provides it.`, "warn"));
+    } else if (action === "unset-default") {
+      onLog(log(`Removed default_server from ${file} — the edge image owns it.`, "warn"));
+    }
+  }
+}
+
 /**
  * Idempotent: returns early when our edge container is already running on the
  * pinned image (and updates it in place when it isn't).
@@ -324,18 +390,40 @@ export async function ensureContainerEdge(
   //    path the image bakes it to, and certs at the bind-mounted /etc/letsencrypt,
   //    so a plain copy keeps every served domain intact.
   const sitesTarget = EDGE_HOST_PATHS.sitesDir;
+  // What was in the target BEFORE the carry. null = we never looked, so the
+  // rollback must not delete anything (fail safe — never guess at removals in a
+  // directory the edge serves from).
+  let beforeCarry: Set<string> | null = null;
   if (bareWasOurs) {
     const barePaths = await detectOpenRestyPaths(executor).catch(() => OPENRESTY_DEFAULT_PATHS);
     if (barePaths.sitesDir !== sitesTarget && (await executor.exists(barePaths.sitesDir))) {
       onLog(log(`Carrying vhosts from ${barePaths.sitesDir}...`));
+      beforeCarry = await listDir(executor, sitesTarget);
       await executor
         .exec(`cp -a ${sq(`${barePaths.sitesDir}/.`)} ${sq(`${sitesTarget}/`)} 2>/dev/null || true`)
         .catch(() => {});
+      await sanitizeCarriedVhosts(executor, sitesTarget, onLog);
     }
   }
 
   const restoreBare = async () => {
     if (!bareWasOurs) return;
+    // Undo the carry BEFORE handing :80 back. This directory is bind-mounted into
+    // EVERY edge container on this box, so a conf the carry added and the rollback
+    // left behind breaks every future edge start — including the compose stack's
+    // own `edge` service, which has nothing to do with this conversion. That is how
+    // one failed conversion became "Container … is restarting" on every later
+    // `openship up`, with the original cause long out of scroll.
+    if (beforeCarry) {
+      const now = await listDir(executor, sitesTarget);
+      const added = [...now].filter((name) => !beforeCarry!.has(name));
+      if (added.length > 0) {
+        await executor
+          .exec(`rm -f ${added.map((n) => sq(`${sitesTarget}/${n}`)).join(" ")}`)
+          .catch(() => {});
+        onLog(log(`Removed ${added.length} carried vhost(s) so the next edge start is clean.`, "warn"));
+      }
+    }
     onLog(log("Restoring the host OpenResty edge...", "warn"));
     await executor.exec("systemctl enable --now openresty 2>/dev/null || true").catch(() => {});
   };
@@ -387,6 +475,12 @@ export async function ensureContainerEdge(
     await executor.exec(`docker rm -f ${sq(container)} 2>/dev/null || true`).catch(() => {});
     invalidateEdgeContainer(executor);
     await restoreBare();
-    throw new Error(`Edge container setup failed: ${msg}`);
+    // Lead with the CAUSE, not Docker's symptom. A crash-looping edge surfaces as
+    // "Container … is restarting, wait until the container is running", which says
+    // nothing; nginx's own `[emerg]` line names the actual problem and is the only
+    // part of 40 lines of container log anyone needs. The message travels up into
+    // the deploy warning, where the container log does not.
+    const reason = edgeFailureReason(logs);
+    throw new Error(`Edge container setup failed: ${reason ? `${reason} (${msg})` : msg}`);
   }
 }

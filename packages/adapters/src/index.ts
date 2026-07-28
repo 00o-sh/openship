@@ -184,7 +184,6 @@ export {
   resolveEdgeImage,
   setDefaultEdgeImage,
   buildEdgeRunCommand,
-  EDGE_CONTAINER_NAME,
   type ContainerEdgeOptions,
   type ContainerEdgeResult,
 } from "./system/proxy/ensure-container-edge";

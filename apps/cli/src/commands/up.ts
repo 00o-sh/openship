@@ -28,6 +28,8 @@ import {
   type EdgeAction,
 } from "../lib/edge-preflight";
 import { importMigratedSites } from "../lib/edge-import";
+import { edgeIsServing, edgeCrashReason } from "@repo/adapters/proxy";
+import { LocalExecutor } from "@repo/adapters";
 import {
   resolveInstallInputs,
   headlessProvision,
@@ -388,6 +390,35 @@ async function runCompose(opts: UpOpts & { yes?: boolean }): Promise<{ apiPort: 
     process.exit(1);
   }
   spinner.succeed("Openship is running via Docker Compose.");
+
+  // If we stopped the operator's proxy to free :80/:443, OUR edge now owes them a
+  // working one. `compose up -d` succeeds as soon as the container is CREATED, so a
+  // crash-looping edge gets this far reading as success — with their proxy stopped
+  // and every hostname on the box dark. Verify, and if it isn't serving, put THEIR
+  // proxy back rather than continuing into an import that can only fail.
+  //
+  // The takeover journal is deliberately left open: it is the record of what to
+  // restart, and `completeHostEdge()` below (not reached) is what discards it.
+  if (edgePlan.action && !(await edgeIsServing(new LocalExecutor()))) {
+    const reason = await edgeCrashReason(new LocalExecutor());
+    console.error(
+      chalk.red(`\n  Openship's edge is not serving :80${reason ? ` — ${reason}` : "."}`),
+    );
+    const restored = await rollbackHostEdge();
+    console.error(
+      restored
+        ? chalk.yellow(
+            `  Your previous proxy has been restarted — the box is serving again, on it.\n` +
+              `  Nothing was migrated. Fix the cause above, then re-run \`openship up\`.\n`,
+          )
+        : chalk.red(
+            `  AND your previous proxy could NOT be restarted automatically — the box is\n` +
+              `  serving nothing right now. Start it by hand:\n` +
+              `    docker stop openship-edge && sudo systemctl enable --now nginx\n`,
+          ),
+    );
+    process.exit(1);
+  }
 
   // Migrate: the container edge is up now, so re-register the foreign proxy's
   // sites into it. The api drives the DockerEdgeExecutor (the host CLI can't), so

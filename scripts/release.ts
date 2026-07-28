@@ -859,8 +859,10 @@ async function runWizard(): Promise<string[] | null> {
       }
     }
 
-    answers.dryRun = await confirm("Dry run first (print the plan, change nothing)?", false);
-    if (branch !== "main" && !answers.dryRun) {
+    // No dry-run prompt: it's pure friction in the wizard (and defaulted to N
+    // anyway). The real gate is "Run it?" below, and `--dry-run` is still there
+    // on the flag path for anyone who wants the plan-only preview.
+    if (branch !== "main") {
       console.log(`\n  ${dim(`You are on "${branch}", not main. A real release from here needs --force-branch.`)}`);
       answers.forceBranch = await confirm(`Release from "${branch}" anyway?`, false);
       if (!answers.forceBranch) return null;

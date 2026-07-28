@@ -41,6 +41,8 @@ vi.mock("./detect", () => ({
   stopTargetsForStatus: () => [],
   resolveOurEdgeContainer: h.resolveOurEdgeContainer,
   sq: (s: string) => `'${s}'`,
+  // The rollback stops OUR edge container before restoring a foreign proxy.
+  EDGE_CONTAINER_NAME: "openship-edge",
 }));
 
 import { runEdgeTakeover } from "./takeover";
@@ -56,12 +58,16 @@ const SITES: ImportedSite[] = [
   { serverNames: ["app.example.com"], ssl: false, target: { kind: "proxy", url: "http://127.0.0.1:3000" } },
 ];
 
-function makeExecutor() {
+function makeExecutor(opts: { portServedAfterRollback?: boolean } = {}) {
   const cmds: string[] = [];
   const executor = {
     exec: vi.fn(async (cmd: string) => {
       cmds.push(cmd);
       if (cmd.includes("is-enabled")) return "enabled"; // journal: foreign proxy was enabled
+      // The rollback VERIFIES :80 is served again before claiming success.
+      if (cmd.includes("/proc/net/tcp") || cmd.includes("ss -ltn")) {
+        return opts.portServedAfterRollback === false ? "" : "yes";
+      }
       return "";
     }),
     mkdir: vi.fn(async () => {}),
@@ -112,6 +118,19 @@ describe("runEdgeTakeover", () => {
     expect(res.warnings).toContain("install boom");
     expect(rolledBackNginx(cmds)).toBe(true); // foreign proxy restored
     expect(h.registerRoute).not.toHaveBeenCalled();
+  });
+
+  // `rolledBack: true` is what the operator is told ("your proxy is back"). If the
+  // restore commands all no-op'd — wrong unit name, service refuses to start — the
+  // box is dark, and saying it came back is worse than saying nothing.
+  it("reports rolledBack=false when the proxy did NOT actually come back", async () => {
+    const { executor } = makeExecutor({ portServedAfterRollback: false });
+    h.installContainerEdge.mockResolvedValue({ component: "edge", success: false, error: "boom" });
+
+    const res = await runEdgeTakeover(executor, { status: STATUS, sites: SITES }, noop);
+
+    expect(res.ok).toBe(false);
+    expect(res.rolledBack).toBe(false);
   });
 
   it("rolls back when a post-install step throws (e.g. path detection)", async () => {

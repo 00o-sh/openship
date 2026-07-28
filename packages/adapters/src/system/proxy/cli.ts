@@ -23,7 +23,15 @@ export {
   freeEdgeTargets,
   stopTargetsForStatus,
 } from "./index";
-export { ourEdgeContainerRunning } from "./detect";
+export {
+  ourEdgeContainerRunning,
+  // The edge container's name + the one parse of "why isn't it running" — the CLI
+  // needs both so it stops hardcoding the name and re-implementing the parse.
+  EDGE_CONTAINER_NAME,
+  edgeFailureReason,
+  edgeIsServing,
+  edgeCrashReason,
+} from "./detect";
 // Recover the sites of a proxy we already STOPPED: probeEdge can't see it (it
 // holds no ports), but its vhosts are still on disk and the parsers are read-only.
 export { detectInstalledProxy, scanImportableSites } from "./import";

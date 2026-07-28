@@ -10,6 +10,11 @@ interface BoxOpts {
   edgeContainer?: string;
   /** Image ref that running container was created from. */
   edgeContainerImage?: string;
+  /** What the carried-vhost sanitize pass reports back. */
+  sanitizeOutput?: string;
+  /** `ls -1` of sites-enabled before the carry / after it. */
+  beforeCarry?: string;
+  afterCarry?: string;
   /** Our BARE host OpenResty is what's serving (ourLuaOnHost → true). */
   bareIsOurs?: boolean;
   dockerMissing?: boolean;
@@ -32,6 +37,7 @@ interface BoxOpts {
 function box(opts: BoxOpts = {}) {
   const commands: string[] = [];
   let containerStarted = false;
+  let carried = false;
   const answer = async (cmd: string): Promise<string> => {
     commands.push(cmd);
     if (cmd.startsWith("docker ps --filter name=openship-edge")) return opts.edgeContainer ?? "";
@@ -39,6 +45,14 @@ function box(opts: BoxOpts = {}) {
     if (cmd.startsWith("docker inspect")) return opts.edgeContainerImage ?? "";
     if (cmd.startsWith("docker version")) return opts.dockerMissing ? "" : "27.0.0";
     if (cmd.includes("site_logger.lua")) return opts.bareIsOurs ? "ok" : "";
+    // The carried-vhost sanitize pass (one shell loop over sites-enabled).
+    if (cmd.includes("dropped-catchall")) return opts.sanitizeOutput ?? "";
+    // Directory listing: before the carry vs after (the rollback diff).
+    if (cmd.startsWith("ls -1")) {
+      const listed = carried ? (opts.afterCarry ?? "") : (opts.beforeCarry ?? "");
+      carried = true;
+      return listed;
+    }
     if (cmd.includes("openresty -t")) {
       if (opts.configInvalid) throw new Error("nginx: [emerg] invalid config");
       return "syntax is ok";
@@ -145,6 +159,48 @@ describe("ensureContainerEdge", () => {
     // Pull before the old one is removed, same rule as the bare conversion.
     expect(idx(commands, "docker pull")).toBeLessThan(idx(commands, "docker rm -f"));
     expect(commands.some((c) => c.includes(`docker run -d --name 'openship-edge'`))).toBe(true);
+  });
+
+  // The bare→container conversion used to `cp -a` the host edge's confs verbatim.
+  // Our own bare catch-all declares `listen 80 default_server`, and the image's
+  // nginx.conf declares one too — so the container died with `[emerg] a duplicate
+  // default server` and the box was rolled back to the edge it was leaving.
+  it("sanitizes carried vhosts after the copy, and says what it changed", async () => {
+    const { executor, commands, onLog } = box({
+      bareIsOurs: true,
+      sanitizeOutput: "dropped-catchall /var/lib/openship/edge/sites-enabled/default.conf",
+    });
+
+    await ensureContainerEdge(executor, { onLog, image: IMAGE, verifyTimeoutMs: 50 });
+
+    // Runs AFTER the carry and BEFORE the container starts — a sanitize that lands
+    // after `docker run` is a sanitize that never prevented the crash.
+    expect(idx(commands, "cp -a")).toBeLessThan(idx(commands, "dropped-catchall"));
+    expect(idx(commands, "dropped-catchall")).toBeLessThan(idx(commands, "docker run"));
+    const said = onLog.mock.calls.map(([l]) => l.message).join("\n");
+    expect(said).toMatch(/Dropped the bare edge's catch-all .*default\.conf/);
+  });
+
+  // A failed conversion used to leave the carried confs in the host bind mount, so
+  // EVERY later edge start on that box — including the compose stack's own `edge`
+  // service — died on the same bad conf, with the original failure long gone.
+  it("removes the carried vhosts when the conversion rolls back", async () => {
+    const { executor, commands, onLog } = box({
+      bareIsOurs: true,
+      runFails: true,
+      beforeCarry: "openship-existing.conf",
+      afterCarry: "openship-existing.conf\ndefault.conf\nlegacy.conf",
+    });
+
+    await expect(ensureContainerEdge(executor, { onLog, image: IMAGE })).rejects.toThrow();
+
+    const rm = commands.find((c) => c.startsWith("rm -f"));
+    expect(rm).toContain("default.conf");
+    expect(rm).toContain("legacy.conf");
+    // The conf that was already there is NOT ours to delete.
+    expect(rm).not.toContain("openship-existing.conf");
+    // And the bare edge is put back after the dir is clean, not before.
+    expect(idx(commands, "rm -f")).toBeLessThan(idx(commands, "systemctl enable --now openresty"));
   });
 
   it("leaves the running edge alone when the new image can't be pulled", async () => {

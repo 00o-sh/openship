@@ -95,6 +95,87 @@ export function isOurEdgeContainer(name?: string, image?: string): boolean {
 }
 
 /**
+ * Is OUR edge actually SERVING on `port` (default 80), on the box `executor` reaches?
+ *
+ * Running is not serving: `docker compose up -d` returns as soon as the container
+ * is CREATED, and a crash-looping edge reads as "up" while every hostname on the
+ * box is dark. So this asks two questions — is the container running, and does it
+ * answer — and only both count.
+ *
+ * Executor-based on purpose: the same check has to work from the CLI on its own box
+ * and from the API over SSH. It used to be a `spawnSync` in the CLI, which meant a
+ * second way of running a command on a machine the codebase already has an executor
+ * for, and a helper that couldn't be reused for a remote server.
+ */
+export async function edgeIsServing(
+  executor: CommandExecutor,
+  port = 80,
+): Promise<boolean> {
+  const running = await tryExec(
+    executor,
+    `docker inspect -f '{{.State.Running}}' ${sq(EDGE_CONTAINER_NAME)} 2>/dev/null`,
+  );
+  if ((running ?? "").trim() !== "true") return false;
+  // wget exits 8 on an HTTP error status — the server ANSWERED, which is what's
+  // being proven. Only a connection failure means "not serving".
+  const probe = await tryExec(
+    executor,
+    containerShell(`wget -q -O /dev/null -T 3 http://127.0.0.1:${port}/ >/dev/null 2>&1; echo $?`),
+  );
+  const code = (probe ?? "").trim().split("\n").pop() ?? "1";
+  return code === "0" || code === "8";
+}
+
+/** `sh -c` inside the edge container. Local to this module so it stays dependency-free. */
+function containerShell(command: string): string {
+  return `docker exec ${sq(EDGE_CONTAINER_NAME)} sh -c ${sq(command)}`;
+}
+
+/**
+ * Why the edge container isn't running, from its own log on the box `executor`
+ * reaches. Parsing is {@link edgeFailureReason}, so every caller agrees on the cause.
+ */
+export async function edgeCrashReason(executor: CommandExecutor): Promise<string | null> {
+  const logs = await tryExec(
+    executor,
+    `docker logs --tail 40 ${sq(EDGE_CONTAINER_NAME)} 2>&1`,
+  );
+  return logs ? edgeFailureReason(logs) : null;
+}
+
+/**
+ * The one line of an edge container's log that explains why it isn't running.
+ *
+ * nginx reports a fatal config problem as `[emerg]` — that line IS the diagnosis,
+ * and the surrounding 40 lines are startup noise. When there is no `[emerg]` the
+ * edge died for a non-config reason (bad mount, missing cert, wrong-arch image,
+ * OOM), so fall back to the last thing it said rather than returning nothing:
+ * "not serving" with no reason is what sent people digging by hand.
+ *
+ * Pure string work, deliberately: the two callers read the log through completely
+ * different channels (the CLI shells out locally, the installer execs over SSH),
+ * and only the PARSING is common. Keeping it in one place stops those two from
+ * disagreeing about what counts as the cause.
+ */
+export function edgeFailureReason(containerLog: string): string | null {
+  const lines = containerLog
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const emerg = lines.find((l) => l.includes("[emerg]"));
+  if (emerg) return emerg.replace(/^.*\[emerg\]\s*\d*#\d*:\s*/, "");
+  return lines.at(-1) ?? null;
+}
+
+/**
+ * OUR edge container's default name. Lives here (the lean detect module) rather
+ * than next to the installer, so the takeover journal — which deliberately imports
+ * nothing heavier than this file — can name the container it has to stop before
+ * restoring a foreign proxy.
+ */
+export const EDGE_CONTAINER_NAME = "openship-edge";
+
+/**
  * Is OUR edge CONTAINER running? `openship-edge` by NAME (the default) or by
  * IMAGE (covers a container renamed via OPENSHIP_EDGE_CONTAINER). A running edge
  * container OWNS 80/443 — host-networked (no `--filter publish` match; its Lua

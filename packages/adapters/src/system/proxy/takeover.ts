@@ -233,9 +233,12 @@ export async function runEdgeTakeover(
     edgeImage: opts.edgeImage,
   });
   if (!install.success) {
-    await rollback(executor, journal, onLog);
+    // `rolledBack` is what the caller reports to the operator, so it carries the
+    // VERIFIED outcome: false here means the box is dark, not just that the restore
+    // commands ran.
+    const rolledBack = await rollback(executor, journal, onLog);
     await clearJournal(executor);
-    return { ok: false, rolledBack: true, registered: [], warnings: [install.error ?? "Edge install failed"] };
+    return { ok: false, rolledBack, registered: [], warnings: [install.error ?? "Edge install failed"] };
   }
 
   try {
@@ -288,8 +291,9 @@ export async function runEdgeTakeover(
     return { ok: true, rolledBack: false, registered, warnings };
   } catch (err) {
     warnings.push(safeErrorMessage(err));
-    await rollback(executor, journal, onLog);
+    const rolledBack = await rollback(executor, journal, onLog);
     await clearJournal(executor);
-    return { ok: false, rolledBack: true, registered: [], warnings };
+    if (!rolledBack) warnings.push("The previous proxy did NOT come back — nothing is serving :80.");
+    return { ok: false, rolledBack, registered: [], warnings };
   }
 }
