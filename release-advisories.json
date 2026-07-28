@@ -7,7 +7,7 @@
       "announce": true,
       "affects": "<0.4.6",
       "title": "Update to Openship 0.4.6",
-      "message": "Openship 0.4.6 is an important update with fixes and improvements worth taking. See the release notes for what changed, then update to stay current.",
+      "message": "Openship 0.4.6 is available. See the release notes for what's new — updating is recommended.",
       "action": {
         "label": "Update now",
         "kind": "update"
