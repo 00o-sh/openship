@@ -22,6 +22,7 @@ import {
   installOpenResty,
   installCertbot,
   foreignProxyOnEdge,
+  ourEdgeContainerRunning,
 } from "@repo/adapters";
 
 // ─── Shell quoting helper ─────────────────────────────────────────────────────
@@ -261,6 +262,18 @@ export async function stepCheckPort25(
  *   - rsync     → required by `transferIn` (engine staging in step 7)
  *   - OpenResty → openship's routing layer; owns :80 / :443 from now on
  *   - certbot   → used by step 12 (request_ssl) for mail.<domain>
+ *
+ * OpenResty is skipped entirely when `openship-edge` (the containerized edge -
+ * see `createInfraProvider` in platform.ts) is already running: it holds
+ * :80/:443 via `--network host`, so a HOST OpenResty can never bind them - not
+ * a transient conflict, a structural one. Installing it anyway dead-ends: the
+ * apt postinst starts the unit, it can't bind, dpkg leaves the package
+ * unconfigured (which breaks the next `apt-get upgrade`), and an operator
+ * masking the unit to unbreak that then makes every later run fail with "Unit
+ * is masked" instead. `ourEdgeContainerRunning` is the same
+ * executor-based probe `probeEdge`/the takeover flow use to recognize our own
+ * edge - reused here rather than re-detecting via env vars, which wouldn't see
+ * a containerized edge on a server reached over SSH.
  */
 export async function stepEnsureComponents(
   exec: CommandExecutor,
@@ -269,12 +282,21 @@ export async function stepEnsureComponents(
 ): Promise<StepResult> {
   const stepId = 2;
   const sysLog = bridgeToSystemLog(stepId, log);
+  const containerEdge = await ourEdgeContainerRunning(exec);
 
   for (const [name, install] of [
     ["rsync", installRsync],
     ["OpenResty", installOpenResty],
     ["certbot", installCertbot],
   ] as const) {
+    if (name === "OpenResty" && containerEdge) {
+      log(
+        stepId,
+        "info",
+        "Skipping OpenResty - the edge is containerized (openship-edge already owns :80/:443)",
+      );
+      continue;
+    }
     log(stepId, "info", `Ensuring ${name}...`);
     const r = await install(exec, sysLog);
     if (!r.success) {
@@ -287,7 +309,13 @@ export async function stepEnsureComponents(
     log(stepId, "info", `${name} ready${r.version ? ` (${r.version})` : ""}`);
   }
 
-  return { stepId, success: true, message: "rsync, OpenResty, and certbot are installed" };
+  return {
+    stepId,
+    success: true,
+    message: containerEdge
+      ? "rsync and certbot are installed; OpenResty is provided by the containerized edge"
+      : "rsync, OpenResty, and certbot are installed",
+  };
 }
 
 /**
@@ -297,6 +325,10 @@ export async function stepEnsureComponents(
  * are bound by it (rather than by some unexpected process). If openresty
  * is down, start it. We DON'T scan for "conflicts" anymore - we expect
  * OpenResty to be the owner and treat anything else as an error.
+ *
+ * On a containerized edge there's no host `openresty.service` to check or
+ * start - step 2 already skipped installing one, for the same reason. Skip
+ * straight to confirming the edge (in whatever form it takes) isn't foreign.
  */
 export async function stepEnsureReverseProxy(
   exec: CommandExecutor,
@@ -304,22 +336,27 @@ export async function stepEnsureReverseProxy(
   log: StepLogger,
 ): Promise<StepResult> {
   const stepId = 4;
-  log(stepId, "info", "Checking OpenResty service status...");
 
-  const active = (
-    await exec.exec("systemctl is-active openresty 2>/dev/null || echo inactive")
-  ).trim();
+  if (await ourEdgeContainerRunning(exec)) {
+    log(stepId, "info", "Edge is containerized (openship-edge) - no host OpenResty service to check");
+  } else {
+    log(stepId, "info", "Checking OpenResty service status...");
 
-  if (active !== "active") {
-    log(stepId, "info", "OpenResty is not running - starting it...");
-    try {
-      await exec.exec("systemctl start openresty");
-    } catch (err) {
-      return {
-        stepId,
-        success: false,
-        message: `Failed to start OpenResty: ${errMsg(err)}`,
-      };
+    const active = (
+      await exec.exec("systemctl is-active openresty 2>/dev/null || echo inactive")
+    ).trim();
+
+    if (active !== "active") {
+      log(stepId, "info", "OpenResty is not running - starting it...");
+      try {
+        await exec.exec("systemctl start openresty");
+      } catch (err) {
+        return {
+          stepId,
+          success: false,
+          message: `Failed to start OpenResty: ${errMsg(err)}`,
+        };
+      }
     }
   }
 

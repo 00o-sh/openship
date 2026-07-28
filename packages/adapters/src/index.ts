@@ -165,6 +165,7 @@ export {
   EdgeConflictError,
   EdgeMigrateRequested,
   freeEdgeTargets,
+  ourEdgeContainerRunning,
   probeEdge,
   stopTargetsForStatus,
 } from "./system/proxy/detect";
