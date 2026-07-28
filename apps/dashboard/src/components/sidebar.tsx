@@ -37,6 +37,10 @@ import { useCloud } from "@/context/CloudContext";
 import { DismissiblePopover } from "@/components/ui/Popover";
 import { setActiveOrganizationId } from "@/lib/api/client";
 import { projectsApi } from "@/lib/api";
+import {
+  getSidebarNavCountsRevision,
+  subscribeSidebarNavCounts,
+} from "@/lib/sidebar-nav-counts";
 
 /**
  * Org list / member shapes from Better Auth's organization plugin.
@@ -159,12 +163,17 @@ export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [navCounts, setNavCounts] = useState<{ projects: number; apps: number } | null>(null);
+  const [navCountsRevision, setNavCountsRevision] = useState(getSidebarNavCountsRevision);
   const countFor = (key: string): number | null => {
     if (!navCounts) return null;
     if (key === "projects") return navCounts.projects;
     if (key === "apps") return navCounts.apps;
     return null;
   };
+
+  useEffect(() => subscribeSidebarNavCounts(() => {
+    setNavCountsRevision(getSidebarNavCountsRevision());
+  }), []);
 
   // Org switcher state. Lazy-loaded — `list()` and the active org fetch
   // only fire after the first popover open so the sidebar doesn't pay
@@ -263,7 +272,7 @@ export function Sidebar() {
     return () => {
       cancelled = true;
     };
-  }, [orgsLoaded, activeOrgId]);
+  }, [orgsLoaded, activeOrgId, navCountsRevision]);
 
   async function handleOrgSwitch(orgId: string) {
     if (orgId === activeOrgId) {

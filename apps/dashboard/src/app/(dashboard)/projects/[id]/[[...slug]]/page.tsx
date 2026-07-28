@@ -35,6 +35,7 @@ import { useToast } from "@/context/ToastContext";
 import { useModal } from "@/context/ModalContext";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import { ApiError, getApiErrorMessage, projectsApi } from "@/lib/api";
+import { invalidateSidebarNavCounts } from "@/lib/sidebar-nav-counts";
 import ErrorState from "@/components/shared/ErrorState";
 import { PageContainer } from "@/components/ui/PageContainer";
 import { HelpMenu } from "@/components/HelpMenu";
@@ -497,6 +498,7 @@ const ProjectSettingsContent = () => {
         if (err instanceof ApiError && err.status === 404) {
           clearInterval(iv);
           showToast(t.projects.delete.alreadyDeleted, "success");
+          invalidateSidebarNavCounts();
           router.push("/");
         }
       }
@@ -546,6 +548,7 @@ const ProjectSettingsContent = () => {
             "success",
           );
         }
+        invalidateSidebarNavCounts();
         router.push("/");
         return;
       }
@@ -561,6 +564,7 @@ const ProjectSettingsContent = () => {
           "success",
           t.projects.delete.partialCleanupTitle,
         );
+        invalidateSidebarNavCounts();
         router.push("/");
         return;
       }
@@ -681,6 +685,7 @@ const ProjectSettingsContent = () => {
       // 404: someone else already deleted the project in another tab.
       if (err instanceof ApiError && err.status === 404) {
         showToast(t.projects.delete.alreadyDeleted, "success");
+        invalidateSidebarNavCounts();
         router.push("/");
         return;
       }
