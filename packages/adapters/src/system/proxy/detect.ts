@@ -132,7 +132,21 @@ export async function sanitizeEdgeVhosts(
   // POSIX sh, one pass, no per-file round trips (this runs over SSH).
   const script = [
     `for f in ${sq(sitesDir)}/*.conf; do`,
-    `  [ -f "$f" ] || continue;`,
+    // A host-side vhost may be a symlink into /etc/nginx/sites-available. That
+    // target is deliberately not mounted in the edge container, so leaving the
+    // link here makes nginx's include glob fail at startup. Materialize valid
+    // links before the container mounts this directory; remove dangling ones.
+    `  [ -e "$f" ] || [ -L "$f" ] || continue;`,
+    `  if [ -L "$f" ]; then`,
+    `    if [ ! -e "$f" ]; then`,
+    `      echo "dropped-dangling-link $f"; rm -f "$f"; continue;`,
+    `    fi;`,
+    `    if cat "$f" > "$f.osh-link"; then`,
+    `      rm -f "$f"; mv "$f.osh-link" "$f"; echo "materialized-link $f";`,
+    `    else`,
+    `      rm -f "$f.osh-link"; echo "dropped-unreadable-link $f"; rm -f "$f"; continue;`,
+    `    fi;`,
+    `  fi;`,
     // A real server_name is anything that isn't the `_` wildcard.
     `  if ! grep -qE '^[[:space:]]*server_name[[:space:]]+[^_;[:space:]]' "$f"; then`,
     `    echo "dropped-catchall $f"; rm -f "$f"; continue;`,
@@ -149,6 +163,12 @@ export async function sanitizeEdgeVhosts(
       onLog(vhostLog(`Dropped catch-all vhost ${file} — the edge image provides it.`, "warn"));
     } else if (action === "unset-default") {
       onLog(vhostLog(`Removed default_server from ${file} — the edge image owns it.`, "warn"));
+    } else if (action === "materialized-link") {
+      onLog(vhostLog(`Materialized linked edge vhost ${file} for the container mount.`, "warn"));
+    } else if (action === "dropped-dangling-link") {
+      onLog(vhostLog(`Dropped dangling edge vhost link ${file}.`, "warn"));
+    } else if (action === "dropped-unreadable-link") {
+      onLog(vhostLog(`Dropped unreadable edge vhost link ${file}.`, "warn"));
     }
   }
 }
