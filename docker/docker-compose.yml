@@ -112,16 +112,6 @@ services:
     # `:z` relabels for SELinux-enforcing hosts; a no-op elsewhere.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      # Read-write: cross-server migration data moves (direct-transfer.ts)
-      # rsync straight into a volume's on-host mountpoint when the TARGET is
-      # this server itself — that's a real filesystem path, not something the
-      # Docker socket exposes. Without this mount those rsyncs fail with
-      # "mkdir ... No such file or directory" even though `docker volume
-      # create`/`inspect` (socket-only) succeed. OPENSHIP_DOCKER_DATA_ROOT
-      # overrides the host path for a customized Docker `data-root`
-      # (`docker info --format '{{.DockerRootDir}}'`); same path on both
-      # sides of the mount so resolved mountpoints match container-side.
-      - ${OPENSHIP_DOCKER_DATA_ROOT:-/var/lib/docker}:${OPENSHIP_DOCKER_DATA_ROOT:-/var/lib/docker}
       - /var/lib/openship/edge/sites-enabled:/usr/local/openresty/nginx/conf/sites-enabled:z
       - /etc/letsencrypt:/etc/letsencrypt:z
       - /var/lib/openship/edge/acme:/var/www/acme:z

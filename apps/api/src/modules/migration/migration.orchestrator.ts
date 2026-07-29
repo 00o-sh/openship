@@ -156,6 +156,55 @@ export interface PendingItem {
   message?: string;
 }
 
+/**
+ * The service's ORIGINAL container id on the SOURCE, for building a
+ * `ServiceHandle` passed to `listSources()` — NOT null unless we genuinely
+ * never scanned one. `listSources()` treats a null containerId as "not
+ * deployed yet" and falls back to GUESSING the volume name from
+ * `service.volumes` + `namespaceVolumes` (the name OpenShip's OWN deploy
+ * pipeline would assign) — correct for the backup/restore use case
+ * `listSources` was built for, but wrong for an adopted source service (e.g.
+ * from Coolify), which was never namespaced by OpenShip: the guess doesn't
+ * match any volume that actually exists on the source, and enumeration
+ * silently produces a name the source (or target) rejects with "no such
+ * volume". Passing the real id makes `listSources` inspect the live
+ * container's actual `Mounts` instead, which is always correct.
+ */
+export function resolveScannedContainerId(
+  serviceName: string,
+  scannedContainerIds: Record<string, string>,
+): string | null {
+  return scannedContainerIds[serviceName] ?? null;
+}
+
+/** What `runResume` must actually call for one pending item, given any
+ *  operator-supplied override. Centralizing the decision (rather than
+ *  inlining it at each `link.transferX(...)` call site) is what makes an
+ *  override for a "no such volume" volume item actually reach the transfer —
+ *  a previous version computed `src` but then called
+ *  `transferVolume(item.source, …)`, silently ignoring it. */
+export type ResumeTransferPlan =
+  | { kind: "volume"; source: string }
+  | { kind: "bind"; asPath: true; source: string; dest: string }
+  | { kind: "bind"; asPath: false; source: string }
+  | { kind: "path"; source: string; dest: string };
+
+export function planResumeTransfer(
+  item: PendingItem,
+  overrides: Record<string, string>,
+): ResumeTransferPlan {
+  const source = overrides[item.key] ?? item.source;
+  if (item.kind === "volume") return { kind: "volume", source };
+  if (item.kind === "bind") {
+    // An override reads from a NEW source path but still writes to the
+    // ORIGINAL bind path (where the target container mounts it).
+    return source !== item.source
+      ? { kind: "bind", asPath: true, source, dest: item.source }
+      : { kind: "bind", asPath: false, source: item.source };
+  }
+  return { kind: "path", source, dest: item.dest ?? item.source };
+}
+
 /** moveData result: bytes written + the items that didn't make it + the volume
  *  names actually WRITTEN on the target (for optional cleanup after a failed
  *  deploy; excludes "keep"-resolved pre-existing volumes). */
@@ -1114,19 +1163,7 @@ class MigrationOrchestratorImpl {
           image: svc.image ?? null,
           env: {},
           volumes: svc.volumes ?? [],
-          // The service's ORIGINAL container on the SOURCE, if we scanned one
-          // (adopting sets this at discovery time) — NOT null. listSources()
-          // treats a null containerId as "not deployed yet" and falls back to
-          // GUESSING the volume name from service.volumes + namespaceVolumes
-          // (the name OpenShip's OWN deploy pipeline would assign) — correct
-          // for the backup/restore use case listSources was built for, but
-          // wrong here: an adopted source service (e.g. from Coolify) was never
-          // namespaced by OpenShip, so the guess doesn't match any volume that
-          // actually exists on the source, and enumeration silently produces a
-          // volume name the source (or target) rejects with "no such volume".
-          // Passing the real id makes listSources inspect the live container's
-          // actual Mounts instead, which is always correct.
-          containerId: scannedContainerIds[svc.name] ?? null,
+          containerId: resolveScannedContainerId(svc.name, scannedContainerIds),
           projectSlug,
           namespaceVolumes: svc.namespaceVolumes,
         };
@@ -1822,22 +1859,16 @@ class MigrationOrchestratorImpl {
       }
       try {
         for (const item of toRetry) {
-          const src = overrides[item.key] ?? item.source;
+          const plan = planResumeTransfer(item, overrides);
+          const src = plan.source;
           try {
-            if (item.kind === "volume") {
-              // BUG (fixed): this used to call transferVolume(item.source, …)
-              // — the STALE name from before an override — silently ignoring
-              // any override the caller supplied for a "no such volume" pending
-              // item. `src` (the override, falling back to item.source when
-              // none was given) is what must actually be transferred.
-              await link.transferVolume(src, () => {});
-            } else if (item.kind === "bind") {
-              // An override reads from a NEW source path but still writes to the
-              // ORIGINAL bind path (where the target container mounts it).
-              if (src !== item.source) await link.transferPath(src, item.source, () => {});
-              else await link.transferBind(item.source, () => {});
+            if (plan.kind === "volume") {
+              await link.transferVolume(plan.source, () => {});
+            } else if (plan.kind === "bind") {
+              if (plan.asPath) await link.transferPath(plan.source, plan.dest, () => {});
+              else await link.transferBind(plan.source, () => {});
             } else {
-              await link.transferPath(src, item.dest ?? item.source, () => {});
+              await link.transferPath(plan.source, plan.dest, () => {});
             }
             if (item.serviceName) resolvedServices.add(item.serviceName);
             log(`resolved ${item.key}`);

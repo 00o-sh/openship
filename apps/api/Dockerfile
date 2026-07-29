@@ -49,18 +49,6 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends openssh-client rsync git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# Docker CLI binary — cross-server migration (direct-transfer.ts) shells out
-# `docker save|load|tag|volume create` via CommandExecutor. That executor is a
-# LocalExecutor (plain child_process, no SSH) whenever a migration's source or
-# target server is the API host itself ("is_local" server / server-host mode),
-# so those commands run INSIDE this container. The Docker Engine API calls
-# elsewhere (dockerode over the socket bridge) don't need the CLI, but these
-# raw shell-outs do — without it every such transfer failed with
-# "docker: not found" (exit 127), even though /var/run/docker.sock is mounted.
-# Copy just the static client binary from the official CLI-only image instead
-# of apt-installing docker.io (which pulls in containerd/dockerd as well).
-COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
-
 # @repo/* are TypeScript-SOURCE workspace packages (package.json main =
 # src/index.ts) resolved via the ROOT package.json "workspaces" field — there
 # is NO node_modules/@repo; bun points straight at packages/*. tsup externalizes
