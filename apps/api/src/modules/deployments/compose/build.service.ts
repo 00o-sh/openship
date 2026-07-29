@@ -168,6 +168,11 @@ export async function buildComposeImages(opts: {
   //     buildCommand as long as it has something to CMD. Excluding them
   //     would drop them to neither bucket and they'd silently fail at
   //     deploy time with a misleading "No image available" error.
+  //   - A `framework === "docker"` sub-app ALWAYS counts too, even with both
+  //     commands empty: it builds from its own repo Dockerfile (the Dockerfile
+  //     owns install/build/start), so requiring a build or start command here
+  //     would drop every Dockerfile-based monorepo sub-app to neither bucket -
+  //     the same silent "No image available" failure.
   // External = compose rows with a pre-built image and no Dockerfile build.
   // ONE-TIME image handover (migration cutover): a service named here deploys
   // from an already-present image (a transferred / running container's image)
@@ -200,7 +205,8 @@ export async function buildComposeImages(opts: {
           // sub-app, or the #231 materialized app row) must be selected as
           // buildable HERE too. Keying off the raw row dropped it to neither
           // bucket → the misleading "No image available" the comment above warns of.
-          (!!(service.buildCommand ?? opts.snapshot.buildCommand) ||
+          ((service.framework ?? opts.snapshot.framework) === "docker" ||
+            !!(service.buildCommand ?? opts.snapshot.buildCommand) ||
             !!(service.startCommand ?? opts.snapshot.startCommand)))),
   );
   const external = enabled.filter(

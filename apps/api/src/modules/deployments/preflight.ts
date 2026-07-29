@@ -856,6 +856,12 @@ function checkConfig(snapshot: DeploymentConfigSnapshot, opts?: PreflightOptions
         subAppFailures.push(`sub-app "${svc.name}" missing rootDirectory`);
         continue;
       }
+      // A `docker` sub-app builds from its OWN Dockerfile under rootDirectory
+      // (its FROM is the image) — install/build/start commands are never
+      // consumed there, same as the single-project docker carve-out below.
+      // Requiring them here would block every Dockerfile-based monorepo
+      // sub-app (e.g. a Railway-style per-service-Dockerfile repo).
+      if (svc.framework === "docker") continue;
       const installFallback = svc.installCommand ?? snapshot.installCommand;
       const buildFallback = svc.buildCommand ?? snapshot.buildCommand;
       const startFallback = svc.startCommand ?? snapshot.startCommand;
