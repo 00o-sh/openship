@@ -422,10 +422,39 @@ include(":services:worker")
     ).toEqual(["services/api", "services/worker"]);
   });
 
+  it("parses a multi-line Kotlin include( … ) list", () => {
+    expect(
+      gradle.parseSubProjects(`rootProject.name = "monorepo"
+include(
+    ":app",
+    ":feature:login",
+    ":core:data",
+)
+`),
+    ).toEqual(["app", "feature/login", "core/data"]);
+  });
+
+  it("parses a Groovy include continued over lines with a trailing comma", () => {
+    expect(
+      gradle.parseSubProjects(`include ':app',
+        ':libs:shared'
+`),
+    ).toEqual(["app", "libs/shared"]);
+  });
+
   it("ignores includeBuild (composite builds, not modules)", () => {
     expect(
       gradle.parseSubProjects(`rootProject.name = "root"
 includeBuild("../shared-lib")
+include 'app'
+`),
+    ).toEqual(["app"]);
+  });
+
+  it("ignores includeFlat (sibling directories outside the repo root)", () => {
+    expect(
+      gradle.parseSubProjects(`rootProject.name = "root"
+includeFlat 'sibling-lib'
 include 'app'
 `),
     ).toEqual(["app"]);
