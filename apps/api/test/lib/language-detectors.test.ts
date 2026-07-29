@@ -198,6 +198,38 @@ describe("JVM port detection from Spring config", () => {
     });
     expect(r.port).toBe(8080);
   });
+
+  /** `application.yml`, where a `port:` key belongs to whichever mapping encloses it. */
+  const yamlPort = (yml: string) =>
+    detectStack([{ name: "pom.xml" }], undefined, {
+      "pom.xml":
+        "<project><parent><artifactId>spring-boot-starter-parent</artifactId></parent></project>",
+      "application.yml": yml,
+    }).port;
+
+  it("reads server.port from a YAML block", () => {
+    expect(yamlPort("server:\n  port: 8081\n")).toBe(8081);
+    expect(yamlPort('server:\n  port: "8081"\n')).toBe(8081);
+    expect(yamlPort("server:\n  ssl:\n    enabled: true\n  port: 8443\n")).toBe(8443);
+    expect(yamlPort("server: {port: 8081}\n")).toBe(8081);
+  });
+
+  it("keeps the stack default when only another mapping declares a port", () => {
+    expect(
+      yamlPort("server:\n  servlet:\n    context-path: /api\nspring:\n  mail:\n    port: 587\n"),
+    ).toBe(8080);
+    expect(yamlPort("spring:\n  data:\n    redis:\n      port: 6379\n")).toBe(8080);
+    expect(yamlPort("spring:\n  datasource:\n    port: 5432\n")).toBe(8080);
+    expect(yamlPort("server:\n  # port: 9999\n  servlet:\n    context-path: /api\n")).toBe(8080);
+  });
+
+  it("prefers the top-level server.port over management.server.port", () => {
+    expect(yamlPort("management:\n  server:\n    port: 9091\nserver:\n  port: 8081\n")).toBe(8081);
+  });
+
+  it("still reads a top-level bare port", () => {
+    expect(yamlPort("port: 7000\n")).toBe(7000);
+  });
 });
 
 describe(".NET recipe", () => {
