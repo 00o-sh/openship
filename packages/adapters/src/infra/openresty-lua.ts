@@ -189,20 +189,26 @@ export async function detectOpenRestyPaths(
  *
  * Primary (both modes): `openresty -t` then `-s reload` — graceful, zero-downtime.
  *
- * What happens when reload FAILS is where the two modes diverge, and getting it
- * wrong takes every site on the box down:
+ * What happens when reload FAILS is where this gets dangerous, because the wrong
+ * recovery takes every site on the box down. Three layers, in order:
  *
- *   • CONTAINER edge — the master IS pid 1. Killing it exits the container, the
- *     restart policy brings it back, and every proxied site 502s for the seconds
- *     in between. "Not running" is also impossible here: if the master were dead
- *     the container would already be gone. So a failed reload is a real problem to
- *     SURFACE, never something to recover by suicide.
- *   • BARE host — a failed reload usually does mean "not running", so starting it
- *     is right. But it is recovered WITHOUT a pattern kill: `pkill -f openresty`
- *     also matches a host-networked edge CONTAINER's master (see
- *     edge-check.test.ts), so the blind kill could take down the very edge it was
- *     trying to recover. Only start when no live master is on the pid file;
- *     otherwise report it rather than killing a process we can't identify.
+ *   1. `opts.containerEdge` — set by the two container-edge providers, so for the
+ *      paths we control the command CONTAINS no kill at all. Nothing to reason
+ *      about at runtime.
+ *   2. `/proc/1/comm` — a runtime backstop for any path that reaches the bare
+ *      command while actually running inside the edge container (a caller that
+ *      forgot the flag, `ensureLuaScripts` on a containerized box). The master IS
+ *      pid 1 there, so `pkill` kills the container's init: the `docker exec`
+ *      returns non-zero, registerRoute's self-rollback restores the PREVIOUS
+ *      vhost, and the deploy reports "Routing failed" while every site blips.
+ *      Restarting a dead master is the supervisor's job in that mode — fail
+ *      loudly, surfacing the reload's real stderr.
+ *   3. BARE host — a failed reload usually does mean "not running", so starting it
+ *      is right. But recover WITHOUT a pattern kill: `pkill -f openresty` also
+ *      matches a host-networked edge CONTAINER's master (see edge-check.test.ts),
+ *      so the blind kill could take down the very edge it was recovering. Only
+ *      start when no live master holds the pid file; otherwise report it rather
+ *      than killing a process we can't identify.
  */
 export function buildReloadCommand(
   paths: OpenRestyPaths,
@@ -215,8 +221,12 @@ ${paths.bin} -s reload 2>&1 || exit 1`;
 
   return `${paths.bin} -t 2>&1 || exit 1
 
-if ${paths.bin} -s reload 2>/dev/null; then
-  exit 0
+reload_err=$(${paths.bin} -s reload 2>&1) && exit 0
+
+if [ "$(cat /proc/1/comm 2>/dev/null)" = "openresty" ] || [ "$(cat /proc/1/comm 2>/dev/null)" = "nginx" ]; then
+  echo "openresty reload failed and openresty is PID 1 (containerized edge) — not killing it; the container supervisor owns restarts." >&2
+  echo "$reload_err" >&2
+  exit 1
 fi
 
 if [ -f ${paths.pidPath} ] && kill -0 "$(cat ${paths.pidPath} 2>/dev/null)" 2>/dev/null; then
@@ -305,6 +315,11 @@ http {
     default_type  application/octet-stream;
     sendfile      on;
     keepalive_timeout 65;
+    # See apps/edge/nginx.conf: the 64-byte default fails \`nginx -t\` outright
+    # ("could not build server_names_hash") for any server_name past ~63 chars,
+    # which refuses the reload and wedges every route on the box, not just the
+    # long one. Keep this in step with the containerized edge's value.
+    server_names_hash_bucket_size 128;
     include ${sitesDir}/*.conf;
 }
 `;

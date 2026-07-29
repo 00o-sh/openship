@@ -136,6 +136,7 @@ export {
 export { CloudInfraProvider } from "./infra/cloud";
 export { NoopInfraProvider } from "./infra/noop";
 export {
+  ACME_HTTP01_PORT,
   OPENRESTY_MGMT_PORT,
   EDGE_CONTAINER_MOUNTS,
   EDGE_HOST_PATHS,
@@ -173,6 +174,7 @@ export {
   EdgeMigrateRequested,
   freeEdgeTargets,
   invalidateEdgeContainer,
+  ourEdgeContainerRunning,
   probeEdge,
   resolveOurEdgeContainer,
   stopTargetsForStatus,

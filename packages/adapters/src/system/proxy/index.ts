@@ -24,6 +24,7 @@ export {
   EdgeConflictError,
   EdgeMigrateRequested,
   freeEdgeTargets,
+  ourEdgeContainerRunning,
   ourLuaOnHost,
   probeEdge,
   stopTargetsForStatus,

@@ -65,6 +65,10 @@ COPY --from=builder /app/package.json /app/bun.lock /app/pnpm-workspace.yaml /ap
 COPY --from=builder /app/packages ./packages
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/apps/api ./apps/api
+# The iRedMail engine is DATA, not code: mail setup step 7 tars this tree and
+# stages it onto the target box (see resolveLocalEngineDir). Without it the
+# containerized API fails the step with "tar: apps/email/engine: Cannot open".
+COPY --from=builder /app/apps/email/engine ./apps/email/engine
 
 ENV NODE_ENV=production
 EXPOSE 4000
