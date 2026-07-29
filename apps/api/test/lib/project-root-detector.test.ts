@@ -1084,4 +1084,34 @@ describe("discoverMonorepoApps - formal workspace monorepo with per-app Dockerfi
     expect(result).not.toBeNull();
     expect(result!.apps.map((app) => app.rootDirectory).sort()).toEqual(["apps/api", "apps/saas"]);
   });
+
+  it("sanitizes an npm-scoped package.json name into a Docker-safe service name", () => {
+    // pnpm/turborepo workspaces conventionally name sub-apps "@scope/pkg".
+    // That name is persisted as Service.name and used verbatim as a Docker
+    // container/network name downstream, which rejects "@" and "/" - this
+    // was the exact shape of the Virtalio repo that surfaced the bug.
+    const scopedSubApp = (dir: string, pkgName: string) => ({
+      rootDirectory: dir,
+      source: "workspace" as const,
+      files: [
+        { name: "package.json", type: "file" as const },
+        { name: "Dockerfile", type: "file" as const },
+      ],
+      packageJson: { name: pkgName },
+      fileContents: {},
+    });
+
+    const result = discoverMonorepoApps(root(), [
+      scopedSubApp("apps/api", "@virtalio/api"),
+      scopedSubApp("apps/saas", "@virtalio/saas"),
+      scopedSubApp("apps/marketing", "@virtalio/marketing"),
+    ]);
+
+    expect(result).not.toBeNull();
+    const names = result!.apps.map((app) => app.name).sort();
+    expect(names).toEqual(["virtalio-api", "virtalio-marketing", "virtalio-saas"]);
+    for (const name of names) {
+      expect(name).toMatch(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/);
+    }
+  });
 });

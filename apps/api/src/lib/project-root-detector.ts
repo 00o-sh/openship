@@ -6,6 +6,7 @@ import {
   getBuildImage,
   parseVercelConfig,
   extractCdTargets,
+  slugify,
   type WorkspaceDetector,
 } from "@repo/core";
 import {
@@ -708,7 +709,9 @@ export interface MonorepoWorkspace {
 export interface MonorepoApp {
   /** Stable identifier for this sub-app (e.g. "apps/web"). */
   id: string;
-  /** Display name (last segment of rootDirectory, or package.json name). */
+  /** Display name AND infra identifier (container/network name) - last segment
+   *  of rootDirectory, or a Docker-safe slug of package.json name. Always
+   *  matches `[a-zA-Z0-9][a-zA-Z0-9_.-]*`; see `sanitizeAppName`. */
   name: string;
   rootDirectory: string;
   stack: StackResult["stack"];
@@ -828,12 +831,29 @@ function isIndependentlyDeployable(candidate: ProjectRootSnapshot): boolean {
   return false;
 }
 
+/**
+ * `MonorepoApp.name` isn't just a display label - it's persisted as
+ * `Service.name` and consumed verbatim as a Docker container/network name
+ * (see compose/build.service.ts, runtime/docker.ts's `createServiceContainer`),
+ * which only allows `[a-zA-Z0-9][a-zA-Z0-9_.-]*`. A `package.json` name is
+ * frequently npm-scoped ("@virtalio/saas" - the norm for pnpm/turborepo
+ * workspaces), and "@"/"/" both fail that pattern, so a raw scoped name
+ * deploys fine right up until container creation, which fails with a cryptic
+ * "Invalid container name" from the Docker daemon. Fold the scope into the
+ * name (rather than dropping it) so sibling apps under different scopes,
+ * or the same package name under different scopes, don't collide.
+ */
+function sanitizeAppName(raw: string): string {
+  return slugify(raw.replace(/^@/, "").replace(/\//g, "-"));
+}
+
 function toMonorepoApp(snapshot: ProjectRootSnapshot, overrides?: { id?: string; rootDirectory?: string }): MonorepoApp {
   const rootDirectory = overrides?.rootDirectory ?? snapshot.rootDirectory;
   const segments = snapshot.rootDirectory.split("/");
   const stack = snapshot.stack;
+  const packageName = (snapshot.packageJson?.name as string | undefined)?.trim();
   const name =
-    (snapshot.packageJson?.name as string | undefined)?.trim() ||
+    (packageName && sanitizeAppName(packageName)) ||
     segments.at(-1) ||
     rootDirectory ||
     "app";
