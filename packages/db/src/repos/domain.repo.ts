@@ -338,6 +338,37 @@ export function createDomainRepo(db: Database) {
      * immediate Verify click. Free-managed rows are excluded; they
      * don't go through DNS verification (we own the suffix).
      */
+    /**
+     * Custom domains that are DNS-VERIFIED but still have no usable certificate.
+     *
+     * The gap this closes: `findPendingVerification` only returns `verified: false`
+     * rows, and the renewal sweep only looks at certs that already exist (it needs an
+     * expiry to compare). A domain whose first issuance failed is verified with
+     * `sslStatus: "provisioning"` — too verified for one job, no cert for the other —
+     * so nothing retried it and the operator had to click Verify + Redeploy by hand.
+     */
+    async findPendingSsl(limit = 50, organizationId?: string): Promise<Domain[]> {
+      const conds = [
+        eq(domain.verified, true),
+        eq(domain.domainType, "custom"),
+        inArray(domain.sslStatus, ["provisioning", "none", "pending"]),
+        // Externally-terminated TLS is not ours to issue; certbot never will.
+        eq(domain.externalIngress, false),
+      ];
+      if (organizationId) {
+        conds.push(
+          inArray(
+            domain.projectId,
+            db
+              .select({ id: project.id })
+              .from(project)
+              .where(eq(project.organizationId, organizationId)),
+          ),
+        );
+      }
+      return db.select().from(domain).where(and(...conds)).limit(limit);
+    },
+
     async findPendingVerification(
       beforeDate: Date,
       limit = 100,

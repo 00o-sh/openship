@@ -185,6 +185,13 @@ export interface NginxProviderOptions {
    * silently repoint `sitesDir` at a host directory nothing serves from.
    */
   pinPaths?: boolean;
+  /**
+   * This edge is a CONTAINER and commands run INSIDE it, so the OpenResty master
+   * is pid 1 — see buildReloadCommand. Set by the two container-edge builders in
+   * proxy/ensure-container-edge.ts; never inferred, because guessing it wrong
+   * means a failed reload kills the container and 502s every site.
+   */
+  containerEdge?: boolean;
 }
 
 const DEFAULT_CERT_DIR = "/etc/letsencrypt/live";
@@ -313,13 +320,15 @@ export class NginxProvider implements RoutingProvider, SslProvider {
   private readonly executor: CommandExecutor | null;
   private reloadCommand: string;
   private readonly pinPaths: boolean;
+  private readonly containerEdge: boolean;
 
   constructor(opts: NginxProviderOptions) {
     this.sitesDir = opts.paths.sitesDir;
     this.acmeEmail = opts.acmeEmail;
     this.certDir = opts.certDir ?? DEFAULT_CERT_DIR;
     this.executor = opts.executor ?? null;
-    this.reloadCommand = buildReloadCommand(opts.paths);
+    this.containerEdge = opts.containerEdge ?? false;
+    this.reloadCommand = buildReloadCommand(opts.paths, { containerEdge: this.containerEdge });
     this.pinPaths = opts.pinPaths ?? false;
   }
 
@@ -943,7 +952,9 @@ ${webhookLocation}${extraLocations}
         try {
           const freshPaths = await detectOpenRestyPaths(this.executor);
           this.sitesDir = freshPaths.sitesDir;
-          this.reloadCommand = buildReloadCommand(freshPaths);
+          this.reloadCommand = buildReloadCommand(freshPaths, {
+            containerEdge: this.containerEdge,
+          });
         } catch {
           // Detection failed - fall through with current cached paths
         }

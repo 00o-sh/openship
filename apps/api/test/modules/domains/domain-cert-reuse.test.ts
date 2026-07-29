@@ -45,8 +45,14 @@ vi.mock("../../../src/lib/controller-helpers", async (importOriginal) => {
 });
 
 vi.mock("../../../src/lib/domain-ssl", () => sslMocks);
+// Both accessors hand back the SAME host executor, which is the point: a local
+// server row and the host channel are one connection, so cert ops land on the
+// host's /etc/letsencrypt either way.
 vi.mock("../../../src/lib/ssh-manager", () => ({
-  sshManager: { withExecutor: vi.fn(async (_id: string, fn: (e: CommandExecutor) => unknown) => fn(hostExec.current!)) },
+  sshManager: {
+    withExecutor: vi.fn(async (_id: string, fn: (e: CommandExecutor) => unknown) => fn(hostExec.current!)),
+    withHostExecutor: vi.fn(async (fn: (e: CommandExecutor) => unknown) => fn(hostExec.current!)),
+  },
 }));
 vi.mock("@repo/adapters", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@repo/adapters")>();

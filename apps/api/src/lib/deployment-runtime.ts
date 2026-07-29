@@ -1,6 +1,5 @@
 import {
   createPlatform,
-  createHostExecutor,
   DockerRuntime,
   type CommandExecutor,
   type DockerConnectionOptions,
@@ -437,7 +436,17 @@ export async function resolveServerExecutor(
     if (!server.isLocal) {
       repos.server.update(server.id, { isLocal: true }).catch(() => {});
     }
-    return { id: server.id, executor: createHostExecutor(), conn, isLocal: true, ssh: null };
+    // POOLED, not a fresh `createHostExecutor()`. This executor outlives the call
+    // (the deploy holds it), so it can't be scoped with `withHostExecutor` — but
+    // `acquire` returns the shared host channel for a local row, which is what
+    // stops one deploy from leaving behind an sshd session (#291).
+    return {
+      id: server.id,
+      executor: await sshManager.acquire(server.id),
+      conn,
+      isLocal: true,
+      ssh: null,
+    };
   }
   const executor = await sshManager.acquire(server.id);
   const ssh = server.sshHost ? await buildSshConfig(server) : null;

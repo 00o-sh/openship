@@ -22,6 +22,7 @@ import {
   installOpenResty,
   installCertbot,
   foreignProxyOnEdge,
+  resolveOurEdgeContainer,
 } from "@repo/adapters";
 
 // ─── Shell quoting helper ─────────────────────────────────────────────────────
@@ -307,6 +308,26 @@ export async function stepEnsureReverseProxy(
   log: StepLogger,
 ): Promise<StepResult> {
   const stepId = 4;
+
+  // A CONTAINER edge is the main path now, and it has no host `openresty.service`
+  // to query or start — `systemctl start openresty` would fail on a box where the
+  // edge is perfectly healthy. Ask the container instead, and let the shared
+  // detector below confirm it really owns the ports (#288).
+  const edgeContainer = await resolveOurEdgeContainer(exec).catch(() => null);
+  if (edgeContainer) {
+    log(stepId, "info", `Edge container ${edgeContainer} provides OpenResty — checking it serves :80/:443...`);
+    const { blocked, owner } = await foreignProxyOnEdge(exec);
+    if (blocked) {
+      return {
+        stepId,
+        success: false,
+        message: `Ports 80/443 are held by another proxy (${owner}). Stop it, or migrate it from the dashboard, then rerun.`,
+      };
+    }
+    log(stepId, "info", `Openship's edge container is the active reverse proxy`);
+    return { stepId, success: true, message: "Openship's edge container is the active reverse proxy" };
+  }
+
   log(stepId, "info", "Checking OpenResty service status...");
 
   const active = (

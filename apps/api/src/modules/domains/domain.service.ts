@@ -18,7 +18,13 @@ import { repos, type Domain, type Project } from "@repo/db";
 import { NotFoundError, ConflictError, ValidationError, safeErrorMessage, normalizeCustomHostname, isValidCustomHostname, SYSTEM } from "@repo/core";
 import { platform, assertResourceInOrg } from "../../lib/controller-helpers";
 import { buildBackgroundContext, type RequestContext } from "../../lib/request-context";
-import { manageDomainSsl, installDomainCert, provisionDomainCertForVerify, verifyExistingCert } from "../../lib/domain-ssl";
+import {
+  manageDomainSsl,
+  installDomainCert,
+  provisionDomainCertForVerify,
+  verifyExistingCert,
+  tlsIssuedElsewhere,
+} from "../../lib/domain-ssl";
 import { getRoutingBaseDomain } from "../../lib/routing-domains";
 import { resolveRecords } from "../../lib/dns-resolver";
 import { resolveProjectServerHost } from "../../lib/server-target";
@@ -117,6 +123,13 @@ export async function addDomain(ctx: RequestContext, data: TAddDomainBody) {
     if (data.isPrimary && !existing.isPrimary) {
       await repos.domain.setPrimary(data.projectId, existing.id);
     }
+    // Re-saving with the toggle on must be able to ADD the www row that a first
+    // save (or an older build) never created.
+    if (data.includeWww) {
+      await addWwwSibling(ctx, data, hostname).catch((err) =>
+        console.warn(`[domains] www.${hostname} not added: ${safeErrorMessage(err)}`),
+      );
+    }
 
     const domain = {
       ...existing,
@@ -154,8 +167,51 @@ export async function addDomain(ctx: RequestContext, data: TAddDomainBody) {
     await repos.domain.setPrimary(data.projectId, domain.id);
   }
 
+  // "Include www" is a REQUEST FOR A SECOND HOSTNAME, so it has to exist as its own
+  // row: verification, DNS records, SSL and routing are all keyed per row, and
+  // `manageDomainSsl`'s www branch explicitly looks for `www.<host>` in the domain
+  // table. Without this the toggle set a flag nothing ever read (issue #289).
+  //
+  // Best-effort: the apex is what the caller asked for and already succeeded. A www
+  // that can't be claimed (already taken by another project, invalid) must not undo
+  // it — the apex stays, and the operator can add www by hand.
+  if (data.includeWww) {
+    await addWwwSibling(ctx, data, hostname).catch((err) =>
+      console.warn(`[domains] www.${hostname} not added: ${safeErrorMessage(err)}`),
+    );
+  }
+
   const records = await buildRecords(domain.hostname, token, project, domain.externalIngress);
   return { domain, records };
+}
+
+/**
+ * "Include www" asks for a SECOND routable hostname, not a flag on the apex row: the
+ * edge binds one `server_name` per row, and `domain-ssl.ts`'s www branch resolves the
+ * variant BY HOSTNAME — so it only exists once it has a row, which then verifies and
+ * certs on its own.
+ *
+ * Recurses through `addDomain` on purpose: hostname validation, the cross-project
+ * conflict check and the interrupted-connect retry path all live there and must apply
+ * to the variant too. Runs AFTER the apex so an apex conflict aborts before we mint a
+ * sibling, and the apex keeps `isPrimary`.
+ *
+ * NOTE: the row alone is not enough — `syncProjectPublicRoutes` deletes project-level
+ * rows the submitted endpoint list omits, so the caller must also include
+ * `www.<apex>` in `publicEndpoints` (the dashboard does this in the same save).
+ */
+async function addWwwSibling(
+  ctx: RequestContext,
+  data: TAddDomainBody,
+  hostname: string,
+): Promise<void> {
+  if (hostname.startsWith("www.")) return;
+  await addDomain(ctx, {
+    projectId: data.projectId,
+    hostname: `www.${hostname}`,
+    isPrimary: false,
+    externalIngress: data.externalIngress,
+  });
 }
 
 /**
@@ -332,11 +388,9 @@ async function withServerHostExecutor<T>(
 ): Promise<T | null> {
   const serverId = await resolveServerIdForProject(project);
   if (!serverId) return null;
-  const server = await repos.server.getInOrganization(serverId, ctx.organizationId).catch(() => null);
-  if (server?.isLocal) {
-    const { createHostExecutor } = await import("@repo/adapters");
-    return fn(createHostExecutor());
-  }
+  // No local/remote branch: `acquire` already returns the pooled HOST channel for a
+  // local row. The old branch handed out a fresh `createHostExecutor()` per call and
+  // never closed it — one leaked sshd session per domain/SSL status read (#291).
   return sshManager.withExecutor(serverId, fn).catch(() => null);
 }
 
@@ -362,12 +416,18 @@ async function edgeHostUnreachable(ctx: RequestContext, project: Project): Promi
   if (!serverId) return false;
   const server = await repos.server.getInOrganization(serverId, ctx.organizationId).catch(() => null);
   if (!server?.isLocal) return false;
-  const { createHostExecutor } = await import("@repo/adapters");
-  const exec = createHostExecutor();
-  return (
-    (await exec.exists("/.dockerenv").catch(() => false)) ||
-    (await exec.exists("/run/.containerenv").catch(() => false))
-  );
+  return sshManager
+    .withHostExecutor(
+      async (exec) =>
+        (await exec.exists("/.dockerenv").catch(() => false)) ||
+        (await exec.exists("/run/.containerenv").catch(() => false)),
+    )
+    // Acquiring the host channel THROWS when the API is containerized with no
+    // channel provisioned — which is precisely this function's "unreachable" case,
+    // so it must answer TRUE. Answering false would let verify march on to a
+    // certbot attempt that fails far from the cause, instead of surfacing
+    // HOST_CHANNEL_HINT below.
+    .catch(() => true);
 }
 
 const HOST_CHANNEL_HINT =
@@ -874,12 +934,99 @@ export interface PendingVerificationResult {
   stillPending: number;
   failed: number;
   total: number;
+  /** Phase 2: certs issued for already-verified domains that had none. */
+  sslIssued?: number;
+  /** Phase 2: still without a cert, backed off for a later run. */
+  sslRetrying?: number;
   details: Array<{
     hostname: string;
     status: "verified" | "still_pending" | "failed";
     message?: string;
     error?: string;
   }>;
+}
+
+/**
+ * Per-hostname retry backoff for the SSL phase, in memory.
+ *
+ * Let's Encrypt allows ~5 failures per hostname per hour; a flat 13-minute retry
+ * burns that on a genuinely misconfigured domain and gets the whole account rate-
+ * limited. Doubles 15m → 30m → 1h → 2h → 4h, capped at 6h, and keeps trying at that
+ * cadence forever rather than giving up — the operator's DNS/firewall fix must heal
+ * itself without another manual click.
+ *
+ * Deliberately NOT a DB column: an API restart clearing it is the behaviour we want
+ * (a redeploy/restart is a strong signal something changed), and it avoids a
+ * migration for state that is worthless after a few hours.
+ */
+const sslRetryAt = new Map<string, { next: number; delayMs: number }>();
+const SSL_RETRY_MIN_MS = 15 * 60_000;
+const SSL_RETRY_MAX_MS = 6 * 60 * 60_000;
+
+function sslRetryDue(id: string): boolean {
+  const e = sslRetryAt.get(id);
+  return !e || Date.now() >= e.next;
+}
+
+function sslRetryScheduled(id: string): void {
+  const prev = sslRetryAt.get(id);
+  const delayMs = Math.min(prev ? prev.delayMs * 2 : SSL_RETRY_MIN_MS, SSL_RETRY_MAX_MS);
+  sslRetryAt.set(id, { next: Date.now() + delayMs, delayMs });
+}
+
+/** Issued (or externally handled) — stop backing off, so a re-break retries fast. */
+function sslRetryCleared(id: string): void {
+  sslRetryAt.delete(id);
+}
+
+/**
+ * Phase 2 of the domain sweep: finish TLS for domains that are already verified but
+ * never got a certificate.
+ *
+ * Reuses `verifyDomainSsl` — the exact call the dashboard's own retry makes — so
+ * there is ONE issuance path, not a cron-flavoured copy of it. Best-effort per
+ * domain, matching the golden rule: routing/TLS never fails anything, it only
+ * reports. What changes is that it now self-heals instead of waiting for a human.
+ */
+async function issuePendingSsl(limit: number): Promise<{ issued: number; retrying: number }> {
+  const rows = await repos.domain.findPendingSsl(limit).catch(() => []);
+  let issued = 0;
+  let retrying = 0;
+
+  for (const d of rows) {
+    if (tlsIssuedElsewhere(d)) {
+      sslRetryCleared(d.id);
+      continue;
+    }
+    if (!sslRetryDue(d.id)) continue;
+
+    const project = await repos.project.findById(d.projectId).catch(() => null);
+    if (!project?.organizationId) continue;
+
+    try {
+      await verifyDomainSsl(
+        buildBackgroundContext({
+          userId: "",
+          organizationId: project.organizationId,
+          label: "domains:verify-pending",
+        }),
+        d.id,
+      );
+      const after = await repos.domain.findById(d.id).catch(() => null);
+      if (after?.sslStatus === "active") {
+        issued++;
+        sslRetryCleared(d.id);
+      } else {
+        retrying++;
+        sslRetryScheduled(d.id);
+      }
+    } catch {
+      retrying++;
+      sslRetryScheduled(d.id);
+    }
+  }
+
+  return { issued, retrying };
 }
 
 export async function verifyPendingDomains(opts?: {
@@ -961,6 +1108,11 @@ export async function verifyPendingDomains(opts?: {
       });
     }
   }
+
+  // Phase 2, same sweep: verified domains whose cert never landed.
+  const ssl = await issuePendingSsl(limit).catch(() => ({ issued: 0, retrying: 0 }));
+  result.sslIssued = ssl.issued;
+  result.sslRetrying = ssl.retrying;
 
   return result;
 }

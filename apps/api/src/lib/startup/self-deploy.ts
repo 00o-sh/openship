@@ -192,10 +192,14 @@ async function foreignProxyBlocksEdge(
   log?: (message: string, level?: "info" | "warn" | "error") => void,
 ): Promise<{ blocked: boolean; owner?: string }> {
   try {
-    const { createHostExecutor, foreignProxyOnEdge } = await import("@repo/adapters");
-    // Probe the HOST's :80/:443, not the api container's netns — createHostExecutor
-    // is LocalExecutor bare, SSH→host when containerized (OPENSHIP_HOST_SSH_*).
-    const { blocked, owner } = await foreignProxyOnEdge(createHostExecutor());
+    const { foreignProxyOnEdge } = await import("@repo/adapters");
+    const { sshManager } = await import("../ssh-manager");
+    // Probe the HOST's :80/:443, not the api container's netns — the host channel is
+    // LocalExecutor bare, SSH→host when containerized (OPENSHIP_HOST_SSH_*). Pooled,
+    // so there's nothing to dispose (see withHostExecutor).
+    const { blocked, owner } = await sshManager.withHostExecutor((exec) =>
+      foreignProxyOnEdge(exec),
+    );
     if (!blocked) return { blocked: false };
     log?.(
       `Not issuing TLS: ${owner} still owns ports 80/443, so Openship isn't the reverse proxy yet — ` +
@@ -419,9 +423,12 @@ export function registerSelfAdoptReconcile(): void {
       // left dark. Best-effort; root Linux only.
       if (isLinuxRoot()) {
         try {
-          const { createHostExecutor, recoverInterruptedTakeover } = await import("@repo/adapters");
-          // Recover takeover on the HOST (createHostExecutor: local bare, SSH→host containerized).
-          await recoverInterruptedTakeover(createHostExecutor(), (e) => console.log(`[self-deploy] ${e.message}`));
+          const { recoverInterruptedTakeover } = await import("@repo/adapters");
+          const { sshManager } = await import("../ssh-manager");
+          // Recover takeover on the HOST (local bare, SSH→host containerized).
+          await sshManager.withHostExecutor((exec) =>
+            recoverInterruptedTakeover(exec, (e) => console.log(`[self-deploy] ${e.message}`)),
+          );
         } catch {}
       }
 

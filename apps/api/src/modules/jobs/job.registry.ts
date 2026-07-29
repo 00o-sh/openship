@@ -115,14 +115,24 @@ export const SYSTEM_JOB_DEFS: SystemJobDef[] = [
   {
     key: "domains:verify-pending",
     label: "Domain DNS verification",
-    // Re-checks every pending custom domain and auto-flips it to verified once
-    // DNS propagates — the lazy half of the verify lifecycle. Off the :00/:30
-    // marks. Cloud verifies via Oblien too, so gate only desktop out.
+    // TWO phases, one sweep: (1) re-check pending custom domains and flip them to
+    // verified once DNS propagates, (2) finish TLS for domains that verified but
+    // whose first issuance failed — those sat in `provisioning` forever, needing a
+    // manual Verify + Redeploy (#289), because the verify sweep only selects
+    // unverified rows and the renewal sweep only selects certs that already exist.
+    // Off the :00/:30 marks. Cloud verifies via Oblien too, so gate only desktop out.
     defaultCron: "*/13 * * * *",
     available: () => platform().target !== "desktop",
     run: async () => {
       const r = await verifyPendingDomains();
-      return { verified: r.verified, failed: r.failed, pending: r.stillPending, total: r.total };
+      return {
+        verified: r.verified,
+        failed: r.failed,
+        pending: r.stillPending,
+        total: r.total,
+        sslIssued: r.sslIssued ?? 0,
+        sslRetrying: r.sslRetrying ?? 0,
+      };
     },
   },
   {

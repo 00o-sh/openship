@@ -5,7 +5,8 @@
  */
 
 import type { CommandExecutor } from "../../../types";
-import type { ProxyKind, ProxyScanResult } from "../../types";
+import type { ImportedSite, ProxyKind, ProxyScanResult } from "../../types";
+import { EDGE_CONTAINER_MOUNTS } from "../../../infra/openresty-lua";
 import { scanNginx, scanOpenshipEdge } from "./nginx";
 import { scanCaddy } from "./caddy";
 import { scanApache } from "./apache";
@@ -123,3 +124,43 @@ export function canImportProxy(proxy: ProxyKind | undefined): boolean {
 }
 
 export { scanNginx, scanOpenshipEdge, scanCaddy, scanApache, scanTraefik };
+
+/** One adopted static site whose docroot the containerized edge cannot read. */
+export interface UnreachableStaticRoot {
+  /** Primary hostname (what the operator recognises). */
+  host: string;
+  /** The docroot as the foreign proxy declared it — a HOST path. */
+  root: string;
+}
+
+/**
+ * Adopted static sites whose docroot lives outside the edge container's bind
+ * mounts — i.e. the paths the edge simply cannot see.
+ *
+ * A bare host proxy could serve any directory on the box; the containerized edge
+ * only sees {@link EDGE_CONTAINER_MOUNTS}. Migrating `root /home/app/dist`
+ * verbatim therefore produces a vhost that answers **500** (`try_files` →
+ * `/index.html` → "rewrite or internal redirection cycle"), which reads as a
+ * broken site rather than a missing mount. Surfacing this BEFORE the cutover lets
+ * the caller offer the real choices: copy the tree under `/opt/openship/static`
+ * (already mounted), add a bind mount, or knowingly leave it.
+ *
+ * Returns [] for a bare-host edge, where every path is readable already.
+ */
+export function unreachableStaticRoots(
+  sites: ImportedSite[],
+  opts: { containerEdge: boolean },
+): UnreachableStaticRoot[] {
+  if (!opts.containerEdge) return [];
+  const visible = EDGE_CONTAINER_MOUNTS.map((m) => m.host.replace(/\/+$/, ""));
+  const out: UnreachableStaticRoot[] = [];
+  for (const site of sites) {
+    if (site.target.kind !== "static") continue;
+    const root = site.target.root.replace(/\/+$/, "");
+    // Prefix match on a path BOUNDARY — `/opt/openship/staticstuff` is not
+    // inside `/opt/openship/static`.
+    const reachable = visible.some((v) => root === v || root.startsWith(`${v}/`));
+    if (!reachable) out.push({ host: site.serverNames[0] ?? root, root: site.target.root });
+  }
+  return out;
+}

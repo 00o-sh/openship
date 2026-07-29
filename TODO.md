@@ -317,6 +317,53 @@ Goal: mail ships as **server image + admin image**, administrable on its own.
 
 ---
 
+## Migrate / edge
+
+### Adopted static roots need an explicit decision step in the CLI
+
+**Shipped:** `unreachableStaticRoots()`
+(`packages/adapters/src/system/proxy/import/index.ts`) reports adopted `static`
+sites whose docroot sits outside `EDGE_CONTAINER_MOUNTS` — i.e. the paths the
+containerized edge cannot read.
+
+**Not shipped:** anything that acts on it. Found on a live 15-site migration: two
+sites (`root /home/App.Front/dist/site/browser`) came up **500** —
+`rewrite or internal redirection cycle while internally redirecting to
+"/index.html"`, because `try_files` can't find an index in a directory that isn't
+mounted. Nothing warned; the operator saw two broken sites and no reason.
+
+- [ ] Migrate wizard: after the scan, if `unreachableStaticRoots()` is non-empty,
+      show the paths and make the operator choose per site (or once for all):
+      **copy** the tree under `/opt/openship/static` (already mounted — works
+      immediately, but a snapshot: rebuilding the frontend needs a re-copy),
+      **mount** the host path into the edge (correct long-term; costs an edge
+      recreate, which blips every site on the box), or **leave** it with the 500
+      spelled out. Same shape as the existing "N config items won't migrate"
+      block, but a decision rather than a warning.
+- [ ] Whichever action runs must rewrite the route's `staticRoot` (and the
+      `<slug>.route.json` beside the vhost — `provisionCert` replays it after every
+      renewal, so a root fixed only in the `.conf` reverts on renew).
+- [ ] The mount path needs a way to add a bind mount without hand-editing
+      `docker-compose.yml` — the edge is the one container whose mounts depend on
+      what the box was serving before us.
+
+### SSL provisioning is invisible in the deploy log
+
+A new project's route is registered with `tls: true`, but the 443 block is only
+emitted once the cert exists (`packages/adapters/src/infra/nginx.ts:594`
+`route.tls && certsExist(domain)`), so there is a ~1 minute window where the site
+answers HTTP and nothing on HTTPS. Verified end-to-end on a live box: cert written
+`01:00:13.137`, vhost re-rendered with TLS `01:00:13.661`, `https=200` right after
+— the pipeline is correct, but during the gap it is indistinguishable from broken,
+and two people have now reported it as an SSL bug.
+
+- [ ] Log it: "route live on HTTP — provisioning the certificate, HTTPS in ~1 min"
+      at registration, then a line when the cert lands (or fails). Issuance is
+      best-effort by design ("domains never fail a deploy"), which is exactly why
+      the *silence* has to go.
+
+---
+
 ## Open TODO markers in code
 
 Verified present; listed so they aren't lost.

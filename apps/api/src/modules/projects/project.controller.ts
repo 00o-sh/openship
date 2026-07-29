@@ -2000,6 +2000,7 @@ export async function connectDomain(c: Context) {
       hostname: body.domain.trim(),
       isPrimary: true,
       externalIngress: body.externalIngress ?? false,
+      includeWww: body.includeWww ?? false,
     });
 
     audit.recordAsync(auditContextFrom(c, organizationId, userId), {
