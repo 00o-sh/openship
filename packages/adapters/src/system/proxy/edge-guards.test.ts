@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -86,6 +86,25 @@ describe("sanitizeEdgeVhosts (real shell, real files)", () => {
     await sanitizeEdgeVhosts(new LocalExecutor(), dir, (l) => said.push(l.message));
     expect(await readFile(join(dir, "onvo.conf"), "utf8")).toBe(once);
     expect(said).toEqual([]); // nothing left to report
+  });
+
+  it("materializes valid symlinks and removes dangling links before the container mounts them", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "openship-vhosts-links-"));
+    const source = join(dir, "source.conf");
+    const linked = join(dir, "linked.conf");
+    const dangling = join(dir, "dangling.conf");
+    await writeFile(source, PLAIN_VHOST);
+    await symlink(source, linked);
+    await symlink(join(dir, "missing.conf"), dangling);
+
+    const said: string[] = [];
+    await sanitizeEdgeVhosts(new LocalExecutor(), dir, (l) => said.push(l.message));
+
+    expect((await lstat(linked)).isSymbolicLink()).toBe(false);
+    expect(await readFile(linked, "utf8")).toBe(PLAIN_VHOST);
+    expect(await readdir(dir)).not.toContain("dangling.conf");
+    expect(said.join("\n")).toMatch(/Materialized linked edge vhost .*linked\.conf/);
+    expect(said.join("\n")).toMatch(/Dropped dangling edge vhost link .*dangling\.conf/);
   });
 });
 
