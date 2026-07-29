@@ -983,10 +983,11 @@ function sslRetryCleared(id: string): void {
  * Phase 2 of the domain sweep: finish TLS for domains that are already verified but
  * never got a certificate.
  *
- * Reuses `verifyDomainSsl` — the exact call the dashboard's own retry makes — so
- * there is ONE issuance path, not a cron-flavoured copy of it. Best-effort per
- * domain, matching the golden rule: routing/TLS never fails anything, it only
- * reports. What changes is that it now self-heals instead of waiting for a human.
+ * Reuses `manageDomainSsl("provision")`, the same locked/persisted issuance
+ * primitive as the interactive flow. A read-only `verifyDomainSsl` recheck is
+ * insufficient here: when the first ACME order genuinely failed there is no
+ * certificate to discover. Best-effort per domain, matching the golden rule:
+ * routing/TLS never fails anything, it only reports.
  */
 async function issuePendingSsl(limit: number): Promise<{ issued: number; retrying: number }> {
   const rows = await repos.domain.findPendingSsl(limit).catch(() => []);
@@ -1004,14 +1005,10 @@ async function issuePendingSsl(limit: number): Promise<{ issued: number; retryin
     if (!project?.organizationId) continue;
 
     try {
-      await verifyDomainSsl(
-        buildBackgroundContext({
-          userId: "",
-          organizationId: project.organizationId,
-          label: "domains:verify-pending",
-        }),
-        d.id,
-      );
+      await manageDomainSsl(d.hostname, {
+        action: "provision",
+        projectId: d.projectId ?? undefined,
+      });
       const after = await repos.domain.findById(d.id).catch(() => null);
       if (after?.sslStatus === "active") {
         issued++;

@@ -72,6 +72,59 @@ describe("buildProjectRouteDomains", () => {
     const custom = planned.find((domain) => domain.hostname === "azharmedicinegirls.org");
     expect(custom?.domainType).toBe("custom");
     expect(custom?.isPrimary).toBe(true);
+    expect(custom?.requiresSslTooling).toBe(true);
+    expect(custom?.provisionSsl).toBe(false);
+  });
+
+  it("prepares SSL tooling for pending custom routes without issuing a certificate", () => {
+    const [route] = buildProjectRouteDomains({
+      project: { slug: "my-app" } as any,
+      projectDomains: [
+        {
+          hostname: "app.example.com",
+          verified: false,
+          externalIngress: false,
+          manualSsl: false,
+        } as any,
+      ],
+      publicEndpoints: [
+        { port: 3000, customDomain: "app.example.com", domainType: "custom" },
+      ],
+      runtimeName: "docker",
+      usesManagedRouting: true,
+    });
+
+    expect(route).toMatchObject({
+      hostname: "app.example.com",
+      requiresSslTooling: true,
+      provisionSsl: false,
+      verified: false,
+    });
+  });
+
+  it("does not prepare certbot for external-ingress custom routes", () => {
+    const [route] = buildProjectRouteDomains({
+      project: { slug: "my-app" } as any,
+      projectDomains: [
+        {
+          hostname: "app.example.com",
+          verified: false,
+          externalIngress: true,
+          manualSsl: false,
+        } as any,
+      ],
+      publicEndpoints: [
+        { port: 3000, customDomain: "app.example.com", domainType: "custom" },
+      ],
+      runtimeName: "docker",
+      usesManagedRouting: true,
+    });
+
+    expect(route).toMatchObject({
+      requiresSslTooling: false,
+      provisionSsl: false,
+      tls: false,
+    });
   });
 
   it("still attaches the free .opsh.io fallback when there is no custom domain", () => {
@@ -147,7 +200,9 @@ describe("buildServiceRouteDomains — custom-domain SSL gate", () => {
     });
     expect(route?.hostname).toBe("api.example.com");
     expect(route?.domainType).toBe("custom");
+    expect(route?.requiresSslTooling).toBe(true);
     expect(route?.provisionSsl).toBe(false);
+    expect(route?.verified).toBe(false);
   });
 
   it("provisions SSL only once the custom domain row is verified", () => {
@@ -161,7 +216,9 @@ describe("buildServiceRouteDomains — custom-domain SSL gate", () => {
       usesManagedRouting: true,
       domainByHostname,
     });
+    expect(route?.requiresSslTooling).toBe(true);
     expect(route?.provisionSsl).toBe(true);
+    expect(route?.verified).toBe(true);
   });
 
   it("canonicalizes a scheme/slash-dressed custom domain to the stored host", () => {

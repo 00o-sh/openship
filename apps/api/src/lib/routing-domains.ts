@@ -10,6 +10,13 @@ import { generateToken } from "./domain-token";
 export interface PlannedRouteDomain {
   hostname: string;
   tls: boolean;
+  /**
+   * The serving host must have the local TLS toolchain ready for this route.
+   * This is intentionally broader than `provisionSsl`: pending custom domains
+   * need certbot installed during their first deploy even though issuance waits
+   * for verification.
+   */
+  requiresSslTooling: boolean;
   provisionSsl: boolean;
   isCloud: boolean;
   targetPort?: number;
@@ -113,11 +120,18 @@ export function buildProjectRouteDomains(opts: {
     // uploaded cert and never run certbot, even behind an external edge.
     const manualSsl = !!domainRow?.manualSsl;
 
+    const requiresSslTooling =
+      usesCertbotSsl(runtimeName) &&
+      !managed.isManaged &&
+      !route.skipSsl &&
+      !external &&
+      !manualSsl;
+
     planned.push({
       hostname: normalized,
       tls: !external || manualSsl,
-      provisionSsl:
-        usesCertbotSsl(runtimeName) && !managed.isManaged && !route.skipSsl && !external && !manualSsl && isVerified,
+      requiresSslTooling,
+      provisionSsl: requiresSslTooling && isVerified,
       isCloud: managed.isManaged,
       ...(route.destination?.targetPort !== undefined
         ? { targetPort: route.destination.targetPort }
@@ -247,11 +261,17 @@ export function buildServiceRouteDomains(opts: {
     // When the domain map isn't supplied (edit/delete reconcile, which doesn't
     // provision SSL), this stays false and no cert work is attempted.
     const isVerified = managed.isManaged ? true : (domainRow?.verified ?? false);
+    const requiresSslTooling =
+      usesCertbotSsl(runtimeName) &&
+      endpoint.domainType === "custom" &&
+      !external &&
+      !manualSsl;
+
     planned.push({
       hostname,
       tls: !external || manualSsl,
-      provisionSsl:
-        usesCertbotSsl(runtimeName) && endpoint.domainType === "custom" && !external && !manualSsl && isVerified,
+      requiresSslTooling,
+      provisionSsl: requiresSslTooling && isVerified,
       isCloud: managed.isManaged,
       targetPort: endpoint.port,
       domainType: endpoint.domainType,
@@ -259,6 +279,7 @@ export function buildServiceRouteDomains(opts: {
       serviceId: service.id,
       isPrimary: false,
       createIfMissing: true,
+      verified: isVerified,
     });
   }
 
