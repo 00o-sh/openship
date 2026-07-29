@@ -137,6 +137,46 @@ describe("rush.json detector", () => {
       ),
     ).toEqual(["apps/app"]);
   });
+
+  it("reads a JSONC rush.json (the shape `rush init` generates)", () => {
+    expect(
+      rush.parseSubProjects(`/**
+ * This is the main configuration file for Rush.
+ * For full documentation, please see https://rushjs.io
+ */
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/rush/v5/rush.schema.json",
+  "rushVersion": "5.140.0",
+  "pnpmVersion": "8.15.8",
+
+  /**
+   * Rush can manage everything in the repo.
+   */
+  "projects": [
+    // The web app
+    {
+      "packageName": "@org/app",
+      "projectFolder": "apps/app"
+    },
+    {
+      "packageName": "@org/lib",
+      "projectFolder": "libraries/lib" // shared code
+    }
+  ]
+}
+`),
+    ).toEqual(["apps/app", "libraries/lib"]);
+  });
+
+  it("keeps a `//` that lives inside a JSON string", () => {
+    expect(
+      rush.parseSubProjects(`{
+  "$schema": "https://developer.microsoft.com/json-schemas/rush/v5/rush.schema.json",
+  "projects": [{ "packageName": "@org/app", "projectFolder": "apps/app" }]
+}
+`),
+    ).toEqual(["apps/app"]);
+  });
 });
 
 // ─── Cargo (Rust) ────────────────────────────────────────────────────────────
@@ -321,6 +361,39 @@ describe("pom.xml (Maven) detector", () => {
   <groupId>com.example</groupId>
   <artifactId>app</artifactId>
   <version>1.0.0</version>
+</project>
+`),
+    ).toEqual([]);
+  });
+
+  it("ignores commented-out <module> entries", () => {
+    expect(
+      maven.parseSubProjects(`<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <packaging>pom</packaging>
+  <modules>
+    <module>app</module>
+    <!-- <module>legacy-api</module> -->
+    <!--
+      <module>experimental</module>
+    -->
+    <module>services/api</module>
+  </modules>
+</project>
+`),
+    ).toEqual(["app", "services/api"]);
+  });
+
+  it("returns [] when the whole <modules> block is commented out", () => {
+    expect(
+      maven.parseSubProjects(`<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <artifactId>app</artifactId>
+  <!--
+  <modules>
+    <module>old</module>
+  </modules>
+  -->
 </project>
 `),
     ).toEqual([]);
