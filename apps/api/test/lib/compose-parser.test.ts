@@ -493,4 +493,30 @@ services:
     const parsed = parseComposeFile(`version: "3.9"\nnetworks:\n  default:\n`);
     expect(parsed.services).toEqual([]);
   });
+
+  it("resolves `<<` merge keys so an anchored environment block reaches the service", () => {
+    const parsed = parseComposeFile(`
+x-environment: &shared
+  DB_HOST: postgres
+  RAILS_ENV: production
+  SETTINGS__APP_COMPONENT: base
+
+services:
+  web:
+    image: app:latest
+    environment:
+      <<: *shared
+      SETTINGS__APP_COMPONENT: web
+`);
+    // The yaml package parses as YAML 1.2, where `<<` is an ordinary key unless
+    // merge support is enabled. Left off, every anchored var is dropped and the
+    // unresolved anchor lands as a literal "<<" var stringified to
+    // "[object Object]" - which deploy.service.ts then spreads into the
+    // container environment. An explicit key still wins over the merged one.
+    expect(parsed.services[0]?.environment).toEqual({
+      DB_HOST: "postgres",
+      RAILS_ENV: "production",
+      SETTINGS__APP_COMPONENT: "web",
+    });
+  });
 });
