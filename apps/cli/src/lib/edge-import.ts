@@ -29,6 +29,28 @@ export async function waitForApiHealth(port: string, tries: number): Promise<boo
   return false;
 }
 
+/**
+ * Wait for the EDGE container to actually be running — not just the API.
+ *
+ * Registration reloads the edge via `docker exec <edge> …`, which throws a raw
+ * `(HTTP code 409) … container is not running` against a container that is still
+ * starting. `compose up` reports the edge "Started" the instant it's created, and
+ * we only waited on API health, so the import could fire into that gap and every
+ * site failed with an identical, misleading 409 — then the edge finished starting
+ * and served fine. Gating on the edge's actual running state closes that race.
+ */
+export async function waitForEdgeRunning(tries: number): Promise<boolean> {
+  const exec = new LocalExecutor();
+  for (let i = 0; i < tries; i++) {
+    const out = await exec
+      .exec(`docker inspect -f '{{.State.Running}}' ${EDGE_CONTAINER_NAME}`)
+      .catch(() => "");
+    if (out.trim() === "true") return true;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  return false;
+}
+
 export interface EdgeImportOutcome {
   ok: boolean;
   registered: string[];
@@ -58,6 +80,14 @@ export async function importMigratedSites(
   ).start();
   if (!(await waitForApiHealth(apiPort, 60))) {
     const error = "API didn't become healthy in time";
+    spinner.warn(`${error} — migrated sites not imported. Re-run \`openship up\` to retry.`);
+    return { ok: false, registered: [], error };
+  }
+  // The edge must be RUNNING before we register: the reload execs into it, and a
+  // container that's still starting 409s. Without this gate the whole import
+  // fails against the edge's own not-yet-running container (the migration race).
+  if (!(await waitForEdgeRunning(60))) {
+    const error = `the ${EDGE_CONTAINER_NAME} container isn't running yet`;
     spinner.warn(`${error} — migrated sites not imported. Re-run \`openship up\` to retry.`);
     return { ok: false, registered: [], error };
   }

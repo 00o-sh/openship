@@ -8,6 +8,27 @@ import { logEntry, sq } from "./local-shell";
 const DEFAULT_SOCKET = "/var/run/docker.sock";
 
 /**
+ * Turn dockerode's opaque "container is not running" 409 into a message that
+ * names the edge and says what to do.
+ *
+ * A `docker exec` against a container that isn't running throws the daemon's raw
+ * `(HTTP code 409) … container <id> is not running`. It prints the RESOLVED id,
+ * not the name, so the error reads like an unrelated app/upstream failure. During
+ * `openship up` migration this surfaced as SIX identical 409s against the edge's
+ * OWN id while the edge container was still starting — a race, not a broken site.
+ */
+function explainEdgeExecError(err: unknown, containerName: string): Error {
+  const msg = (err as { message?: string })?.message ?? String(err);
+  if (/is not running|not running|409/i.test(msg)) {
+    return new Error(
+      `edge container "${containerName}" is not running yet (still starting, or stopped) — ` +
+        `wait for it to be up (docker start ${containerName}) and retry.`,
+    );
+  }
+  return err instanceof Error ? err : new Error(msg);
+}
+
+/**
  * Where the edge's config files are reachable from:
  *
  *   "mounted"   — the routing volumes are mounted into THIS process (the compose
@@ -69,22 +90,31 @@ export class DockerEdgeExecutor implements CommandExecutor {
     command: string,
   ): Promise<{ code: number; stdout: string; stderr: string }> {
     const container = this.docker.getContainer(this.containerName);
-    const exec = await container.exec({
-      Cmd: ["/bin/sh", "-c", command],
-      AttachStdout: true,
-      AttachStderr: true,
-      Tty: false,
-    });
-    // NO `hijack` — and it must stay that way. Hijack makes docker-modem request a
-    // connection upgrade; the daemon answers `101 Switching Protocols`, and Bun's
-    // node:http does not surface that upgrade the way modem expects, so every exec
-    // died with `(HTTP code 101) unexpected`. The api image runs Bun, so in
-    // docker-edge mode that broke EVERY edge operation — config reload, certbot,
-    // and site registration all failed while the edge itself looked healthy.
-    // Verified both ways under Bun: hijack=true → 101; hijack=false → stdout,
-    // stderr and exit code all correct. Hijack only exists for interactive stdin,
-    // which no edge command uses.
-    const stream = await exec.start({ stdin: false });
+    let exec: Dockerode.Exec;
+    let stream: NodeJS.ReadWriteStream;
+    try {
+      exec = await container.exec({
+        Cmd: ["/bin/sh", "-c", command],
+        AttachStdout: true,
+        AttachStderr: true,
+        Tty: false,
+      });
+      // NO `hijack` — and it must stay that way. Hijack makes docker-modem request a
+      // connection upgrade; the daemon answers `101 Switching Protocols`, and Bun's
+      // node:http does not surface that upgrade the way modem expects, so every exec
+      // died with `(HTTP code 101) unexpected`. The api image runs Bun, so in
+      // docker-edge mode that broke EVERY edge operation — config reload, certbot,
+      // and site registration all failed while the edge itself looked healthy.
+      // Verified both ways under Bun: hijack=true → 101; hijack=false → stdout,
+      // stderr and exit code all correct. Hijack only exists for interactive stdin,
+      // which no edge command uses.
+      stream = await exec.start({ stdin: false });
+    } catch (err) {
+      // A not-yet-running edge here 409s with an id, not a name — rewrite it so the
+      // caller sees "edge is still starting", not a bare Docker error. See #291-era
+      // migration race: the reload raced the edge container's own startup.
+      throw explainEdgeExecError(err, this.containerName);
+    }
 
     const outStream = new PassThrough();
     const errStream = new PassThrough();
