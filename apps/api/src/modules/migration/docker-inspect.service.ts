@@ -39,6 +39,13 @@ export { reconcileStack } from "./docker-reconcile";
 // Cap the connect+reachability probe so a hung SSH docker forward can't leave the
 // migration scan spinning on "Connecting to Docker…" forever (the reported bug).
 const REACHABILITY_TIMEOUT_MS = 25_000;
+// Cap the rest of discovery (listing + inspecting containers/volumes/networks,
+// reading compose files, scanning the proxy, image env lookups, project
+// recovery) as one unit — see the comment at its call site. Generous: a large
+// stack (hundreds of containers) legitimately needs more than a few seconds
+// at mapLimit's concurrency of 5, but this still guarantees the scan fails
+// loudly well under a minute instead of hanging indefinitely.
+const DISCOVERY_TIMEOUT_MS = 90_000;
 
 async function mapLimit<T, R>(
   items: T[],
@@ -140,156 +147,182 @@ export async function discoverServerStack(
       throw new Error(`Docker daemon is not reachable on this server. ${safeErrorMessage(err)}`);
     }
 
-    step("Listing containers, volumes and networks…");
-    const [containers, volumes, networks] = await Promise.all([
-      rt.listAllContainers(),
-      rt.listAllVolumes(),
-      rt.listAllNetworks(),
-    ]);
+    // Every step below makes several Docker API calls over the SAME SSH
+    // bridge the reachability ping above just proved is up. In rare cases
+    // (observed empirically; no reproducible trigger found) ONE such call can
+    // still hang indefinitely with no error even on an otherwise-healthy
+    // bridge — without a bound here, that stalls the whole migration scan
+    // forever past the point REACHABILITY_TIMEOUT_MS already cleared. Bound
+    // the rest of discovery as one unit so a stuck call surfaces as a clear,
+    // retryable error (`step`'s last message tells you which stage) instead
+    // of a silent "stuck on Listing containers…" spinner.
+    return await withTimeout(
+      (async (): Promise<DiscoveredStack> => {
+        step("Listing containers, volumes and networks…");
+        const [containers, volumes, networks] = await Promise.all([
+          rt.listAllContainers(),
+          rt.listAllVolumes(),
+          rt.listAllNetworks(),
+        ]);
 
-    // Split by ownership. GENERIC candidates (no openship.* label) feed the
-    // normal adopt grid. OPENSHIP-owned deploy containers are recovered as their
-    // own projects (re-import) — build helpers (`openship.build`) are neither.
-    //
-    // FLAT DOCKER mode ignores the openship.* namespace: every container (minus
-    // transient build helpers) is a generic candidate, so Openship-managed
-    // workloads adopt as plain compose/standalone — no managed set, no re-import.
-    const isOpenshipOwned = (labels: Record<string, string>) =>
-      Object.keys(labels).some((k) => k === "openship" || k.startsWith("openship."));
-    const managed = flatDocker ? [] : containers.filter((c) => isOpenshipOwned(c.labels));
-    const candidates = flatDocker
-      ? containers.filter((c) => !isBuildHelper(c.labels))
-      : containers.filter((c) => !isOpenshipOwned(c.labels));
-    const managedApp = managed.filter(
-      (c) => c.labels["openship.project"] && !isBuildHelper(c.labels),
-    );
+        // Split by ownership. GENERIC candidates (no openship.* label) feed the
+        // normal adopt grid. OPENSHIP-owned deploy containers are recovered as their
+        // own projects (re-import) — build helpers (`openship.build`) are neither.
+        //
+        // FLAT DOCKER mode ignores the openship.* namespace: every container (minus
+        // transient build helpers) is a generic candidate, so Openship-managed
+        // workloads adopt as plain compose/standalone — no managed set, no re-import.
+        const isOpenshipOwned = (labels: Record<string, string>) =>
+          Object.keys(labels).some((k) => k === "openship" || k.startsWith("openship."));
+        const managed = flatDocker ? [] : containers.filter((c) => isOpenshipOwned(c.labels));
+        const candidates = flatDocker
+          ? containers.filter((c) => !isBuildHelper(c.labels))
+          : containers.filter((c) => !isOpenshipOwned(c.labels));
+        const managedApp = managed.filter(
+          (c) => c.labels["openship.project"] && !isBuildHelper(c.labels),
+        );
 
-    step(`Inspecting ${candidates.length} container(s)…`);
-    const [details, managedDetails] = await Promise.all([
-      mapLimit(candidates, 5, (c) => rt.inspectContainer(c.id)).then((d) =>
-        d.filter((x): x is DockerContainerDetail => x !== null),
-      ),
-      mapLimit(managedApp, 5, (c) => rt.inspectContainer(c.id)).then((d) =>
-        d.filter((x): x is DockerContainerDetail => x !== null),
-      ),
-    ]);
+        step(`Inspecting ${candidates.length} container(s)…`);
+        const [details, managedDetails] = await Promise.all([
+          mapLimit(candidates, 5, (c) => rt.inspectContainer(c.id)).then((d) =>
+            d.filter((x): x is DockerContainerDetail => x !== null),
+          ),
+          mapLimit(managedApp, 5, (c) => rt.inspectContainer(c.id)).then((d) =>
+            d.filter((x): x is DockerContainerDetail => x !== null),
+          ),
+        ]);
 
-    // Group by compose project (standalone containers key on "") for the
-    // compose-file reads; reconciliation itself is pure (see reconcileStack).
-    const groups = new Map<string, DockerContainerDetail[]>();
-    for (const d of details) {
-      const key = d.composeProject ?? "";
-      const list = groups.get(key) ?? [];
-      list.push(d);
-      groups.set(key, list);
-    }
+        // Group by compose project (standalone containers key on "") for the
+        // compose-file reads; reconciliation itself is pure (see reconcileStack).
+        const groups = new Map<string, DockerContainerDetail[]>();
+        for (const d of details) {
+          const key = d.composeProject ?? "";
+          const list = groups.get(key) ?? [];
+          list.push(d);
+          groups.set(key, list);
+        }
 
-    step("Reading compose files…");
-    const declared = await readComposeDeclarations(serverId, groups);
+        step("Reading compose files…");
+        const declared = await readComposeDeclarations(serverId, groups);
 
-    // Detect routes the server's existing (foreign) reverse proxy already serves,
-    // indexed by published host port — so the wizard can surface each container's
-    // current domain(s)+SSL. Own read-only SSH pass; self-catching (never fails
-    // discovery). Skipped in flat mode is unnecessary — a foreign proxy is a
-    // foreign proxy regardless of how we classify the app containers.
-    step("Scanning existing reverse proxy…");
-    const proxyRoutesByPort = await scanProxyRoutes(serverId);
+        // Detect routes the server's existing (foreign) reverse proxy already serves,
+        // indexed by published host port — so the wizard can surface each container's
+        // current domain(s)+SSL. Own read-only SSH pass; self-catching (never fails
+        // discovery). Skipped in flat mode is unnecessary — a foreign proxy is a
+        // foreign proxy regardless of how we classify the app containers.
+        step("Scanning existing reverse proxy…");
+        const proxyRoutesByPort = await scanProxyRoutes(serverId);
 
-    // Fetch each distinct image's baked-in env once (candidates AND openship
-    // containers), so discovery can subtract image defaults and import only the
-    // vars the operator actually set.
-    const uniqueImages = [
-      ...new Set([...details, ...managedDetails].map((d) => d.image).filter(Boolean)),
-    ];
-    const imageInfoPairs = await mapLimit(uniqueImages, 4, async (ref) => {
-      const [env, cmd] = await Promise.all([rt.inspectImageEnv(ref), rt.inspectImageCmd(ref)]);
-      return [ref, { env: new Set(env), cmd }] as const;
-    });
-    const imageDefaults = new Map(imageInfoPairs.map(([ref, v]) => [ref, v.env]));
-    const imageCmds = new Map(imageInfoPairs.map(([ref, v]) => [ref, v.cmd]));
+        // Fetch each distinct image's baked-in env once (candidates AND openship
+        // containers), so discovery can subtract image defaults and import only the
+        // vars the operator actually set.
+        const uniqueImages = [
+          ...new Set([...details, ...managedDetails].map((d) => d.image).filter(Boolean)),
+        ];
+        const imageInfoPairs = await mapLimit(uniqueImages, 4, async (ref) => {
+          const [env, cmd] = await Promise.all([rt.inspectImageEnv(ref), rt.inspectImageCmd(ref)]);
+          return [ref, { env: new Set(env), cmd }] as const;
+        });
+        const imageDefaults = new Map(imageInfoPairs.map(([ref, v]) => [ref, v.env]));
+        const imageCmds = new Map(imageInfoPairs.map(([ref, v]) => [ref, v.cmd]));
 
-    // Recover Openship projects: read the on-server manifest (rich, faithful
-    // recipe) and cross-reference each openship.project id against THIS org's DB.
-    // Present here = genuinely managed → counted; absent = orphaned → re-importable.
-    let openshipProjects: DiscoveredStack["openshipProjects"] = [];
-    let alreadyManaged = 0;
-    // SECURITY: `openship.project` is a container LABEL — attacker-controllable
-    // via a malicious image's LABEL, inherited onto the container. It flows into
-    // a remote root shell (`projectSnapshotExists` → `test -f …snapshot-<id>…`),
-    // so validate the id shape BEFORE the probe; a crafted `x$(cmd)` label is
-    // dropped here (belt-and-braces with the store's own quoting).
-    const projectIds = [
-      ...new Set(managedApp.map((c) => c.labels["openship.project"]!).filter((id) => id && OPENSHIP_PROJECT_ID_RE.test(id))),
-    ];
+        // Recover Openship projects: read the on-server manifest (rich, faithful
+        // recipe) and cross-reference each openship.project id against THIS org's DB.
+        // Present here = genuinely managed → counted; absent = orphaned → re-importable.
+        let openshipProjects: DiscoveredStack["openshipProjects"] = [];
+        let alreadyManaged = 0;
+        // SECURITY: `openship.project` is a container LABEL — attacker-controllable
+        // via a malicious image's LABEL, inherited onto the container. It flows into
+        // a remote root shell (`projectSnapshotExists` → `test -f …snapshot-<id>…`),
+        // so validate the id shape BEFORE the probe; a crafted `x$(cmd)` label is
+        // dropped here (belt-and-braces with the store's own quoting).
+        const projectIds = [
+          ...new Set(
+            managedApp
+              .map((c) => c.labels["openship.project"]!)
+              .filter((id) => id && OPENSHIP_PROJECT_ID_RE.test(id)),
+          ),
+        ];
 
-    // Self-heal the on-server recovery state before recovering from it: every
-    // re-migration mints a NEW project id, so dead entries + snapshots pile up
-    // in .openship/manifest.json (the file we're about to read) and it grows
-    // unbounded. Drop THIS org's entries that are neither a live DB project nor
-    // backed by a running container — i.e. true orphans. A running container's
-    // id is kept so a soft-deleted (record-only) workload stays re-importable.
-    try {
-      const liveDb = await repos.project.listByOrganization(organizationId, { page: 1, perPage: 1000 });
-      const liveProjectIds = new Set<string>([...liveDb.rows.map((p) => p.id), ...projectIds]);
-      await sshManager
-        .withExecutor(serverId, (exec) => pruneOrphanManifestArtifacts(exec, { organizationId, liveProjectIds }))
-        .catch(() => {});
-    } catch {
-      /* best-effort — never fail discovery on a prune hiccup */
-    }
+        // Self-heal the on-server recovery state before recovering from it: every
+        // re-migration mints a NEW project id, so dead entries + snapshots pile up
+        // in .openship/manifest.json (the file we're about to read) and it grows
+        // unbounded. Drop THIS org's entries that are neither a live DB project nor
+        // backed by a running container — i.e. true orphans. A running container's
+        // id is kept so a soft-deleted (record-only) workload stays re-importable.
+        try {
+          const liveDb = await repos.project.listByOrganization(organizationId, {
+            page: 1,
+            perPage: 1000,
+          });
+          const liveProjectIds = new Set<string>([...liveDb.rows.map((p) => p.id), ...projectIds]);
+          await sshManager
+            .withExecutor(serverId, (exec) =>
+              pruneOrphanManifestArtifacts(exec, { organizationId, liveProjectIds }),
+            )
+            .catch(() => {});
+        } catch {
+          /* best-effort — never fail discovery on a prune hiccup */
+        }
 
-    if (projectIds.length > 0) {
-      step("Recovering Openship projects…");
-      // One SSH session: read the manifest AND check which projects have a full
-      // recovery snapshot (cheap `test -f`, no read — the dump is read only at
-      // re-import time, for one project).
-      const { manifestById, snapshotIds } = await sshManager
-        .withExecutor(serverId, async (exec) => {
-          const manifest = await readManifest(exec).catch(() => null);
-          const snap = new Set<string>();
+        if (projectIds.length > 0) {
+          step("Recovering Openship projects…");
+          // One SSH session: read the manifest AND check which projects have a full
+          // recovery snapshot (cheap `test -f`, no read — the dump is read only at
+          // re-import time, for one project).
+          const { manifestById, snapshotIds } = await sshManager
+            .withExecutor(serverId, async (exec) => {
+              const manifest = await readManifest(exec).catch(() => null);
+              const snap = new Set<string>();
+              await Promise.all(
+                projectIds.map(async (id) => {
+                  if (await projectSnapshotExists(exec, id).catch(() => false)) snap.add(id);
+                }),
+              );
+              return {
+                manifestById: manifest
+                  ? new Map<string, ManifestProjectEntry>(manifest.projects.map((p) => [p.id, p]))
+                  : null,
+                snapshotIds: snap,
+              };
+            })
+            .catch(() => ({ manifestById: null, snapshotIds: new Set<string>() }));
+          const knownHereIds = new Set<string>();
           await Promise.all(
             projectIds.map(async (id) => {
-              if (await projectSnapshotExists(exec, id).catch(() => false)) snap.add(id);
+              const row = await repos.project.findByIdInOrganization(id, organizationId);
+              if (row) knownHereIds.add(id);
             }),
           );
-          return {
-            manifestById: manifest
-              ? new Map<string, ManifestProjectEntry>(manifest.projects.map((p) => [p.id, p]))
-              : null,
-            snapshotIds: snap,
-          };
-        })
-        .catch(() => ({ manifestById: null, snapshotIds: new Set<string>() }));
-      const knownHereIds = new Set<string>();
-      await Promise.all(
-        projectIds.map(async (id) => {
-          const row = await repos.project.findByIdInOrganization(id, organizationId);
-          if (row) knownHereIds.add(id);
-        }),
-      );
-      openshipProjects = reconcileOpenshipProjects({
-        managedDetails,
-        manifestById,
-        knownHereIds,
-        snapshotIds,
-        imageDefaults,
-        imageCmds,
-      });
-      alreadyManaged = managedApp.filter((c) => knownHereIds.has(c.labels["openship.project"]!)).length;
-    }
+          openshipProjects = reconcileOpenshipProjects({
+            managedDetails,
+            manifestById,
+            knownHereIds,
+            snapshotIds,
+            imageDefaults,
+            imageCmds,
+          });
+          alreadyManaged = managedApp.filter((c) =>
+            knownHereIds.has(c.labels["openship.project"]!),
+          ).length;
+        }
 
-    return reconcileStack({
-      serverId,
-      details,
-      volumes,
-      networks,
-      declared,
-      alreadyManaged,
-      imageDefaults,
-      imageCmds,
-      openshipProjects,
-      proxyRoutesByPort,
-    });
+        return reconcileStack({
+          serverId,
+          details,
+          volumes,
+          networks,
+          declared,
+          alreadyManaged,
+          imageDefaults,
+          imageCmds,
+          openshipProjects,
+          proxyRoutesByPort,
+        });
+      })(),
+      DISCOVERY_TIMEOUT_MS,
+      `timed out after ${DISCOVERY_TIMEOUT_MS / 1000}s scanning the server's containers, volumes and networks — the server may be under heavy load or a Docker API call over SSH stalled; retrying usually succeeds`,
+    );
   } finally {
     await rt.dispose();
   }
