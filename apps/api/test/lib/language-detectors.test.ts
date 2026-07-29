@@ -4,7 +4,14 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
 import { detectStack, type RepoFile } from "../../src/lib/stack-detector";
-import { STACKS, LANGUAGES, getRuntimeImage, type StackId, type StackDefinition } from "@repo/core";
+import {
+  STACKS,
+  LANGUAGES,
+  collectDependencies,
+  getRuntimeImage,
+  type StackId,
+  type StackDefinition,
+} from "@repo/core";
 
 /**
  * Per-stack recipe validation. Loads the real fixtures in `fixtures/deploy/`
@@ -143,6 +150,53 @@ describe("package-manager-aware Python install", () => {
     });
     expect(r.stack).toBe("django");
     expect(r.buildCommand).toBe("pip install -r requirements.txt && python manage.py collectstatic --noinput");
+  });
+});
+
+describe("PEP 621 [project].dependencies", () => {
+  const deps = (toml: string) => Object.keys(collectDependencies({ "pyproject.toml": toml }));
+
+  it("reads dependencies listed after another array-valued key", () => {
+    expect(
+      deps(
+        '[project]\nname = "svc"\nauthors = [{ name = "Ada", email = "ada@example.com" }]\ndependencies = ["fastapi", "uvicorn"]\n',
+      ),
+    ).toEqual(["fastapi", "uvicorn"]);
+
+    expect(
+      deps(
+        '[project]\nname = "svc"\nclassifiers = ["Private :: Do Not Upload"]\ndependencies = ["flask"]\n',
+      ),
+    ).toEqual(["flask"]);
+  });
+
+  it("keeps reading past a requirement that carries extras", () => {
+    expect(
+      deps('[project]\nname = "svc"\ndependencies = ["uvicorn[standard]", "fastapi"]\n'),
+    ).toEqual(["uvicorn", "fastapi"]);
+    expect(
+      deps(
+        '[project]\nname = "svc"\ndependencies = ["fastapi", "uvicorn[standard]", "sqlalchemy"]\n',
+      ),
+    ).toEqual(["fastapi", "uvicorn", "sqlalchemy"]);
+  });
+
+  it("stops at the end of the [project] table", () => {
+    expect(
+      deps(
+        '[project]\nname = "svc"\ndependencies = ["fastapi"]\n\n[tool.pytest.ini_options]\naddopts = ["-q"]\n',
+      ),
+    ).toEqual(["fastapi"]);
+    expect(deps('[project]\nname = "svc"\n\n[tool.uv]\ndependencies = ["ruff"]\n')).toEqual([]);
+  });
+
+  it("resolves the framework recipe for a manifest with project metadata", () => {
+    const r = detectStack([{ name: "pyproject.toml" }, { name: "main.py" }], undefined, {
+      "pyproject.toml":
+        '[project]\nname = "svc"\nrequires-python = ">=3.12"\nauthors = [{ name = "Ada" }]\ndependencies = ["fastapi", "uvicorn"]\n',
+    });
+    expect(r.stack).toBe("fastapi");
+    expect(r.startCommand).toBe("uvicorn main:app --host 0.0.0.0 --port 8000");
   });
 });
 
