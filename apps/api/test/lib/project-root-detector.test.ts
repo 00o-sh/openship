@@ -1012,3 +1012,76 @@ describe("discoverMonorepoApps - .NET class-library exclusion", () => {
     expect(result!.apps.map((app) => app.rootDirectory).sort()).toEqual([".", "ApiB"]);
   });
 });
+
+describe("discoverMonorepoApps - formal workspace monorepo with per-app Dockerfiles", () => {
+  // Mirrors a Railway-style pnpm/turbo monorepo where every sub-app carries its
+  // own Dockerfile (and often a railway.json) instead of being buildpack-
+  // detected. Each sub-app's stack therefore resolves to "docker"
+  // (projectType "docker"), not "app" - previously excluded entirely by
+  // isMonorepoAppCandidate, which dropped candidates to 0 and made
+  // discoverMonorepoApps return null for the whole repo.
+  const root = () => ({
+    rootDirectory: "",
+    files: [
+      { name: "package.json", type: "file" as const },
+      { name: "pnpm-workspace.yaml", type: "file" as const },
+      { name: "turbo.json", type: "file" as const },
+      { name: "apps", type: "dir" as const },
+    ],
+    packageJson: { packageManager: "pnpm@9.0.0" },
+    fileContents: { "pnpm-workspace.yaml": "packages:\n  - 'apps/*'\n" },
+  });
+
+  const dockerSubApp = (dir: string) => ({
+    rootDirectory: dir,
+    source: "workspace" as const,
+    files: [
+      { name: "package.json", type: "file" as const },
+      { name: "Dockerfile", type: "file" as const },
+      { name: "railway.json", type: "file" as const },
+    ],
+    packageJson: { name: dir.split("/").at(-1) },
+    fileContents: {},
+  });
+
+  it("detects a monorepo whose sub-apps each have their own Dockerfile", () => {
+    const result = discoverMonorepoApps(root(), [
+      dockerSubApp("apps/api"),
+      dockerSubApp("apps/saas"),
+      dockerSubApp("apps/marketing"),
+    ]);
+
+    expect(result).not.toBeNull();
+    expect(result!.apps.map((app) => app.rootDirectory).sort()).toEqual([
+      "apps/api",
+      "apps/marketing",
+      "apps/saas",
+    ]);
+    for (const app of result!.apps) {
+      expect(app.stack).toBe("docker");
+      // The Dockerfile owns install/build/start - the runtime builds straight
+      // from it (requireRepositoryDockerfile), so these stay empty rather than
+      // being synthesized.
+      expect(app.installCommand).toBe("");
+      expect(app.buildCommand).toBe("");
+      expect(app.startCommand).toBe("");
+    }
+    expect(result!.workspace.packageManager).toBe("pnpm");
+  });
+
+  it("still excludes a services (docker-compose) candidate from the app list", () => {
+    const composeSubApp = {
+      rootDirectory: "apps/infra",
+      source: "workspace" as const,
+      files: [{ name: "docker-compose.yml", type: "file" as const }],
+      fileContents: {},
+    };
+    const result = discoverMonorepoApps(root(), [
+      dockerSubApp("apps/api"),
+      dockerSubApp("apps/saas"),
+      composeSubApp,
+    ]);
+    expect(result).not.toBeNull();
+    expect(result!.apps.map((app) => app.rootDirectory).sort()).toEqual(["apps/api", "apps/saas"]);
+  });
+});

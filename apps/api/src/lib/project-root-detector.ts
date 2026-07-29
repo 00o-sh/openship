@@ -928,11 +928,22 @@ export function discoverMonorepoApps(
  * not the monorepo flow). Library directories under `packages/` are still
  * filtered out by `scoreCandidate`'s segment penalty; we additionally reject
  * `unknown` stacks so we don't list every directory containing a manifest.
+ *
+ * `projectType === "docker"` (a directory with its own Dockerfile) is
+ * ALSO accepted, not just "app": a Railway/per-service-Dockerfile-style
+ * monorepo (e.g. `apps/api/Dockerfile`, `apps/web/Dockerfile`) is exactly as
+ * deployable as a buildpack-detected app - the build pipeline already builds
+ * a "docker"-stack sub-app straight from its own Dockerfile at its
+ * `rootDirectory`, same as a standalone docker-stack project (see
+ * compose/build.service.ts's monorepo build path). Excluding these dropped
+ * every sub-app to 0 candidates for any monorepo built this way, so
+ * `discoverMonorepoApps` silently returned null instead of detecting it.
  */
 function isMonorepoAppCandidate(candidate: ProjectRootSnapshot): boolean {
   if (!candidate.rootDirectory) return false;
   if (candidate.stack.stack === "unknown") return false;
-  if (candidate.stack.projectType !== "app") return false;
+  if (candidate.stack.projectType !== "app" && candidate.stack.projectType !== "docker")
+    return false;
   // A .NET class library is not a deployable app — only web/service/exe projects are.
   if (isDotnetLibraryOnly(candidate)) return false;
   // Library segments first (packages/, libs/, shared/, …) are not deployable on their own.
