@@ -292,7 +292,7 @@ async function archivePreviousDeployment(
  * per-service GitHub Checks, then archive the previous deployment.
  * Mirrors the single-app finalize tail in executeServerDeploy.
  */
-async function finalizeComposeDeploy(opts: {
+export async function finalizeComposeDeploy(opts: {
   project: Project;
   dep: Deployment;
   logger: BuildLogger;
@@ -364,12 +364,10 @@ async function finalizeComposeDeploy(opts: {
     console.warn(`[build] rollup/Checks emission failed for ${dep.id}:`, err);
   }
 
-  // Don't archive the previous deployment while THIS one is still `reconciling`
-  // (connection lost, outcome unverified) — archiving now could prematurely
-  // retire a still-live predecessor before we know the new deploy succeeded.
-  // Reconciliation settles the status; archival waits for a confirmed ready.
+  // Archive the predecessor only after this deployment reaches a success state.
+  // Failed, cancelled, and reconciling deployments leave the live release intact.
   const settled = await repos.deployment.findById(dep.id).catch(() => null);
-  if (settled?.status !== "reconciling") {
+  if (settled?.status === "ready" || settled?.status === "partial_failure") {
     await archivePreviousDeployment(dep, project, logger);
   }
 }
