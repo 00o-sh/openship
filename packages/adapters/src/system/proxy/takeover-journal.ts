@@ -20,7 +20,7 @@
 
 import type { CommandExecutor } from "../../types";
 import type { EdgeStatus, SystemLog, SystemLogCallback } from "../types";
-import { freeEdgeTargets, sq, stopTargetsForStatus } from "./detect";
+import { EDGE_CONTAINER_NAME, freeEdgeTargets, sq, stopTargetsForStatus } from "./detect";
 
 const JOURNAL_DIR = "/var/lib/openship";
 export const JOURNAL_PATH = `${JOURNAL_DIR}/edge-takeover.json`;
@@ -107,13 +107,31 @@ export async function readJournal(executor: CommandExecutor): Promise<TakeoverJo
   }
 }
 
-/** Restart & re-enable the foreign proxy captured in the journal. */
+/**
+ * Restart & re-enable the foreign proxy captured in the journal, and report
+ * whether the box is ACTUALLY serving :80 afterwards.
+ *
+ * `executor` must reach the HOST — never wrap it in `edgeContainerExecutor`, or the
+ * `docker stop` below runs inside the edge container and stops nothing (the same
+ * namespace trap that broke the vhost rename).
+ */
 export async function rollback(
   executor: CommandExecutor,
   journal: TakeoverJournal,
   onLog: SystemLogCallback,
-): Promise<void> {
+): Promise<boolean> {
   onLog(log("Rolling back — restoring the previous proxy...", "warn"));
+  // Release 80/443 from OUR edge first, or every restore below fails to bind and
+  // the box is left dark with a "restored" message.
+  //
+  // The CONTAINER edge is the one that actually holds the ports today — this used
+  // to stop only the openresty UNIT, which on a container box isn't running at all,
+  // so `docker start <their-nginx>` hit "address already in use" while
+  // openship-edge kept the socket. Both are attempted: the unit for a legacy bare
+  // edge, the container for every current one. `--restart=no` before the stop, or
+  // the daemon brings it straight back and re-takes the port.
+  await tryExec(executor, `docker update --restart=no ${sq(EDGE_CONTAINER_NAME)} 2>/dev/null || true`);
+  await tryExec(executor, `docker stop ${sq(EDGE_CONTAINER_NAME)} 2>/dev/null || true`);
   // Stop AND disable OpenResty so it releases 80/443 durably — otherwise both it
   // and the restored proxy stay `enabled` and race for the port on next reboot.
   await tryExec(
@@ -144,6 +162,39 @@ export async function rollback(
       onLog(log(`Could not restore process ${p.pid} — no command captured.`, "warn"));
     }
   }
+
+  // PROVE it. Every command above is `tryExec` + `|| true`, which is right for a
+  // best-effort restore of someone else's service — but it means this function
+  // could do nothing at all and the caller would still tell the operator "your
+  // previous proxy has been restarted, the box is serving again". That sentence is
+  // the difference between "retry when convenient" and "your sites are down right
+  // now", so it has to be earned.
+  const restored = await portIsServed(executor, 80);
+  if (!restored) {
+    onLog(
+      log(
+        "Nothing is listening on :80 after the restore — the box is NOT serving. " +
+          "Start your proxy by hand (e.g. `systemctl start nginx`, or `docker start <name>`).",
+        "error",
+      ),
+    );
+  }
+  return restored;
+}
+
+/**
+ * Is anything LISTENING on `port`? `ss` where present, /proc/net/tcp otherwise —
+ * no curl, no wget, nothing that may be absent on a minimal box. Hex `0050` is 80,
+ * state `0A` is LISTEN.
+ */
+async function portIsServed(executor: CommandExecutor, port: number): Promise<boolean> {
+  const hex = port.toString(16).toUpperCase().padStart(4, "0");
+  const out = await tryExec(
+    executor,
+    `(command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -qE ':${port}[[:space:]]' && echo yes) || ` +
+      `(grep -qiE '^[[:space:]]*[0-9]+:[[:space:]]*[0-9A-F]{8}:${hex}[[:space:]]+[0-9A-F]{8}:0000[[:space:]]+0A' /proc/net/tcp 2>/dev/null && echo yes) || true`,
+  );
+  return (out ?? "").includes("yes");
 }
 
 /**
@@ -171,9 +222,11 @@ export async function rollbackEdgeTakeover(
 ): Promise<boolean> {
   const journal = await readJournal(executor);
   if (!journal || journal.completed) return false;
-  await rollback(executor, journal, onLog);
+  const restored = await rollback(executor, journal, onLog);
+  // Clear it either way: a journal that can't be acted on successfully is not one
+  // the next boot should replay. `restored` is what the caller tells the operator.
   await clearJournal(executor);
-  return true;
+  return restored;
 }
 
 /** Mark the two-process takeover finished so boot recovery leaves it alone. */

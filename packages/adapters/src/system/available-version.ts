@@ -20,8 +20,9 @@ import type { ComponentStatus } from "./types";
 const PACKAGE_NAMES: Record<string, string | null> = {
   git: "git",
   rsync: "rsync",
-  openresty: "openresty",
-  certbot: "certbot",
+  // The edge is an IMAGE, not a repo package — its "newer version available" comes
+  // from the registry (see the update scanner's imageDigest), never from apt.
+  edge: null,
   docker: null,
 };
 

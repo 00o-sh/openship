@@ -486,7 +486,11 @@
     "confirmDeleteWipe": "Eliminar + borrar datos",
     "confirmDeleteEnvWipe": "Eliminar entorno + borrar datos",
     "confirmDelete": "Eliminar proyecto",
-    "confirmDeleteEnv": "Eliminar entorno"
+    "confirmDeleteEnv": "Eliminar entorno",
+    "linkedTitleOne": "{count} proyecto está conectado a esta app",
+    "linkedTitleOther": "{count} proyectos están conectados a esta app",
+    "linkedNote": "Siguen funcionando con sus datos intactos: solo pierden esta conexión. Vuelve a desplegarlos para aplicarlo.",
+    "linkedNoteRecordOnly": "Siguen funcionando, pero el vínculo se va con el registro: reimportar esta app más tarde no lo restaura."
   },
   "routing": {
     "title": "Enrutamiento",

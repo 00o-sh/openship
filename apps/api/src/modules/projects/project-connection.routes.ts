@@ -26,6 +26,21 @@ r.get(
   ctrl.list,
 );
 
+// Registered BEFORE `/:linkId`-style paths so "consumers" is never captured as an
+// id by a future param route on this router.
+r.get(
+  "/consumers",
+  {
+    tag: "project:read",
+    mcp: {
+      description:
+        "List the projects that consume THIS app's connection (a shared database has many).",
+    },
+  },
+  cloudProjectProxy,
+  ctrl.consumers,
+);
+
 r.post(
   "/",
   {

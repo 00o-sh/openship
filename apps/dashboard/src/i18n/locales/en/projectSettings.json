@@ -502,7 +502,7 @@
   },
   "logs": {
     "noRuntime": "No runtime logs",
-    "noRuntimeDesc": "This project is deployed as a static app, so there is no running server process to stream logs from.",
+    "noRuntimeDesc": "This project has no running server process and no domain, so there is nothing to stream. Add a domain and its edge request logs will appear here.",
     "terminal": "Terminal",
     "server": "Server",
     "requests": "Requests",
@@ -621,7 +621,11 @@
     "recordOnlyDesc": "Keeps the app and its data running on your server — only the Openship record is removed. You can re-import it later.",
     "recordOnlyReversible": "Reversible — the app stays on your server.",
     "recordOnlyNote": "Nothing on the server is touched — the app keeps running with its data. Only Openship's record is removed, and it can be re-imported later.",
-    "confirmRecordOnly": "Remove record"
+    "confirmRecordOnly": "Remove record",
+    "linkedTitleOne": "{count} project is connected to this app",
+    "linkedTitleOther": "{count} projects are connected to this app",
+    "linkedNote": "They keep running with their data untouched — they only lose this connection. Redeploy them to pick that up.",
+    "linkedNoteRecordOnly": "They keep running, but the link goes with the record — re-importing this app later won't restore it."
   },
   "routing": {
     "title": "Routing",
@@ -702,7 +706,7 @@
       "includeWwwFallback": "yourdomain.com",
       "externalIngress": "External ingress & TLS",
       "externalIngressDesc": "TLS terminates upstream (Cloudflare Tunnel, load balancer). Verify by TXT only — the domain need not point at this server, and we won't issue a certificate.",
-      "noWww": "Enter the domain without \"www.\" — turn on \"Include www\" below to add it.",
+      "noWww": "That domain is already on this project.",
       "adding": "Adding...",
       "submit": "Add domain"
     },

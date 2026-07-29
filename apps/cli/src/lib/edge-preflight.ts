@@ -19,7 +19,7 @@
  * with fakes — no real docker/ss/fs.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import chalk from "chalk";
 import { isCancel, log, note, select } from "@clack/prompts";
@@ -35,6 +35,9 @@ import {
   ourEdgeContainerRunning as realOurEdgeContainerRunning,
   recoverInterruptedTakeover as realRecoverInterruptedTakeover,
   rollbackEdgeTakeover as realRollbackEdgeTakeover,
+  edgeProxy,
+  edgeProxyFor,
+  collectProxyCerts,
   type CommandExecutor,
   type EdgeStatus,
   type ImportedSite,
@@ -50,7 +53,7 @@ export interface EdgePlan {
   action?: EdgeAction;
   /** Sites parsed from the foreign proxy — passed to the api's import endpoint (migrate). */
   sites?: ImportedSite[];
-  /** Foreign cert PEMs, keyed by source cert path, read host-side (migrate + TLS sites). */
+  /** Foreign cert PEMs read host-side, keyed by hostname (migrate + TLS sites). */
   certPems?: Record<string, { certPem: string; keyPem: string }>;
 }
 
@@ -91,27 +94,26 @@ export interface EdgePreflightDeps {
   /** Ask whether to import a stopped proxy's remaining sites. Injectable like
    *  `confirm` so the flow stays testable without a TTY. */
   confirmStoppedImport(info: { proxy: ProxyKind; count: number }): Promise<boolean>;
-  /** Read a cert/key PEM off the host filesystem; null if unreadable. */
-  readCert(path: string): string | null;
+  /**
+   * Harvest the source proxy's certs so the containerized API can install them —
+   * it can't read the host filesystem itself, which is why the CLI reads them here.
+   * Keyed by hostname (and cert path, for a declared-path proxy).
+   *
+   * Delegates to the adapter's one cert reader, so caddy's data dir and traefik's
+   * acme.json are carried too — this used to read declared config paths only, which
+   * neither of those proxies has, so every domain on them silently re-issued.
+   * Injectable to keep the flow testable without a real proxy on disk.
+   */
+  collectCerts(
+    executor: CommandExecutor,
+    sites: ImportedSite[],
+    source: { status?: EdgeStatus; proxy?: ProxyKind },
+  ): Promise<Record<string, { certPem: string; keyPem: string }>>;
   /** Show the detected conflict (sites + non-migratable warnings) to the operator. */
   render(info: { owner: string; sites: ImportedSite[]; warnings: string[] }): void;
   /** Ask which action to take (interactive path only). */
   confirm(info: { owner: string; known: boolean; importable: number }): Promise<EdgeAction>;
   warn(message: string): void;
-}
-
-/** A filesystem path safe to read without shell/path surprises (absolute, no metachars). */
-function isSafePath(p: string): boolean {
-  return /^\/[A-Za-z0-9._/-]+$/.test(p);
-}
-
-/** Read a PEM off the host filesystem; null when unreadable. The default `readCert` dep. */
-function readCertFile(p: string): string | null {
-  try {
-    return readFileSync(p, "utf8");
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -162,7 +164,8 @@ export async function planAndApplyHostEdge(
 
   // migrate captures the foreign certs (host FS) before we stop the proxy;
   // takeover just frees the ports and lets the imported sites drop.
-  const certPems = action === "migrate" ? collectCertPems(sites, deps.readCert) : undefined;
+  const certPems =
+    action === "migrate" ? await deps.collectCerts(executor, sites, { status }) : undefined;
   // Journaled stop: if the caller's bring-up fails it calls rollbackHostEdge()
   // and the operator's proxy comes back, instead of the box staying dark.
   await deps.beginEdgeTakeover(executor, status, (m, l) =>
@@ -284,7 +287,12 @@ async function offerStoppedProxyImport(
     return { proceed: true };
   }
 
-  return { proceed: true, action: "migrate", sites, certPems: collectCertPems(sites, readCertFile) };
+  return {
+    proceed: true,
+    action: "migrate",
+    sites,
+    certPems: await deps.collectCerts(executor, sites, { proxy }),
+  };
 }
 
 /* ── Doctor: "the edge container can't bind" diagnosis + repair ───────────── */
@@ -398,7 +406,7 @@ export async function repairEdgeConflict(
 
   const scan = mode === "migrate" ? await realImportSites(executor, status) : { sites: [], warnings: [] };
   const certPems =
-    mode === "migrate" ? collectCertPems(scan.sites, readCertFile) : undefined;
+    mode === "migrate" ? await collectCertsFromProxy(executor, scan.sites, { status }) : undefined;
 
   // Journaled: if the edge still won't come up, rollbackHostEdge() restores this.
   await realBeginEdgeTakeover(executor, status, (entry) => onLog(entry.message, entry.level));
@@ -461,20 +469,81 @@ async function resolveAction(
   });
 }
 
-function collectCertPems(
+async function collectCertsFromProxy(
+  executor: CommandExecutor,
   sites: ImportedSite[],
-  readCert: (path: string) => string | null,
-): Record<string, { certPem: string; keyPem: string }> {
-  const out: Record<string, { certPem: string; keyPem: string }> = {};
-  for (const s of sites) {
-    if (!s.ssl || !s.tls) continue;
-    const { certPath, keyPath } = s.tls;
-    if (!isSafePath(certPath) || !isSafePath(keyPath)) continue; // else api provisions fresh
-    const certPem = readCert(certPath);
-    const keyPem = readCert(keyPath);
-    if (certPem && keyPem) out[certPath] = { certPem, keyPem };
+  source: { status?: EdgeStatus; proxy?: ProxyKind },
+): Promise<Record<string, { certPem: string; keyPem: string }>> {
+  const api = source.proxy
+    ? edgeProxyFor(executor, source.proxy)
+    : await edgeProxy(executor, source.status ? { status: source.status } : {});
+  if (!api) return {};
+  const { certPems, warnings } = await collectProxyCerts(api, sites);
+  for (const w of warnings) console.log(chalk.yellow(`  ${w}`));
+  return certPems;
+}
+
+/**
+ * Show a detected foreign-proxy edge conflict — the sites it serves + any
+ * non-migratable warnings. THE one presenter for the migrate/take-over decision,
+ * shared by the compose host-edge preflight (defaultDeps), the stopped-proxy
+ * import path, and the bare wizard's self-edge preflight (no more copies).
+ */
+export function renderEdgeConflict(info: { owner: string; sites: ImportedSite[]; warnings: string[] }): void {
+  const { owner, sites, warnings } = info;
+  if (sites.length > 0) {
+    const lines = sites.map((st) => {
+      const host = (st.serverNames ?? []).join(", ") || "(no server_name)";
+      const dest = st.target.kind === "static" ? `static: ${st.target.root}` : st.target.url;
+      return `${chalk.bold(host)} → ${chalk.dim(dest)}${st.ssl ? chalk.green(" [TLS]") : ""}`;
+    });
+    note(lines.join("\n"), `Detected ${sites.length} site${sites.length === 1 ? "" : "s"} on ${owner}`);
   }
-  return out;
+  if (warnings.length > 0) {
+    log.warn(`${warnings.length} config item${warnings.length === 1 ? "" : "s"} won't migrate automatically:`);
+    for (const w of warnings.slice(0, 8)) log.message(chalk.dim(`• ${w}`));
+  }
+}
+
+/** Ask migrate / take over / cancel for a foreign proxy on 80/443. The single
+ *  EdgeAction prompt — one vocabulary, one default rule — shared by every caller. */
+export async function confirmEdgeAction(info: {
+  owner: string;
+  known: boolean;
+  importable: number;
+}): Promise<EdgeAction> {
+  const { owner, known, importable } = info;
+  const choice = await select({
+    message: known
+      ? `An existing reverse proxy (${owner}) is serving ports 80/443.`
+      : `Ports 80/443 are in use by ${owner}, which we couldn't identify.`,
+    options: [
+      ...(importable > 0
+        ? [
+            {
+              value: "migrate" as const,
+              label: `Migrate ${importable} site${importable === 1 ? "" : "s"} & take over`,
+              hint: "import the existing sites into Openship's edge, then take 80/443",
+            },
+          ]
+        : []),
+      {
+        value: "takeover" as const,
+        label: "Stop it & take over 80/443",
+        hint: known ? "the existing sites stop being served" : "may interrupt a running service",
+      },
+      { value: "cancel" as const, label: "Cancel — leave it running" },
+    ],
+    // Default to MIGRATE whenever there are sites we can import: it's the only
+    // option that both gets Openship onto 80/443 and keeps the operator's
+    // existing sites served, so it's the choice they almost always want and
+    // the one that loses nothing on a reflexive Enter.
+    // With nothing importable there's no safe default: a known proxy falls
+    // back to cancel (blind Enter would stop sites that are being served),
+    // and an unidentified port holder to takeover.
+    initialValue: importable > 0 ? "migrate" : known ? "cancel" : "takeover",
+  });
+  return isCancel(choice) ? "cancel" : (choice as EdgeAction);
 }
 
 function defaultDeps(): EdgePreflightDeps {
@@ -507,54 +576,9 @@ function defaultDeps(): EdgePreflightDeps {
       });
       return !isCancel(take) && take === "import";
     },
-    readCert: readCertFile,
-    render: ({ owner, sites, warnings }) => {
-      if (sites.length > 0) {
-        const lines = sites.map((st) => {
-          const host = (st.serverNames ?? []).join(", ") || "(no server_name)";
-          const dest = st.target.kind === "static" ? `static: ${st.target.root}` : st.target.url;
-          return `${chalk.bold(host)} → ${chalk.dim(dest)}${st.ssl ? chalk.green(" [TLS]") : ""}`;
-        });
-        note(lines.join("\n"), `Detected ${sites.length} site${sites.length === 1 ? "" : "s"} on ${owner}`);
-      }
-      if (warnings.length > 0) {
-        log.warn(`${warnings.length} config item${warnings.length === 1 ? "" : "s"} won't migrate automatically:`);
-        for (const w of warnings.slice(0, 8)) log.message(chalk.dim(`• ${w}`));
-      }
-    },
-    confirm: async ({ owner, known, importable }) => {
-      const choice = await select({
-        message: known
-          ? `An existing reverse proxy (${owner}) is serving ports 80/443.`
-          : `Ports 80/443 are in use by ${owner}, which we couldn't identify.`,
-        options: [
-          ...(importable > 0
-            ? [
-                {
-                  value: "migrate" as const,
-                  label: `Migrate ${importable} site${importable === 1 ? "" : "s"} & take over`,
-                  hint: "import the existing sites into Openship's edge, then take 80/443",
-                },
-              ]
-            : []),
-          {
-            value: "takeover" as const,
-            label: "Stop it & take over 80/443",
-            hint: known ? "the existing sites stop being served" : "may interrupt a running service",
-          },
-          { value: "cancel" as const, label: "Cancel — leave it running" },
-        ],
-        // Default to MIGRATE whenever there are sites we can import: it's the only
-        // option that both gets Openship onto 80/443 and keeps the operator's
-        // existing sites served, so it's the choice they almost always want and
-        // the one that loses nothing on a reflexive Enter.
-        // With nothing importable there's no safe default: a known proxy falls
-        // back to cancel (blind Enter would stop sites that are being served),
-        // and an unidentified port holder to takeover.
-        initialValue: importable > 0 ? "migrate" : known ? "cancel" : "takeover",
-      });
-      return isCancel(choice) ? "cancel" : (choice as EdgeAction);
-    },
+    collectCerts: collectCertsFromProxy,
+    render: renderEdgeConflict,
+    confirm: confirmEdgeAction,
     warn: (message) => console.log(chalk.yellow(`  ${message}`)),
   };
 }

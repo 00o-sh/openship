@@ -1,6 +1,5 @@
 import {
   createPlatform,
-  createHostExecutor,
   DockerRuntime,
   type CommandExecutor,
   type DockerConnectionOptions,
@@ -66,6 +65,26 @@ export interface DeploymentMeta {
    * port advisory, so it doesn't re-nag after a refresh.
    */
   portCheckSkipped?: (number | string)[];
+  /**
+   * Advisory post-deploy static-output probe — the file-side twin of `portCheck`,
+   * one entry per routed path. Point-in-time; never gates the deploy. An entry
+   * that is `checked && (!found || !hasIndex)` is a 404 waiting to happen.
+   */
+  outputCheck?: OutputCheckResult[];
+  /** Routed paths the operator dismissed from the output advisory. */
+  outputCheckSkipped?: string[];
+  /**
+   * The outputDirectory this deployment is actually SERVED from, relative to its
+   * release root — `""` when a Docker sandbox build already extracted the doc-root.
+   *
+   * Persisted because it CANNOT be recomputed after the fact: `resolveDeployRouting`
+   * keys off the BUILD runtime (docker for a sandbox static) while `runtimeMode` is
+   * persisted as the SERVE identity ("bare"), so a later recompute reads "bare" and
+   * answers `project.outputDirectory` — pointing a probe at `<root>/dist` when the
+   * edge serves `<root>`. Reading it back is the only way the check and the edge
+   * agree on one path.
+   */
+  staticServeOutputDir?: string;
 }
 
 /** One exposed port's advisory probe outcome (persisted in `deployment.meta`). */
@@ -417,7 +436,17 @@ export async function resolveServerExecutor(
     if (!server.isLocal) {
       repos.server.update(server.id, { isLocal: true }).catch(() => {});
     }
-    return { id: server.id, executor: createHostExecutor(), conn, isLocal: true, ssh: null };
+    // POOLED, not a fresh `createHostExecutor()`. This executor outlives the call
+    // (the deploy holds it), so it can't be scoped with `withHostExecutor` — but
+    // `acquire` returns the shared host channel for a local row, which is what
+    // stops one deploy from leaving behind an sshd session (#291).
+    return {
+      id: server.id,
+      executor: await sshManager.acquire(server.id),
+      conn,
+      isLocal: true,
+      ssh: null,
+    };
   }
   const executor = await sshManager.acquire(server.id);
   const ssh = server.sshHost ? await buildSshConfig(server) : null;

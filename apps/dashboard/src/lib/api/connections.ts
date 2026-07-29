@@ -16,6 +16,17 @@ export interface ProjectConnection {
   mode: ConnectionMode;
 }
 
+/** A project that CONSUMES this app — the reverse of {@link ProjectConnection}. */
+export interface ConnectionConsumer {
+  id: string;
+  targetProjectId: string;
+  targetName: string;
+  targetSlug: string | null;
+  outputId: string;
+  envKey: string;
+  mode: ConnectionMode;
+}
+
 export interface CreateConnectionBody {
   sourceProjectId: string;
   outputId: string;
@@ -27,6 +38,13 @@ export const connectionsApi = {
   /** Connections wired INTO a project (`projectId` = the consumer). */
   list: (projectId: string) =>
     api.get<{ data: ProjectConnection[] }>(endpoints.projects.connections(projectId)),
+
+  /** Projects consuming THIS app (`projectId` = the shared source). Many for a
+   *  shared database — one Postgres can back any number of apps. */
+  consumers: (projectId: string) =>
+    api.get<{ data: ConnectionConsumer[] }>(
+      `${endpoints.projects.connections(projectId)}/consumers`,
+    ),
 
   /** Wire a source database app into `projectId` (injects a secret env var). */
   create: (projectId: string, body: CreateConnectionBody) =>

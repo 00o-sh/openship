@@ -11,7 +11,7 @@
 
 import type { CommandExecutor } from "../../../types";
 import type { ImportedSite, ProxyScanResult } from "../../types";
-import { sq, stripComments, tryExec } from "./parse-utils";
+import { collapseByHost, sq, stripComments, tryExec } from "./parse-utils";
 
 /** Files `apachectl -S` reports as holding vhost defs (Include-resolved). */
 async function vhostFilesFromDump(executor: CommandExecutor): Promise<string[]> {
@@ -56,14 +56,48 @@ function directiveAll(body: string, name: string): string[] {
   );
 }
 
-function parseVhost(body: string, portHint: string): ImportedSite | { warning: string } {
+/**
+ * Is this vhost nothing but an HTTP→HTTPS upgrade for its own hostname?
+ *
+ * Apache writes this two ways — `Redirect permanent / https://…` and a
+ * `RewriteRule … [R=301]` — and such a vhost very often ALSO carries a
+ * DocumentRoot, so it parsed as a real static site and then collided with the
+ * `:443` vhost for the same ServerName. That collision is how a live HTTPS site
+ * came back as an empty docroot. Openship's edge issues that redirect itself, so
+ * there is nothing here to carry.
+ */
+function isHttpsRedirectOnly(body: string): boolean {
+  const hasProxy = /(?:^|\n)\s*ProxyPass\s+\S+\s+(?!!)\S/i.test(body);
+  if (hasProxy) return false;
+  const redirects = [
+    ...body.matchAll(/(?:^|\n)\s*Redirect(?:Permanent|Match)?\s+(?:\d{3}\s+|permanent\s+|temp\s+)?\S*\s*(\S+)/gi),
+    ...body.matchAll(/(?:^|\n)\s*RewriteRule\s+\S+\s+(\S+)\s*\[[^\]]*R=?3\d\d[^\]]*\]/gi),
+  ].map((m) => m[1]);
+  return redirects.length > 0 && redirects.some((t) => /^https:\/\//i.test(t));
+}
+
+/** `ServerName example.com:443` is valid Apache — the port is NOT part of the
+ *  hostname, and carrying it through produced `server_name example.com:443`,
+ *  which matches nothing. */
+function hostOnly(name: string): string {
+  return name.trim().replace(/^https?:\/\//i, "").replace(/:\d+$/, "");
+}
+
+function parseVhost(body: string, portHint: string): ImportedSite | { warning: string } | null {
   const serverName = directive(body, "ServerName")?.split(/\s+/)[0];
   const aliases = directiveAll(body, "ServerAlias").flatMap((line) => line.split(/\s+/));
-  const names = [serverName, ...aliases].filter((n): n is string => Boolean(n));
+  const names = [serverName, ...aliases]
+    .filter((n): n is string => Boolean(n))
+    .map(hostOnly)
+    .filter(Boolean);
 
   if (names.length === 0) {
     return { warning: "apache: skipped a VirtualHost with no ServerName" };
   }
+
+  // Checked BEFORE DocumentRoot: a redirect vhost with a docroot is still a
+  // redirect vhost, and treating it as a static site is what lost the real one.
+  if (isHttpsRedirectOnly(body)) return null;
 
   // ProxyPass <path> http://upstream — keep ALL non-"!" mappings (path fan-out);
   // primary = the "/" mapping if present, else the first.
@@ -71,6 +105,9 @@ function parseVhost(body: string, portHint: string): ImportedSite | { warning: s
     .map((m) => ({ path: m[1], url: m[2] }))
     .filter((p) => p.url && p.url !== "!");
   const docRoot = directive(body, "DocumentRoot")?.replace(/^["']|["']$/g, "");
+  // `ProxyPassMatch … fcgi://` / `…php-fpm.sock` — a PHP application, whatever its
+  // DocumentRoot says.
+  const fcgiMatch = /(?:^|\n)\s*ProxyPassMatch\s+[^\n]*(fcgi:|php-fpm|php\d*-fpm|\.sock)/i.test(body);
   const certPath = directive(body, "SSLCertificateFile");
   const keyPath = directive(body, "SSLCertificateKeyFile");
   const ssl = /:443/.test(portHint) || /SSLEngine\s+on/i.test(body) || Boolean(certPath);
@@ -78,9 +115,30 @@ function parseVhost(body: string, portHint: string): ImportedSite | { warning: s
   let target: ImportedSite["target"];
   if (routes.length > 0) {
     const primary = routes.find((r) => r.path === "/") ?? routes[0];
+    // `balancer://cluster/` needs the matching <Proxy balancer://…> member list,
+    // which no single upstream can express — emitting it yields a vhost nginx
+    // can't resolve.
+    if (/^balancer:\/\//i.test(primary.url)) {
+      return {
+        warning: `apache: ${names[0]} proxies to an mod_proxy_balancer cluster (${primary.url}) — re-add its members manually`,
+      };
+    }
     target = { kind: "proxy", url: primary.url };
+  } else if (fcgiMatch) {
+    // Checked BEFORE DocumentRoot, and that order is a SECURITY property: the
+    // canonical PHP-FPM vhost is `DocumentRoot` + `ProxyPassMatch … fcgi://`, so
+    // treating it as static would serve .php files as plain text — source
+    // disclosure (credentials in config.php), not merely a broken site.
+    return {
+      warning: `apache: ${names[0]} is a PHP-FPM site (ProxyPassMatch → FastCGI) — not migratable as a static root; re-add it manually`,
+    };
   } else if (docRoot) {
     target = { kind: "static", root: docRoot };
+  } else if (/(?:^|\n)\s*ProxyPassMatch\s/i.test(body)) {
+    // Regex-keyed proxying with no docroot has no single upstream either.
+    return {
+      warning: `apache: ${names[0]} uses ProxyPassMatch (regex proxying) — re-add it manually`,
+    };
   } else {
     return { warning: `apache: ${names[0]} has neither ProxyPass nor DocumentRoot — skipped` };
   }
@@ -89,6 +147,13 @@ function parseVhost(body: string, portHint: string): ImportedSite | { warning: s
   if (routes.length > 0) site.routes = routes;
   if (certPath && keyPath) site.tls = { certPath, keyPath };
   return site;
+}
+
+/** ServerName + aliases of a vhost we're about to drop as a redirect half. */
+function redirectVhostNames(body: string): string[] {
+  const serverName = directive(body, "ServerName")?.split(/\s+/)[0];
+  const aliases = directiveAll(body, "ServerAlias").flatMap((l) => l.split(/\s+/));
+  return [serverName, ...aliases].filter((n): n is string => Boolean(n)).map(hostOnly).filter(Boolean);
 }
 
 /** Extract `<VirtualHost x>…</VirtualHost>` bodies + the opening-tag args. */
@@ -115,11 +180,43 @@ export async function scanApache(executor: CommandExecutor): Promise<ProxyScanRe
   const blocks = vhostBlocks(text);
   if (blocks.length === 0) warnings.push("apache: no <VirtualHost> blocks found");
 
+  /** Hostnames whose only vhost was an HTTP→HTTPS redirect. */
+  const redirectOnlyHosts: string[][] = [];
   for (const { args, body } of blocks) {
     const parsed = parseVhost(body, args);
+    if (parsed === null) {
+      redirectOnlyHosts.push(redirectVhostNames(body));
+      continue; // HTTP→HTTPS redirect half — the edge does that itself
+    }
     if ("warning" in parsed) warnings.push(parsed.warning);
     else sites.push(parsed);
   }
 
-  return { proxy: "apache", sites, warnings };
+  // Dropping the redirect half is right when the TLS vhost beside it carries the
+  // site. When there ISN'T one, the hostname would vanish without a word — so say
+  // it, rather than letting the operator discover a missing domain in production.
+  const served = new Set(sites.flatMap((s) => s.serverNames));
+  for (const names of redirectOnlyHosts) {
+    const orphaned = names.filter((n) => !served.has(n));
+    if (orphaned.length > 0) {
+      warnings.push(
+        `apache: ${orphaned.join(", ")} only redirected to HTTPS and has no TLS VirtualHost here — nothing to serve it after migration`,
+      );
+    }
+  }
+
+  // `<VirtualHost *:80>` and `<VirtualHost *:443>` for the same ServerName both
+  // reach here when the :80 half serves real content; TLS has to win.
+  const { kept, dropped } = collapseByHost(
+    sites,
+    (s) => s.serverNames,
+    (s) => (s.ssl ? 2 : 0) + (s.target.kind === "proxy" ? 1 : 0),
+  );
+  for (const d of dropped) {
+    warnings.push(
+      `apache: ${d.serverNames.join(", ")} had a second VirtualHost (${d.ssl ? "TLS" : "plain HTTP"}, ${d.target.kind}) — kept the TLS/proxy one`,
+    );
+  }
+
+  return { proxy: "apache", sites: kept, warnings };
 }

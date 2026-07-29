@@ -126,4 +126,48 @@ describe("addDomain retries", () => {
     expect(domainRepo.create).not.toHaveBeenCalled();
     expect(domainRepo.update).not.toHaveBeenCalled();
   });
+
+  // The toggle used to set a flag nothing read: the controller dropped it and the SSL
+  // layer's www branch only ever resolved an EXISTING row (#289). www is a second
+  // routable hostname — the edge binds one server_name per row — so it only exists
+  // once it has its own row.
+  it("materializes the www variant as its own row when includeWww is set", async () => {
+    domainRepo.findByHostname.mockResolvedValue(null);
+    domainRepo.create.mockImplementation(async (data: any) => ({ id: `dom_${data.hostname}`, ...data }));
+
+    await addDomain(context as any, {
+      projectId: project.id,
+      hostname: "example.com",
+      isPrimary: true,
+      includeWww: true,
+    } as any);
+
+    expect(domainRepo.create.mock.calls.map(([data]: [any]) => data.hostname)).toEqual([
+      "example.com",
+      "www.example.com",
+    ]);
+    // The apex keeps primary — the variant is a sibling, not a replacement — and it
+    // starts pending so it verifies and certs on its own like any custom domain.
+    expect(domainRepo.create.mock.calls[1][0]).toMatchObject({
+      hostname: "www.example.com",
+      isPrimary: false,
+      verified: false,
+      status: "pending",
+    });
+  });
+
+  it("never stacks www on www", async () => {
+    domainRepo.findByHostname.mockResolvedValue(null);
+    domainRepo.create.mockImplementation(async (data: any) => ({ id: `dom_${data.hostname}`, ...data }));
+
+    await addDomain(context as any, {
+      projectId: project.id,
+      hostname: "www.example.com",
+      includeWww: true,
+    } as any);
+
+    expect(domainRepo.create.mock.calls.map(([data]: [any]) => data.hostname)).toEqual([
+      "www.example.com",
+    ]);
+  });
 });

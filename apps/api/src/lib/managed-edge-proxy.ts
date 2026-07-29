@@ -25,7 +25,9 @@ export async function ensureManagedEdgeProxy(
   // public URL, making Oblien proxy to its own loopback → 404). resolveEdgeTargetHost
   // returns null (with a reason) rather than a dead loopback so we surface an
   // actionable warning instead of silently wiring a broken route.
-  const { host, reason } = await resolveEdgeTargetHost(organizationId, opts?.serverId);
+  const { host, reason } = await resolveEdgeTargetHost(organizationId, {
+    serverId: opts?.serverId,
+  });
   if (!host) {
     throw new Error(`Cannot configure edge proxy: ${reason ?? "target host could not be resolved"}`);
   }

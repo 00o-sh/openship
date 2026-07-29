@@ -3,7 +3,8 @@
     "loading": "جارٍ التحميل...",
     "countOne": "{count} مشروع",
     "countOther": "{count} مشاريع",
-    "noTargetProjects": "لا توجد مشاريع منشورة على هذا الهدف بعد."
+    "noTargetProjects": "لا توجد مشاريع منشورة على هذا الهدف بعد.",
+    "noTargetDesc": "انشر تطبيقًا على هذا الهدف، أو أنشئ مشروعًا جديدًا للبدء."
   },
   "status": {
     "live": "مباشر",
@@ -34,7 +35,8 @@
     "services": "الخدمات",
     "static": "ثابت",
     "standalone": "مستقل",
-    "updateAvailable": "Update"
+    "updateAvailable": "Update",
+    "appBadge": "تطبيق"
   },
   "hosting": {
     "cloud": "السحابة",
@@ -97,7 +99,13 @@
     "teardownFailedAt": "فشل التفكيك عند: {reasons}. أعد المحاولة، أو افرض الحذف لتركها معزولة.",
     "teardownFailed": "فشل التفكيك",
     "cleanupFailedTitle": "فشل التنظيف",
-    "alreadyDeleted": "تم حذف المشروع بالفعل"
+    "alreadyDeleted": "تم حذف المشروع بالفعل",
+    "forceModalTitle": "لم نتمكّن من إزالته من المصدر",
+    "forceModalBody": "لم يتم الوصول إلى بيئة التشغيل (أو استمر الفشل)، لذلك لم يُفكَّك هذا المشروع. يمكنك حذفه من Openship على أي حال — يُحذف السجل الآن ويُستعاد أي مورد متبقٍ تلقائيًا بمجرد أن يصبح السيرفر متاحًا.",
+    "forceModalConfirm": "حذف من المخزن",
+    "forceModalCancel": "إلغاء",
+    "unlinked": "تم فصل الربط عن {projects} — أعد النشر لتطبيق ذلك.",
+    "unlinkedTitle": "تم تحديث المشاريع المرتبطة"
   },
   "sidebar": {
     "project": "المشروع",
@@ -163,7 +171,18 @@
     "deleteConfirmPrefix": "حذف نهائي لـ",
     "deleteConfirmSuffix": "؟",
     "cancel": "إلغاء",
-    "delete": "حذف"
+    "delete": "حذف",
+    "created": "تاريخ الإنشاء",
+    "detailsTitle": "التفاصيل",
+    "detailsDescription": "ما ينشره هذا المشروع وأين",
+    "managedImages": "صور حاويات مُدارة",
+    "managedImagesText": "يعمل هذا التطبيق من صور مبنية مسبقًا — لا يوجد مستودع لربطه. انشره فقط.",
+    "services": "الخدمات",
+    "target": "الهدف",
+    "targetPending": "يُحدَّد عند النشر",
+    "type": "النوع",
+    "typeApp": "تطبيق",
+    "typeProject": "مشروع"
   },
   "overview": {
     "platformCloud": "سحابة Openship",
@@ -324,7 +343,16 @@
     "guideIntroFallback": "يحصل مشروعك على هذا الاتصال جاهزًا للاستخدام.",
     "whatYouGet": "ما يحصل عليه تطبيقك",
     "advancedValues": "متقدّم",
-    "copy": "نسخ"
+    "copy": "نسخ",
+    "usedByTitle": "مُستخدَم بواسطة",
+    "usedByOpen": "فتح المشروع",
+    "usedByHint": "يعتمد {count} مشروع على اتصال هذا التطبيق. أزل الربط من المشروع المستهلك.",
+    "linkedCountOne": "تطبيق واحد مرتبط ({count})",
+    "linkedCountOther": "{count} تطبيقات مرتبطة",
+    "linkedHint": "يعتمد عليها هذا المشروع دون أن يشغّلها.",
+    "linkedBadge": "مرتبط",
+    "unlink": "إلغاء الربط",
+    "openApp": "فتح التطبيق"
   },
   "incomingWebhooks": {
     "title": "الويب هوكس الواردة",

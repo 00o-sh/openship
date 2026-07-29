@@ -12,6 +12,20 @@ export const APP_NAME = "Openship";
  * menu (Electron main). They were literally the same five URLs typed twice, which
  * is how a docs link ends up dead in one menu and fine in the other.
  */
+/**
+ * Where our published images live when nothing overrides it.
+ *
+ * `OPENSHIP_IMAGE_REGISTRY` overrides it everywhere. Shared because the fallback
+ * was typed independently in the CLI's compose generator, the API's edge-image
+ * pin and the adapters' edge installer — three defaults that had to agree for a
+ * pull to resolve, with nothing making them.
+ *
+ * NOTE: the shipped compose YAML repeats it as `${OPENSHIP_IMAGE_REGISTRY:-…}`
+ * because compose interpolation can't read TypeScript. That copy is asserted
+ * against this one by test.
+ */
+export const DEFAULT_IMAGE_REGISTRY = "ghcr.io/oblien";
+
 export const BRAND_LINKS = {
   site: "https://openship.io",
   docs: "https://openship.io/docs",

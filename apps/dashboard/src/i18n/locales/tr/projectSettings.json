@@ -592,7 +592,11 @@
     "confirmDeleteWipe": "Sil + verileri temizle",
     "confirmDeleteEnvWipe": "Ortamı sil + verileri temizle",
     "confirmDelete": "Projeyi sil",
-    "confirmDeleteEnv": "Ortamı sil"
+    "confirmDeleteEnv": "Ortamı sil",
+    "linkedTitleOne": "{count} proje bu uygulamaya bağlı",
+    "linkedTitleOther": "{count} proje bu uygulamaya bağlı",
+    "linkedNote": "Verileri dokunulmadan çalışmaya devam eder — yalnızca bu bağlantıyı kaybederler. Uygulamak için yeniden dağıtın.",
+    "linkedNoteRecordOnly": "Çalışmaya devam ederler, ama bağlantı kayıtla birlikte gider — uygulamayı sonra yeniden içe aktarmak onu geri getirmez."
   },
   "routing": {
     "title": "Yönlendirme",

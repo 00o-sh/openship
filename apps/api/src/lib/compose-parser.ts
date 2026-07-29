@@ -66,7 +66,11 @@ export interface ComposeParseOptions {
 // ─── Parser ──────────────────────────────────────────────────────────────────
 
 export function parseComposeFile(content: string, options: ComposeParseOptions = {}): ComposeParseResult {
-  const doc = parseYaml(content);
+  // `merge: true` is required, not cosmetic: the parser defaults to YAML 1.2,
+  // where `<<` is an ordinary key. Compose files that hoist shared config into
+  // an anchor (`x-environment: &shared` + `<<: *shared`) otherwise lose every
+  // anchored value and carry a literal "<<" key through to the container env.
+  const doc = parseYaml(content, { merge: true });
 
   if (!doc || typeof doc !== "object") {
     return { services: [], volumes: [], networks: [] };

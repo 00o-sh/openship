@@ -8,7 +8,10 @@
 
 import type { CommandExecutor } from "../../../types";
 import type { ImportedSite, ProxyScanResult } from "../../types";
-import { extractBlocks, stripComments, tryExec } from "./parse-utils";
+import { EDGE_HOST_PATHS, OPENRESTY_DEFAULT_PATHS } from "../../../infra/openresty-lua";
+import { containerCommand } from "../../edge-container-executor";
+import { resolveOurEdgeContainer } from "../detect";
+import { collapseByHost, extractBlocks, stripComments, tryExec } from "./parse-utils";
 
 async function loadNginxConfig(executor: CommandExecutor): Promise<string> {
   const dumped = await tryExec(executor, "nginx -T 2>/dev/null");
@@ -59,7 +62,15 @@ function resolveProxyTarget(
   const host = authority.replace(/:\d+$/, "");
   if (upstreams.has(host)) return { url: `${scheme}${upstreams.get(host)}` };
   const isIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
-  if (isIp || host === "localhost" || host.includes(".")) return { url: raw };
+  // `localhost` is NOT safe to carry over verbatim: nginx resolves it to ::1
+  // first, and most app servers bind IPv4 only — so an adopted
+  // `proxy_pass http://localhost:4000` 502s with "connect() failed (111) …
+  // upstream: http://[::1]:4000". Pin the family the app actually listens on.
+  // (An app bound ONLY to ::1 is rare enough to be worth this trade.)
+  if (host === "localhost" || host === "ip6-localhost") {
+    return { url: raw.replace(/^(https?:\/\/)[^/:]+/i, "$1127.0.0.1") };
+  }
+  if (isIp || host.includes(".")) return { url: raw };
   return { reason: `proxy_pass host "${host}" is an undeclared upstream — not migratable` };
 }
 
@@ -124,6 +135,30 @@ function isHttpsUpgradeForSelf(body: string, names: string[]): boolean {
   });
 }
 
+/**
+ * Does every `location` in this block exist only to answer ACME challenges?
+ *
+ * certbot's `--webroot` leaves blocks whose sole content is
+ * `location /.well-known/acme-challenge/ { root /var/www/certbot; }` — and
+ * `--webroot-path` pointed at a deliberately nonexistent dir is a known certbot
+ * idiom too. Their `root` is NOT a site root: treating it as one produced a
+ * static vhost for a directory with no index, which the edge answers with a 500
+ * (`try_files` → `/index.html` → redirect cycle). Our edge answers ACME itself,
+ * so these carry nothing to migrate.
+ */
+function isAcmeWebrootOnly(body: string): boolean {
+  const paths = [...body.matchAll(/(?:^|[\s;}])location\s+([^{]+?)\s*\{/g)].map((m) =>
+    m[1].trim(),
+  );
+  if (paths.length === 0) {
+    // No locations at all — a bare `root` with nothing serving it is only ACME
+    // scaffolding when the path itself says so (certbot's nonexistent webroot).
+    const root = firstDirective(body, "root") ?? "";
+    return /letsencrypt|acme|certbot/i.test(root);
+  }
+  return paths.every((p) => /\.well-known\/acme-challenge/i.test(p));
+}
+
 function parseServer(
   body: string,
   source: string,
@@ -172,10 +207,21 @@ function parseServer(
     const primary = resolved.find((r) => r.path === "/") ?? resolved[0];
     target = { kind: "proxy", url: primary.url };
     routes = resolved;
-  } else if (root) {
-    target = { kind: "static", root: root.replace(/;$/, "") };
   } else if (isHttpsUpgradeForSelf(body, names)) {
-    return { warnings: [] }; // HTTPS-upgrade half of a certbot pair — nothing lost
+    // BEFORE the `root` fallback, deliberately. certbot's :80 half usually
+    // carries BOTH a redirect and an ACME webroot `root`, so checking `root`
+    // first classified it as a STATIC SITE — which then collided with the real
+    // :443 vhost for the same hostname downstream (one file per host) and
+    // overwrote it. The site vanished and its TLS with it: the host answered
+    // only on :80 serving an empty webroot.
+    return { warnings: [] };
+  } else if (root && !isAcmeWebrootOnly(body)) {
+    target = { kind: "static", root: root.replace(/;$/, "") };
+  } else if (root) {
+    // A root that exists ONLY to answer /.well-known/acme-challenge — certbot
+    // scaffolding, not a site. Our edge answers ACME itself (nginx.conf proxies
+    // the challenge to certbot's loopback port), so there's nothing to carry.
+    return { warnings: [] };
   } else {
     warnings.push(`nginx: ${names[0]} has neither proxy_pass nor root — skipped (${source})`);
     return { warnings };
@@ -212,12 +258,37 @@ function parseNginxConfig(raw: string): ProxyScanResult {
     if (site) sites.push(site);
   }
 
-  return { proxy: "nginx", sites, warnings };
+  const { kept } = collapseByHost(
+    sites,
+    (s) => s.serverNames,
+    (s) => (s.ssl ? 2 : 0) + (s.target.kind === "proxy" ? 1 : 0),
+  );
+  return { proxy: "nginx", sites: kept, warnings };
 }
 
+/**
+ * One vhost file per hostname downstream, so two parsed blocks sharing a
+ * `server_name` are a COLLISION — last write wins and the loser is gone. Decide
+ * the winner here instead of letting file-write order decide it.
+ *
+ * Precedence: TLS beats plain HTTP, and a proxy beats a static root. That's the
+ * certbot pair (`:80` helper + `:443` real site) resolved the right way round —
+ * previously the `:80` half could overwrite the real site, leaving the host
+ * answering only on port 80 with an empty webroot.
+ */
 export async function scanNginx(executor: CommandExecutor): Promise<ProxyScanResult> {
   return parseNginxConfig(await loadNginxConfig(executor));
 }
+
+/**
+ * Every place our own edge's vhosts can sit: the canonical bind-mounted host dir
+ * (containerized edge), and the two bare-host OpenResty layouts.
+ */
+const OUR_EDGE_SITE_GLOBS = [
+  `${EDGE_HOST_PATHS.sitesDir}/*.conf`,
+  `${OPENRESTY_DEFAULT_PATHS.sitesDir}/*.conf`,
+  "/etc/openresty/sites-enabled/*.conf",
+];
 
 /**
  * Scan OUR OWN OpenResty edge's per-domain `server{}` blocks. NginxProvider
@@ -228,9 +299,17 @@ export async function scanNginx(executor: CommandExecutor): Promise<ProxyScanRes
  * `ssl_certificate`), so the same parser applies. Read-only; empty if unreadable.
  */
 export async function scanOpenshipEdge(executor: CommandExecutor): Promise<ProxyScanResult> {
-  const raw = await tryExec(
-    executor,
-    "cat /usr/local/openresty/nginx/conf/sites-enabled/*.conf /etc/openresty/sites-enabled/*.conf 2>/dev/null",
-  );
-  return parseNginxConfig(raw ?? "");
+  const cat = `cat ${OUR_EDGE_SITE_GLOBS.join(" ")} 2>/dev/null`;
+  const raw = await tryExec(executor, cat);
+  if (raw?.trim()) return parseNginxConfig(raw);
+
+  // Nothing on the host. On a legacy install the sites tree is a Docker-managed
+  // named volume mounted ONLY into the edge + api containers, so the host paths
+  // above genuinely don't exist and the read above is indistinguishable from "no
+  // sites" — which is exactly how the migrate wizard silently lost every domain
+  // and cert it used to pre-fill. Ask the container directly.
+  const container = await resolveOurEdgeContainer(executor);
+  if (!container) return parseNginxConfig("");
+  const fromContainer = await tryExec(executor, containerCommand(container, cat));
+  return parseNginxConfig(fromContainer ?? "");
 }

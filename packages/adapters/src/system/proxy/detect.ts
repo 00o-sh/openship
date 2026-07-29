@@ -16,6 +16,7 @@ import {
 } from "../../runtime/port-conflict";
 import { OPENRESTY_LUA_DIR } from "../../infra/openresty-lua";
 import type {
+  SystemLog,
   EdgeOccupant,
   EdgePolicy,
   EdgeStatus,
@@ -95,6 +96,153 @@ export function isOurEdgeContainer(name?: string, image?: string): boolean {
 }
 
 /**
+ * Make carried vhosts safe to `include` inside the edge image.
+ *
+ * The image's own nginx.conf includes `sites-enabled/*.conf` and THEN declares the
+ * catch-all (`listen 80 default_server; server_name _;`) that proxies ACME
+ * http-01 to certbot and 404s unmanaged hosts. A bare host edge has its own
+ * equivalent, so a blind `cp -a` hands the container two default servers for
+ * 0.0.0.0:80 — `[emerg] a duplicate default server`, which crash-loops the
+ * container. The operator then sees only Docker's "container is restarting"
+ * message, and the box gets rolled back to the bare edge it was trying to leave.
+ *
+ * Two rules, both because the IMAGE owns the catch-all role:
+ *   - a conf with no real `server_name` (catch-all only) is dropped — keeping it
+ *     would also shadow the image's ACME location, breaking issuance;
+ *   - `default_server` is stripped from every remaining `listen`, so a real vhost
+ *     that happened to carry the flag stops claiming a role it doesn't need.
+ *
+ * Runs before EVERY edge start, not only after a carry. A conf left by an older or
+ * failed attempt lives in the HOST bind mount, so it poisons every later start —
+ * including compose, which never carried anything. That is how one bad conversion
+ * became `[emerg] duplicate default server` on every subsequent `openship up`.
+ *
+ * Best-effort: a box where this can't run is no worse off than before, and
+ * `openresty -t` is still the gate that catches a bad tree.
+ */
+function vhostLog(message: string, level: SystemLog["level"] = "info"): SystemLog {
+  return { timestamp: new Date().toISOString(), message, level };
+}
+
+export async function sanitizeEdgeVhosts(
+  executor: CommandExecutor,
+  sitesDir: string,
+  onLog: (l: SystemLog) => void,
+): Promise<void> {
+  // POSIX sh, one pass, no per-file round trips (this runs over SSH).
+  const script = [
+    `for f in ${sq(sitesDir)}/*.conf; do`,
+    // A host-side vhost may be a symlink into /etc/nginx/sites-available. That
+    // target is deliberately not mounted in the edge container, so leaving the
+    // link here makes nginx's include glob fail at startup. Materialize valid
+    // links before the container mounts this directory; remove dangling ones.
+    `  [ -e "$f" ] || [ -L "$f" ] || continue;`,
+    `  if [ -L "$f" ]; then`,
+    `    if [ ! -e "$f" ]; then`,
+    `      echo "dropped-dangling-link $f"; rm -f "$f"; continue;`,
+    `    fi;`,
+    `    if cat "$f" > "$f.osh-link"; then`,
+    `      rm -f "$f"; mv "$f.osh-link" "$f"; echo "materialized-link $f";`,
+    `    else`,
+    `      rm -f "$f.osh-link"; echo "dropped-unreadable-link $f"; rm -f "$f"; continue;`,
+    `    fi;`,
+    `  fi;`,
+    // A real server_name is anything that isn't the `_` wildcard.
+    `  if ! grep -qE '^[[:space:]]*server_name[[:space:]]+[^_;[:space:]]' "$f"; then`,
+    `    echo "dropped-catchall $f"; rm -f "$f"; continue;`,
+    `  fi;`,
+    `  if grep -qE '[[:space:]]default_server' "$f"; then`,
+    `    sed -E 's/([[:space:]]listen[^;]*)[[:space:]]+default_server/\\1/g' "$f" > "$f.osh" && mv "$f.osh" "$f" && echo "unset-default $f";`,
+    `  fi;`,
+    `done`,
+  ].join(" ");
+  const out = await executor.exec(script).catch(() => "");
+  for (const line of out.split("\n").map((l) => l.trim()).filter(Boolean)) {
+    const [action, file] = [line.slice(0, line.indexOf(" ")), line.slice(line.indexOf(" ") + 1)];
+    if (action === "dropped-catchall") {
+      onLog(vhostLog(`Dropped catch-all vhost ${file} — the edge image provides it.`, "warn"));
+    } else if (action === "unset-default") {
+      onLog(vhostLog(`Removed default_server from ${file} — the edge image owns it.`, "warn"));
+    } else if (action === "materialized-link") {
+      onLog(vhostLog(`Materialized linked edge vhost ${file} for the container mount.`, "warn"));
+    } else if (action === "dropped-dangling-link") {
+      onLog(vhostLog(`Dropped dangling edge vhost link ${file}.`, "warn"));
+    } else if (action === "dropped-unreadable-link") {
+      onLog(vhostLog(`Dropped unreadable edge vhost link ${file}.`, "warn"));
+    }
+  }
+}
+
+/**
+ * Is our edge DEFINITIVELY broken — crash-looping, exited, dead?
+ *
+ * Asks the negative on purpose, and answers "no" when it can't tell. The caller acts
+ * on `true` by stopping our edge and restoring the operator's proxy, so a false
+ * positive TAKES DOWN A WORKING EDGE. The previous version probed `wget` inside the
+ * container (no guarantee the image has it; host networking makes 127.0.0.1
+ * ambiguous), false-negatived a box serving live traffic, and reported it as dark —
+ * the guard became the outage.
+ *
+ * `.State.Status` can't be misread: `restarting` for a crash loop, `exited` for dead.
+ * Anything else — including an unreadable answer — is treated as fine, so the worst
+ * case is missing a broken edge (which the next step reports anyway).
+ */
+export async function edgeIsBroken(executor: CommandExecutor): Promise<boolean> {
+  const status = await tryExec(
+    executor,
+    `docker inspect -f '{{.State.Status}}' ${sq(EDGE_CONTAINER_NAME)} 2>/dev/null`,
+  );
+  const state = (status ?? "").trim();
+  return state === "restarting" || state === "exited" || state === "dead";
+}
+
+/**
+ * Why the edge container isn't running, from its own log on the box `executor`
+ * reaches. Parsing is {@link edgeFailureReason}, so every caller agrees on the cause.
+ */
+export async function edgeCrashReason(executor: CommandExecutor): Promise<string | null> {
+  const logs = await tryExec(
+    executor,
+    `docker logs --tail 40 ${sq(EDGE_CONTAINER_NAME)} 2>&1`,
+  );
+  return logs ? edgeFailureReason(logs) : null;
+}
+
+/**
+ * The one line of an edge container's log that explains why it isn't running.
+ *
+ * nginx reports a fatal config problem as `[emerg]` — that line IS the diagnosis,
+ * and the surrounding 40 lines are startup noise. Returns null when there is no
+ * `[emerg]`: the log of a running edge is access lines, and quoting one of those as
+ * "the reason" is how a healthy box got reported as broken.
+ *
+ * Pure string work, deliberately: the two callers read the log through completely
+ * different channels (the CLI shells out locally, the installer execs over SSH),
+ * and only the PARSING is common. Keeping it in one place stops those two from
+ * disagreeing about what counts as the cause.
+ */
+export function edgeFailureReason(containerLog: string): string | null {
+  const lines = containerLog
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const emerg = lines.find((l) => l.includes("[emerg]"));
+  if (emerg) return emerg.replace(/^.*\[emerg\]\s*\d*#\d*:\s*/, "");
+  // No `[emerg]` → nothing here explains a failure. Do NOT fall back to the last
+  // line: on a RUNNING edge that's an access-log entry, and reporting
+  // `"GET /favicon.ico" 404` as the reason it's down is worse than silence.
+  return null;
+}
+
+/**
+ * OUR edge container's default name. Lives here (the lean detect module) rather
+ * than next to the installer, so the takeover journal — which deliberately imports
+ * nothing heavier than this file — can name the container it has to stop before
+ * restoring a foreign proxy.
+ */
+export const EDGE_CONTAINER_NAME = "openship-edge";
+
+/**
  * Is OUR edge CONTAINER running? `openship-edge` by NAME (the default) or by
  * IMAGE (covers a container renamed via OPENSHIP_EDGE_CONTAINER). A running edge
  * container OWNS 80/443 — host-networked (no `--filter publish` match; its Lua
@@ -106,23 +254,99 @@ export function isOurEdgeContainer(name?: string, image?: string): boolean {
  * a foreign proxy the takeover flow would kill.
  */
 export async function ourEdgeContainerRunning(executor: CommandExecutor): Promise<boolean> {
+  return Boolean(await resolveOurEdgeContainer(executor));
+}
+
+/**
+ * Short-lived memo for {@link resolveOurEdgeContainer}, keyed by the executor —
+ * i.e. by the BOX being asked, since an executor reaches exactly one machine.
+ *
+ * The probe is 1–2 `docker ps` shell-outs (over SSH for a remote server), and it
+ * sits on read paths that run constantly: every `createPlatform`, every
+ * `checkEdge`, and once per file in `readEdgeFile` /
+ * `writeEdgeFile` — so carrying one cert cost eight round-trips to answer the same
+ * question. Uncached, this reproduced the per-poll shell-out storm that made the
+ * server page slow in the first place.
+ *
+ * Cache lifetime is deliberately short, and every code path that CREATES or
+ * REMOVES the edge invalidates explicitly (see `invalidateEdgeContainer`), so a
+ * stale answer can only ever come from someone changing the edge out-of-band —
+ * where being wrong for a few seconds costs a retryable reload, not data.
+ */
+const EDGE_CONTAINER_TTL_MS = 20_000;
+
+interface EdgeContainerMemo {
+  value: string | null;
+  at: number;
+  generation: number;
+}
+
+const edgeContainerMemo = new WeakMap<CommandExecutor, EdgeContainerMemo>();
+/** Bumped by a no-arg invalidate; makes every existing entry unreadable at once
+ *  (a WeakMap can't be enumerated, so there's nothing to delete). */
+let edgeMemoGeneration = 0;
+
+/**
+ * Drop the memoized edge-container answer. MUST be called by anything that starts,
+ * replaces or removes the edge container — otherwise the next reader can be told
+ * the old story for up to {@link EDGE_CONTAINER_TTL_MS}.
+ *
+ * With an executor: only that box. Without: every box (used when we can't name the
+ * executor that changed, e.g. a compose stack coming up underneath us).
+ */
+export function invalidateEdgeContainer(executor?: CommandExecutor): void {
+  if (executor) edgeContainerMemo.delete(executor);
+  else edgeMemoGeneration++;
+}
+
+/**
+ * The NAME of our running edge container on this box, or null.
+ *
+ * Same detection as {@link ourEdgeContainerRunning} — it's the same probe, so
+ * this is the single source of truth and the boolean delegates here. Callers that
+ * need to reach INTO the edge (`docker exec`) must use this rather than
+ * `OPENSHIP_EDGE_CONTAINER`: that env names the CONTROL PLANE's own edge, which
+ * says nothing about a remote server we're scanning or deploying to.
+ *
+ * Memoized per executor for a few seconds. Pass `{ fresh: true }` on paths that
+ * are ABOUT TO ACT on the answer (install, uninstall, takeover) — there, a stale
+ * negative would create a second edge and a stale positive would skip creating one.
+ */
+export async function resolveOurEdgeContainer(
+  executor: CommandExecutor,
+  opts?: { fresh?: boolean },
+): Promise<string | null> {
+  if (!opts?.fresh) {
+    const hit = edgeContainerMemo.get(executor);
+    if (hit && hit.generation === edgeMemoGeneration && Date.now() - hit.at < EDGE_CONTAINER_TTL_MS) {
+      return hit.value;
+    }
+  }
+
+  const resolved = await probeOurEdgeContainer(executor);
+  edgeContainerMemo.set(executor, {
+    value: resolved,
+    at: Date.now(),
+    generation: edgeMemoGeneration,
+  });
+  return resolved;
+}
+
+async function probeOurEdgeContainer(executor: CommandExecutor): Promise<string | null> {
   const byName = await tryExec(
     executor,
     `docker ps --filter name=openship-edge --format '{{.Names}}' 2>/dev/null | head -1`,
   );
-  if (byName && byName.trim()) return true;
+  if (byName?.trim()) return byName.trim();
 
   // Renamed container (OPENSHIP_EDGE_CONTAINER): still ours if it runs our image.
   const all = await tryExec(executor, `docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null`);
-  if (!all) return false;
-  return all
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .some((line) => {
-      const [name, image] = line.split("\t");
-      return isOurEdgeContainer(name, image);
-    });
+  if (!all) return null;
+  for (const line of all.split("\n").map((l) => l.trim()).filter(Boolean)) {
+    const [name, image] = line.split("\t");
+    if (name && isOurEdgeContainer(name, image)) return name;
+  }
+  return null;
 }
 
 /**

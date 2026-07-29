@@ -148,17 +148,20 @@ export const updateCommand = new Command("update")
       return;
     }
 
-    // Compose install → pull the new-version images + recreate the stack (the
-    // CLI package update above refreshed the compose template/pin). Bare install
-    // → restart the process service so it picks up the new bundle.
+    // Compose install → the FULL reconcile: regenerate the compose file + .env
+    // from the new CLI (carrying every operator setting forward), pull the
+    // new-version images, and recreate. Nothing needs to be run after this —
+    // `openship up` afterwards used to be the thing that broke installs, because
+    // it re-rendered .env from flags it wasn't given. Bare install → restart the
+    // process service so it picks up the new bundle.
     if (readInstallMethod() === "compose") {
-      const pulled = composeUpdate(latest);
+      const applied = await composeUpdate(latest);
       if (isJsonMode()) {
-        printJson({ updated: true, from: current, to: latest, via: pm, method: "compose", pulled });
-      } else if (pulled) {
-        ok(`Updated to v${latest} and pulled the new images — the compose stack is on the new version.`);
+        printJson({ updated: true, from: current, to: latest, via: pm, method: "compose", applied });
+      } else if (applied) {
+        ok(`Updated to v${latest} — compose stack regenerated, images pulled, services recreated.`);
       } else {
-        err(`Updated the CLI to v${latest}, but \`docker compose pull\` failed. Run \`openship up\` to retry.`);
+        err(`Updated the CLI to v${latest}, but bringing the compose stack up failed. Re-run \`openship update\`, or \`openship up\` to retry.`);
         process.exitCode = 1;
       }
       return;

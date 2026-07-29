@@ -536,6 +536,14 @@ jobs:
       - name: Build CLI
         run: bun run --cwd apps/cli build
 
+      # Gate: run the ACTUAL built bundle across node/bun/shebang/no-node and
+      # boot the real server. This is the last check before the IMMUTABLE npm
+      # publish, so a CLI that installs but can't launch (0.4.4 crash, #257
+      # boot, #261 shebang) fails the release under the SAME version instead of
+      # shipping. dist/ was just built above → skip its rebuild.
+      - name: Release smoke — built CLI launches + server boots
+        run: SMOKE_SKIP_BUILD=1 bash apps/cli/scripts/release-smoke.sh
+
       - name: Publish to npm (OIDC trusted publishing — no token)
         working-directory: apps/cli
         run: |

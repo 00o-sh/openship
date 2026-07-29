@@ -839,7 +839,8 @@ function toMonorepoApp(snapshot: ProjectRootSnapshot, overrides?: { id?: string;
     "app";
 
   // Static sub-apps keep an empty start command: the monorepo build pipeline
-  // serves them as files via the generated nginx image (see isStaticService /
+  // serves them as files — via the edge on self-hosted, a generated nginx image on
+  // cloud (see isStaticService /
   // the static Dockerfile branch). Server sub-apps carry their real start command.
   return {
     id: overrides?.id ?? snapshot.rootDirectory,

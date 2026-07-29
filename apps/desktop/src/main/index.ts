@@ -622,16 +622,21 @@ app.whenReady().then(async () => {
       const notify = store.get("updateNotifications") !== false; // default ON
 
       if (autoUpdate) {
-        // Auto-install: download + install straight away. Progress streams to
-        // the dashboard's top-of-page surface (no modal needed).
+        // Auto-install: the user opted IN to always taking updates, so this is
+        // not an interruption — advisory or not, download + install straight
+        // away. Progress streams to the dashboard's top surface (no modal).
         await runUpdate();
-      } else if (notify) {
-        // Notify-only (the default): offer it in the native modal, user decides.
-        // On "Update now" the modal hands off to the header progress bar.
+      } else if (notify && result.announcement) {
+        // Notify-only (the default): the modal appears ONLY when the release
+        // advisory says so (`bun run release … publish` writes `announce`). A
+        // newer version on its own is NOT a reason to interrupt anyone — routine
+        // releases go out often, and a modal on every launch trains people to
+        // dismiss the one that actually matters. Unannounced releases stay
+        // discoverable in Settings → Updates and the home Updates block.
         openUpdateWindow(mainWindow, result);
       }
-      // Muted + not auto → stay silent here. The dashboard still surfaces
-      // matching advisories on its own (critical ones always).
+      // Muted, or no announcement → stay silent here. The dashboard still
+      // surfaces matching advisories on its own (critical ones always).
     });
   }
 

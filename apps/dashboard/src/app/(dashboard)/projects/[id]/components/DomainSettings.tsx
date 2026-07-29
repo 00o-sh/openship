@@ -76,6 +76,14 @@ interface DomainSummaryItem {
   isPrimary: boolean;
   /** True when the row exists in DB but verified=false / status=pending. */
   needsVerify: boolean;
+  /**
+   * TLS terminates at the operator's OWN proxy/CDN (a "bring your own" domain), so
+   * certbot on this box neither issued nor can renew it — `manageDomainSsl` answers
+   * `not_local` for renew/provision on such a row. Carried here so the menu can
+   * hide an action that would silently do nothing. Uploading a cert (Origin CA) is
+   * still valid and stays offered.
+   */
+  externalIngress?: boolean;
   status: { label: string; tone: DomainTone };
   ssl: { label: string; tone: DomainTone };
 }
@@ -686,9 +694,12 @@ export const DomainSettings = () => {
     const isCustom = newDomainType === "custom";
     const portValue = newDomainPort.trim();
 
-    // The "Include www" toggle owns the www record — a hand-typed "www."
-    // prefix would double it up, so block it with guidance instead.
-    if (isCustom && host.startsWith("www.")) {
+    // `www.x` is a legitimate hostname to add on its own — refuse it only when THIS
+    // project already has that exact row, which is the real error (a duplicate).
+    // This used to reject every typed `www.` on the grounds that the "Include www"
+    // toggle owned it; the toggle created nothing (#289), so the rule blocked the
+    // only workaround users had.
+    if (isCustom && domainsData.domains.some((d: any) => (d.domain ?? d.hostname) === host)) {
       showToast(t.projectSettings.domains.add.noWww, "error", t.projectSettings.domains.toast.addDomainTitle);
       return;
     }
@@ -724,14 +735,31 @@ export const DomainSettings = () => {
         );
       }
 
+      const target = hasProjectServer
+        ? { port: portValue }
+        : { targetPath: newDomainPath.trim() || "/" };
       const nextEndpoint = createPublicEndpoint({
         domainType: newDomainType,
         ...(isCustom ? { customDomain: host } : { domain: host }),
-        ...(hasProjectServer ? { port: portValue } : { targetPath: newDomainPath.trim() || "/" }),
+        ...target,
       });
+      // The www variant must be in THIS save, not just in the domain table:
+      // `syncProjectPublicRoutes` deletes every project-level domain row the
+      // submitted endpoint list omits (project-route-store.ts:108), so a row the
+      // connect call just minted would be removed by the save that follows it.
+      // publicEndpoints is the source of truth for routing — the variant has to be
+      // in it to survive, verify, and get a cert of its own.
+      const wwwEndpoint =
+        isCustom && includeWww && !host.startsWith("www.")
+          ? createPublicEndpoint({
+              domainType: newDomainType,
+              customDomain: `www.${host}`,
+              ...target,
+            })
+          : null;
       const label = isCustom ? host : `${host}.${baseDomain}`;
       const ok = await persistPublicEndpoints(
-        [...publicEndpoints, nextEndpoint],
+        [...publicEndpoints, nextEndpoint, ...(wwwEndpoint ? [wwwEndpoint] : [])],
         isCustom
           ? interpolate(t.projectSettings.domains.toast.addedCustom, { label })
           : interpolate(t.projectSettings.domains.toast.addedFree, { label }),
@@ -1358,16 +1386,21 @@ export const DomainSettings = () => {
     }
   };
 
+  /** This project's domain rows, keyed by lowercased hostname. */
+  const domainRowsByHostname: Map<string, any> = (() => {
+    const domains = Array.isArray(domainsData.domains) ? domainsData.domains : [];
+    return new Map(
+      domains
+        .filter((d: any) => typeof d?.hostname === "string" && d.hostname.trim())
+        .map((d: any) => [d.hostname.toLowerCase(), d]),
+    );
+  })();
+
   // Every enabled + exposed service is a generic domain → port route card —
   // the SAME card a single-app project's endpoints render as. No project-vs-
   // service split in the UI; internal (non-exposed) services produce no card.
   const serviceRouteCards: Array<{ service: Service; summary: DomainSummaryItem }> = (() => {
-    const domains = Array.isArray(domainsData.domains) ? domainsData.domains : [];
-    const domainByHostname = new Map(
-      domains
-        .filter((d: any) => typeof d?.hostname === "string")
-        .map((d: any) => [d.hostname.toLowerCase(), d]),
-    );
+    const domainByHostname = domainRowsByHostname;
     return services
       .filter((s) => s.enabled && s.exposed)
       .map((service) => {
@@ -1387,12 +1420,57 @@ export const DomainSettings = () => {
             liveUrl: `https://${hostname}`,
             isPrimary: domain?.isPrimary ?? false,
             needsVerify: !!domain && domain.verified === false,
+            externalIngress: domain?.externalIngress === true,
             status: resolveDomainStatus(domain, t),
             ssl: resolveDomainSsl(hostname, domain, baseDomain, t),
           },
         };
       });
   })();
+
+  /**
+   * Domain rows this project HAS that no service card accounts for.
+   *
+   * The cards above are derived from `services`, with domains only decorating a
+   * service they hostname-match. That means a project with domain rows but no
+   * exposed service produced NO cards at all, and the tab read "No domains yet"
+   * while the very same rows were driving the Production URL in the sidebar — the
+   * domain was live, and invisible: unverifiable, un-editable, un-deletable here.
+   *
+   * The control-plane "Openship" project is the guaranteed case (it's an adopted
+   * deployment with domain rows and no service rows), but any project whose domain
+   * isn't attached to an exposed service hits it. A domain the project owns has to
+   * be listed by the page that owns domains, whether or not a service claims it.
+   */
+  const orphanDomainCards: DomainSummaryItem[] = (() => {
+    const claimed = new Set(
+      services.filter((s) => s.enabled && s.exposed).map((s) => resolveServiceHostname(s).toLowerCase()),
+    );
+    return [...domainRowsByHostname.entries()]
+      .filter(([hostname]) => !claimed.has(hostname))
+      .map(([hostname, domain]) => ({
+        id: typeof domain?.id === "string" ? domain.id : hostname,
+        domainId: typeof domain?.id === "string" ? domain.id : undefined,
+        title: domain?.hostname ?? hostname,
+        hostname: domain?.hostname ?? hostname,
+        typeLabel:
+          domain?.domainType === "custom"
+            ? t.projectSettings.domains.typeCustom
+            : t.projectSettings.domains.typeFree,
+        // No service backs this row, so there's no port to name. `mappedLabel` is
+        // the card's subtitle, so leave it empty rather than invent "port auto".
+        mappedLabel: "",
+        liveUrl: `https://${domain?.hostname ?? hostname}`,
+        isPrimary: domain?.isPrimary ?? false,
+        needsVerify: domain?.verified === false,
+        externalIngress: domain?.externalIngress === true,
+        status: resolveDomainStatus(domain, t),
+        ssl: resolveDomainSsl(hostname, domain, baseDomain, t),
+      }));
+  })();
+
+  /** Cards actually rendered — gates "Set as primary", which needs a choice. */
+  const totalRouteCards = serviceRouteCards.length + orphanDomainCards.length;
 
   // Build the ⋯ menu items for a domain card. Shared by the single-app and
   // service route cards so both collapse the same way. Visit is NOT here — it's
@@ -1438,7 +1516,12 @@ export const DomainSettings = () => {
     const sslActionable = !domain.needsVerify && !!domain.domainId;
     const certbotOwned = !isCloudProject && !isManagedRow; // self-hosted custom domain
     const canRecheck = isCloudProject || !isManagedRow; // everything except self-hosted free
-    if (sslActionable && certbotOwned) {
+    //   • BYO / external-ingress row → TLS terminates at the operator's own
+    //     proxy, so `manageDomainSsl` answers `not_local` for renew and the button
+    //     would silently do nothing. Uploading an Origin-CA cert IS still the right
+    //     action there (that's what secures the origin hop), so only renew goes.
+    const canRenew = certbotOwned && !domain.externalIngress;
+    if (sslActionable && canRenew) {
       items.push({
         id: "renew",
         label: isRenewing ? m.renewing : m.renewSsl,
@@ -1486,7 +1569,10 @@ export const DomainSettings = () => {
   // hints — is shared.
   const renderRouteCard = (
     item: DomainSummaryItem,
-    opts: { onEdit: () => void; onSetPrimary?: () => void },
+    // `onEdit` is optional: a domain with no service behind it has no route to
+    // edit, and offering the action would open an editor for a service that
+    // doesn't exist. Everything else on the card still applies.
+    opts: { onEdit?: () => void; onSetPrimary?: () => void },
   ): React.ReactNode => {
     const canVerify = item.needsVerify && !!item.domainId;
     const menuActions = buildDomainMenuActions({
@@ -1603,10 +1689,13 @@ export const DomainSettings = () => {
   // True when the panel is showing preview (pre-Connect) data only. Used
   // to tweak the explainer text inside the panel.
   const isPreviewOnly = dnsRecords.length === 0 && previewedRecords.length > 0;
-  // Custom domains must be entered bare; the "Include www" toggle adds the www
-  // record. A typed "www." prefix is a mistake, so flag it and block submit.
+  // Only a DUPLICATE blocks submit now. A typed `www.` is fine — the "Include www"
+  // toggle is a convenience for claiming both at once, not the sole owner of www.
   const newDomainHasWww =
-    newDomainType === "custom" && newDomain.trim().toLowerCase().startsWith("www.");
+    newDomainType === "custom" &&
+    domainsData.domains.some(
+      (d: any) => (d.domain ?? d.hostname) === newDomain.trim().toLowerCase(),
+    );
 
   return (
     <div className="space-y-5">
@@ -2007,7 +2096,7 @@ export const DomainSettings = () => {
 
           {servicesLoading ? (
             <div className="py-8 text-center text-sm text-muted-foreground">{t.projectSettings.domains.addRoute.loading}</div>
-          ) : serviceRouteCards.length === 0 ? (
+          ) : serviceRouteCards.length === 0 && orphanDomainCards.length === 0 ? (
             <div className="py-8 text-center text-sm text-muted-foreground">
               {t.projectSettings.domains.addRoute.emptyPrefix}<span className="font-medium text-foreground">{t.projectSettings.domains.addRoute.emptyAction}</span>{t.projectSettings.domains.addRoute.emptySuffix}
             </div>
@@ -2018,7 +2107,19 @@ export const DomainSettings = () => {
                   onEdit: () => setEditingRouteServiceId(service.id),
                   // Choosing a canonical domain only makes sense with >1 route.
                   onSetPrimary:
-                    serviceRouteCards.length > 1 && summary.domainId && !summary.isPrimary
+                    totalRouteCards > 1 && summary.domainId && !summary.isPrimary
+                      ? () => void handleSetPrimaryServiceDomain(summary)
+                      : undefined,
+                }),
+              )}
+              {/* Domains with no exposed service behind them (the control plane's
+                  own hostname, a domain whose service was removed). No service to
+                  edit, so no Edit route action — but verify / recheck SSL / renew /
+                  delete all still apply, which is the point of listing them. */}
+              {orphanDomainCards.map((summary) =>
+                renderRouteCard(summary, {
+                  onSetPrimary:
+                    totalRouteCards > 1 && summary.domainId && !summary.isPrimary
                       ? () => void handleSetPrimaryServiceDomain(summary)
                       : undefined,
                 }),
@@ -2254,7 +2355,7 @@ function SectionCard({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-2xl border border-border/50 bg-card sadwq">
+    <div className="rounded-2xl border border-border/50 bg-card">
       <div className="border-b border-border/40 px-5 py-4">
         <div className="flex min-w-0 items-start justify-between gap-3">
           <div
@@ -2429,7 +2530,7 @@ function DomainOverviewCard({
   }, [autoOpenRecords, openRecords]);
 
   return (
-    <div className="rounded-2xl border border-border/50 bg-card sadwq">
+    <div className="rounded-2xl border border-border/50 bg-card">
       <div className="flex items-start justify-between gap-2 border-b border-border/40 px-5 py-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
@@ -2461,7 +2562,9 @@ function DomainOverviewCard({
 
       <div className="space-y-4 px-5 py-4">
         <div className="break-all text-[15px] font-semibold text-foreground">{domain.hostname}</div>
-        <InfoRow label={d.overview.mappedTo} value={domain.mappedLabel} />
+        {/* No service behind the domain → nothing to be "mapped to". Rendering the
+            row with an empty value reads as a half-loaded card. */}
+        {domain.mappedLabel ? <InfoRow label={d.overview.mappedTo} value={domain.mappedLabel} /> : null}
         <InfoRow label={d.overview.status} value={<StatusPill tone={domain.status.tone}>{domain.status.label}</StatusPill>} />
         <InfoRow label={d.overview.ssl} value={<StatusPill tone={domain.ssl.tone}>{domain.ssl.label}</StatusPill>} />
 

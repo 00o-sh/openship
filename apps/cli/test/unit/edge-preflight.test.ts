@@ -24,7 +24,7 @@ function deps(over: Partial<EdgePreflightDeps> = {}): EdgePreflightDeps {
     beginEdgeTakeover: vi.fn(async () => {}),
     recoverInterruptedTakeover: vi.fn(async () => {}),
     ourEdgeContainerRunning: vi.fn(async () => false),
-    readCert: vi.fn((p: string) => (p.endsWith(".crt") ? "CERT" : "KEY")),
+    collectCerts: vi.fn(async () => ({ "a.com": { certPem: "CERT", keyPem: "KEY" } })),
     detectInstalledProxy: vi.fn(async () => null),
     scanProxySites: vi.fn(async () => ({ sites: [tlsSite], warnings: [] })),
     edgeServedHostnames: vi.fn(() => new Set<string>()),
@@ -71,25 +71,40 @@ describe("planAndApplyHostEdge", () => {
     expect(d.beginEdgeTakeover).toHaveBeenCalledTimes(1);
   });
 
-  it("migrate stops the proxy, returns sites, and collects safe cert PEMs", async () => {
+  it("migrate stops the proxy, returns sites, and harvests cert PEMs by hostname", async () => {
     const d = deps({ confirm: vi.fn(async () => "migrate") });
     const plan = await planAndApplyHostEdge({}, d);
     expect(plan.proceed).toBe(true);
     expect(plan.action).toBe("migrate");
     expect(plan.sites).toEqual([tlsSite]);
-    expect(plan.certPems).toEqual({ "/etc/ssl/a.crt": { certPem: "CERT", keyPem: "KEY" } });
+    expect(plan.certPems).toEqual({ "a.com": { certPem: "CERT", keyPem: "KEY" } });
     expect(d.beginEdgeTakeover).toHaveBeenCalledTimes(1);
   });
 
-  it("does not collect PEMs for unsafe cert paths", async () => {
-    const unsafe = { ...tlsSite, tls: { certPath: "/etc/ssl/../$(x).crt", keyPath: "/etc/ssl/a.key" } };
+  // The certs must be read while the proxy is still UP: a containerized caddy or
+  // traefik keeps its store inside the container, so once beginEdgeTakeover stops
+  // it there is nothing left to read and every domain re-issues through ACME.
+  it("harvests the certs BEFORE stopping the proxy", async () => {
+    const order: string[] = [];
     const d = deps({
       confirm: vi.fn(async () => "migrate"),
-      importSites: vi.fn(async () => ({ sites: [unsafe], warnings: [] })),
+      collectCerts: vi.fn(async () => {
+        order.push("collect");
+        return {};
+      }),
+      beginEdgeTakeover: vi.fn(async () => {
+        order.push("stop");
+      }),
     });
+    await planAndApplyHostEdge({}, d);
+    expect(order).toEqual(["collect", "stop"]);
+  });
+
+  it("takeover harvests nothing (the occupant's sites are dropped, not carried)", async () => {
+    const d = deps({ confirm: vi.fn(async () => "takeover") });
     const plan = await planAndApplyHostEdge({}, d);
-    expect(plan.certPems).toEqual({});
-    expect(d.readCert).not.toHaveBeenCalled();
+    expect(plan.certPems).toBeUndefined();
+    expect(d.collectCerts).not.toHaveBeenCalled();
   });
 
   it("stops the proxy through the JOURNALED path (so a failed bring-up can roll back)", async () => {

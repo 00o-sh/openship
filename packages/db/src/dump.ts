@@ -423,6 +423,7 @@ export const ENCRYPTED_COLUMNS: ReadonlyArray<EncryptedColumnSpec> = [
   { table: "servers", column: "sshPassword" },
   { table: "servers", column: "sshKeyPassphrase" },
   { table: "instance_settings", column: "tunnelToken" },
+  { table: "instance_settings", column: "ghDeviceTokenEncrypted" },
   { table: "deployment", column: "envVars" },
   { table: "notification_channel", column: "config", secretPaths: ["hmacSecret", "webhookUrl"] },
 ];

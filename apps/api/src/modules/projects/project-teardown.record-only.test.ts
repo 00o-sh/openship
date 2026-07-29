@@ -29,6 +29,25 @@ const h = vi.hoisted(() => ({
   // instead of burning the 5s timeout.
   listByProjectCalls: 0,
 
+  /** Links from the app being deleted into the projects using it. */
+  consumers: [] as Array<{
+    id: string;
+    targetProjectId: string;
+    envKey: string;
+    mode: string;
+  }>,
+  unlinkConsumersOfSource: vi.fn(
+    async (links: Array<{ id: string; targetProjectId: string; envKey: string }>) => ({
+      unlinked: links.map((l) => ({
+        linkId: l.id,
+        projectId: l.targetProjectId,
+        projectName: l.targetProjectId,
+        envKey: l.envKey,
+      })),
+      errors: [] as string[],
+    }),
+  ),
+
   claimDeletion: vi.fn(async () => true),
   deleteHard: vi.fn(async () => {}),
   clearDeletionInProgress: vi.fn(async () => {}),
@@ -62,7 +81,12 @@ vi.mock("@repo/db", () => ({
     backupRun: { listInFlightByProject: vi.fn(async () => []) },
     backupRestore: { listInFlightByProject: vi.fn(async () => []) },
     orphanedResource: { create: h.orphanCreate },
+    projectConnection: { listBySource: vi.fn(async () => h.consumers) },
   },
+}));
+
+vi.mock("./project-connection.service", () => ({
+  unlinkConsumersOfSource: h.unlinkConsumersOfSource,
 }));
 
 vi.mock("./project-cleanup.service", () => ({
@@ -109,6 +133,87 @@ beforeEach(() => {
   h.project = projectFixture();
   h.activeDeployments = [];
   h.listByProjectCalls = 0;
+  h.consumers = [];
+});
+
+describe("teardownProject — deleting a linked app unlinks it from the projects using it", () => {
+  it("unlinks every consuming project instead of refusing the delete", async () => {
+    // `project_connection.sourceProjectId` is ON DELETE RESTRICT, so the links
+    // have to go before the row can drop. The consuming projects are NOT touched
+    // beyond losing the injected env var — they keep running.
+    h.consumers = [
+      { id: "conn_a", targetProjectId: "app-a", envKey: "DATABASE_URL", mode: "internal" },
+      { id: "conn_b", targetProjectId: "app-b", envKey: "DATABASE_URL", mode: "internal" },
+    ];
+
+    const res = await teardownProject(ctx, "p1", { force: true, recordOnly: false });
+
+    expect(res.rejection).toBeUndefined();
+    expect(res.rowDeleted).toBe(true);
+    expect(h.unlinkConsumersOfSource).toHaveBeenCalledWith(h.consumers);
+    expect(res.unlinked.map((u) => u.projectId)).toEqual(["app-a", "app-b"]);
+    expect(stepOf(res.steps, "unlink_consumers")?.status).toBe("ok");
+  });
+
+  it("unlinks AFTER the runtime is clean — a kept row never strips another project's env", async () => {
+    // The atomicity gate keeps the row when cleanup fails (unreachable server).
+    // Unlinking before that point would leave a live project pointing at nothing
+    // while the app it points at is still there.
+    h.consumers = [
+      { id: "conn_a", targetProjectId: "app-a", envKey: "DATABASE_URL", mode: "internal" },
+    ];
+    h.collectProjectManifest.mockResolvedValueOnce({
+      projectId: "p1",
+      resources: [{ type: "container", ref: "c1", label: "container c1" }],
+    } as never);
+    h.executeCleanup.mockResolvedValueOnce({
+      total: 1,
+      succeeded: 0,
+      failed: [{ label: "container c1", error: "ssh timeout" }],
+    } as never);
+
+    const res = await teardownProject(ctx, "p1", { force: false });
+
+    expect(res.rowDeleted).toBe(false);
+    expect(h.unlinkConsumersOfSource).not.toHaveBeenCalled();
+    expect(h.deleteHard).not.toHaveBeenCalled();
+  });
+
+  it("keeps the row when a link can't be removed — the FK would refuse the drop anyway", async () => {
+    h.consumers = [
+      { id: "conn_a", targetProjectId: "app-a", envKey: "DATABASE_URL", mode: "internal" },
+    ];
+    h.unlinkConsumersOfSource.mockResolvedValueOnce({
+      unlinked: [],
+      errors: ["DATABASE_URL on app-a: db down"],
+    });
+
+    const res = await teardownProject(ctx, "p1", { force: false });
+
+    expect(res.rowDeleted).toBe(false);
+    expect(h.deleteHard).not.toHaveBeenCalled();
+    expect(stepOf(res.steps, "unlink_consumers")?.status).toBe("failed");
+  });
+
+  it("unlinks on a record-only delete too — the row (and its links) still go", async () => {
+    h.consumers = [
+      { id: "conn_a", targetProjectId: "app-a", envKey: "DATABASE_URL", mode: "internal" },
+    ];
+
+    const res = await teardownProject(ctx, "p1", { force: false, recordOnly: true });
+
+    expect(res.rowDeleted).toBe(true);
+    expect(h.unlinkConsumersOfSource).toHaveBeenCalled();
+  });
+
+  it("touches nothing connection-related when the app isn't linked anywhere", async () => {
+    h.consumers = [];
+    const res = await teardownProject(ctx, "p1", { force: false, recordOnly: true });
+
+    expect(res.rowDeleted).toBe(true);
+    expect(h.unlinkConsumersOfSource).not.toHaveBeenCalled();
+    expect(stepOf(res.steps, "unlink_consumers")).toBeUndefined();
+  });
 });
 
 describe("teardownProject — record-only delete touches nothing on the server", () => {

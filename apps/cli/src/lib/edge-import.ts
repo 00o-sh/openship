@@ -11,7 +11,8 @@
  */
 import chalk from "chalk";
 import ora from "ora";
-import type { ImportedSite } from "@repo/adapters/proxy";
+import { EDGE_CONTAINER_NAME, edgeCrashReason, type ImportedSite } from "@repo/adapters/proxy";
+import { LocalExecutor } from "@repo/adapters";
 import { composeInternalToken } from "./compose";
 
 /** Wait for the compose api container to answer its health stub. */
@@ -91,10 +92,19 @@ export async function importMigratedSites(
           `Openship holds :80/:443 and ${sites.length === 1 ? "that hostname is" : "those hostnames are"} NOT being served.`,
       );
       for (const w of warnings.slice(0, 8)) console.log(chalk.red(`    • ${w}`));
+      // Every per-site error being "container is restarting" means ONE thing: the
+      // edge itself is crash-looping, and the reason is in its log, not in the six
+      // identical 409s above. Print it — otherwise "the cause above" names nothing
+      // and the operator is left guessing at a config error they can't see.
+      const edgeLog = await edgeCrashReason(new LocalExecutor());
+      if (edgeLog) {
+        console.log(chalk.red(`\n  The edge container is not running. Its log says:`));
+        console.log(chalk.red(`    ${edgeLog}`));
+      }
       console.log(
         chalk.yellow(
           `\n  Retry the import with \`openship up\` once the cause above is fixed, or put your\n` +
-            `  previous proxy back:  docker stop openship-edge && sudo systemctl enable --now nginx\n`,
+            `  previous proxy back:  docker stop ${EDGE_CONTAINER_NAME} && sudo systemctl enable --now nginx\n`,
         ),
       );
       return { ok: false, registered, error: warnings[0] ?? "no sites were registered" };

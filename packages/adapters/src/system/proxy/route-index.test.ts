@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import type { ImportedSite } from "@repo/adapters";
-import { buildProxyRouteIndex } from "./proxy-route-scan";
+import type { ImportedSite } from "../types";
+import { buildProxyRouteIndex } from "./api";
 
 const proxySite = (over: Partial<ImportedSite> & { url: string }): ImportedSite => ({
   serverNames: over.serverNames ?? ["app.example.com"],

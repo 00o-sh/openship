@@ -46,14 +46,17 @@ const REMOTE_ENGINE_DIR = "/root/iRedMail-engine";
 /**
  * Absolute path to `apps/email/engine/` on the openship API host.
  *
- * `MAIL_SERVER_ENGINE_DIR` overrides for ops who pin a packaged build to a
- * fixed location. Otherwise the cwd differs by how the API was started, so both
- * layouts are probed rather than assuming one:
+ * `MAIL_SERVER_ENGINE_DIR` wins when set, and the packaged desktop app
+ * (services.ts) plus the CLI-bundled server (up.ts) both set it, pointing at the
+ * engine tree they ship — they run with a cwd that has no monorepo at all.
+ *
+ * Otherwise the cwd differs by how the API was started, so both layouts are
+ * probed rather than assuming one:
  *   - dev (`bun dev` in apps/api)      → cwd is apps/api  → ../../apps/email/engine
  *   - container (CMD from the WORKDIR) → cwd is /app      → apps/email/engine
- * The container case used to resolve to `/apps/email/engine` (off the
- * filesystem root) and step 7 died with "tar: /apps/email/engine: Cannot open".
- * The dev path stays first so a repo checkout keeps behaving exactly as before.
+ * The container case used to resolve to `/apps/email/engine` (off the filesystem
+ * root) and step 7 died with "tar: /apps/email/engine: Cannot open". The dev path
+ * stays first so a repo checkout keeps behaving exactly as before.
  */
 export function resolveLocalEngineDir(): string {
   if (process.env.MAIL_SERVER_ENGINE_DIR) {
@@ -349,6 +352,7 @@ export async function stepEnsureReverseProxy(
   log: StepLogger,
 ): Promise<StepResult> {
   const stepId = 4;
+
 
   if (await ourEdgeContainerRunning(exec)) {
     log(stepId, "info", "Edge is containerized (openship-edge) - no host OpenResty service to check");

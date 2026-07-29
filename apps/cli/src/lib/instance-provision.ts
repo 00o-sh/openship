@@ -23,7 +23,17 @@ export interface InstallInputs {
   domain:
     | { kind: "byo"; hostname?: string }
     | { kind: "custom"; hostname: string; acmeEmail?: string; edge: "migrate" | "takeover" | "cancel" }
-    | { kind: "free"; slug: string; publicHost?: string }
+    | {
+        kind: "free";
+        slug: string;
+        publicHost?: string;
+        /** Bare install: stand up the local :80 edge Cloud forwards to, and (when
+         *  a foreign proxy holds 80/443) take it over / migrate it. Ignored in
+         *  compose — the container edge owns :80. */
+        localEdge?: boolean;
+        edgeTakeover?: boolean;
+        edgeMigrate?: boolean;
+      }
     | { kind: "none" };
 }
 
@@ -327,26 +337,35 @@ export async function headlessProvision(opts: {
     // yet then. So we check HERE, where a retry is still possible: `onSlugTaken`
     // lets an interactive caller pick another name instead of the run ending with
     // a domain that was never created.
+    // One payload builder so every attempt forwards the same bare-install edge
+    // flags (localEdge + the takeover choice) — the free branch used to drop them.
+    const freeBody = (s: string) => ({
+      domainType: "free" as const,
+      slug: s,
+      publicHost: d.publicHost,
+      dashPort,
+      localEdge: d.localEdge,
+      edgeTakeover: d.edgeTakeover,
+      edgeMigrate: d.edgeMigrate,
+    });
     let slug = d.slug;
-    let res = await internalPost(
-      port,
-      "/api/system/self-register",
-      { domainType: "free", slug, publicHost: d.publicHost, dashPort },
-      token,
-    );
+    let res = await internalPost(port, "/api/system/self-register", freeBody(slug), token);
     for (let attempt = 0; !res.ok && isSlugTaken(res.data) && opts.onSlugTaken && attempt < 5; attempt++) {
       const next = await opts.onSlugTaken(slug);
       if (!next) break; // caller declined to choose another
       slug = next;
-      res = await internalPost(
-        port,
-        "/api/system/self-register",
-        { domainType: "free", slug, publicHost: d.publicHost, dashPort },
-        token,
-      );
+      res = await internalPost(port, "/api/system/self-register", freeBody(slug), token);
     }
     domainRegistered = res.ok;
     liveUrl = res.data?.url;
+    // Bare + localEdge stands the host edge up in the background (install +
+    // takeover) and streams progress — the SAME session the custom branch drains.
+    if (res.ok && res.data?.sessionId) {
+      const edge = await drainProvisionStream(port, String(res.data.sessionId), token, (m) => log(`  ${m}`));
+      if (!edge.completed && edge.detail) {
+        warnings.push(`Local edge not fully ready: ${edge.detail} — it retries on next boot.`);
+      }
+    }
     if (!res.ok) {
       // Say what actually went wrong. This used to append "needs the box connected
       // to Openship Cloud first" to EVERY failure, which flatly contradicts the

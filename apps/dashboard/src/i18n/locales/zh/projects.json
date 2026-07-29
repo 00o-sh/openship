@@ -3,7 +3,8 @@
     "loading": "加载中……",
     "countOne": "{count} 个项目",
     "countOther": "{count} 个项目",
-    "noTargetProjects": "尚未有项目部署到此目标。"
+    "noTargetProjects": "尚未有项目部署到此目标。",
+    "noTargetDesc": "在此目标上部署一个应用，或新建项目以开始。"
   },
   "status": {
     "live": "运行中",
@@ -34,7 +35,8 @@
     "services": "服务",
     "static": "静态",
     "standalone": "独立",
-    "updateAvailable": "Update"
+    "updateAvailable": "Update",
+    "appBadge": "应用"
   },
   "hosting": {
     "cloud": "云端",
@@ -97,7 +99,13 @@
     "teardownFailedAt": "拆除在此处失败：{reasons}。请重试，或强制删除以将它们变为孤立资源。",
     "teardownFailed": "拆除失败",
     "cleanupFailedTitle": "清理失败",
-    "alreadyDeleted": "项目已删除"
+    "alreadyDeleted": "项目已删除",
+    "forceModalTitle": "无法从源端移除",
+    "forceModalBody": "无法连接到运行时（或持续失败），因此该项目未被拆除。你仍然可以将它从 Openship 中删除——记录会立即移除，服务器恢复可访问后会自动回收残留资源。",
+    "forceModalConfirm": "从存储中删除",
+    "forceModalCancel": "取消",
+    "unlinked": "已解除与 {projects} 的关联 — 重新部署以生效。",
+    "unlinkedTitle": "已更新关联项目"
   },
   "sidebar": {
     "project": "项目",
@@ -163,7 +171,18 @@
     "deleteConfirmPrefix": "永久删除",
     "deleteConfirmSuffix": "？",
     "cancel": "取消",
-    "delete": "删除"
+    "delete": "删除",
+    "created": "创建时间",
+    "detailsTitle": "详情",
+    "detailsDescription": "该项目部署什么、部署到哪里",
+    "managedImages": "托管容器镜像",
+    "managedImagesText": "该应用运行自预构建镜像——无需连接仓库，直接部署即可。",
+    "services": "服务",
+    "target": "目标",
+    "targetPending": "部署时选择",
+    "type": "类型",
+    "typeApp": "应用",
+    "typeProject": "项目"
   },
   "overview": {
     "platformCloud": "Openship Cloud",
@@ -324,7 +343,16 @@
     "guideIntroFallback": "你的项目将获得此连接，开箱即用。",
     "whatYouGet": "你的应用获得什么",
     "advancedValues": "高级",
-    "copy": "复制"
+    "copy": "复制",
+    "usedByTitle": "被使用于",
+    "usedByOpen": "打开项目",
+    "usedByHint": "有 {count} 个项目依赖此应用的连接。请在使用它的项目中解除链接。",
+    "linkedCountOne": "{count} 个关联应用",
+    "linkedCountOther": "{count} 个关联应用",
+    "linkedHint": "本项目连接使用，但并不运行它们。",
+    "linkedBadge": "已关联",
+    "unlink": "解除关联",
+    "openApp": "打开应用"
   },
   "incomingWebhooks": {
     "title": "传入 Webhook",

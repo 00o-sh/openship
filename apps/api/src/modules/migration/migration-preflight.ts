@@ -9,8 +9,10 @@
  * BLOCKED — the adopted project has no linked source to rebuild on the target.
  */
 
+import { edgeProxy } from "@repo/adapters";
 import { discoverServerStack } from "./docker-inspect.service";
 import { createServerCommandExecutor } from "../../lib/deployment-runtime";
+import { sshManager } from "../../lib/ssh-manager";
 import { sizeOfMoveSet, type SizedItem } from "./migration-size";
 import { sq } from "./direct-transfer";
 
@@ -96,6 +98,46 @@ export interface MigrationPreview {
   conflicts?: Array<{ serviceName: string; volume: string }>;
 }
 
+/**
+ * Ask the source server's proxy, for each domain a kept service currently serves,
+ * whether it holds a cert we can actually carry. `hasCert: false` means the target
+ * will issue via ACME on publish.
+ *
+ * One SSH pass with one proxy scan behind it (`edgeProxy` memoizes), then one cert
+ * lookup per domain. Best-effort: an unreachable source or a failed scan reports
+ * `hasCert: false` for everything, which is the safe direction — the wizard says
+ * "will issue" and the carry can still surprise the operator pleasantly.
+ */
+async function previewSslByDomain(
+  sourceServerId: string,
+  chosen: Array<{ proxyKind?: unknown; existingRoute?: Array<{ ssl: { enabled: boolean }; domains: string[] }> }>,
+): Promise<Array<{ domain: string; hasCert: boolean }> | undefined> {
+  const tlsDomains = new Set<string>();
+  const plainDomains = new Set<string>();
+  for (const s of chosen) {
+    if (s.proxyKind) continue;
+    for (const r of s.existingRoute ?? []) {
+      for (const d of r.domains) (r.ssl?.enabled ? tlsDomains : plainDomains).add(d);
+    }
+  }
+  const all = new Set([...tlsDomains, ...plainDomains]);
+  if (all.size === 0) return undefined;
+
+  const carried = new Set<string>();
+  try {
+    await sshManager.withExecutor(sourceServerId, async (exec) => {
+      const proxy = await edgeProxy(exec);
+      if (!proxy) return;
+      for (const domain of tlsDomains) {
+        if (await proxy.certFor(domain).catch(() => null)) carried.add(domain);
+      }
+    });
+  } catch {
+    // Source unreachable — every domain reports "will issue".
+  }
+  return [...all].map((domain) => ({ domain, hasCert: carried.has(domain) }));
+}
+
 export async function buildMigrationPreview(opts: {
   sourceServerId: string;
   targetServerId: string;
@@ -149,21 +191,15 @@ export async function buildMigrationPreview(opts: {
     ? []
     : Array.from(new Set(workloads.flatMap((s) => s.volumes.map((v) => v.name))));
 
-  // Per kept domain: does the source proxy expose a reusable on-disk cert
-  // (certPath+keyPath present)? Those get CARRIED (no ACME); the rest re-issue.
-  const sslByDomain = sameServer
-    ? undefined
-    : (() => {
-        const seen = new Map<string, boolean>();
-        for (const s of chosen) {
-          if (s.proxyKind) continue;
-          for (const r of s.existingRoute ?? []) {
-            const hasCert = Boolean(r.ssl?.certPath && r.ssl?.keyPath);
-            for (const d of r.domains) seen.set(d, (seen.get(d) ?? false) || hasCert);
-          }
-        }
-        return seen.size ? [...seen].map(([domain, hasCert]) => ({ domain, hasCert })) : undefined;
-      })();
+  // Per kept domain: will the source proxy's cert be CARRIED (no ACME)?
+  //
+  // This asks the same reader the migration itself uses, rather than checking for
+  // declared cert paths. The paths-present test was wrong in both directions: it
+  // said "will reuse" for a path holding an expired or wrong-hostname cert that
+  // the carry then rejects, and "will issue" for every caddy and traefik box —
+  // those keep certs in their own stores with no path to declare, so the wizard
+  // promised an ACME issuance for domains whose certs are sitting right there.
+  const sslByDomain = sameServer ? undefined : await previewSslByDomain(sourceServerId, chosen);
 
   // Cross-server: measure the payload on the source (volumes + movable binds +
   // built images by ID + custom paths) so the wizard can show total GB and a

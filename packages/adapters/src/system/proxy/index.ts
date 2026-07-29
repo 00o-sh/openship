@@ -19,6 +19,8 @@ import { runEdgeTakeover, type EdgeTakeoverOptions, type EdgeTakeoverResult } fr
 // ── Engine surface (single import point) ──────────────────────────────────────
 export {
   classifyProxy,
+  EDGE_CONTAINER_NAME,
+  edgeFailureReason,
   EdgeConflictError,
   EdgeMigrateRequested,
   freeEdgeTargets,
@@ -36,6 +38,11 @@ export {
 } from "./takeover-journal";
 export type { RegisterImportedSitesOptions } from "./takeover";
 export { scanImportableSites, canImportProxy, scanOpenshipEdge, detectInstalledProxy } from "./import";
+// The READ api — prefer this over re-assembling probeEdge + importSites + your own
+// cert reader at the call site (see ./api.ts for why it exists).
+export { edgeProxy, edgeProxyFor, buildProxyRouteIndex, collectProxyCerts } from "./api";
+export type { EdgeProxyApi, ProxySiteRoute, ProxySiteRouteSsl, AdoptedCert, CertCandidate } from "./api";
+export { validateCertFor, readDeclaredPair, isSafeCertPath } from "./cert-material";
 export type {
   EdgeClassification,
   EdgeConflictDetails,

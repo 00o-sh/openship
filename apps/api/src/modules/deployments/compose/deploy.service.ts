@@ -51,7 +51,9 @@ import {
 } from "../../../lib/routing-domains";
 import { resolveServiceEndpointUrls, resolveServicePublicEndpoints } from "../../../lib/public-endpoints";
 import { ensureManagedEdgeProxy } from "../../../lib/managed-edge-proxy";
+import { ensureRoutingReady } from "../../../lib/edge-reconcile";
 import * as sessionManager from "../session-manager";
+import { isStaticService } from "../../../lib/deployable-service";
 import { auditPorts } from "../port-audit.service";
 import type { PortCheckResult } from "../../../lib/deployment-runtime";
 import { resolveServicePort } from "./domain-helpers";
@@ -82,6 +84,13 @@ export interface ComposeDeployResult {
     ip?: string;
     hostPort?: number;
     error?: string;
+    /**
+     * Host directory this service's built files live in — set INSTEAD of
+     * containerId/ip/hostPort for a self-hosted static sub-app, which the edge
+     * serves from disk rather than proxying to a container. Consumed by the
+     * composite route resolver.
+     */
+    staticRoot?: string;
   }>;
   warning?: string;
   /** Per-domain routing failures on an otherwise-successful deploy (domains are
@@ -506,7 +515,14 @@ export async function deployComposeServices(
     // routing is flagged action-required and retried later.
     try {
       if (plannedRoutes.length > 0) {
-        await opts.system.ensureFeature("routing", systemLog);
+        // Components + edge convergence as ONE step — see ensureRoutingReady for why
+        // the second half can't live inside ensureFeature. Without an executor
+        // there's no box to converge (cloud), so components alone are correct.
+        if (opts.executor) {
+          await ensureRoutingReady(opts.executor, opts.system, { onLog: systemLog });
+        } else {
+          await opts.system.ensureFeature("routing", systemLog);
+        }
       }
       if (plannedRoutes.some((route) => route.provisionSsl)) {
         await opts.system.ensureFeature("ssl", systemLog);
@@ -853,6 +869,71 @@ export async function deployComposeServices(
         error: message,
       });
       unavailableServiceNames.add(svc.name);
+      continue;
+    }
+
+    // ── Static sub-app: files on the host, served by the edge ──────────────
+    // `image` is a DIRECTORY here, not a tag — the batch builder extracted the
+    // build output (staticExtractOnly). There is no container to create, no port
+    // to publish and no health check to run: the edge serves the files with
+    // `root`. This replaces containerizing an nginx image whose only job was to
+    // hand the same files to the edge one hop later.
+    //
+    // Cloud never reaches this branch: `staticExtractOnly` isn't set there (no host
+    // directory to serve), so `image` is a tag and the service deploys as a proxied
+    // container exactly as before.
+    if (isStaticService(svc) && image.startsWith("/")) {
+      sessionManager.broadcastServiceStatus(dep.id, {
+        serviceName: svc.name,
+        serviceId: svc.id,
+        status: "deploying",
+      });
+      logger.log(`Serving static files for "${svc.name}" from ${image}\n`, "info", {
+        serviceName: svc.name,
+      });
+
+      // Per-service routes point at the DIRECTORY. Best-effort, matching the rest
+      // of routing: a registration failure never fails the deploy.
+      if (routeContext?.routing) {
+        const { routes: staticRoutes } = await prepareServiceRoutes({
+          project,
+          service: svc,
+          runtimeName: runtime.name,
+          routeContext,
+          logger,
+        });
+        for (const route of staticRoutes) {
+          const routeKey = route.hostname.toLowerCase();
+          if (seenRouteDomains.has(routeKey)) continue;
+          seenRouteDomains.add(routeKey);
+          await routeContext.routing
+            .registerRoute({ domain: route.hostname, staticRoot: image, tls: true })
+            .catch((err) => {
+              composeRouteWarnings.push(
+                `${route.hostname}: ${err instanceof Error ? err.message : "route registration failed"}`,
+              );
+            });
+        }
+      }
+
+      await repos.service.createServiceDeployment({
+        deploymentId: dep.id,
+        serviceId: svc.id,
+        status: "success",
+        imageRef: image,
+      });
+      results.push({
+        serviceId: svc.id,
+        serviceName: svc.name,
+        status: "running",
+        staticRoot: image,
+      });
+      successful += 1;
+      sessionManager.broadcastServiceStatus(dep.id, {
+        serviceName: svc.name,
+        serviceId: svc.id,
+        status: "running",
+      });
       continue;
     }
 
@@ -1435,12 +1516,15 @@ export async function deployComposeServices(
   // Vercel-style single-domain composition: when the monorepo is exactly one
   // static frontend + one server backend, serve both on ONE domain (frontend at
   // `/`, backend reverse-proxied at `/api/` or the vercel.json rewrite prefix).
-  // Best-effort + additive: it only fires when every piece resolves (frontend
-  // IP+port+domain, backend IP+port) on a self-hosted runtime, and any failure
-  // just leaves the per-service routes already registered in the loop. NOTE:
-  // the static frontend must be exposed with a routable port for this to form
-  // (otherwise buildServiceRouteDomain/port resolution yields nothing and we
-  // no-op) — verify end-to-end on a live self-hosted deploy.
+  // Best-effort + additive: it only fires when every piece resolves on a
+  // self-hosted runtime, and any failure just leaves the per-service routes already
+  // registered in the loop.
+  //
+  // The frontend resolves as a DOC ROOT (its extracted host directory), so it needs
+  // no port and no container — the vhost is `root` at `/` plus the backend proxied
+  // at the prefix. It previously required the static frontend to be exposed on a
+  // routable port, which meant containerizing an nginx image purely to satisfy the
+  // "every target is a URL" assumption.
   if (routeContext?.routing && runtime.name !== "cloud") {
     try {
       // Reusable routing core (shared with the routing API): resolve each
@@ -1461,6 +1545,10 @@ export async function deployComposeServices(
         services: enabled,
         routingConfig: project.routingConfig,
         resolveTargetUrl,
+        // A static frontend has no upstream — the composite serves it from disk and
+        // still proxies the backend at the prefix, in the same vhost.
+        resolveStaticRoot: (serviceId) =>
+          results.find((r) => r.serviceId === serviceId)?.staticRoot ?? null,
         resolveDomain: (serviceId) => {
           const svc = enabled.find((s) => s.id === serviceId);
           // Composite (vercel-style single-domain) uses the service's PRIMARY route.

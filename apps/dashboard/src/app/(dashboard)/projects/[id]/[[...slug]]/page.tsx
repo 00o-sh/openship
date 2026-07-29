@@ -548,6 +548,22 @@ const ProjectSettingsContent = () => {
             "success",
           );
         }
+        // Projects this app was linked into: they keep running, but their live
+        // container still holds the connection value until they redeploy.
+        const unlinkedNames = [
+          ...new Set(
+            (Array.isArray(response.unlinked) ? response.unlinked : []).map(
+              (u: { projectName?: string; projectId?: string }) => u.projectName ?? u.projectId,
+            ),
+          ),
+        ].filter(Boolean);
+        if (unlinkedNames.length > 0) {
+          showToast(
+            interpolate(t.projects.delete.unlinked, { projects: unlinkedNames.join(", ") }),
+            "success",
+            t.projects.delete.unlinkedTitle,
+          );
+        }
         invalidateSidebarNavCounts();
         router.push("/");
         return;

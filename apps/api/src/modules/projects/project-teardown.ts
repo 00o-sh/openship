@@ -17,7 +17,10 @@
  *      still returns 207 with that step marked `failed` in the response.
  *
  * The teardown sequence is INTENTIONALLY ordered:
- *   webhook → runtime resources → webmail → DB row.
+ *   webhook → runtime resources → webmail → unlink consumers → DB row.
+ * Unlinking the projects that CONSUME this app is the last thing before the row
+ * drops: a runtime cleanup that fails (unreachable server → row kept) must not
+ * strip another project's env var while the app it points at is still alive.
  * GitHub first because once the row is gone we lose `webhookId`. Runtime
  * resources next because the existing manifest reads container/volume
  * metadata from `deployment`+`service` rows that the FK CASCADE will
@@ -80,6 +83,16 @@ export interface OrphanedResourceSummary {
   serverId: string | null;
 }
 
+/** A project we unlinked from this app on the way out: it keeps running, minus
+ *  `envKey`. Its live container still holds the (now dead) value until its next
+ *  deploy — which is what the caller reports back to the user. */
+export interface UnlinkedConsumerSummary {
+  linkId: string;
+  projectId: string;
+  projectName: string;
+  envKey: string;
+}
+
 export interface TeardownResult {
   /** True only when EVERY step is `ok` or `skipped`. */
   ok: boolean;
@@ -96,6 +109,9 @@ export interface TeardownResult {
    *  not a failure. Drives the "will be cleaned up when the server is back"
    *  message. */
   orphaned: OrphanedResourceSummary[];
+  /** Projects unlinked from this app as part of the delete. Empty for a project
+   *  nothing was wired into. */
+  unlinked: UnlinkedConsumerSummary[];
   /** Set when teardown short-circuited before the step sequence; absent
    *  on the normal "ran to completion" path. */
   rejection?: TeardownRejectionKind;
@@ -298,6 +314,23 @@ export async function teardownProject(
       return finalize(steps, false, "org_mismatch");
     }
 
+    // ── Step 0: find the projects this app is linked INTO. ───────────────
+    // `project_connection.sourceProjectId` is ON DELETE RESTRICT, so those links
+    // have to go before the row can drop — we unlink them near the END (see
+    // stepUnlinkConsumers), but read them here so the list is captured while the
+    // graph is still whole.
+    //
+    // try/catch, not `.catch()`: the repo lookup can throw SYNCHRONOUSLY (a
+    // partially-stubbed `repos` in a unit test), which a promise `.catch` never
+    // sees — and a read that explodes must not take the delete down. Unreadable
+    // → the FK still protects the row (stepDeleteRow fails loudly instead).
+    let consumerLinks: ConsumerLink[] = [];
+    try {
+      consumerLinks = (await repos.projectConnection.listBySource(projectId)) as ConsumerLink[];
+    } catch {
+      /* unreadable — stepDeleteRow surfaces the FK error if it mattered */
+    }
+
     // Record-only ("soft") delete: keep the server workload + data, drop just
     // the Openship record. NEVER honored for a cloud project — its resources
     // live on Oblien and must be reclaimed; this is the security boundary, not
@@ -383,11 +416,22 @@ export async function teardownProject(
       orphaned = await persistOrphans(ctx.organizationId, projectId, orphanCandidates);
     }
 
+    // ── Step 4b: unlink this app from every project it was wired into. ───
+    // The LAST thing before the row drops, deliberately: the atomicity gate above
+    // can still keep the row (unreachable server), and a project stripped of its
+    // env var while the app it points at is still alive is the one outcome nobody
+    // asked for. A failure here keeps the row too — the RESTRICT FK would refuse
+    // the drop anyway.
+    const unlink = await stepUnlinkConsumers(consumerLinks, push);
+    if (!unlink.ok) {
+      return finalize(steps, false, undefined, { orphaned, unlinked: unlink.unlinked });
+    }
+
     // ── Step 5: Drop the DB row. FK CASCADE on project.id sweeps
     //   deployment, service, env_var, domain, backup_policy.
     rowDeleted = await stepDeleteRow(projectId, project.groupId, push);
 
-    return finalize(steps, rowDeleted, undefined, orphaned);
+    return finalize(steps, rowDeleted, undefined, { orphaned, unlinked: unlink.unlinked });
   } finally {
     // Lock released on every non-deleting exit so a retry is always possible.
     if (!rowDeleted) {
@@ -400,7 +444,10 @@ function finalize(
   steps: TeardownStep[],
   rowDeleted: boolean,
   rejection?: TeardownRejectionKind,
-  orphaned: OrphanedResourceSummary[] = [],
+  extra: {
+    orphaned?: OrphanedResourceSummary[];
+    unlinked?: UnlinkedConsumerSummary[];
+  } = {},
 ): TeardownResult {
   const unrecoverable = steps.filter((s) => s.status === "failed");
   return {
@@ -408,12 +455,62 @@ function finalize(
     rowDeleted,
     steps,
     unrecoverable,
-    orphaned,
+    orphaned: extra.orphaned ?? [],
+    unlinked: extra.unlinked ?? [],
     ...(rejection !== undefined ? { rejection } : {}),
   };
 }
 
+// ─── Linked projects ──────────────────────────────────────────────────────────
+
+/** A `project_connection` row seen from the SOURCE side — one project this app
+ *  was linked into. */
+interface ConsumerLink {
+  id: string;
+  targetProjectId: string;
+  envKey: string;
+  mode: string;
+}
+
 // ─── Step implementations ─────────────────────────────────────────────────────
+
+/**
+ * Unlink this app from every project it was wired into.
+ *
+ * Deleting a linked app is allowed to break the link — that IS the delete. The
+ * consuming projects keep running (their containers, data and services are never
+ * touched); they just lose the injected connection env var, so the caller tells
+ * the user which ones to redeploy.
+ */
+async function stepUnlinkConsumers(
+  links: ConsumerLink[],
+  push: (s: TeardownStep) => void,
+): Promise<{ ok: boolean; unlinked: UnlinkedConsumerSummary[] }> {
+  const unlinked: UnlinkedConsumerSummary[] = [];
+  if (links.length === 0) return { ok: true, unlinked };
+
+  // Dynamic import keeps the connection service's deploy-pipeline imports out of
+  // this module's static graph — same reason applyConnectionToTarget does it.
+  const { unlinkConsumersOfSource } = await import("./project-connection.service");
+  const result = await unlinkConsumersOfSource(links);
+  unlinked.push(...result.unlinked);
+
+  if (result.errors.length > 0) {
+    push({
+      step: "unlink_consumers",
+      status: "failed",
+      details: `${unlinked.length}/${links.length} unlinked`,
+      error: result.errors.join("; "),
+    });
+    return { ok: false, unlinked };
+  }
+  push({
+    step: "unlink_consumers",
+    status: "ok",
+    details: `${unlinked.length} project link(s) removed`,
+  });
+  return { ok: true, unlinked };
+}
 
 async function stepCancelInFlight(
   projectId: string,

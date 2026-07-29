@@ -8,6 +8,7 @@ import { getRequestContext } from "../../lib/request-context";
 import { param } from "../../lib/controller-helpers";
 import {
   listConnections,
+  listConsumers,
   createConnection,
   connectBundle,
   deleteConnection,
@@ -18,6 +19,13 @@ import {
 export async function list(c: Context) {
   const ctx = getRequestContext(c);
   return c.json({ data: await listConnections(ctx, param(c, "id")) });
+}
+
+/** GET /api/projects/:id/connections/consumers — projects that consume THIS app
+ *  (a shared database has many). The reverse of `list`. */
+export async function consumers(c: Context) {
+  const ctx = getRequestContext(c);
+  return c.json({ data: await listConsumers(ctx, param(c, "id")) });
 }
 
 /** POST /api/projects/:id/connections — link a source DB app into this project. */

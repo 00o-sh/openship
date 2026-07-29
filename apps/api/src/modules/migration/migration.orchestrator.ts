@@ -33,6 +33,9 @@ import {
   transferVolume,
   transferImage,
   scopedVolumeName,
+  readEdgeFile,
+  writeEdgeFile,
+  edgeProxy,
   type ServiceHandle,
   type TransferEndpoint,
   type TransferMode,
@@ -151,6 +154,55 @@ export interface PendingItem {
   serviceName?: string;
   reason: "missing" | "denied" | "error";
   message?: string;
+}
+
+/**
+ * The service's ORIGINAL container id on the SOURCE, for building a
+ * `ServiceHandle` passed to `listSources()` — NOT null unless we genuinely
+ * never scanned one. `listSources()` treats a null containerId as "not
+ * deployed yet" and falls back to GUESSING the volume name from
+ * `service.volumes` + `namespaceVolumes` (the name OpenShip's OWN deploy
+ * pipeline would assign) — correct for the backup/restore use case
+ * `listSources` was built for, but wrong for an adopted source service (e.g.
+ * from Coolify), which was never namespaced by OpenShip: the guess doesn't
+ * match any volume that actually exists on the source, and enumeration
+ * silently produces a name the source (or target) rejects with "no such
+ * volume". Passing the real id makes `listSources` inspect the live
+ * container's actual `Mounts` instead, which is always correct.
+ */
+export function resolveScannedContainerId(
+  serviceName: string,
+  scannedContainerIds: Record<string, string>,
+): string | null {
+  return scannedContainerIds[serviceName] ?? null;
+}
+
+/** What `runResume` must actually call for one pending item, given any
+ *  operator-supplied override. Centralizing the decision (rather than
+ *  inlining it at each `link.transferX(...)` call site) is what makes an
+ *  override for a "no such volume" volume item actually reach the transfer —
+ *  a previous version computed `src` but then called
+ *  `transferVolume(item.source, …)`, silently ignoring it. */
+export type ResumeTransferPlan =
+  | { kind: "volume"; source: string }
+  | { kind: "bind"; asPath: true; source: string; dest: string }
+  | { kind: "bind"; asPath: false; source: string }
+  | { kind: "path"; source: string; dest: string };
+
+export function planResumeTransfer(
+  item: PendingItem,
+  overrides: Record<string, string>,
+): ResumeTransferPlan {
+  const source = overrides[item.key] ?? item.source;
+  if (item.kind === "volume") return { kind: "volume", source };
+  if (item.kind === "bind") {
+    // An override reads from a NEW source path but still writes to the
+    // ORIGINAL bind path (where the target container mounts it).
+    return source !== item.source
+      ? { kind: "bind", asPath: true, source, dest: item.source }
+      : { kind: "bind", asPath: false, source: item.source };
+  }
+  return { kind: "path", source, dest: item.dest ?? item.source };
 }
 
 /** moveData result: bytes written + the items that didn't make it + the volume
@@ -813,6 +865,7 @@ class MigrationOrchestratorImpl {
           log,
           onProgress,
           runId,
+          scannedContainerIds,
         );
       }
 
@@ -1058,6 +1111,7 @@ class MigrationOrchestratorImpl {
     log: (message: string) => void,
     onProgress?: (u: ProgressUpdate) => void,
     runId?: string,
+    scannedContainerIds: Record<string, string> = {},
   ): Promise<MoveResult> {
     const [source, target] = await Promise.all([
       createServerCommandExecutor(sourceServerId, organizationId),
@@ -1109,7 +1163,7 @@ class MigrationOrchestratorImpl {
           image: svc.image ?? null,
           env: {},
           volumes: svc.volumes ?? [],
-          containerId: null,
+          containerId: resolveScannedContainerId(svc.name, scannedContainerIds),
           projectSlug,
           namespaceVolumes: svc.namespaceVolumes,
         };
@@ -1479,37 +1533,54 @@ class MigrationOrchestratorImpl {
     targetServerId: string,
     organizationId: string,
     chosen: Array<{
-      existingRoute?: Array<{ domains: string[]; ssl: { certPath?: string; keyPath?: string } }>;
+      existingRoute?: Array<{ domains: string[]; ssl: { enabled?: boolean } }>;
     }>,
   ): Promise<void> {
-    // domain → source cert/key file paths, from the proxy scan attached to each
-    // discovered service (one entry per proxied path). First writer wins per domain.
-    const domainCerts = new Map<string, { certPath: string; keyPath: string }>();
+    // Every TLS-served domain among the kept services. The cert MATERIAL comes from
+    // the source proxy's own reader, not from cert paths on the discovered route:
+    // caddy and traefik declare no paths (their certs live in a data dir and in
+    // acme.json), so a path-driven carry silently moved nothing from those boxes and
+    // every migrated domain re-issued through ACME on the target.
+    const domains = new Set<string>();
     for (const s of chosen) {
       for (const r of s.existingRoute ?? []) {
-        if (!r.ssl?.certPath || !r.ssl.keyPath) continue;
+        if (r.ssl?.enabled === false) continue;
         for (const domain of r.domains) {
           // Hostname-only guard — the domain becomes a filesystem path segment.
           if (!/^[a-z0-9.-]+$/i.test(domain) || domain.includes("..")) continue;
-          if (!domainCerts.has(domain)) {
-            domainCerts.set(domain, { certPath: r.ssl.certPath, keyPath: r.ssl.keyPath });
-          }
+          domains.add(domain);
         }
       }
     }
-    if (domainCerts.size === 0) return;
+    if (domains.size === 0) return;
 
     const source = await createServerCommandExecutor(sourceServerId, organizationId);
     const target = await createServerCommandExecutor(targetServerId, organizationId);
-    for (const [domain, paths] of domainCerts) {
+    const proxy = await edgeProxy(source.executor).catch(() => null);
+    if (!proxy) return;
+
+    for (const domain of domains) {
       try {
-        const certPem = await source.executor.readFile(paths.certPath);
-        const keyPem = await source.executor.readFile(paths.keyPath);
-        if (!certPem?.includes("BEGIN CERTIFICATE") || !keyPem?.includes("PRIVATE KEY")) continue;
+        // certFor validates that the cert covers THIS domain and hasn't expired
+        // before we plant it at the target's certbot path. That gate matters here
+        // more than anywhere: whatever lands at that path is what the target's
+        // `verifyExistingCert` will later accept as this domain's cert, so an
+        // unchecked carry writes a mismatched cert straight into the trusted spot.
+        const candidate = await proxy.certCandidateFor(domain);
+        if (!candidate.cert) {
+          console.log(`[migration] no cert carried for ${domain}: ${candidate.reason}`);
+          continue;
+        }
+        // writeEdgeFile, not plain writeFile: the target may run a containerized
+        // edge whose cert dir the HOST can't see, where a plain write lands
+        // somewhere the edge never reads.
         const dir = `/etc/letsencrypt/live/${domain}`;
-        await target.executor.writeFile(`${dir}/fullchain.pem`, certPem);
-        await target.executor.writeFile(`${dir}/privkey.pem`, keyPem);
-        console.log(`[migration] carried TLS cert for ${domain} → target ${dir}`);
+        await writeEdgeFile(target.executor, `${dir}/fullchain.pem`, candidate.cert.certPem);
+        await writeEdgeFile(target.executor, `${dir}/privkey.pem`, candidate.cert.keyPem);
+        console.log(
+          `[migration] carried TLS cert for ${domain} → target ${dir} ` +
+            `(from ${candidate.cert.source}, expires ${candidate.cert.expiresAt})`,
+        );
       } catch (err) {
         console.warn(`[migration] cert carry failed for ${domain}: ${safeErrorMessage(err)}`);
       }
@@ -1788,17 +1859,16 @@ class MigrationOrchestratorImpl {
       }
       try {
         for (const item of toRetry) {
-          const src = overrides[item.key] ?? item.source;
+          const plan = planResumeTransfer(item, overrides);
+          const src = plan.source;
           try {
-            if (item.kind === "volume") {
-              await link.transferVolume(item.source, () => {});
-            } else if (item.kind === "bind") {
-              // An override reads from a NEW source path but still writes to the
-              // ORIGINAL bind path (where the target container mounts it).
-              if (src !== item.source) await link.transferPath(src, item.source, () => {});
-              else await link.transferBind(item.source, () => {});
+            if (plan.kind === "volume") {
+              await link.transferVolume(plan.source, () => {});
+            } else if (plan.kind === "bind") {
+              if (plan.asPath) await link.transferPath(plan.source, plan.dest, () => {});
+              else await link.transferBind(plan.source, () => {});
             } else {
-              await link.transferPath(src, item.dest ?? item.source, () => {});
+              await link.transferPath(plan.source, plan.dest, () => {});
             }
             if (item.serviceName) resolvedServices.add(item.serviceName);
             log(`resolved ${item.key}`);

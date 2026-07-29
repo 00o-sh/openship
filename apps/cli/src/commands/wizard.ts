@@ -50,12 +50,25 @@ import { saveInstanceUrl, readInstanceUrl } from "../lib/ports";
 import { runRepair, looksCorrupted, lastServiceError } from "../lib/repair";
 import {
   ensureDocker,
+  dockerGap,
   hasDockerCompose,
   composeUp,
   composeInternalToken,
+  composePrefetch,
   sourceBuildDir,
+  readInstallMethod,
+  composeDown,
+  composeStart,
+  composeRestart,
+  composeRunning,
 } from "../lib/compose";
-import { planAndApplyHostEdge, rollbackHostEdge, completeHostEdge } from "../lib/edge-preflight";
+import {
+  planAndApplyHostEdge,
+  rollbackHostEdge,
+  completeHostEdge,
+  renderEdgeConflict,
+  confirmEdgeAction,
+} from "../lib/edge-preflight";
 import { importMigratedSites } from "../lib/edge-import";
 import type { ImportedSite } from "@repo/adapters/proxy";
 import { headlessProvision, type InstallInputs } from "../lib/instance-provision";
@@ -329,6 +342,41 @@ function finishSetup(opts: {
   outro(opts.byo ? chalk.dim("Point your reverse proxy at the dashboard port above.") : chalk.green("Happy shipping."));
 }
 
+/**
+ * Shared local-edge preflight for a BARE install. A foreign proxy on 80/443 must
+ * be dealt with before Openship can own the edge — and this is domain-AGNOSTIC:
+ * a custom domain terminates TLS here, and a FREE domain has Cloud forward to :80
+ * here, so BOTH need the local edge (and the same migrate/take-over/cancel
+ * choice). This is the bare-mode twin of `openship up`'s compose `planAndApplyHostEdge`.
+ * Returns proceed=false only when the operator chose to leave the proxy running.
+ */
+async function promptLocalEdgeTakeover(
+  port: string,
+): Promise<{ proceed: boolean; edgeMigrate: boolean; edgeTakeover: boolean }> {
+  const pf = await internalPost(port, "/api/system/self-edge/preflight", {});
+  const status = pf.ok
+    ? (pf.data?.status as
+        | { classification: string; canProceedClean: boolean; occupants: Array<{ command?: string; port: number }> }
+        | undefined)
+    : undefined;
+  // Clean (or unknown) edge → nothing to migrate/take over.
+  if (!status || status.canProceedClean || !status.occupants?.length) {
+    return { proceed: true, edgeMigrate: false, edgeTakeover: false };
+  }
+  const owner = status.occupants.map((o) => o.command ?? `port ${o.port}`).join(", ");
+  const known = status.classification === "known";
+  const sites = (pf.ok && Array.isArray(pf.data?.sites) ? pf.data.sites : []) as ImportedSite[];
+  const warnings = (pf.ok && Array.isArray(pf.data?.warnings) ? pf.data.warnings : []) as string[];
+
+  // Reuse the ONE shared presenter + prompt from edge-preflight.ts (same UI,
+  // same EdgeAction vocabulary + default the compose host-edge preflight uses) —
+  // no third hand-rolled copy of the migrate/take-over/cancel decision.
+  renderEdgeConflict({ owner, sites, warnings });
+  const action = await confirmEdgeAction({ owner, known, importable: sites.length });
+  if (action === "cancel") return { proceed: false, edgeMigrate: false, edgeTakeover: false };
+  return { proceed: true, edgeMigrate: action === "migrate", edgeTakeover: action === "takeover" };
+}
+
 export async function runWizard(): Promise<void> {
   const resuming = isSetupInProgress();
   intro(`${chalk.bgCyan(chalk.black(" Openship "))}${chalk.dim(" setup")}`);
@@ -574,11 +622,20 @@ export async function runWizard(): Promise<void> {
   //    host-net Docker) and a failed Docker ensure fall back to the bare service.
   let method: "compose" | "bare" = "bare";
   if (process.platform === "linux") {
-    if (hasDockerCompose()) {
+    // Say what's ACTUALLY missing. "Docker isn't installed" on a box that has
+    // Docker but no Compose plugin (Debian's docker.io) sent operators chasing
+    // the wrong problem, and re-running get.docker.com for a daemon that's merely
+    // unreachable can't help — it just rewrites their docker repo config.
+    const gap = dockerGap();
+    if (!gap) {
       method = "compose";
+    } else if (!gap.installable) {
+      log.warn(`${gap.summary} — using the bare process service instead.`);
+      if (gap.hint) log.info(gap.hint);
+      method = "bare";
     } else {
-      log.step("Docker isn't installed — installing it now (get.docker.com)…");
-      method = (await ensureDocker()) ? "compose" : "bare";
+      log.step(`${gap.summary} — installing via get.docker.com…`);
+      method = (await ensureDocker({ onNotice: (line) => log.info(line) })) ? "compose" : "bare";
       if (method === "bare") {
         log.warn("Couldn't install Docker automatically — falling back to the bare process service.");
       }
@@ -655,6 +712,26 @@ export async function runWizard(): Promise<void> {
     }
   }
   if (method === "compose") {
+    // Fetch FIRST, cut over second — same rule as `openship up`. Pulling after the
+    // preflight stops a foreign proxy keeps the box dark for the whole download, and
+    // a failed pull takes their sites down for a problem that never reached them.
+    log.step(
+      sourceBuildDir()
+        ? "Building the Openship images before touching :80/:443 (first run takes a few minutes)…"
+        : "Pulling images before touching :80/:443…",
+    );
+    if (
+      !composePrefetch({
+        publicUrl,
+        trustProxy: behindProxy,
+        version: __CLI_VERSION__,
+        noHostControl: !allowHostControl,
+      })
+    ) {
+      cancel("Couldn't fetch the Openship images — nothing on this box was changed.");
+      process.exit(1);
+    }
+
     // A foreign proxy already on 80/443? Migrate/take it over first (interactive)
     // so the container edge can bind — the same host-edge pipe `openship up` uses.
     const edgePlan = await planAndApplyHostEdge({});
@@ -667,12 +744,10 @@ export async function runWizard(): Promise<void> {
     edgeAction = edgePlan.action;
     migratedSites = edgePlan.sites;
     migratedCertPems = edgePlan.certPems;
-    log.step(
-      sourceBuildDir()
-        ? "Building the Openship images from your source checkout (first run takes a few minutes)…"
-        : "Pulling images and starting the Docker Compose stack…",
-    );
-    const up = composeUp({
+    log.step("Starting the Docker Compose stack…");
+    const up = await composeUp({
+      // Prefetched above, before the preflight stopped anything.
+      alreadyFetched: true,
       publicUrl,
       trustProxy: behindProxy,
       version: __CLI_VERSION__,
@@ -855,119 +930,66 @@ export async function runWizard(): Promise<void> {
       await internalPost(port, "/api/system/self-register", { domainType: "byo" });
     } else {
       cloudEmail = cloud.email;
-      // Availability is only knowable now (cloud is connected) — so surface it
-      // here: on a taken/invalid subdomain, re-prompt and retry instead of
-      // dead-ending. The public host is guaranteed set (resolvePublicHost).
-      let regSlug = domainPlan.slug;
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const s2 = spinner();
-        s2.start(`Registering ${chalk.bold(`${regSlug}.opsh.io`)} with Openship Cloud`);
-        const res = await internalPost(port, "/api/system/self-register", {
-          domainType: "free",
-          slug: regSlug,
-          publicHost: domainPlan.publicHost,
-          dashPort: Number(started.dashPort),
-        });
-        if (res.ok && res.data?.url) {
-          liveUrl = res.data.url;
-          s2.stop(`Free domain live: ${res.data.url}`);
-          break;
-        }
-        s2.stop(`Couldn't register ${regSlug}.opsh.io: ${res.data?.error || "failed"}`, 1);
-        const next = ensure(
-          await select({
-            message: "Try a different subdomain?",
-            options: [
-              { value: "retry", label: "Pick another subdomain" },
-              { value: "skip", label: "Skip for now", hint: "log in on this server; add a domain later in Settings → Cloud" },
-            ],
-          }),
+      // Cloud forwards <slug>.opsh.io → :80 on THIS box, so the box needs a local
+      // edge listening there — including taking over a foreign proxy on 80/443.
+      // The SAME shared preflight the custom path runs; Cloud terminates TLS, so
+      // no cert is issued (self-register gets localEdge + the takeover choice).
+      const edge = await promptLocalEdgeTakeover(port);
+      if (!edge.proceed) {
+        log.warn(
+          "Left the existing proxy on 80/443 running — a free domain forwards to :80 here, so it " +
+            "won't serve until Openship owns that port. Re-run setup and choose migrate / take over.",
         );
-        if (next === "skip") break;
-        regSlug = ensure(
-          await text({
-            message: "Choose your subdomain",
-            placeholder: "my-openship",
-            initialValue: regSlug,
-            validate: (v) => (v && SLUG_RE.test(v.trim().toLowerCase()) ? undefined : "Lowercase letters, digits, hyphens"),
-          }),
-        )
-          .trim()
-          .toLowerCase();
       }
+      // Reuse the SAME provision pipe as `openship up` + the compose wizard: its
+      // free branch owns the shared-zone slug-taken retry (onSlugTaken) AND the
+      // localEdge host-edge streaming — no hand-rolled loop here. bootstrapAdmin
+      // already ran above; headlessProvision's bootstrap is idempotent.
+      const result = await headlessProvision({
+        port,
+        dashPort: started.dashPort,
+        token: provisionToken,
+        method: "bare",
+        inputs: {
+          admin,
+          domain: {
+            kind: "free",
+            slug: domainPlan.slug,
+            publicHost: domainPlan.publicHost,
+            // Bare needs a local :80 edge for Cloud to forward to; skip only when
+            // the operator declined the takeover (their proxy keeps 80/443).
+            localEdge: edge.proceed,
+            edgeTakeover: edge.edgeTakeover,
+            edgeMigrate: edge.edgeMigrate,
+          },
+        },
+        onLog: (msg) => log.message(chalk.dim(msg)),
+        onSlugTaken: async (taken) => {
+          log.warn(`"${taken}.opsh.io" is already taken.`);
+          const next = await text({
+            message: "Choose a different subdomain (or leave empty to skip the free domain)",
+            placeholder: "my-openship",
+            validate: (v) => (!v || SLUG_RE.test(v.trim().toLowerCase()) ? undefined : "Lowercase letters, digits, hyphens"),
+          });
+          return isCancel(next) || !next.trim() ? null : next.trim().toLowerCase();
+        },
+      });
+      if (result.liveUrl) liveUrl = result.liveUrl;
+      for (const w of result.warnings) log.warn(w);
     }
   } else if (domainPlan.type === "custom") {
-    // Managed HTTPS needs ports 80/443. If an existing proxy already owns them,
-    // ask before taking over — never silently kill someone's running service.
-    let edgeTakeover = false;
-    let edgeMigrate = false;
-    let proceedCustom = true;
-    const pf = await internalPost(port, "/api/system/self-edge/preflight", {});
-    const status = pf.ok
-      ? (pf.data?.status as
-          | { classification: string; canProceedClean: boolean; occupants: Array<{ command?: string; port: number }> }
-          | undefined)
-      : undefined;
-    const importable = pf.ok && Array.isArray(pf.data?.sites) ? (pf.data.sites as unknown[]).length : 0;
-    if (status && !status.canProceedClean && status.occupants?.length) {
-      const owner = status.occupants.map((o) => o.command ?? `port ${o.port}`).join(", ");
-      const known = status.classification === "known";
+    // Managed HTTPS needs ports 80/443 — the SAME shared preflight the free path
+    // runs asks migrate / take over / cancel when a foreign proxy owns them.
+    const edge = await promptLocalEdgeTakeover(port);
+    const proceedCustom = edge.proceed;
+    const edgeTakeover = edge.edgeTakeover;
+    const edgeMigrate = edge.edgeMigrate;
 
-      // Show WHAT would be migrated (not just a count) so the operator can audit
-      // it before handing us their edge. Mirrors the dashboard takeover modal.
-      const sites = (pf.ok && Array.isArray(pf.data?.sites) ? pf.data.sites : []) as Array<{
-        serverNames?: string[];
-        ssl?: boolean;
-        target?: { kind?: string; url?: string; root?: string };
-        source?: string;
-      }>;
-      if (sites.length > 0) {
-        const lines = sites.map((st) => {
-          const host = (st.serverNames ?? []).join(", ") || "(no server_name)";
-          const dest = st.target?.kind === "static" ? `static: ${st.target?.root ?? ""}` : st.target?.url ?? "";
-          return `${chalk.bold(host)} → ${chalk.dim(dest)}${st.ssl ? chalk.green(" [TLS]") : ""}`;
-        });
-        note(lines.join("\n"), `Detected ${sites.length} site${sites.length === 1 ? "" : "s"} on ${owner}`);
-      }
-      const warns = (pf.ok && Array.isArray(pf.data?.warnings) ? pf.data.warnings : []) as string[];
-      if (warns.length > 0) {
-        log.warn(`${warns.length} config item${warns.length === 1 ? "" : "s"} won't migrate automatically:`);
-        for (const w of warns.slice(0, 8)) log.message(chalk.dim(`• ${w}`));
-      }
-
-      const choice = ensure(
-        await select({
-          message: known
-            ? `An existing reverse proxy (${owner}) is serving ports 80/443.`
-            : `Ports 80/443 are in use by ${owner}, which we couldn't identify.`,
-          options: [
-            ...(importable > 0
-              ? [{
-                  value: "migrate",
-                  label: `Migrate ${importable} site${importable === 1 ? "" : "s"} & take over`,
-                  hint: "import the existing sites into Openship, then take 80/443",
-                }]
-              : []),
-            {
-              value: "override",
-              label: "Stop it & take over 80/443",
-              hint: known ? "the existing sites stop being served" : "may interrupt a running service",
-            },
-            { value: "cancel", label: "Cancel — leave it running" },
-          ],
-          // Same default as the `up` preflight (edge-preflight.ts): migrate when
-          // there are importable sites — it takes 80/443 without dropping any of
-          // them. Otherwise a known proxy defaults to cancel (Enter must not stop
-          // sites that are being served) and an unidentified holder to takeover.
-          initialValue: importable > 0 ? "migrate" : known ? "cancel" : "override",
-        }),
-      );
-      if (choice === "cancel") proceedCustom = false;
-      else if (choice === "migrate") edgeMigrate = true;
-      else edgeTakeover = true;
-    }
-
+    // proceed=false covers BOTH the explicit "Cancel — leave it running" choice
+    // and ESC/Ctrl-C (the shared confirmEdgeAction maps isCancel → "cancel").
+    // Either way we DON'T abort the run — the stack is already up, so we register
+    // the instance as byo (front it with your own proxy) and continue, rather than
+    // leaving a deployed-but-unregistered box. The warn below tells the operator.
     if (!proceedCustom) {
       log.warn(
         "Left the existing proxy on 80/443 running. Registering Openship without managed HTTPS — " +
@@ -1041,6 +1063,11 @@ function storedPorts(): { api?: number; dashboard?: number } {
  */
 export async function runControl(): Promise<void> {
   const svc = serviceStatus();
+  const isCompose = readInstallMethod() === "compose";
+  // A compose install has no systemd/launchd unit for serviceStatus() to read,
+  // so derive liveness + drive start/stop/restart through docker compose instead.
+  const running = isCompose ? composeRunning() : svc.running;
+  const managerLabel = isCompose ? "docker compose" : svc.kind === "unsupported" ? "none" : svc.kind;
   const ports = storedPorts();
   const apiPort = String(ports.api ?? 4000);
   const dashUrl = `http://localhost:${ports.dashboard ?? 3001}`;
@@ -1051,10 +1078,10 @@ export async function runControl(): Promise<void> {
   intro(`${chalk.bgCyan(chalk.black(" Openship "))}${chalk.dim(" control")}`);
   note(
     `${chalk.dim("URL".padEnd(11))}${chalk.bold(primaryUrl)}\n` +
-      `${chalk.dim("Service".padEnd(11))}${svc.running ? chalk.green("running") : chalk.yellow("stopped")}\n` +
+      `${chalk.dim("Service".padEnd(11))}${running ? chalk.green("running") : chalk.yellow("stopped")}\n` +
       `${chalk.dim("Dashboard".padEnd(11))}${dashUrl}\n` +
       (ports.api ? `${chalk.dim("API".padEnd(11))}http://localhost:${ports.api}\n` : "") +
-      `${chalk.dim("Manager".padEnd(11))}${svc.kind === "unsupported" ? "none" : svc.kind}`,
+      `${chalk.dim("Manager".padEnd(11))}${managerLabel}`,
     "Openship is already set up",
   );
 
@@ -1071,7 +1098,7 @@ export async function runControl(): Promise<void> {
       options: [
         ...(corrupted ? [{ value: "repair", label: "Repair database", hint: "backup → heal → verify" }] : []),
         { value: "open", label: "Open the dashboard" },
-        svc.running
+        running
           ? { value: "restart", label: "Restart the service" }
           : { value: "start", label: "Start the service" },
         { value: "stop", label: "Stop the service", hint: "won't restart on boot" },
@@ -1093,15 +1120,31 @@ export async function runControl(): Promise<void> {
       await open(primaryUrl).catch(() => {});
       outro(chalk.dim(`Opening ${primaryUrl}`));
       return;
-    case "start":
+    case "start": {
+      if (isCompose) {
+        const ok = composeStart();
+        outro(ok ? chalk.green("Started.") : chalk.yellow("Couldn't start the stack — run `openship up` to see the error."));
+        return;
+      }
       await startService({});
       return;
+    }
     case "restart": {
+      if (isCompose) {
+        const ok = composeRestart();
+        outro(ok ? chalk.green("Restarted.") : chalk.yellow("Couldn't restart the stack."));
+        return;
+      }
       const r = restartService();
       outro(r.restarted ? chalk.green("Restarted.") : chalk.yellow(r.detail));
       return;
     }
     case "stop": {
+      if (isCompose) {
+        const ok = composeDown();
+        outro(ok ? chalk.green("Stopped. Won't restart on boot.") : chalk.yellow("Couldn't stop the stack."));
+        return;
+      }
       const r = stopService();
       outro(chalk.green(`Stopped. ${chalk.dim(r.detail)}`));
       return;

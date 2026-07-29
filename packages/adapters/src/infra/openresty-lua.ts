@@ -84,6 +84,48 @@ export const OPENRESTY_DEFAULT_PATHS: OpenRestyPaths = {
   pidPath: "/usr/local/openresty/nginx/logs/nginx.pid",
 };
 
+// ── Containerized edge ───────────────────────────────────────────────────────
+
+/** Root for edge state that isn't already at a well-known host location. */
+export const EDGE_HOST_STATE_DIR = "/var/lib/openship/edge";
+
+/**
+ * Where the edge container's state lives ON THE HOST, and where it's mounted
+ * inside the container.
+ *
+ * Certs and static docroots keep the SAME path on both sides deliberately: every
+ * host-side reader we already have (the migrate proxy scan, `carrySourceCerts`,
+ * cert reuse, the mail server's cert symlinks) then keeps working with no
+ * translation, and a bare→container conversion inherits the box's existing certs
+ * instead of orphaning them. Bind mounts, never named volumes — Docker-managed
+ * volumes make edge state invisible to host tooling, which is what silently broke
+ * domain/SSL detection in the migrate wizard.
+ */
+export const EDGE_CONTAINER_MOUNTS: ReadonlyArray<{ host: string; container: string }> = [
+  { host: `${EDGE_HOST_STATE_DIR}/sites-enabled`, container: OPENRESTY_DEFAULT_PATHS.sitesDir },
+  { host: "/etc/letsencrypt", container: "/etc/letsencrypt" },
+  { host: `${EDGE_HOST_STATE_DIR}/acme`, container: "/var/www/acme" },
+  { host: "/opt/openship/static", container: "/opt/openship/static" },
+];
+
+/**
+ * Paths for driving a containerized edge from OUTSIDE the container — i.e. over
+ * SSH to the box it runs on.
+ *
+ * Deliberately mixed, and the split is the whole point: `sitesDir` is the HOST
+ * path (vhost files are written straight to the bind-mounted directory), while
+ * `bin` and `pidPath` are CONTAINER paths (commands run via `docker exec`).
+ * `confPath` is baked into the image and must never be written — the container
+ * edge skips `ensureOpenRestyConfig` entirely.
+ */
+export const EDGE_HOST_PATHS: OpenRestyPaths = {
+  bin: OPENRESTY_DEFAULT_PATHS.bin,
+  confPath: OPENRESTY_DEFAULT_PATHS.confPath,
+  confDir: OPENRESTY_DEFAULT_PATHS.confDir,
+  sitesDir: `${EDGE_HOST_STATE_DIR}/sites-enabled`,
+  pidPath: OPENRESTY_DEFAULT_PATHS.pidPath,
+};
+
 /** Well-known nginx.conf locations across OpenResty packages. */
 const KNOWN_CONF_PATHS = [
   "/usr/local/openresty/nginx/conf/nginx.conf",
@@ -145,18 +187,38 @@ export async function detectOpenRestyPaths(
 /**
  * Build the OpenResty reload command from detected paths.
  *
- * Primary: `openresty -t` then `openresty -s reload` (graceful, zero-downtime).
- * Fallback: if reload fails (e.g. not running), kill everything and start fresh.
+ * Primary (both modes): `openresty -t` then `-s reload` — graceful, zero-downtime.
  *
- * The kill-and-restart fallback is SKIPPED when openresty is PID 1 — i.e. a
- * containerized edge (OPENSHIP_EDGE_MODE), where it is the container's init.
- * `pkill` there kills PID 1, so the whole edge container dies mid-exec: the
- * docker exec returns non-zero, registerRoute's self-rollback restores the
- * PREVIOUS vhost, and the deploy reports "Routing failed" while every site on
- * the box blips. Restarting a dead master is the container supervisor's job in
- * that mode, so fail loudly (surfacing the reload's real stderr) instead.
+ * What happens when reload FAILS is where this gets dangerous, because the wrong
+ * recovery takes every site on the box down. Three layers, in order:
+ *
+ *   1. `opts.containerEdge` — set by the two container-edge providers, so for the
+ *      paths we control the command CONTAINS no kill at all. Nothing to reason
+ *      about at runtime.
+ *   2. `/proc/1/comm` — a runtime backstop for any path that reaches the bare
+ *      command while actually running inside the edge container (a caller that
+ *      forgot the flag, `ensureLuaScripts` on a containerized box). The master IS
+ *      pid 1 there, so `pkill` kills the container's init: the `docker exec`
+ *      returns non-zero, registerRoute's self-rollback restores the PREVIOUS
+ *      vhost, and the deploy reports "Routing failed" while every site blips.
+ *      Restarting a dead master is the supervisor's job in that mode — fail
+ *      loudly, surfacing the reload's real stderr.
+ *   3. BARE host — a failed reload usually does mean "not running", so starting it
+ *      is right. But recover WITHOUT a pattern kill: `pkill -f openresty` also
+ *      matches a host-networked edge CONTAINER's master (see edge-check.test.ts),
+ *      so the blind kill could take down the very edge it was recovering. Only
+ *      start when no live master holds the pid file; otherwise report it rather
+ *      than killing a process we can't identify.
  */
-export function buildReloadCommand(paths: OpenRestyPaths): string {
+export function buildReloadCommand(
+  paths: OpenRestyPaths,
+  opts: { containerEdge?: boolean } = {},
+): string {
+  if (opts.containerEdge) {
+    return `${paths.bin} -t 2>&1 || exit 1
+${paths.bin} -s reload 2>&1 || exit 1`;
+  }
+
   return `${paths.bin} -t 2>&1 || exit 1
 
 reload_err=$(${paths.bin} -s reload 2>&1) && exit 0
@@ -167,9 +229,11 @@ if [ "$(cat /proc/1/comm 2>/dev/null)" = "openresty" ] || [ "$(cat /proc/1/comm 
   exit 1
 fi
 
-pkill -f '[o]penresty' >/dev/null 2>&1 || true
-pkill -f '[n]ginx' >/dev/null 2>&1 || true
-sleep 1
+if [ -f ${paths.pidPath} ] && kill -0 "$(cat ${paths.pidPath} 2>/dev/null)" 2>/dev/null; then
+  echo "openresty (pid $(cat ${paths.pidPath})) is running but refused -s reload" >&2
+  exit 1
+fi
+
 rm -f ${paths.pidPath}
 ${paths.bin}`;
 }

@@ -3,6 +3,7 @@ import {
   access,
   mkdir as fsMkdir,
   readFile as fsReadFile,
+  rename as fsRename,
   rm as fsRm,
   writeFile as fsWriteFile,
 } from "node:fs/promises";
@@ -88,6 +89,10 @@ export class LocalExecutor implements CommandExecutor {
   async writeFile(path: string, content: string): Promise<void> {
     await fsMkdir(dirname(path), { recursive: true });
     await fsWriteFile(path, content, "utf-8");
+  }
+
+  async rename(from: string, to: string): Promise<void> {
+    await fsRename(from, to);
   }
 
   async readFile(path: string): Promise<string> {

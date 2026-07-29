@@ -13,7 +13,7 @@
 import type { Context } from "hono";
 import { setSignedCookie } from "hono/cookie";
 import { db, repos, schema, eq, and } from "@repo/db";
-import { generateId } from "@repo/core";
+import { generateId, safeErrorMessage } from "@repo/core";
 import { hashPassword } from "better-auth/crypto";
 import { invalidateOpenRestyPaths } from "@/lib/openresty-paths";
 import { env } from "../../config";
@@ -38,6 +38,7 @@ import { getInstanceReachability } from "../../lib/public-url";
 import { sshManager } from "../../lib/ssh-manager";
 import { encryptSecretField } from "@/lib/credential-encryption";
 import { ensureLocalUser, invalidateLocalUserCache } from "../../lib/local-user";
+import { ensureLocalServerRegistered } from "../../lib/startup/self-server";
 import { provisionUser } from "../../lib/provision-user";
 import { COOKIE_PREFIX } from "../../lib/auth";
 import { mintSession } from "../../lib/cloud-auth-proxy";
@@ -563,6 +564,16 @@ export async function bootstrapAdmin(c: Context) {
 
   invalidateLocalUserCache();
   clearAuthModeCache();
+
+  // Register "This Server" NOW that a founding admin exists. The boot hook already
+  // ran and bailed for want of one (the API comes up before the CLI calls this), and
+  // nothing else re-runs it — so without this a freshly installed box showed
+  // "No servers yet" until the API happened to restart, even though Openship itself
+  // was listed under Apps. Best-effort: a failure here must not fail the bootstrap,
+  // since the boot hook will still catch it on the next restart.
+  await ensureLocalServerRegistered().catch((err) =>
+    console.warn("[setup] local server registration deferred to next boot:", safeErrorMessage(err)),
+  );
 
   audit.recordAsync(auditContextFrom(c, `org_${localUser.id}`, localUser.id), {
     eventType: "admin.bootstrapped",

@@ -27,6 +27,7 @@ import { permission } from "../../lib/permission";
 import { param } from "../../lib/controller-helpers";
 import { streamSSE } from "../../lib/sse";
 import { sshManager } from "../../lib/ssh-manager";
+import { withPinnedEdgeImage } from "../../lib/edge-image";
 import { applyProjectRouting } from "./routing-apply.service";
 import {
   createEdgeConsentSession,
@@ -52,11 +53,10 @@ async function withEdgeExecutor<T>(
   organizationId: string,
   fn: (exec: CommandExecutor) => Promise<T>,
 ): Promise<T> {
-  const server = await repos.server.getInOrganization(serverId, organizationId).catch(() => null);
-  if (server?.isLocal) {
-    const { createHostExecutor } = await import("@repo/adapters");
-    return fn(createHostExecutor());
-  }
+  // No local/remote branch: `acquire` already returns the pooled HOST channel for a
+  // local row (and never dials its display sshHost). Branching here to a fresh
+  // `createHostExecutor()` is what leaked a connection per poll of this endpoint —
+  // the dashboard calls edgeStatus on a timer (#291).
   return sshManager.withExecutor(serverId, fn);
 }
 
@@ -193,19 +193,19 @@ export async function ensureEdgeStream(c: Context) {
       appendEdgeLog(session.id, "Connecting to the server…");
       await withEdgeExecutor(serverId, ctx.organizationId, async (executor) => {
         // No extra probe here: the installer (`ensureEdgeClear` inside
-        // `installOpenResty`) detects the edge state itself and raises the
-        // takeover consent, and `apt` output streams live via `onLog` — so the
+        // `installContainerEdge`) detects the edge state itself and raises the
+        // takeover consent, and the image pull streams live via `onLog` — so the
         // console stays alive without a duplicate round-trip.
         // Self-heal a takeover that crashed mid-flight on a prior attempt.
         await recoverInterruptedTakeover(executor, onLog).catch(() => {});
-        const installer = COMPONENT_INSTALLERS["openresty"];
+        const installer = COMPONENT_INSTALLERS["edge"];
         // Same call shape as the deploy pipeline + server-setup: the installer
         // raises the edge-conflict consent via promptUser; on "migrate",
-        // ensureEdge runs the takeover (install OpenResty + migrate the foreign
+        // ensureEdge runs the takeover (bring up our edge + migrate the foreign
         // proxy's sites). No app container is touched.
         const edge = await ensureEdge(
           executor,
-          (p) => installer(executor, onLog, { promptUser: p }),
+          (p) => installer(executor, onLog, withPinnedEdgeImage({ promptUser: p })),
           { promptUser, onLog },
         );
         if (edge.migrated && !edge.ok) {
