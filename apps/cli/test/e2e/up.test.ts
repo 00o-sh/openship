@@ -54,7 +54,19 @@ vi.mock("@repo/adapters/proxy", async (importOriginal) => ({
   edgeIsBroken: async () => e.edgeBroken,
   edgeCrashReason: async () => e.edgeCrashReason,
 }));
-vi.mock("@repo/adapters", () => ({ LocalExecutor: class {} }));
+// waitForEdgeRunning (edge-import.ts) does `new LocalExecutor().exec("docker
+// inspect …")` to confirm the edge container is actually up before importing
+// migrated sites — mirror `e.edgeBroken` so it resolves the same way the rest
+// of the edge-chain fixtures already do, instead of the class being callable
+// but exec-less (that threw "exec.exec is not a function" the instant any
+// test's flow reached this check).
+vi.mock("@repo/adapters", () => ({
+  LocalExecutor: class {
+    async exec() {
+      return e.edgeBroken ? "false" : "true";
+    }
+  },
+}));
 
 vi.mock("../../src/lib/edge-preflight", () => ({
   planAndApplyHostEdge: async () => {
