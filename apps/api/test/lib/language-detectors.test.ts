@@ -338,3 +338,39 @@ describe("PHP fpm+nginx recipe", () => {
     expect(getRuntimeImage("symfony")).toBe("php:8.3-fpm");
   });
 });
+
+describe("commented-out entries in dependency manifests", () => {
+  const gemfile = (sinatra: string) =>
+    `source "https://rubygems.org"\ngem "puma"\ngem "rake"\n${sinatra}`;
+  const mixExs = (phoenix: string) =>
+    `defmodule App.MixProject do\n  defp deps do\n    [\n      {:jason, "~> 1.4"},\n${phoenix}    ]\n  end\nend\n`;
+
+  it("a commented gem does not select the Sinatra recipe", () => {
+    const r = detectStack([{ name: "Gemfile" }, { name: "main.rb" }], undefined, {
+      Gemfile: gemfile('# gem "sinatra"\n'),
+    });
+    expect(r.stack).toBe("unknown");
+  });
+
+  it("a declared gem still selects the Sinatra recipe", () => {
+    const r = detectStack([{ name: "Gemfile" }, { name: "main.rb" }], undefined, {
+      Gemfile: gemfile('gem "sinatra"\n'),
+    });
+    expect(r.stack).toBe("sinatra");
+  });
+
+  it("a commented mix.exs dep tuple does not select the Phoenix recipe", () => {
+    const r = detectStack([{ name: "mix.exs" }, { name: "lib", type: "dir" }], undefined, {
+      "mix.exs": mixExs('      # {:phoenix, "~> 1.7"},\n'),
+    });
+    expect(r.stack).not.toBe("phoenix");
+  });
+
+  it("a declared mix.exs dep tuple still selects the Phoenix recipe", () => {
+    const r = detectStack([{ name: "mix.exs" }, { name: "lib", type: "dir" }], undefined, {
+      "mix.exs": mixExs('      {:phoenix, "~> 1.7"},\n'),
+    });
+    expect(r.stack).toBe("phoenix");
+    expect(r.startCommand).toBe("_build/prod/rel/app/bin/app start");
+  });
+});
