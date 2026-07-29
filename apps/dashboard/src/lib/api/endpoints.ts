@@ -330,6 +330,10 @@ export const endpoints = {
         `mail/admin/${encodeURIComponent(serverId)}/mailboxes`,
       mailbox: (serverId: string, email: string) =>
         `mail/admin/${encodeURIComponent(serverId)}/mailboxes/${encodeURIComponent(email)}`,
+      aliases: (serverId: string) =>
+        `mail/admin/${encodeURIComponent(serverId)}/aliases`,
+      alias: (serverId: string, id: number) =>
+        `mail/admin/${encodeURIComponent(serverId)}/aliases/${id}`,
       stats: (serverId: string) =>
         `mail/admin/${encodeURIComponent(serverId)}/stats`,
       dnsScan: (serverId: string) =>

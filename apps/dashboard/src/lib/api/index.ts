@@ -107,10 +107,12 @@ export { mailAdminApi } from "./mail-admin";
 export type {
   AdminDomain,
   AdminMailbox,
+  AdminAlias,
   CreateDomainPayload,
   UpdateDomainPayload,
   CreateMailboxPayload,
   UpdateMailboxPayload,
+  CreateAliasPayload,
   DomainDependents,
   AdditionalDomainDnsState,
   MailServerStats,
