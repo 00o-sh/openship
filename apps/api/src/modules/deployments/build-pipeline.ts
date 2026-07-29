@@ -27,7 +27,6 @@ import {
   DEFAULT_BUILD_RESOURCE_CONFIG,
   ensurePortAvailable,
   allocateHostPort,
-  createHostExecutor,
   runDeployPipeline,
   isMultiServiceRuntime,
   waitForReady,
@@ -42,6 +41,7 @@ import {
   resolveEffectiveTarget,
 } from "../../lib/deployment-runtime";
 import { ensureRoutingReady } from "../../lib/edge-reconcile";
+import { sshManager } from "../../lib/ssh-manager";
 import {
   resolveBuildRuntimeModes,
   resolveDeployRouting,
@@ -1269,7 +1269,12 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
       )
         .filter((p) => p.id !== project.id && typeof p.hostPort === "number")
         .map((p) => p.hostPort as number);
-      pinnedHostPort = await allocateHostPort(phase.targetExecutor ?? createHostExecutor(), { avoid });
+      // The deploy's own executor when it has one; otherwise the POOLED host
+      // channel — never a bare `createHostExecutor()`, which builds a fresh
+      // SSH connection per call and leaked one sshd session each time (#291).
+      pinnedHostPort = phase.targetExecutor
+        ? await allocateHostPort(phase.targetExecutor, { avoid })
+        : await sshManager.withHostExecutor((exec) => allocateHostPort(exec, { avoid }));
       await repos.project
         .update(project.id, { hostPort: pinnedHostPort })
         .catch((err) => logger.log(`Couldn't persist host port ${pinnedHostPort}: ${safeErrorMessage(err)}\n`, "warn"));

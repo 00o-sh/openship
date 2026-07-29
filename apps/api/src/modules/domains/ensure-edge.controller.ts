@@ -53,11 +53,10 @@ async function withEdgeExecutor<T>(
   organizationId: string,
   fn: (exec: CommandExecutor) => Promise<T>,
 ): Promise<T> {
-  const server = await repos.server.getInOrganization(serverId, organizationId).catch(() => null);
-  if (server?.isLocal) {
-    const { createHostExecutor } = await import("@repo/adapters");
-    return fn(createHostExecutor());
-  }
+  // No local/remote branch: `acquire` already returns the pooled HOST channel for a
+  // local row (and never dials its display sshHost). Branching here to a fresh
+  // `createHostExecutor()` is what leaked a connection per poll of this endpoint —
+  // the dashboard calls edgeStatus on a timer (#291).
   return sshManager.withExecutor(serverId, fn);
 }
 

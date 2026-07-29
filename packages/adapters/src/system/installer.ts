@@ -265,6 +265,24 @@ export async function installOpenResty(
   onLog: SystemLogCallback,
   config?: InstallerConfig,
 ): Promise<InstallResult> {
+  // The edge CONTAINER already IS OpenResty, and it holds :80/:443 in host
+  // network mode. Installing the host package on top of it is not merely
+  // redundant — the Debian postinst STARTS openresty.service, the bind fails with
+  // "Address already in use", and dpkg is left half-configured, which breaks every
+  // later apt operation on the box (#288). Same guard `installCertbot` already
+  // has, for the same reason: the edge provides the component.
+  const edge = await resolveOurEdgeContainer(executor).catch(() => null);
+  if (edge) {
+    const inEdge = await executor
+      .exec(containerCommand(edge, "openresty -v 2>&1"))
+      .catch(() => "");
+    if (inEdge.trim()) {
+      const parsed = systemCatalog.checks.openresty.parseVersion(inEdge.trim());
+      onLog(log(`OpenResty ${parsed} provided by the edge container — nothing to install`));
+      return { component: "openresty", success: true, version: parsed };
+    }
+  }
+
   // Gate on privilege BEFORE touching the box, so a non-privileged run bails
   // out cleanly instead of stopping a running OpenResty and then failing at apt.
   const prep = await prepareExecutor(executor, "openresty");

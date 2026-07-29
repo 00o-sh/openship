@@ -1,9 +1,9 @@
 "use client";
 
 import React from "react";
-import { useI18n } from "@/components/i18n-provider";
+import { useI18n, interpolate } from "@/components/i18n-provider";
 import PublicEndpointsCard from "@/components/routing/PublicEndpointsCard";
-import type { PublicEndpoint } from "@/context/deployment/types";
+import { createPublicEndpoint, type PublicEndpoint } from "@/context/deployment/types";
 
 /**
  * Free / Custom / None routing picker, rendered as a COMPACT segmented tab (the
@@ -58,6 +58,39 @@ export function RoutingModePicker({
 }: RoutingModePickerProps) {
   const { t } = useI18n();
   const w = t.widgets.routing.settingsCard;
+
+  // The apex the www variant would attach to: the first custom endpoint's hostname.
+  const apex = endpoints.find((e) => e.domainType === "custom")?.customDomain?.trim().toLowerCase();
+  const wwwCandidate = apex && !apex.startsWith("www.") ? apex : null;
+  const wwwIncluded =
+    !!wwwCandidate &&
+    endpoints.some(
+      (e) => e.domainType === "custom" && e.customDomain?.trim().toLowerCase() === `www.${wwwCandidate}`,
+    );
+
+  /** Add/remove the `www.` endpoint, mirroring the apex's port or target path. */
+  const toggleWww = (on: boolean) => {
+    if (!wwwCandidate) return;
+    const host = `www.${wwwCandidate}`;
+    if (!on) {
+      onEndpointsChange(
+        endpoints.filter(
+          (e) => !(e.domainType === "custom" && e.customDomain?.trim().toLowerCase() === host),
+        ),
+      );
+      return;
+    }
+    const primary = endpoints.find((e) => e.domainType === "custom");
+    onEndpointsChange([
+      ...endpoints,
+      createPublicEndpoint({
+        domainType: "custom",
+        customDomain: host,
+        ...(primary?.port ? { port: primary.port } : {}),
+        ...(primary?.targetPath ? { targetPath: primary.targetPath } : {}),
+      }),
+    ]);
+  };
   const tabs: Array<{ value: RoutingMode; label: string }> = [
     { value: "free", label: w.free },
     { value: "custom", label: w.custom },
@@ -84,6 +117,28 @@ export function RoutingModePicker({
         <p className="px-1 pt-0.5 text-xs text-muted-foreground">{labels.noneDesc}</p>
       ) : (
         <div className="pt-1">
+          {/* Offered wherever a CUSTOM domain is chosen — including initial setup,
+              where it was missing entirely (#289 item 2.1) and users had to come back
+              to the project's Domains tab afterwards. `www.<apex>` is appended as its
+              own endpoint because publicEndpoints is what routing reconciles against:
+              `syncProjectPublicRoutes` mints the pending row from it, then the domain
+              sweep verifies it and issues its cert. A flag on the apex would be
+              dropped by the same reconciler. */}
+          {mode === "custom" && wwwCandidate && (
+            <label className="mb-2 flex cursor-pointer items-start gap-2 px-1">
+              <input
+                type="checkbox"
+                checked={wwwIncluded}
+                onChange={(e) => toggleWww(e.target.checked)}
+                className="mt-0.5 size-3.5 accent-primary"
+              />
+              <span className="text-xs text-muted-foreground">
+                {interpolate(t.projectSettings.domains.add.includeWwwDesc, {
+                  domain: wwwCandidate,
+                })}
+              </span>
+            </label>
+          )}
           <PublicEndpointsCard
             projectName={projectName}
             endpoints={endpoints}

@@ -118,7 +118,7 @@ async function runningImage(
  */
 export type EdgeProviderOptions = Omit<
   NginxProviderOptions,
-  "executor" | "paths" | "pinPaths"
+  "executor" | "paths" | "pinPaths" | "containerEdge"
 >;
 
 /**
@@ -143,6 +143,9 @@ export async function containerEdgeProvider(
     // MUST be pinned: re-detection answers from inside the container and would
     // repoint sitesDir at a host dir the edge never reads.
     pinPaths: true,
+    // Reload runs INSIDE the container, where the master is pid 1 — so a failed
+    // reload must never fall back to killing it (#292).
+    containerEdge: true,
   });
 }
 
@@ -169,6 +172,8 @@ export async function localContainerEdgeProvider(
     // nginx.conf + the Lua are BAKED into the image — nothing to detect, install
     // or patch, and detection would answer from inside the container anyway.
     pinPaths: true,
+    // `docker exec`s into the edge, so the master is pid 1 there too (#292).
+    containerEdge: true,
   });
 }
 

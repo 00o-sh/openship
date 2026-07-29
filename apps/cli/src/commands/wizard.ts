@@ -50,6 +50,7 @@ import { saveInstanceUrl, readInstanceUrl } from "../lib/ports";
 import { runRepair, looksCorrupted, lastServiceError } from "../lib/repair";
 import {
   ensureDocker,
+  dockerGap,
   hasDockerCompose,
   composeUp,
   composeInternalToken,
@@ -621,11 +622,20 @@ export async function runWizard(): Promise<void> {
   //    host-net Docker) and a failed Docker ensure fall back to the bare service.
   let method: "compose" | "bare" = "bare";
   if (process.platform === "linux") {
-    if (hasDockerCompose()) {
+    // Say what's ACTUALLY missing. "Docker isn't installed" on a box that has
+    // Docker but no Compose plugin (Debian's docker.io) sent operators chasing
+    // the wrong problem, and re-running get.docker.com for a daemon that's merely
+    // unreachable can't help — it just rewrites their docker repo config.
+    const gap = dockerGap();
+    if (!gap) {
       method = "compose";
+    } else if (!gap.installable) {
+      log.warn(`${gap.summary} — using the bare process service instead.`);
+      if (gap.hint) log.info(gap.hint);
+      method = "bare";
     } else {
-      log.step("Docker isn't installed — installing it now (get.docker.com)…");
-      method = (await ensureDocker()) ? "compose" : "bare";
+      log.step(`${gap.summary} — installing via get.docker.com…`);
+      method = (await ensureDocker({ onNotice: (line) => log.info(line) })) ? "compose" : "bare";
       if (method === "bare") {
         log.warn("Couldn't install Docker automatically — falling back to the bare process service.");
       }

@@ -47,6 +47,50 @@ export function extractBlocks(text: string, keyword: string): string[] {
  * (wraps in `'…'` and escapes embedded quotes). Used to quote file paths fed to
  * `cat` when reading discovered vhost files.
  */
+/**
+ * Resolve same-hostname collisions before they reach disk.
+ *
+ * Every importer feeds one vhost FILE per hostname, so two parsed blocks sharing
+ * a `server_name`/address are a collision where last-write-wins and the loser is
+ * gone with no trace. Every proxy has a shape that produces this pair:
+ *
+ *   • nginx  — certbot's `:80` helper beside the real `:443` vhost
+ *   • traefik — the `web` redirect router beside the `websecure` router
+ *   • caddy  — an explicit `http://host` block beside the auto-HTTPS one
+ *   • apache — `<VirtualHost *:80>` with a Redirect beside `<VirtualHost *:443>`
+ *
+ * Observed live: the plain-HTTP half won and a customer's HTTPS site came back
+ * HTTP-only serving an empty ACME webroot. `score` decides the winner (higher
+ * wins); ties keep source order, and `dropped` is returned so the caller can say
+ * what it set aside rather than staying quiet.
+ */
+export function collapseByHost<T>(
+  items: T[],
+  hostsOf: (item: T) => string[],
+  score: (item: T) => number,
+): { kept: T[]; dropped: T[] } {
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    // Keyed on the FULL name set: a multi-name block (`a.com b.com`) is one vhost
+    // and must not be compared against a single-name block for one of them.
+    const key = [...hostsOf(item)].sort().join(" ");
+    const bag = groups.get(key);
+    if (bag) bag.push(item);
+    else groups.set(key, [item]);
+  }
+
+  const kept: T[] = [];
+  const dropped: T[] = [];
+  // Map iteration follows first-insert order, so `kept` stays in source order.
+  for (const bag of groups.values()) {
+    let winner = bag[0];
+    for (const cand of bag) if (score(cand) > score(winner)) winner = cand;
+    kept.push(winner);
+    for (const loser of bag) if (loser !== winner) dropped.push(loser);
+  }
+  return { kept, dropped };
+}
+
 export function sq(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }

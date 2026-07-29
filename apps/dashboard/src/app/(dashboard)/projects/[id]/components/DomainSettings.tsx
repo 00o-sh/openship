@@ -694,9 +694,12 @@ export const DomainSettings = () => {
     const isCustom = newDomainType === "custom";
     const portValue = newDomainPort.trim();
 
-    // The "Include www" toggle owns the www record — a hand-typed "www."
-    // prefix would double it up, so block it with guidance instead.
-    if (isCustom && host.startsWith("www.")) {
+    // `www.x` is a legitimate hostname to add on its own — refuse it only when THIS
+    // project already has that exact row, which is the real error (a duplicate).
+    // This used to reject every typed `www.` on the grounds that the "Include www"
+    // toggle owned it; the toggle created nothing (#289), so the rule blocked the
+    // only workaround users had.
+    if (isCustom && domainsData.domains.some((d: any) => (d.domain ?? d.hostname) === host)) {
       showToast(t.projectSettings.domains.add.noWww, "error", t.projectSettings.domains.toast.addDomainTitle);
       return;
     }
@@ -732,14 +735,31 @@ export const DomainSettings = () => {
         );
       }
 
+      const target = hasProjectServer
+        ? { port: portValue }
+        : { targetPath: newDomainPath.trim() || "/" };
       const nextEndpoint = createPublicEndpoint({
         domainType: newDomainType,
         ...(isCustom ? { customDomain: host } : { domain: host }),
-        ...(hasProjectServer ? { port: portValue } : { targetPath: newDomainPath.trim() || "/" }),
+        ...target,
       });
+      // The www variant must be in THIS save, not just in the domain table:
+      // `syncProjectPublicRoutes` deletes every project-level domain row the
+      // submitted endpoint list omits (project-route-store.ts:108), so a row the
+      // connect call just minted would be removed by the save that follows it.
+      // publicEndpoints is the source of truth for routing — the variant has to be
+      // in it to survive, verify, and get a cert of its own.
+      const wwwEndpoint =
+        isCustom && includeWww && !host.startsWith("www.")
+          ? createPublicEndpoint({
+              domainType: newDomainType,
+              customDomain: `www.${host}`,
+              ...target,
+            })
+          : null;
       const label = isCustom ? host : `${host}.${baseDomain}`;
       const ok = await persistPublicEndpoints(
-        [...publicEndpoints, nextEndpoint],
+        [...publicEndpoints, nextEndpoint, ...(wwwEndpoint ? [wwwEndpoint] : [])],
         isCustom
           ? interpolate(t.projectSettings.domains.toast.addedCustom, { label })
           : interpolate(t.projectSettings.domains.toast.addedFree, { label }),
@@ -1669,10 +1689,13 @@ export const DomainSettings = () => {
   // True when the panel is showing preview (pre-Connect) data only. Used
   // to tweak the explainer text inside the panel.
   const isPreviewOnly = dnsRecords.length === 0 && previewedRecords.length > 0;
-  // Custom domains must be entered bare; the "Include www" toggle adds the www
-  // record. A typed "www." prefix is a mistake, so flag it and block submit.
+  // Only a DUPLICATE blocks submit now. A typed `www.` is fine — the "Include www"
+  // toggle is a convenience for claiming both at once, not the sole owner of www.
   const newDomainHasWww =
-    newDomainType === "custom" && newDomain.trim().toLowerCase().startsWith("www.");
+    newDomainType === "custom" &&
+    domainsData.domains.some(
+      (d: any) => (d.domain ?? d.hostname) === newDomain.trim().toLowerCase(),
+    );
 
   return (
     <div className="space-y-5">

@@ -187,19 +187,43 @@ export async function detectOpenRestyPaths(
 /**
  * Build the OpenResty reload command from detected paths.
  *
- * Primary: `openresty -t` then `openresty -s reload` (graceful, zero-downtime).
- * Fallback: if reload fails (e.g. not running), kill everything and start fresh.
+ * Primary (both modes): `openresty -t` then `-s reload` — graceful, zero-downtime.
+ *
+ * What happens when reload FAILS is where the two modes diverge, and getting it
+ * wrong takes every site on the box down:
+ *
+ *   • CONTAINER edge — the master IS pid 1. Killing it exits the container, the
+ *     restart policy brings it back, and every proxied site 502s for the seconds
+ *     in between. "Not running" is also impossible here: if the master were dead
+ *     the container would already be gone. So a failed reload is a real problem to
+ *     SURFACE, never something to recover by suicide.
+ *   • BARE host — a failed reload usually does mean "not running", so starting it
+ *     is right. But it is recovered WITHOUT a pattern kill: `pkill -f openresty`
+ *     also matches a host-networked edge CONTAINER's master (see
+ *     edge-check.test.ts), so the blind kill could take down the very edge it was
+ *     trying to recover. Only start when no live master is on the pid file;
+ *     otherwise report it rather than killing a process we can't identify.
  */
-export function buildReloadCommand(paths: OpenRestyPaths): string {
+export function buildReloadCommand(
+  paths: OpenRestyPaths,
+  opts: { containerEdge?: boolean } = {},
+): string {
+  if (opts.containerEdge) {
+    return `${paths.bin} -t 2>&1 || exit 1
+${paths.bin} -s reload 2>&1 || exit 1`;
+  }
+
   return `${paths.bin} -t 2>&1 || exit 1
 
 if ${paths.bin} -s reload 2>/dev/null; then
   exit 0
 fi
 
-pkill -f '[o]penresty' >/dev/null 2>&1 || true
-pkill -f '[n]ginx' >/dev/null 2>&1 || true
-sleep 1
+if [ -f ${paths.pidPath} ] && kill -0 "$(cat ${paths.pidPath} 2>/dev/null)" 2>/dev/null; then
+  echo "openresty (pid $(cat ${paths.pidPath})) is running but refused -s reload" >&2
+  exit 1
+fi
+
 rm -f ${paths.pidPath}
 ${paths.bin}`;
 }

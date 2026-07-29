@@ -11,7 +11,7 @@
  * Lifecycle (up/stop/update/status) routes here when ~/.openship/install-method
  * is "compose"; otherwise the bare service backend handles it.
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
@@ -91,12 +91,72 @@ function writeInstallMethod(method: InstallMethod): void {
   writeFileSync(INSTALL_METHOD_FILE, method, { mode: 0o600 });
 }
 
-/** docker + `docker compose` both present. */
+/**
+ * Why Docker isn't usable, as three SEPARATE facts.
+ *
+ * Collapsing them into one boolean is what made the wizard announce "Docker
+ * isn't installed" on a box that had Docker but no Compose plugin (Debian's
+ * `docker.io` package ships none) — and then re-run get.docker.com for a daemon
+ * that was merely unreachable, which cannot help and rewrites the host's docker
+ * repo config on the way.
+ */
+export interface DockerState {
+  /** `docker` is on PATH. Client-only probe — never touches the socket. */
+  binary: boolean;
+  /** `docker compose` resolves (Compose v2 plugin). Also client-only. */
+  plugin: boolean;
+  /** The daemon answers US. False when it's stopped OR the socket denies this
+   *  user (not in the `docker` group) — indistinguishable from here, so the
+   *  hint below covers both. */
+  daemon: boolean;
+}
+
+export function dockerState(): DockerState {
+  const ok = (args: string[]) => spawnSync("docker", args, { stdio: "ignore" }).status === 0;
+  // `docker --version` is the client; `docker version` (no dashes) contacts the
+  // daemon and is the one that fails on a permission-denied socket.
+  if (!ok(["--version"])) return { binary: false, plugin: false, daemon: false };
+  return { binary: true, plugin: ok(["compose", "version"]), daemon: ok(["version"]) };
+}
+
+export interface DockerGap {
+  /** One line, safe to show a user verbatim. */
+  summary: string;
+  /** True when running the Docker installer would actually close this gap. */
+  installable: boolean;
+  /** What the operator should do when we can't. */
+  hint?: string;
+}
+
+/** null when Docker is fully usable. */
+export function dockerGap(state: DockerState = dockerState()): DockerGap | null {
+  if (!state.binary) {
+    return { summary: "Docker isn't installed", installable: true };
+  }
+  if (!state.plugin) {
+    return {
+      summary: "Docker is installed but the Compose plugin (`docker compose`) is missing",
+      installable: true,
+    };
+  }
+  if (!state.daemon) {
+    const asRoot = typeof process.getuid === "function" && process.getuid() === 0;
+    return {
+      summary: "Docker is installed but its daemon isn't reachable",
+      // Reinstalling changes nothing: a group change only applies to NEW logins,
+      // and a stopped daemon needs starting, not installing.
+      installable: false,
+      hint: asRoot
+        ? "Start it with: systemctl start docker"
+        : `Add your user to the docker group: sudo usermod -aG docker ${userInfo().username} — then log out and back in (or run: newgrp docker). If the daemon is stopped: sudo systemctl start docker`,
+    };
+  }
+  return null;
+}
+
+/** docker + `docker compose` present AND the daemon reachable. */
 export function hasDockerCompose(): boolean {
-  const docker = spawnSync("docker", ["version"], { stdio: "ignore" });
-  if (docker.status !== 0) return false;
-  const compose = spawnSync("docker", ["compose", "version"], { stdio: "ignore" });
-  return compose.status === 0;
+  return dockerGap() === null;
 }
 
 /**
@@ -129,9 +189,25 @@ function shQuote(s: string): string {
  * false and the caller falls back to the bare service. The installer's own
  * output is inherited (that's the real progress the operator sees).
  */
-export async function ensureDocker(): Promise<boolean> {
-  if (hasDockerCompose()) return true;
+export interface EnsureDockerOpts {
+  /** Where narration goes. Defaults to stderr; the wizard passes clack's log so
+   *  the lines match the rest of its output. */
+  onNotice?: (line: string) => void;
+}
+
+export async function ensureDocker(opts: EnsureDockerOpts = {}): Promise<boolean> {
+  const notice = opts.onNotice ?? ((line: string) => process.stderr.write(`  ${line}\n`));
+  const state = dockerState();
+  const gap = dockerGap(state);
+  if (!gap) return true;
   if (process.platform !== "linux") return false;
+  // An unreachable daemon is not an installation problem — say what to do and
+  // stop, rather than running the Docker installer over a working install.
+  if (!gap.installable) {
+    notice(gap.summary + ".");
+    if (gap.hint) notice(gap.hint);
+    return false;
+  }
 
   const plan = systemCatalog.installs.docker({
     os: "linux",
@@ -141,15 +217,52 @@ export async function ensureDocker(): Promise<boolean> {
 
   const asRoot = typeof process.getuid === "function" && process.getuid() === 0;
   const sudo = !asRoot && hasCmd("sudo") ? "sudo " : "";
-  const sh = (script: string): number =>
-    spawnSync("sh", ["-c", sudo ? `${sudo}sh -c ${shQuote(script)}` : script], {
-      stdio: "inherit",
-    }).status ?? 1;
 
-  if (sh(plan.installCommand) !== 0) return false;
+  // Set expectations BEFORE the child takes over the terminal. get.docker.com
+  // prints its commit line and then goes quiet for minutes while apt fetches
+  // ~150 MB — on a small VPS that silence reads as a hang, and operators kill it.
+  notice("This can take 2-5 minutes on a small VPS (~150 MB of packages) and stays quiet while apt works.");
+  if (state.binary) {
+    // The installer detects the existing docker, prints a scary-looking warning
+    // and then `sleep 20` before continuing. Pre-empt it or the pause looks broken.
+    notice("Docker's installer will warn that docker already exists and pause ~20s before continuing — that's expected.");
+  }
+
+  const sh = (script: string): Promise<number> =>
+    new Promise((resolve) => {
+      const child = spawn("sh", ["-c", sudo ? `${sudo}sh -c ${shQuote(script)}` : script], {
+        stdio: "inherit",
+      });
+      // Heartbeat: the ONLY output during the long apt phase, so an operator can
+      // tell "still working" from "wedged". spawn (not spawnSync) purely so this
+      // timer can fire — a sync child blocks the event loop and prints nothing.
+      const started = Date.now();
+      const tick = setInterval(() => {
+        const s = Math.round((Date.now() - started) / 1000);
+        notice(`still installing Docker — ${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s elapsed…`);
+      }, 30_000);
+      const done = (code: number) => {
+        clearInterval(tick);
+        resolve(code);
+      };
+      child.on("error", () => done(1));
+      child.on("close", (code) => done(code ?? 1));
+    });
+
+  if ((await sh(plan.installCommand)) !== 0) return false;
   // Best-effort daemon start (get.docker.com already enables it on systemd).
-  if (plan.startCommand) sh(plan.startCommand);
-  return hasDockerCompose();
+  if (plan.startCommand) await sh(plan.startCommand);
+
+  const after = dockerGap();
+  if (!after) {
+    notice("Docker ready.");
+    return true;
+  }
+  // Installed fine, still not usable — almost always the group: root installed
+  // it, this (non-root) process still can't open the socket until a new login.
+  notice(after.summary + ".");
+  if (after.hint) notice(after.hint);
+  return false;
 }
 
 export interface ComposeUpOpts {

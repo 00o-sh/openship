@@ -11,7 +11,7 @@
 
 import type { CommandExecutor } from "../../../types";
 import type { ImportedSite, ProxyScanResult } from "../../types";
-import { stripComments, tryExec } from "./parse-utils";
+import { collapseByHost, stripComments, tryExec } from "./parse-utils";
 
 const CADDYFILE_PATHS = ["/etc/caddy/Caddyfile", "/etc/Caddyfile"];
 
@@ -21,10 +21,13 @@ interface CaddyHandler {
   handler?: string;
   upstreams?: Array<{ dial?: string }>;
   root?: string;
+  /** `php_fastcgi` adapts to a reverse_proxy whose transport is fastcgi — NOT an
+   *  HTTP upstream. Migrating it as one yields a vhost where every request fails. */
+  transport?: { protocol?: string };
   routes?: CaddyRoute[]; // subroute
 }
 interface CaddyRoute {
-  match?: Array<{ host?: string[] }>;
+  match?: Array<{ host?: string[]; path?: string[] }>;
   handle?: CaddyHandler[];
 }
 interface CaddyAdaptConfig {
@@ -40,26 +43,108 @@ async function loadCaddyJson(executor: CommandExecutor): Promise<string | null> 
   return null;
 }
 
-/** Flatten a route's handlers, descending into `subroute` routes, to leaf handlers. */
-function flattenHandlers(handlers: CaddyHandler[] | undefined, out: CaddyHandler[] = []): CaddyHandler[] {
+interface FlatHandler {
+  h: CaddyHandler;
+  /** The nested route this handler came from had its OWN matcher (a path, a file
+   *  test…), so it serves a SUBSET of the host — not the site's main upstream. */
+  scoped: boolean;
+}
+
+/**
+ * Flatten a route's handlers, descending into `subroute` routes, to leaf handlers.
+ *
+ * Carries each nested route's matcher down as `scoped`, which is load-bearing:
+ * flattening it away made a `handle_path /api/*` proxy indistinguishable from the
+ * site's catch-all, and since it comes FIRST in adapt output, `find()` picked it —
+ * silently routing an entire host to its /api backend. Caught against real
+ * `caddy adapt` output, not a fixture.
+ */
+function flattenHandlers(
+  handlers: CaddyHandler[] | undefined,
+  scoped = false,
+  out: FlatHandler[] = [],
+): FlatHandler[] {
   for (const h of handlers ?? []) {
     if (h.handler === "subroute") {
-      for (const r of h.routes ?? []) flattenHandlers(r.handle, out);
+      for (const r of h.routes ?? []) {
+        flattenHandlers(r.handle, scoped || (r.match?.length ?? 0) > 0, out);
+      }
     } else {
-      out.push(h);
+      out.push({ h, scoped });
     }
   }
   return out;
 }
 
+/** Handlers that mean "this route serves something we cannot express as one
+ *  upstream or docroot" — worth NAMING, because silently skipping them is how a
+ *  live PHP or `respond` site disappears from a migration without a word. */
+const UNMIGRATABLE_HANDLERS: Record<string, string> = {
+  php_fastcgi: "a PHP-FPM site (php_fastcgi)",
+  fastcgi: "a FastCGI backend",
+  static_response: "a static inline response (respond)",
+  templates: "Caddy templates",
+  encode: "",
+  headers: "",
+  authentication: "Caddy authentication",
+  rewrite: "",
+  acme_server: "an embedded ACME server",
+};
+
+interface RouteOutcome {
+  target?: ImportedSite["target"];
+  /** Set when the route carries something worth telling the operator about. */
+  note?: string;
+  /** More than one upstream — load balancing we can't reproduce with one target. */
+  extraUpstreams?: number;
+  /** The only upstream found was path-scoped, so using it as the host's upstream
+   *  is a guess the operator must check. */
+  pathScopedOnly?: boolean;
+  /** Some OTHER upstream on this host is path-scoped — those path rules don't survive. */
+  hasScopedSibling?: boolean;
+}
+
 /** A route's target: reverse_proxy upstream (first dial) or file_server + vars.root. */
-function targetFromRoute(route: CaddyRoute): ImportedSite["target"] | null {
+function targetFromRoute(route: CaddyRoute): RouteOutcome {
   const flat = flattenHandlers(route.handle);
-  const dial = flat.find((h) => h.handler === "reverse_proxy")?.upstreams?.find((u) => u.dial)?.dial;
-  if (dial) return { kind: "proxy", url: /^https?:\/\//.test(dial) ? dial : `http://${dial}` };
-  const root = flat.find((h) => h.handler === "vars" && typeof h.root === "string")?.root;
-  if (root && flat.some((h) => h.handler === "file_server")) return { kind: "static", root };
-  return null; // redirect-only (auto HTTP→HTTPS) or an unsupported handler
+  const proxies = flat.filter((f) => f.h.handler === "reverse_proxy");
+  // The CATCH-ALL proxy is the site's upstream; a path-scoped one only serves its
+  // own prefix. Prefer unscoped, and say so when only a scoped one exists.
+  const chosen = proxies.find((f) => !f.scoped) ?? proxies[0];
+  const proxy = chosen?.h;
+  if (proxy?.transport?.protocol === "fastcgi") {
+    return { note: "serves a PHP-FPM/FastCGI site (php_fastcgi) — not an HTTP upstream" };
+  }
+  const pathScopedOnly = Boolean(chosen?.scoped);
+  const hasScopedSibling = proxies.some((f) => f.scoped);
+  const dials = (proxy?.upstreams ?? []).map((u) => u.dial).filter((d): d is string => Boolean(d));
+  if (dials.length > 0) {
+    const dial = dials[0];
+    // A unix-socket upstream isn't an http URL; emitting `http://unix//run/x.sock`
+    // produces a vhost that can never connect.
+    if (/^unix\//i.test(dial)) {
+      return { note: `proxies to the unix socket "${dial}", which needs a manual upstream` };
+    }
+    return {
+      target: { kind: "proxy", url: /^https?:\/\//.test(dial) ? dial : `http://${dial}` },
+      extraUpstreams: dials.length - 1,
+      pathScopedOnly,
+      hasScopedSibling,
+    };
+  }
+  const root = flat.find((f) => f.h.handler === "vars" && typeof f.h.root === "string")?.h.root;
+  if (root && flat.some((f) => f.h.handler === "file_server")) {
+    return { target: { kind: "static", root } };
+  }
+
+  // Nothing we can serve. Say WHICH handler, when we recognise it.
+  for (const { h } of flat) {
+    const label = h.handler ? UNMIGRATABLE_HANDLERS[h.handler] : undefined;
+    if (label) return { note: `serves ${label}` };
+  }
+  // A bare `static_response`/`redir` route is Caddy's own auto HTTP→HTTPS half —
+  // the edge does that itself, so it is genuinely nothing to migrate.
+  return {};
 }
 
 /** Parse `caddy adapt` JSON. Returns null when it isn't the expected shape. */
@@ -74,6 +159,7 @@ function parseCaddyJson(raw: string): { sites: ImportedSite[]; warnings: string[
   if (!servers) return null;
 
   const sites: ImportedSite[] = [];
+  const warnings: string[] = [];
   for (const srv of Object.values(servers)) {
     // TLS iff this server listens on :443 (Caddy puts the real routes there; the
     // separate :80 server only carries the auto HTTP→HTTPS redirect).
@@ -81,14 +167,47 @@ function parseCaddyJson(raw: string): { sites: ImportedSite[]; warnings: string[
     for (const route of srv.routes ?? []) {
       const hosts = (route.match ?? []).flatMap((m) => m.host ?? []).filter((h) => h && h !== "*");
       if (hosts.length === 0) continue; // catch-all / no host matcher
-      const target = targetFromRoute(route);
-      if (!target) continue; // redirect-only or unsupported — nothing to migrate
+      const outcome = targetFromRoute(route);
+      if (outcome.note) {
+        warnings.push(`caddy: ${hosts.join(", ")} ${outcome.note} — re-add it manually`);
+        continue;
+      }
+      if (!outcome.target) continue; // auto HTTP→HTTPS half — the edge does that itself
+      if (outcome.extraUpstreams) {
+        warnings.push(
+          `caddy: ${hosts.join(", ")} load-balances across ${outcome.extraUpstreams + 1} upstreams — only the first is migrated`,
+        );
+      }
+      // Path routing doesn't survive a single-upstream vhost. Two flavours, and
+      // the second is a guess worth flagging harder than the first.
+      if (outcome.hasScopedSibling || (route.match ?? []).some((m) => m.path?.length)) {
+        warnings.push(
+          `caddy: ${hosts.join(", ")} routes some paths to other upstreams — only the catch-all is migrated; re-add path rules manually`,
+        );
+      }
+      if (outcome.pathScopedOnly) {
+        warnings.push(
+          `caddy: ${hosts.join(", ")} has no catch-all upstream — used its path-scoped one; verify the target`,
+        );
+      }
       // Certs: Caddy auto-provisions, and openship re-issues via Let's Encrypt on
       // takeover, so we carry only the ssl flag here (no fragile cert→SNI mapping).
-      sites.push({ serverNames: hosts, ssl, target, source: "caddy (adapt)" });
+      sites.push({ serverNames: hosts, ssl, target: outcome.target, source: "caddy (adapt)" });
     }
   }
-  return { sites, warnings: [] };
+  // An `http://host` block and the auto-HTTPS one for the same host both carry a
+  // real handler — TLS must win, or the site comes back plain HTTP.
+  const { kept, dropped } = collapseByHost(
+    sites,
+    (s) => s.serverNames,
+    (s) => (s.ssl ? 1 : 0),
+  );
+  for (const d of dropped) {
+    warnings.push(
+      `caddy: ${d.serverNames.join(", ")} had a second (non-TLS) block — kept the TLS one`,
+    );
+  }
+  return { sites: kept, warnings };
 }
 
 async function loadCaddyfile(executor: CommandExecutor): Promise<string> {
@@ -146,7 +265,11 @@ export async function scanCaddy(executor: CommandExecutor): Promise<ProxyScanRes
   const json = await loadCaddyJson(executor);
   if (json) {
     const parsed = parseCaddyJson(json);
-    if (parsed && parsed.sites.length > 0) {
+    // Sites OR warnings means adapt gave a real answer. Requiring sites > 0 meant
+    // a config we deliberately REFUSED (all php_fastcgi, all unix sockets) looked
+    // like "adapt found nothing", fell through to the text scan, and threw the
+    // refusal reasons away — the operator got "no readable Caddyfile" instead.
+    if (parsed && (parsed.sites.length > 0 || parsed.warnings.length > 0)) {
       return { proxy: "caddy", sites: parsed.sites, warnings: parsed.warnings };
     }
   }
@@ -188,19 +311,53 @@ async function scanCaddyText(executor: CommandExecutor): Promise<ProxyScanResult
       continue;
     }
 
-    const proxyMatch = body.match(/(?:^|\s)reverse_proxy\s+([^\n{]+)/);
+    const inlineProxy = body.match(/(?:^|\s)reverse_proxy\s+([^\n{]+)/);
+    // Block form — `reverse_proxy {\n  to backend:8080\n  header_up …\n}` — is
+    // idiomatic Caddy and has NO inline upstream, so the inline regex above missed
+    // it entirely and the site was reported as having no reverse_proxy at all.
+    const blockProxy = body.match(/(?:^|\s)reverse_proxy\s*\{([\s\S]*?)\}/);
+    const blockTo = blockProxy?.[1].match(/(?:^|\n)\s*to\s+([^\n]+)/);
     const rootMatch = body.match(/(?:^|\s)root\s+\*?\s*([^\n\s]+)/);
     const tlsMatch = body.match(/(?:^|\s)tls\s+(\S+)\s+(\S+)/); // tls <cert> <key>
 
+    const upstreams = (inlineProxy?.[1] ?? blockTo?.[1] ?? "").trim().split(/\s+/).filter(Boolean);
+    const host = addrs[0].host;
+
     let target: ImportedSite["target"];
-    if (proxyMatch) {
-      const upstream = proxyMatch[1].trim().split(/\s+/)[0];
+    if (upstreams.length > 0) {
+      const upstream = upstreams[0];
+      if (/^unix\//i.test(upstream)) {
+        warnings.push(
+          `caddy: ${host} proxies to the unix socket "${upstream}" — needs a manual upstream, skipped`,
+        );
+        continue;
+      }
+      if (upstreams.length > 1) {
+        warnings.push(
+          `caddy: ${host} load-balances across ${upstreams.length} upstreams — only the first is migrated`,
+        );
+      }
       target = { kind: "proxy", url: /^https?:\/\//.test(upstream) ? upstream : `http://${upstream}` };
+    } else if (/(?:^|\s)php_fastcgi\s/.test(body)) {
+      // BEFORE `root`, and that order is a SECURITY property: `root * /srv/php` +
+      // `php_fastcgi` is the standard PHP site, and migrating it as a static root
+      // serves .php files as plain text — source disclosure, not just a 500.
+      warnings.push(
+        `caddy: ${host} serves a PHP-FPM site (php_fastcgi) — not migratable as a static root; re-add it manually`,
+      );
+      continue;
     } else if (rootMatch) {
       target = { kind: "static", root: rootMatch[1] };
     } else {
-      warnings.push(`caddy: ${addrs[0].host} has no reverse_proxy or root — skipped`);
+      warnings.push(`caddy: ${host} has no reverse_proxy or root — skipped`);
       continue;
+    }
+    // A path-scoped handler means the upstream we found serves only part of the
+    // site; taking it as the whole host quietly rewires everything else.
+    if (/(?:^|\s)(handle_path|handle)\s+\//.test(body)) {
+      warnings.push(
+        `caddy: ${host} routes by path (handle/handle_path) — only one upstream is migrated; re-add path rules manually`,
+      );
     }
 
     const site: ImportedSite = {
@@ -215,5 +372,16 @@ async function scanCaddyText(executor: CommandExecutor): Promise<ProxyScanResult
     sites.push(site);
   }
 
-  return { proxy: "caddy", sites, warnings };
+  const { kept, dropped } = collapseByHost(
+    sites,
+    (s) => s.serverNames,
+    (s) => (s.ssl ? 1 : 0),
+  );
+  for (const d of dropped) {
+    warnings.push(
+      `caddy: ${d.serverNames.join(", ")} had a second (non-TLS) block — kept the TLS one`,
+    );
+  }
+
+  return { proxy: "caddy", sites: kept, warnings };
 }

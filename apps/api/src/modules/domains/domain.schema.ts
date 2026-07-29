@@ -29,6 +29,12 @@ export const AddDomainBody = Type.Object({
   /** Externally-managed ingress + TLS (Cloudflare Tunnel, LB): verify via TXT
    *  only, skip certbot, serve plain HTTP. Domain need not resolve to the box. */
   externalIngress: Type.Optional(Type.Boolean({ default: false })),
+  /**
+   * Also claim `www.<hostname>`. Creates a SECOND pending domain row — the SSL
+   * layer's own `includeWww` only ever acted on an existing verified www ROW, so
+   * without this the toggle was a no-op end to end (issue #289).
+   */
+  includeWww: Type.Optional(Type.Boolean({ default: false })),
 });
 
 /** Operator-supplied certificate (BYO / Cloudflare Origin CA) to install for a

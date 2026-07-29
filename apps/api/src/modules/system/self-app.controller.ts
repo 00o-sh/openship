@@ -18,6 +18,7 @@ import type { Context } from "hono";
 import type { ImportedSite, ManualCert } from "@repo/adapters";
 import { repos, db, schema, eq } from "@repo/db";
 import { SYSTEM, safeErrorMessage } from "@repo/core";
+import { sshManager } from "../../lib/ssh-manager";
 import { env } from "../../config";
 import { assertNotCloud, platform } from "../../lib/controller-helpers";
 import { ensureLocalUser } from "../../lib/local-user";
@@ -415,14 +416,18 @@ export async function selfEdgePreflight(c: Context) {
   }
 
   try {
-    const { createHostExecutor, detectEdge, importSites } = await import("@repo/adapters");
+    const { detectEdge, importSites } = await import("@repo/adapters");
     // Host-op executor: LocalExecutor bare, SSH→host.docker.internal when
     // containerized (OPENSHIP_HOST_SSH_* set). Inspecting the api container's
     // own netns would return a wrong migrate/takeover prompt in docker mode.
-    const executor = createHostExecutor();
-    const status = await detectEdge(executor);
-    // Scan the foreign proxy's sites (if importable) so the CLI can offer migration.
-    const { sites, warnings } = await importSites(executor, status);
+    // Pooled — this endpoint is polled by the CLI/wizard, and a per-call executor
+    // is what leaked sshd sessions until OOM (#291).
+    const { status, sites, warnings } = await sshManager.withHostExecutor(async (executor) => {
+      const detected = await detectEdge(executor);
+      // Scan the foreign proxy's sites (if importable) so the CLI can offer migration.
+      const scanned = await importSites(executor, detected);
+      return { status: detected, sites: scanned.sites, warnings: scanned.warnings };
+    });
     return c.json({ status, sites, warnings });
   } catch (err) {
     return c.json({ error: safeErrorMessage(err) }, 500);
