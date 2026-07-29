@@ -244,13 +244,10 @@ async function executeSslAction(
 
 // NOTE on the toolchain (certbot/OpenResty): we deliberately do NOT install it
 // here. Installing certbot can take 30–90s, which blows the renew HTTP request's
-// timeout. Toolchain install lives in the DEPLOY step chain instead — the deploy
-// preflight runs `system.ensureFeature("ssl", …)` whenever a planned domain has
-// `provisionSsl` (see build-pipeline.ts), streaming the install logs into the
-// deploy output. So a custom domain gets certbot installed AND its cert issued
-// as part of a normal deploy; this on-demand path only issues/renews against an
-// already-provisioned host (and surfaces a clear error if the toolchain is
-// missing — i.e. "redeploy to set up SSL").
+// timeout. Toolchain install lives in the DEPLOY step chain instead. The first
+// deploy prepares it for every local-certbot custom route, including a pending
+// one whose certificate issuance is deferred until verification. This
+// on-demand path can therefore issue/renew later without requiring a redeploy.
 export async function manageDomainSsl(
   hostname: string,
   opts: DomainSslOptions,

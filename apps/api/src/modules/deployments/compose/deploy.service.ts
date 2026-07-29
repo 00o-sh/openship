@@ -524,7 +524,10 @@ export async function deployComposeServices(
           await opts.system.ensureFeature("routing", systemLog);
         }
       }
-      if (plannedRoutes.some((route) => route.provisionSsl)) {
+      // Pending custom routes deliberately skip issuance, but their first
+      // deploy must still prepare certbot so automatic/manual verification can
+      // issue later without asking for a redeploy.
+      if (plannedRoutes.some((route) => route.requiresSslTooling)) {
         await opts.system.ensureFeature("ssl", systemLog);
       }
     } catch (err) {

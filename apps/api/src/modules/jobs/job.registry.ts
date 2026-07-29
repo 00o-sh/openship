@@ -120,9 +120,10 @@ export const SYSTEM_JOB_DEFS: SystemJobDef[] = [
     // whose first issuance failed — those sat in `provisioning` forever, needing a
     // manual Verify + Redeploy (#289), because the verify sweep only selects
     // unverified rows and the renewal sweep only selects certs that already exist.
-    // Off the :00/:30 marks. Cloud verifies via Oblien too, so gate only desktop out.
+    // Off the :00/:30 marks. This also runs in Desktop: the local API resolves
+    // each project's active deployment and performs verification/cert work on
+    // that remote server over its stored SSH connection.
     defaultCron: "*/13 * * * *",
-    available: () => platform().target !== "desktop",
     run: async () => {
       const r = await verifyPendingDomains();
       return {

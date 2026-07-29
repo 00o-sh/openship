@@ -1080,7 +1080,10 @@ function buildDeployEnvironment(
                   );
                 }
               }
-              if (plannedDomains.some((d) => d.provisionSsl)) {
+              // Prepare certbot for pending custom domains too. Issuance still
+              // waits for verification, but Verify/the background verifier must
+              // not require a second deploy merely to install the toolchain.
+              if (plannedDomains.some((d) => d.requiresSslTooling)) {
                 await system.ensureFeature("ssl", systemLog);
               }
             } catch (err) {
