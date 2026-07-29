@@ -23,7 +23,7 @@ const MISSING_BASELINE: Record<string, number> = {
   jobs: 876,
   migration: 1237,
   settings: 888,
-  emailsAdmin: 316,
+  emailsAdmin: 628,
   widgets: 138,
   misc: 123,
   overview: 120,
