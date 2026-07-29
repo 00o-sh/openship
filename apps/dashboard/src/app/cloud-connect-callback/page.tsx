@@ -29,6 +29,7 @@ import { Loader2, Check, AlertCircle } from "lucide-react";
 import { cloudApi } from "@/lib/api";
 import { getApiErrorMessage } from "@/lib/api/client";
 import { CONNECT_PKCE_STORAGE_PREFIX } from "@/lib/cloud-auth";
+import { closeAuthWindowAfterSuccess } from "@/utils/authWindow";
 import { AuthShell } from "@/components/auth-shell";
 import { useI18n } from "@/components/i18n-provider";
 
@@ -94,15 +95,9 @@ function CloudConnectCallbackInner() {
         } catch {
           /* opener gone / cross-origin throws — ignore */
         }
-        if (window.opener) {
-          setTimeout(() => {
-            try {
-              window.close();
-            } catch {
-              /* user closed manually */
-            }
-          }, 600);
-        }
+        // Cloud login may clear window.opener via Cross-Origin-Opener-Policy.
+        // The popup is still script-opened and should close after success.
+        closeAuthWindowAfterSuccess();
       })
       .catch((err) => {
         setStatus("error");
