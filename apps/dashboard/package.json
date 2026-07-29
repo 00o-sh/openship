@@ -16,6 +16,7 @@
     "clean": "rm -rf .next .turbo node_modules"
   },
   "dependencies": {
+    "@noble/hashes": "^2.0.1",
     "@radix-ui/react-slot": "^1.2.4",
     "@repo/core": "workspace:*",
     "@repo/onboarding": "workspace:*",

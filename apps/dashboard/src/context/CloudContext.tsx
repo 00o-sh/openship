@@ -351,7 +351,14 @@ export function CloudProvider({ children }: { children: ReactNode }) {
     const handle = openAuthWindow();
     prepareConnectUrl()
       .then((url) => handle.navigate(url))
-      .catch(() => handle.close());
+      .catch((error) => {
+        // Never silently close the popup. Self-hosted dashboards are often
+        // served over private-LAN HTTP, where browser security APIs differ
+        // from HTTPS. Keep the window open with an actionable local error if
+        // setup still fails after the PKCE fallback.
+        console.error("Unable to prepare Openship Cloud sign-in", error);
+        handle.navigate(`${window.location.origin}/cloud-connect-callback?setup_error=pkce`);
+      });
     handle.onClose(() => checkStatus());
   }, [prepareConnectUrl, checkStatus]);
 

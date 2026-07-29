@@ -42,6 +42,14 @@ function CloudConnectCallbackInner() {
   const [errorMessage, setErrorMessage] = useState<string>("");
 
   useEffect(() => {
+    if (searchParams.get("setup_error") === "pkce") {
+      setStatus("error");
+      setErrorMessage(
+        "Openship could not securely start the Cloud sign-in. Close this window and try again.",
+      );
+      return;
+    }
+
     const code = searchParams.get("code");
     const state = searchParams.get("state") ?? "";
 
