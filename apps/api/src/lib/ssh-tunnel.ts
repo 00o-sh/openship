@@ -56,8 +56,41 @@ export interface TunnelResponse {
 }
 
 /**
+ * Parse a chunked-transfer-encoded body out of an accumulated buffer.
+ * Returns the decoded body, or `null` if the buffer doesn't yet contain a
+ * complete terminating chunk (0-length chunk + trailing CRLF).
+ */
+function decodeChunkedBody(buf: Buffer): Buffer | null {
+  const out: Buffer[] = [];
+  let offset = 0;
+  for (;;) {
+    const lineEnd = buf.indexOf("\r\n", offset);
+    if (lineEnd === -1) return null;
+    const sizeLine = buf.slice(offset, lineEnd).toString().split(";")[0].trim();
+    const size = parseInt(sizeLine, 16);
+    if (Number.isNaN(size)) return null;
+    const chunkStart = lineEnd + 2;
+    if (size === 0) return Buffer.concat(out);
+    const chunkEnd = chunkStart + size;
+    if (buf.length < chunkEnd + 2) return null; // chunk data + trailing CRLF not fully buffered yet
+    out.push(buf.slice(chunkStart, chunkEnd));
+    offset = chunkEnd + 2;
+  }
+}
+
+/**
  * Send a single HTTP request to `remoteHost:remotePort` through an SSH
  * tunnel.  Returns the full response (status, headers, body).
+ *
+ * Writes the request directly onto the tunnel's raw duplex and parses the
+ * response by hand (same approach as `tunnelStream` below) rather than
+ * going through `http.request({ createConnection })` — Bun's `node:http`
+ * polyfill does not honor a caller-supplied `createConnection` socket (it
+ * still attempts its own connection under the hood), which made every call
+ * through this path fail with ECONNREFUSED and get silently swallowed to
+ * `null`. Always sends `Connection: close` so the remote closes the socket
+ * once the response is flushed — the simplest unambiguous end-of-body
+ * signal alongside Content-Length/chunked framing.
  *
  * Returns `null` on connection error, timeout, or if the executor
  * doesn't support tunnelling.
@@ -82,43 +115,94 @@ export async function tunnelRequest(
     return null;
   }
 
+  const bodyBuf = body ? (Buffer.isBuffer(body) ? body : Buffer.from(body)) : undefined;
+  const headerLines = [
+    `${method} ${path} HTTP/1.1`,
+    `Host: 127.0.0.1:${remotePort}`,
+    "Connection: close",
+    ...(bodyBuf ? [`Content-Length: ${bodyBuf.length}`] : []),
+    ...Object.entries(headers).map(([k, v]) => `${k}: ${v}`),
+    "",
+    "",
+  ];
+
   return new Promise<TunnelResponse | null>((resolve) => {
-    const timer = setTimeout(() => {
-      tunnel.destroy();
-      resolve(null);
-    }, timeoutMs);
-
-    const req = http.request(
-      {
-        method,
-        path,
-        headers: {
-          Host: `127.0.0.1:${remotePort}`,
-          ...headers,
-        },
-        createConnection: () => tunnel as any,
-      },
-      (res) => {
-        const chunks: Buffer[] = [];
-        res.on("data", (chunk: Buffer) => chunks.push(chunk));
-        res.on("end", () => {
-          clearTimeout(timer);
-          resolve({
-            statusCode: res.statusCode ?? 0,
-            headers: res.headers,
-            body: Buffer.concat(chunks).toString(),
-          });
-        });
-      },
-    );
-
-    req.on("error", () => {
+    let settled = false;
+    const finish = (result: TunnelResponse | null) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      resolve(null);
+      tunnel.destroy();
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => finish(null), timeoutMs);
+
+    let buffer = Buffer.alloc(0);
+    let headerEnd = -1;
+    let statusCode = 0;
+    let parsedHeaders: http.IncomingHttpHeaders = {};
+
+    tunnel.on("data", (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk]);
+
+      if (headerEnd === -1) {
+        headerEnd = buffer.indexOf("\r\n\r\n");
+        if (headerEnd === -1) return;
+
+        const rawHead = buffer.slice(0, headerEnd).toString();
+        const [statusLine, ...headerLinesRaw] = rawHead.split("\r\n");
+        statusCode = parseInt(statusLine.split(" ")[1] ?? "0", 10);
+        for (const line of headerLinesRaw) {
+          const colon = line.indexOf(":");
+          if (colon > 0) {
+            parsedHeaders[line.slice(0, colon).trim().toLowerCase()] = line.slice(colon + 1).trim();
+          }
+        }
+      }
+
+      const bodyBytes = buffer.slice(headerEnd + 4);
+      const contentLength = parsedHeaders["content-length"]
+        ? parseInt(parsedHeaders["content-length"] as string, 10)
+        : null;
+      const isChunked = parsedHeaders["transfer-encoding"] === "chunked";
+
+      if (isChunked) {
+        const decoded = decodeChunkedBody(bodyBytes);
+        if (decoded !== null) {
+          finish({ statusCode, headers: parsedHeaders, body: decoded.toString() });
+        }
+      } else if (contentLength !== null) {
+        if (bodyBytes.length >= contentLength) {
+          finish({
+            statusCode,
+            headers: parsedHeaders,
+            body: bodyBytes.slice(0, contentLength).toString(),
+          });
+        }
+      }
+      // Neither content-length nor chunked: wait for the remote to close
+      // the connection (handled by the "close"/"end" listener below).
     });
 
-    if (body) req.write(body);
-    req.end();
+    tunnel.on("error", () => finish(null));
+    tunnel.on("close", () => {
+      if (settled) return;
+      // Connection closed before/without a recognized length framing —
+      // treat whatever body we've buffered as the complete response (the
+      // "Connection: close" no-content-length case).
+      if (headerEnd !== -1) {
+        finish({
+          statusCode,
+          headers: parsedHeaders,
+          body: buffer.slice(headerEnd + 4).toString(),
+        });
+      } else {
+        finish(null);
+      }
+    });
+
+    tunnel.write(Buffer.concat([Buffer.from(headerLines.join("\r\n")), bodyBuf ?? Buffer.alloc(0)]));
   });
 }
 
