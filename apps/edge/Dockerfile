@@ -20,7 +20,12 @@ FROM openresty/openresty:1.27.1.1-alpine
 # (see nginx.conf) — zero downtime, no webroot, no port-80 fight.
 # procps → `pkill` for the reload command's restart fallback.
 # curl   → optional GeoLite2 download (geo is non-fatal if absent).
-RUN apk add --no-cache certbot procps curl
+# openssl → the CLI (the base image ships only the libraries) for the temporary
+#           self-signed certs a domain serves until its real one is issued, so a
+#           routed host never refuses a TLS handshake. See ensureBootstrapCert in
+#           packages/adapters/src/infra/nginx.ts; without it that falls back to an
+#           HTTP-only vhost, which is what Cloudflare reports as error 525.
+RUN apk add --no-cache certbot procps curl openssl
 
 # Openship Lua (rules engine + analytics + logging + webhook). Baked in at the
 # path lua_package_path resolves (`require "openship.rules_lib"` etc.).

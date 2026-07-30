@@ -83,7 +83,15 @@ describe("edgeImportSites", () => {
 
     expect(res.__status).toBe(200);
     expect(res.__data.registered).toEqual(["a.com"]);
-    expect(H.platform!.routing.registerRoute).toHaveBeenCalledWith({ domain: "a.com", tls: true, targetUrl: "http://127.0.0.1:3000" });
+    // An imported TLS site's certificate becomes ours to serve, so the route asks
+    // for a :443 listener from the start — the cert carried below may not land, and
+    // a routed host with no TLS listener refuses the handshake (Cloudflare 525).
+    expect(H.platform!.routing.registerRoute).toHaveBeenCalledWith({
+      domain: "a.com",
+      tls: true,
+      terminatesTlsLocally: true,
+      targetUrl: "http://127.0.0.1:3000",
+    });
     expect(H.platform!.ssl.installCert).toHaveBeenCalledWith("a.com", { certPem: "CERT", keyPem: "KEY" });
   });
 });

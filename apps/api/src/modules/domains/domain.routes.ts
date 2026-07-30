@@ -8,7 +8,7 @@ import { Hono } from "hono";
 import { secureRouter } from "../../lib/secure-router";
 import { cloudDomainProxy } from "../../lib/cloud/project-router";
 import * as ctrl from "./domain.controller";
-import { AddDomainBody, UploadCertBody } from "./domain.schema";
+import { AddDomainBody, UploadCertBody, PreviewDomainBody } from "./domain.schema";
 
 const r = secureRouter(new Hono(), {
   module: "domains",
@@ -25,7 +25,7 @@ r.post(
 );
 // Side-effect-free DNS probe — POST is used to carry hostname in body.
 // readOnly opts out of the scanner's "POST must be write/admin" rule.
-r.post("/preview", { tag: "domain:read", readOnly: true, mcp: { description: "Preview the DNS records a domain will need, before adding it." } }, ctrl.preview);
+r.post("/preview", { tag: "domain:read", readOnly: true, body: PreviewDomainBody, mcp: { description: "Preview the DNS records a domain will need, before adding it." } }, ctrl.preview);
 // Per-domain routes carry cloudDomainProxy (after the permission middleware):
 // a domain belonging to a cloud project is proxied to the SaaS; a local domain
 // falls through to the local handler.

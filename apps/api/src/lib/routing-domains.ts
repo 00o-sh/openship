@@ -19,6 +19,15 @@ export interface PlannedRouteDomain {
    */
   requiresSslTooling: boolean;
   provisionSsl: boolean;
+  /**
+   * TLS for this host terminates on the serving box, so the edge must keep a :443
+   * listener up for it from the moment the route exists (a temporary self-signed
+   * cert until the real one lands). Broader than `provisionSsl`/`requiresSslTooling`:
+   * it also covers a manual-SSL host whose cert hasn't been uploaded yet, and it
+   * stays true after a failed issuance — both are states where a missing listener
+   * means the origin refuses the handshake and Cloudflare reports 525 (#308).
+   */
+  terminatesTlsLocally: boolean;
   isCloud: boolean;
   targetPort?: number;
   targetPath?: string;
@@ -62,6 +71,26 @@ export function resolveManagedHostname(hostname: string): { isManaged: boolean; 
     isManaged: subdomain.length > 0,
     subdomain: subdomain || undefined,
   };
+}
+
+/**
+ * Does TLS for `hostname` terminate on THIS box? See
+ * {@link PlannedRouteDomain.terminatesTlsLocally}.
+ *
+ * For the callers that reach `registerRoute` WITHOUT going through the route
+ * planner — route reconcile, compose single-domain composition, migration path
+ * fan-out. They have to agree with the planner: a route registered without this
+ * flag gets no :443 listener until its cert exists, and a routed domain with no
+ * TLS listener refuses the handshake outright (Cloudflare reports 525, #308).
+ */
+export function hostTerminatesTlsLocally(
+  hostname: string,
+  domain?: { externalIngress?: boolean | null } | null,
+): boolean {
+  // A managed *.opsh.io host is fronted by Openship Cloud's edge, which
+  // terminates TLS and forwards to plain :80 here.
+  if (resolveManagedHostname(hostname).isManaged) return false;
+  return !domain?.externalIngress;
 }
 
 export function buildProjectRouteDomains(opts: {
@@ -132,6 +161,9 @@ export function buildProjectRouteDomains(opts: {
       hostname: normalized,
       tls: !external || manualSsl,
       requiresSslTooling,
+      // Ours to terminate unless an upstream ingress owns it (externalIngress) or
+      // it's a managed *.opsh.io host fronted by Openship Cloud's edge.
+      terminatesTlsLocally: !external && !managed.isManaged,
       // Attempt issuance on the FIRST deploy of an unverified custom domain
       // (sslStatus still "none" = no attempt yet, by any path) — issuing IS the
       // verification on self-hosted, so this makes the domain Live at end-of-deploy
@@ -278,6 +310,9 @@ export function buildServiceRouteDomains(opts: {
       hostname,
       tls: !external || manualSsl,
       requiresSslTooling,
+      // Same rule as the single-app path: a custom host on this box is ours to
+      // terminate; a managed free host is Cloud's.
+      terminatesTlsLocally: endpoint.domainType === "custom" && !external,
       // First-deploy issuance for an unverified custom service route — see the
       // single-app add() gate above for the rationale. [#291/#304 follow-up]
       provisionSsl: requiresSslTooling && (isVerified || domainRow?.sslStatus === "none"),
@@ -533,6 +568,7 @@ export function toRoutedDomainInputs(domains: PlannedRouteDomain[]): RoutedDomai
     hostname: domain.hostname,
     tls: domain.tls,
     provisionSsl: domain.provisionSsl,
+    terminatesTlsLocally: domain.terminatesTlsLocally,
     targetPort: domain.targetPort,
     targetPath: domain.targetPath,
   }));

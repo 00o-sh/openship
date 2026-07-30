@@ -8,7 +8,7 @@ import { Hono } from "hono";
 import { secureRouter } from "../../lib/secure-router";
 import { cloudDeploymentProxy, cloudProjectProxyByQuery } from "../../lib/cloud/project-router";
 import * as ctrl from "./deployment.controller";
-import { TriggerDeployBody, BuildAccessBody } from "./deployment.schema";
+import { TriggerDeployBody, BuildAccessBody, PrepareDeployBody, BuildRespondBody } from "./deployment.schema";
 
 const r = secureRouter(new Hono(), {
   module: "deployments",
@@ -49,6 +49,7 @@ r.post(
   {
     tag: "deployment:write",
     collection: true,
+    body: PrepareDeployBody,
     mcp: { description: "Detect stack/build config for a git repo or local path before deploying." },
   },
   ctrl.prepare,
@@ -122,7 +123,7 @@ r.post(
 );
 r.delete("/:id", { tag: "deployment:admin" }, cloudDeploymentProxy, ctrl.remove);
 r.post("/:id/restart", { tag: "deployment:write", mcp: { description: "Restart the running container(s) for this deployment." } }, cloudDeploymentProxy, ctrl.restart);
-r.post("/:id/build/respond", { tag: "deployment:write", mcp: { description: "Respond to a build gate/prompt for this deployment (e.g. approve a step)." } }, cloudDeploymentProxy, ctrl.buildRespond);
+r.post("/:id/build/respond", { tag: "deployment:write", body: BuildRespondBody, mcp: { description: "Respond to a build gate/prompt for this deployment (e.g. approve a step)." } }, cloudDeploymentProxy, ctrl.buildRespond);
 r.get("/:id/info", { tag: "deployment:read", mcp: { description: "Get container info for this deployment." } }, cloudDeploymentProxy, ctrl.containerInfo);
 r.get("/:id/usage", { tag: "deployment:read", mcp: { description: "Get container CPU/memory usage for this deployment." } }, cloudDeploymentProxy, ctrl.containerUsage);
 

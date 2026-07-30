@@ -43,6 +43,24 @@ Certbot failed to authenticate some domains (authenticator: webroot).
     expect(s).toMatch(/takeover|another web server|:80/i);
   });
 
+  it("525 → Cloudflare answered the challenge itself, and names the three fixes", () => {
+    // Cloudflare redirected the plain-HTTP challenge to https ("Always Use HTTPS"),
+    // then couldn't complete TLS to origin. Reported as an "Invalid response", so
+    // this MUST win over the 404/proxy-on-:80 branch — the fix is entirely different.
+    const out = `${OPENER}
+  Type:   unauthorized
+  Detail: 104.21.5.7: Invalid response from https://app.example.xyz/.well-known/acme-challenge/abc: 525`;
+    const s = summarizeCertbotFailure(out, "app.example.xyz");
+    expect(s).toMatch(/cloudflare/i);
+    expect(s).toMatch(/full/i);
+    expect(s).not.toMatch(/takeover/i);
+  });
+
+  it("526 → same Cloudflare guidance (Full (strict) rejecting the temporary cert)", () => {
+    const out = `${OPENER}\n  Detail: Invalid response from https://app.example.xyz/.well-known/acme-challenge/abc: 526`;
+    expect(summarizeCertbotFailure(out, "app.example.xyz")).toMatch(/cloudflare/i);
+  });
+
   it("rate limit → wait-before-retry", () => {
     const out = `${OPENER}\nThere were too many certificates already issued for exact set of domains`;
     const s = summarizeCertbotFailure(out, "hekai.org");

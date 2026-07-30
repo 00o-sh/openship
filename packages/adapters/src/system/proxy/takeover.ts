@@ -109,6 +109,11 @@ export async function registerImportedSites(
           await routing.registerRoute({
             domain,
             tls: site.ssl,
+            // An imported site's TLS becomes ours the moment we take :443 over, and
+            // its cert may not land until the carry/ACME step below. Keep a :443
+            // listener up throughout, or the domain refuses handshakes mid-takeover
+            // (Cloudflare 525, #308).
+            terminatesTlsLocally: site.ssl,
             targetUrl: site.target.url,
             ...(proxyLocations.length ? { proxyLocations } : {}),
           });
@@ -118,6 +123,7 @@ export async function registerImportedSites(
           await routing.registerRoute({
             domain,
             tls: site.ssl,
+            terminatesTlsLocally: site.ssl,
             staticRoot: site.target.root,
             staticRootAdopted: true,
           });
@@ -269,7 +275,12 @@ export async function runEdgeTakeover(
 
     for (const route of opts.extraRoutes ?? []) {
       try {
-        await nginx.registerRoute({ domain: route.domain, tls: route.tls, targetUrl: route.targetUrl });
+        await nginx.registerRoute({
+          domain: route.domain,
+          tls: route.tls,
+          terminatesTlsLocally: route.tls,
+          targetUrl: route.targetUrl,
+        });
         if (route.tls) await nginx.provisionCert(route.domain);
         registered.push(route.domain);
       } catch (err) {

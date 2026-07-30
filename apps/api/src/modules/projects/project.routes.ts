@@ -30,7 +30,16 @@ import {
   CreateProjectEnvironmentBody,
   MergeEnvVarsBody,
   UpdateResourcesBody,
+  LinkRepoBody,
+  SetAutoDeployBody,
+  SetBranchBody,
+  SetSleepModeBody,
+  SetOptionsBody,
 } from "./project.schema";
+import {
+  CreateIncomingWebhookBody,
+  UpdateIncomingWebhookBody,
+} from "../incoming-webhooks/incoming.schema";
 
 const r = secureRouter(new Hono(), {
   module: "projects",
@@ -172,7 +181,7 @@ r.post(
 r.get("/:id/deletion-preview", { tag: "project:read", mcp: { description: "Preview what deleting this project would remove (read-only)." } }, cloudProjectProxy, ctrl.deletionPreview);
 
 /* ─── Build options ────────────────────────────────────────────────────── */
-r.post("/:id/options", { tag: "project:write", mcp: { description: "Set build/deploy options for a project." } }, cloudProjectProxy, ctrl.setOptions);
+r.post("/:id/options", { tag: "project:write", body: SetOptionsBody, mcp: { description: "Set build/deploy options for a project." } }, cloudProjectProxy, ctrl.setOptions);
 r.post("/:id/port-check", { tag: "project:read", readOnly: true, mcp: { description: "Live port-reachability check for the project's active deployment (advisory)." } }, cloudProjectProxy, ctrl.portCheck);
 r.post("/:id/output-check", { tag: "project:read", readOnly: true, mcp: { description: "Live static-output check for the project's active deployment (advisory; static apps)." } }, cloudProjectProxy, ctrl.outputCheck);
 
@@ -221,16 +230,16 @@ r.patch("/:id/clone-token", { tag: "project:admin" }, cloudProjectProxy, ctrl.up
 /* ─── Git ──────────────────────────────────────────────────────────────── */
 r.get("/:id/git", { tag: "project:read", mcp: { description: "Get the project's linked git repository info." } }, cloudProjectProxy, ctrl.getGitInfo);
 r.get("/:id/commit-status", { tag: "project:read", mcp: { description: "Compare the deployed commit against the remote HEAD." } }, cloudProjectProxy, ctrl.getCommitStatus);
-r.post("/:id/git/link", { tag: "project:write", mcp: { description: "Link a git repository to the project." } }, cloudProjectProxy, ctrl.linkRepo);
+r.post("/:id/git/link", { tag: "project:write", body: LinkRepoBody, mcp: { description: "Link a git repository to the project." } }, cloudProjectProxy, ctrl.linkRepo);
 r.get("/:id/branches", { tag: "project:read", mcp: { description: "List the linked repository's branches." } }, cloudProjectProxy, ctrl.listBranches);
-r.post("/:id/auto-deploy", { tag: "project:write", mcp: { description: "Enable/disable auto-deploy on push." } }, cloudProjectProxy, ctrl.setAutoDeploy);
+r.post("/:id/auto-deploy", { tag: "project:write", body: SetAutoDeployBody, mcp: { description: "Enable/disable auto-deploy on push." } }, cloudProjectProxy, ctrl.setAutoDeploy);
 r.post("/:id/webhook-domain", { tag: "project:write" }, cloudProjectProxy, ctrl.setWebhookDomain);
-r.post("/:id/branch", { tag: "project:write", mcp: { description: "Set the project's deploy branch." } }, cloudProjectProxy, ctrl.setBranch);
+r.post("/:id/branch", { tag: "project:write", body: SetBranchBody, mcp: { description: "Set the project's deploy branch." } }, cloudProjectProxy, ctrl.setBranch);
 
 /* ─── Incoming webhooks (generic per-project trigger hooks) ─────────────── */
 r.get("/:id/incoming-webhooks", { tag: "project:read", mcp: { description: "List a project's incoming webhooks (dynamic trigger URLs)." } }, cloudProjectProxy, incomingWebhooks.list);
-r.post("/:id/incoming-webhooks", { tag: "project:write", mcp: { description: "Create an incoming webhook that fires a deploy or job when its URL is called." } }, cloudProjectProxy, incomingWebhooks.create);
-r.patch("/:id/incoming-webhooks/:hookId", { tag: "project:write", mcp: { description: "Update an incoming webhook (name/enabled/action/auth)." } }, cloudProjectProxy, incomingWebhooks.update);
+r.post("/:id/incoming-webhooks", { tag: "project:write", body: CreateIncomingWebhookBody, mcp: { description: "Create an incoming webhook that fires a deploy or job when its URL is called." } }, cloudProjectProxy, incomingWebhooks.create);
+r.patch("/:id/incoming-webhooks/:hookId", { tag: "project:write", body: UpdateIncomingWebhookBody, mcp: { description: "Update an incoming webhook (name/enabled/action/auth)." } }, cloudProjectProxy, incomingWebhooks.update);
 r.post("/:id/incoming-webhooks/:hookId/rotate", { tag: "project:write", mcp: { description: "Rotate an incoming webhook's token / HMAC secret." } }, cloudProjectProxy, incomingWebhooks.rotate);
 r.delete("/:id/incoming-webhooks/:hookId", { tag: "project:write", mcp: { description: "Delete an incoming webhook." } }, cloudProjectProxy, incomingWebhooks.remove);
 r.get("/:id/incoming-webhooks/:hookId/deliveries", { tag: "project:read", mcp: { description: "List one incoming webhook's recent deliveries (paginated)." } }, cloudProjectProxy, incomingWebhooks.hookDeliveries);
@@ -251,7 +260,7 @@ r.patch(
 r.post("/:id/resources", { tag: "project:write" }, cloudProjectProxy, ctrl.updateResources);
 
 /* ─── Sleep mode ───────────────────────────────────────────────────────── */
-r.post("/:id/sleep-mode", { tag: "project:write", mcp: { description: "Set the project's sleep mode (auto_sleep / always_on)." } }, cloudProjectProxy, ctrl.setSleepMode);
+r.post("/:id/sleep-mode", { tag: "project:write", body: SetSleepModeBody, mcp: { description: "Set the project's sleep mode (auto_sleep / always_on)." } }, cloudProjectProxy, ctrl.setSleepMode);
 
 /* ─── Deployments ──────────────────────────────────────────────────────── */
 r.get("/:id/deployments", { tag: "project:deployment:list", mcp: { description: "List a project's deployments (history, statuses)." } }, cloudProjectProxy, ctrl.listDeployments);

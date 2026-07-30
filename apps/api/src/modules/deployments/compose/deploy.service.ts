@@ -46,6 +46,7 @@ import {
   buildServiceRouteDomains,
   createTrackedSslProvider,
   ensureRouteDomainRecord,
+  hostTerminatesTlsLocally,
   toRoutedDomainInputs,
   type PlannedRouteDomain,
 } from "../../../lib/routing-domains";
@@ -910,7 +911,15 @@ export async function deployComposeServices(
           if (seenRouteDomains.has(routeKey)) continue;
           seenRouteDomains.add(routeKey);
           await routeContext.routing
-            .registerRoute({ domain: route.hostname, staticRoot: image, tls: true })
+            .registerRoute({
+              domain: route.hostname,
+              staticRoot: image,
+              tls: true,
+              terminatesTlsLocally: hostTerminatesTlsLocally(
+                route.hostname,
+                routeContext.domainByHostname.get(routeKey),
+              ),
+            })
             .catch((err) => {
               composeRouteWarnings.push(
                 `${route.hostname}: ${err instanceof Error ? err.message : "route registration failed"}`,
@@ -1573,6 +1582,10 @@ export async function deployComposeServices(
         await routeContext.routing.registerRoute({
           domain: r.hostname,
           tls: true,
+          terminatesTlsLocally: hostTerminatesTlsLocally(
+            r.hostname,
+            routeContext.domainByHostname.get(r.hostname.toLowerCase()),
+          ),
           targetUrl: r.targetUrl!,
           ...(r.proxyLocations?.length ? { proxyLocations: r.proxyLocations } : {}),
           ...(r.redirects?.length ? { redirects: r.redirects } : {}),
@@ -1593,6 +1606,10 @@ export async function deployComposeServices(
         await routeContext.routing.registerRoute({
           domain: reg.hostname,
           tls: true,
+          terminatesTlsLocally: hostTerminatesTlsLocally(
+            reg.hostname,
+            routeContext.domainByHostname.get(reg.hostname.toLowerCase()),
+          ),
           targetUrl: reg.targetUrl!,
           ...(reg.proxyLocations?.length ? { proxyLocations: reg.proxyLocations } : {}),
         });

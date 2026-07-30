@@ -44,6 +44,11 @@ export const UploadCertBody = Type.Object({
   keyPem: Type.String({ minLength: 1, maxLength: 100_000 }),
 });
 
+/** POST /preview — side-effect-free DNS-records preview for a hostname. */
+export const PreviewDomainBody = Type.Object({
+  hostname: Type.String({ minLength: 1, maxLength: 253, description: "Hostname to preview DNS records for." }),
+});
+
 // ─── Inferred types ──────────────────────────────────────────────────────────
 
 export type TDomainIdParam = Static<typeof DomainIdParam>;
