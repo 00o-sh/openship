@@ -64,6 +64,7 @@ export function projectServicesToDeployableServices(services: Service[]): Deploy
     environment: (s.environment as Record<string, string> | null) ?? {},
     volumes: (s.volumes as string[] | null) ?? [],
     command: s.command ?? undefined,
+    commandArgv: (s.commandArgv as string[] | null) ?? null, // #332
     restart: s.restart ?? undefined,
     exposed: s.exposed,
     exposedPort: s.exposedPort ?? undefined,

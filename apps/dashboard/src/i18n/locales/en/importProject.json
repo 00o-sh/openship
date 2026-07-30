@@ -47,6 +47,15 @@
     "outputDirectoryDesc": "Directory with build output",
     "sourceFolderLabel": "Source Folder",
     "sourceFolderDesc": "Build from a subdirectory inside the repository or local project.",
+    "composePath": {
+      "title": "Compose file",
+      "subtitle": "Detected automatically at the project root",
+      "label": "Path to your compose file",
+      "description": "For repos that keep compose outside the root — give the file (deploy/stack.yml) or the folder holding it (deploy/docker-compose). Re-scans the repo and deploys the services it declares.",
+      "apply": "Scan",
+      "scanning": "Scanning…",
+      "scanFailed": "Could not scan that compose path."
+    },
     "buildImageLabel": "Build Image",
     "buildImageDesc": "Builder container image for cloud or server builds. Override it when the detected base image is wrong.",
     "productionPathsLabel": "Production Paths",

@@ -321,10 +321,12 @@ export async function prepare(c: Context) {
     repo?: string;
     branch?: string;
     path?: string;
+    composePath?: string;
   }>();
 
   // Determine source - callers may send { owner, repo } without an explicit source
   const source = body.source ?? (body.owner && body.repo ? "github" : undefined);
+  const composePath = body.composePath?.trim() || undefined;
 
   try {
     let input: prepareService.Source;
@@ -333,7 +335,14 @@ export async function prepare(c: Context) {
       if (!body.owner || !body.repo) {
         return c.json({ error: "owner and repo are required" }, 400);
       }
-      input = { source: "github", owner: body.owner, repo: body.repo, branch: body.branch, ctx };
+      input = {
+        source: "github",
+        owner: body.owner,
+        repo: body.repo,
+        branch: body.branch,
+        ctx,
+        composePath,
+      };
     } else if (source === "local") {
       if (env.CLOUD_MODE) {
         return c.json({ error: "Local projects are not available in cloud mode" }, 403);
@@ -341,7 +350,7 @@ export async function prepare(c: Context) {
       if (!body.path) {
         return c.json({ error: "path is required" }, 400);
       }
-      input = { source: "local", path: body.path };
+      input = { source: "local", path: body.path, composePath };
     } else {
       return c.json({ error: "source must be 'github' or 'local'" }, 400);
     }

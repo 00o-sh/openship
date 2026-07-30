@@ -118,11 +118,12 @@ export const SYSTEM = {
     /** Port range */
     MIN_PORT: 1,
     MAX_PORT: 65535,
-    /** Resource limits */
-    MIN_CPU_CORES: 0.25,
-    MAX_CPU_CORES: 4,
-    MIN_MEMORY_MB: 128,
-    MAX_MEMORY_MB: 8192,
+    // Resource bounds deliberately do NOT live here. They belong to
+    // ./resources.ts, which is the single source of truth: the floors
+    // (MIN_CPU_CORES / MIN_MEMORY_MB) plus the rule that the UPPER bound is the
+    // target machine's probed capacity, not a constant. The unread
+    // MAX_CPU_CORES: 4 / MAX_MEMORY_MB: 8192 pair that used to sit here encoded
+    // exactly the fixed ceiling that made a large self-hosted box unusable.
     /** Pagination */
     DEFAULT_PAGE: 1,
     DEFAULT_PER_PAGE: 20,

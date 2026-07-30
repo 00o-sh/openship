@@ -2,6 +2,12 @@
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { Server, Cloud, Cpu, ArrowRight, Pencil, ChevronDown, ChevronUp, CheckCircle2, Loader2, Plus, Settings2, Zap, Globe, GitBranch, Search, ShieldAlert, ShieldCheck } from "lucide-react";
+import {
+  RESOURCE_TIER_ORDER,
+  RESOURCE_TIER_SPECS,
+  formatCpuCores,
+  formatMemoryMb,
+} from "@repo/core";
 import { BlurIp } from "@/components/BlurIp";
 import { useDeployment } from "@/context/DeploymentContext";
 import { usesServiceDeployment } from "@/context/deployment/types";
@@ -603,27 +609,31 @@ interface DeployTargetStepProps {
 }
 
 // ─── Cloud resource tiers ────────────────────────────────────────────────────
-// Placeholder runtime shapes for the Openship Cloud power picker. The
-// numbers here are the UX surface only — the backend owns the
-// authoritative cpu/mem/disk values per tier and translates them at
-// provision time. Billing is credits-based (no $/mo shown here).
+// DERIVED from the one tier table in @repo/core, which the backend provisioner
+// (cloud-resources.ts) and the self-hosted Machine Power card also read. These
+// used to be hand-written display strings next to a comment admitting "the
+// backend owns the authoritative values" — i.e. a copy that could silently drift
+// from what a tier actually provisions. Label + bestFor are still looked up from
+// the dictionary by `id` inside CloudPowerPicker.
 type CloudResourceTier = NonNullable<DeploymentConfig["cloudResourceTier"]>;
 
-// Specs are technical values (kept verbatim); label + bestFor are looked up
-// from the dictionary by `id` inside CloudPowerPicker.
 const CLOUD_RESOURCE_TIERS: Array<{
     id: Exclude<CloudResourceTier, "custom">;
     cpu: string;
     ram: string;
     disk: string;
-}> = [
-    { id: "micro", cpu: "0.25 vCPU", ram: "256 MB", disk: "4 GB" },
-    { id: "low", cpu: "0.5 vCPU", ram: "512 MB", disk: "8 GB" },
-    { id: "medium", cpu: "1 vCPU", ram: "1 GB", disk: "16 GB" },
-    { id: "high", cpu: "2 vCPU", ram: "2 GB", disk: "32 GB" },
-];
+}> = RESOURCE_TIER_ORDER.map((id) => {
+    const spec = RESOURCE_TIER_SPECS[id];
+    return {
+        id: id as Exclude<CloudResourceTier, "custom">,
+        cpu: formatCpuCores(spec.cpuCores),
+        ram: formatMemoryMb(spec.memoryMb),
+        disk: formatMemoryMb(spec.diskMb),
+    };
+});
 
-const CUSTOM_DEFAULTS = { cpuCores: 1, memoryMb: 1024, diskMb: 16384 };
+/** Custom starts from the middle preset rather than a second literal. */
+const CUSTOM_DEFAULTS = { ...RESOURCE_TIER_SPECS.medium };
 
 // ─── Custom-values modal ─────────────────────────────────────────────────────
 // Rendered via showModal() so the inputs get proper breathing room

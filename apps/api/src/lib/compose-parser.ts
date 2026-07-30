@@ -6,6 +6,7 @@
  */
 
 import { parse as parseYaml } from "yaml";
+import { commandToArgv } from "@repo/core";
 import type { ComposeAdvanced, ComposeHealthcheck } from "@repo/core";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -32,6 +33,12 @@ export interface ComposeService {
   environmentMeta?: Record<string, ComposeEnvironmentMeta>;
   volumes: string[];
   command?: string;
+  /**
+   * #332: structured argv for the container Cmd. list-form → verbatim;
+   * string-form → shell-word-split. `null`/absent → no override (image CMD);
+   * `[]` → clear image CMD. `command` above is the display/legacy string.
+   */
+  commandArgv?: string[] | null;
   restart?: string;
   /** Extended compose fields (healthcheck, …) not warranting a top-level key. */
   advanced?: ComposeAdvanced;
@@ -97,7 +104,7 @@ export function parseComposeFile(content: string, options: ComposeParseOptions =
       environment: environment.values,
       ...(Object.keys(environment.metadata).length > 0 && { environmentMeta: environment.metadata }),
       volumes: parseVolumes(svc.volumes, interpolationEnv),
-      command: parseCommand(svc.command, interpolationEnv),
+      ...parseCommand(svc.command, interpolationEnv),
       restart: typeof svc.restart === "string" ? interpolateComposeString(svc.restart, interpolationEnv) : undefined,
       ...(advanced && { advanced }),
     });
@@ -244,12 +251,25 @@ function parseVolumes(vols: unknown, env: Record<string, string>): string[] {
   });
 }
 
-function parseCommand(command: unknown, env: Record<string, string>): string | undefined {
-  if (typeof command === "string") return interpolateComposeString(command, env);
-  if (Array.isArray(command)) {
-    return command.map((part) => interpolateComposeString(String(part), env)).join(" ");
+/**
+ * Parse a compose `command` into BOTH a display string and structured argv (#332).
+ * docker-compose semantics: list → argv verbatim; string → shell-word-split into
+ * argv (NO implicit `sh -c` — a shell needs an explicit `sh -c`); absent → no
+ * override. The `command` string is kept for display / legacy compatibility.
+ */
+function parseCommand(
+  command: unknown,
+  env: Record<string, string>,
+): { command?: string; commandArgv?: string[] | null } {
+  if (typeof command === "string") {
+    const interpolated = interpolateComposeString(command, env);
+    return { command: interpolated, commandArgv: commandToArgv(interpolated) };
   }
-  return undefined;
+  if (Array.isArray(command)) {
+    const argv = command.map((part) => interpolateComposeString(String(part), env));
+    return { command: argv.join(" "), commandArgv: argv };
+  }
+  return {};
 }
 
 /**
@@ -264,7 +284,75 @@ function parseAdvanced(svc: Record<string, unknown>, env: Record<string, string>
   const healthcheck = parseHealthcheck(svc.healthcheck, env);
   if (healthcheck) advanced.healthcheck = healthcheck;
 
+  const resources = parseServiceResources(svc, env);
+  if (resources) advanced.resources = resources;
+
   return Object.keys(advanced).length > 0 ? advanced : undefined;
+}
+
+/**
+ * Compose memory string → MB. Accepts the byte-suffix forms compose allows
+ * (`512m`, `2g`, `1024k`, `1073741824`) plus the `2gb`/`512mb` spellings people
+ * actually write. Returns undefined for anything unparseable — a malformed
+ * limit must not silently become a tiny cap.
+ */
+function parseComposeMemory(raw: unknown): number | undefined {
+  if (typeof raw === "number") {
+    // Bare number = bytes (compose treats an unsuffixed value as bytes).
+    return raw > 0 ? Math.floor(raw / (1024 * 1024)) : undefined;
+  }
+  if (typeof raw !== "string") return undefined;
+  const m = raw.trim().toLowerCase().match(/^(\d+(?:\.\d+)?)\s*([kmgt]?)b?$/);
+  if (!m) return undefined;
+  const value = parseFloat(m[1]!);
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+  const factor: Record<string, number> = {
+    "": 1 / (1024 * 1024), // bytes → MB
+    k: 1 / 1024,
+    m: 1,
+    g: 1024,
+    t: 1024 * 1024,
+  };
+  const mb = value * (factor[m[2]!] ?? 1);
+  return mb >= 1 ? Math.floor(mb) : undefined;
+}
+
+/** Compose cpu string/number → fractional cores ("0.5", 2, "1.5"). */
+function parseComposeCpus(raw: unknown): number | undefined {
+  const n = typeof raw === "number" ? raw : typeof raw === "string" ? parseFloat(raw.trim()) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+/**
+ * Normalize a service's own resource limits. Compose has two spellings and we
+ * honor both, with the swarm `deploy.resources.limits` block winning because
+ * it's the more specific/modern form when a file carries both.
+ */
+function parseServiceResources(
+  svc: Record<string, unknown>,
+  env: Record<string, string>,
+): { cpuCores?: number; memoryMb?: number } | undefined {
+  const interp = (v: unknown) =>
+    typeof v === "string" ? interpolateComposeString(v, env) : v;
+
+  let memoryMb = parseComposeMemory(interp(svc.mem_limit));
+  let cpuCores = parseComposeCpus(interp(svc.cpus));
+
+  const limits = (
+    (svc.deploy as Record<string, unknown> | undefined)?.resources as
+      | Record<string, unknown>
+      | undefined
+  )?.limits as Record<string, unknown> | undefined;
+  if (limits) {
+    memoryMb = parseComposeMemory(interp(limits.memory)) ?? memoryMb;
+    cpuCores = parseComposeCpus(interp(limits.cpus)) ?? cpuCores;
+  }
+
+  if (memoryMb === undefined && cpuCores === undefined) return undefined;
+  return {
+    ...(cpuCores !== undefined && { cpuCores }),
+    ...(memoryMb !== undefined && { memoryMb }),
+  };
 }
 
 /**

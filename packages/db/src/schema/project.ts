@@ -162,6 +162,19 @@ export const project = pgTable(
     productionPaths: text("production_paths"),
     /** Root directory within the repo (for monorepos) */
     rootDirectory: text("root_directory"),
+    /**
+     * Where this project's compose file lives, when it is NOT at the auto-detected
+     * root — either the file itself (`deploy/stack.yml`, which is also how a
+     * non-standard filename is deployed) or the directory holding it
+     * (`deploy/docker-compose`). Set by the user; seeded from `openship.json`'s
+     * `composePath` when they haven't set one.
+     *
+     * Read on every scan AND on every redeploy: the push-triggered compose-drift
+     * reconcile re-parses the file from the repo, so without this it would look at
+     * the wrong path and silently stop tracking upstream changes. Null = detect
+     * the root as usual.
+     */
+    composePath: text("compose_path"),
     /** Start command for production runtime */
     startCommand: text("start_command"),
     /** Docker image for build environment (e.g. node:22, oven/bun:latest) */

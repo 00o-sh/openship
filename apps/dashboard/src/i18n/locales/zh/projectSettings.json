@@ -175,14 +175,13 @@
       "framework": "框架",
       "packageManager": "包管理器",
       "runtimeIsolation": "运行时隔离",
-      "resources": "资源",
-      "resourcesValue": "{cpu} vCPU · {memory} MB",
       "runtimePort": "运行时端口",
       "installCommand": "安装命令",
       "buildCommand": "构建命令",
       "noBuildStep": "无构建步骤",
       "outputDirectory": "输出目录",
       "rootDirectory": "根目录",
+      "composePath": "Compose 文件",
       "startCommand": "启动命令",
       "staticNoServer": "静态（无服务器）",
       "modeSandboxed": "沙盒化（容器）",
@@ -422,53 +421,53 @@
   },
   "resources": {
     "title": "机器性能",
-    "description": "为你的项目配置机器性能。",
+    "description": "此项目容器的 CPU 与内存上限。",
+    "loading": "正在读取目标机器…",
+    "machineCapacity": "机器：{cpu} vCPU · {memory}",
+    "exceedsMachine": "超出该机器容量",
+    "appliesOnNextDeploy": "上限在容器重建时生效——请重新部署以应用更改。",
     "tiers": {
-      "lightweight": {
-        "name": "轻量",
-        "description": "小型应用和静态站点"
+      "unlimited": {
+        "name": "无上限",
+        "description": "使用整台机器（默认）",
+        "spec": "机器容量"
       },
-      "standard": {
-        "name": "标准",
+      "micro": {
+        "name": "Micro",
+        "description": "小型边车与工作进程"
+      },
+      "low": {
+        "name": "低",
+        "description": "小型应用与静态站点"
+      },
+      "medium": {
+        "name": "中",
         "description": "大多数 Web 应用"
       },
-      "performance": {
-        "name": "高性能",
+      "high": {
+        "name": "高",
         "description": "高流量应用"
-      },
-      "enterprise": {
-        "name": "企业级",
-        "description": "大规模生产应用"
-      },
-      "autoscale": {
-        "name": "自动扩缩",
-        "description": "根据需求自动扩缩"
       }
     },
-    "dynamic": "动态",
     "custom": {
       "name": "自定义",
-      "description": "定义你自己的资源",
-      "clickToConfigure": "点击以配置"
+      "description": "自行设置上限",
+      "notSet": "未设置"
     },
-    "cpuValue": "{cpu} vCPU",
     "customPanel": {
-      "title": "配置自定义资源",
+      "boundedBy": "该机器有 {cpu} vCPU 和 {memory}。输入 0 表示无上限。",
+      "capacityUnknown": "无法读取该机器的容量，因此不强制任何上限。输入 0 表示无上限。",
       "cpuCores": "CPU 核心数",
-      "cpuRange": "范围：0.25 - 4.00",
       "memory": "内存 (MB)",
-      "memoryRange": "范围：128 - 8192",
+      "zeroMeansNoLimit": "0 = 无上限",
       "cancel": "取消",
-      "saving": "保存中...",
-      "save": "保存配置"
+      "saving": "保存中…",
+      "save": "保存"
     },
     "toast": {
-      "updated": "资源更新成功",
-      "updateFailed": "更新资源失败",
-      "cpuRange": "CPU 必须介于 0.25 到 4.00 核心之间",
-      "memoryRange": "内存必须介于 128 MB 到 8192 MB 之间",
-      "customSaved": "自定义资源保存成功",
-      "customSaveFailed": "保存自定义资源失败"
+      "updated": "机器性能已更新",
+      "updateFailed": "更新机器性能失败",
+      "invalidValues": "CPU 与内存必须为 0 或正数"
     }
   },
   "sleep": {

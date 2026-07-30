@@ -112,6 +112,27 @@ function envMapToRows(env?: Record<string, string>): DeploymentConfig["envVars"]
   }));
 }
 
+/**
+ * The compose pin to scan with: the caller's value, else whatever the saved
+ * project already has. The latter is what makes re-entering the wizard on a
+ * subpath-compose project detect it the same way it did the first time, instead
+ * of falling back to a single-app read of the repo root.
+ *
+ * Returns a `{ composePath }` fragment to spread into the prepare body — empty
+ * when there is nothing to pin, and for `""` (an explicit clear), so a blank
+ * value never reaches the API as a pin.
+ */
+function scanComposePath(
+  contextComposePath: string | undefined,
+  project: PersistedProject,
+): { composePath?: string } {
+  const declared =
+    contextComposePath ??
+    (typeof project?.composePath === "string" ? project.composePath : undefined);
+  const trimmed = declared?.trim();
+  return trimmed ? { composePath: trimmed } : {};
+}
+
 function hasSavedProjectPort(project: PersistedProject) {
   if (!project) return false;
 
@@ -193,12 +214,19 @@ function buildPreparedOptions(response: PrepareProjectResponse): DeploymentConfi
  * tier fields. A named tier maps straight through; explicit cpu/mem/disk becomes
  * the "custom" tier (missing values fall back to low-tier defaults). Returns an
  * empty object when nothing is declared, so the config keeps its default tier.
+ *
+ * `unlimited` is deliberately NOT forwarded: it's a self-hosted-only selection
+ * (the machine is the cap) and has no cloud spec, so passing it through would
+ * reach the provisioner as a tier with no cpu/memory behind it. A repo that
+ * declares it simply keeps the cloud default here.
  */
 function resolveCloudResources(
   resources: PrepareProjectResponse["resources"],
 ): Partial<Pick<DeploymentConfig, "cloudResourceTier" | "cloudResourceCustom">> {
   if (!resources) return {};
-  if (resources.tier) return { cloudResourceTier: resources.tier };
+  if (resources.tier && resources.tier !== "unlimited") {
+    return { cloudResourceTier: resources.tier };
+  }
   if (resources.cpuCores != null || resources.memoryMb != null || resources.diskMb != null) {
     return {
       cloudResourceTier: "custom",
@@ -617,6 +645,10 @@ export function useDeploymentConfig() {
         localPath,
         uploadSessionId,
         projectName: project?.name || repoName,
+        // The scan echoes back the compose path it actually used (request value or
+        // the one openship.json declared), so the field shows what's in effect and
+        // the value survives into the project row on save.
+        composePath: response.composePath ?? (project?.composePath as string | undefined),
         projectType: preparedContext.projectType,
         serviceDeploymentMode: preparedContext.serviceDeploymentMode,
         composeDefaults: preparedContext.composeDefaults,
@@ -685,7 +717,7 @@ export function useDeploymentConfig() {
       owner: string,
       repo: string,
       force?: string,
-      context?: { branch?: string; projectId?: string },
+      context?: { branch?: string; projectId?: string; composePath?: string },
     ): Promise<{ success: boolean; error?: string; errorType?: string; buildInProgress?: boolean }> => {
       try {
         let project: PersistedProject = null;
@@ -713,6 +745,7 @@ export function useDeploymentConfig() {
           repo: sourceRepo,
           branch: requestedBranch,
           force,
+          ...scanComposePath(context?.composePath, project),
         });
 
         if (response?.error) {
@@ -762,7 +795,7 @@ export function useDeploymentConfig() {
   const initializeFromLocal = useCallback(
     async (
       path: string,
-      context?: { projectId?: string },
+      context?: { projectId?: string; composePath?: string },
     ): Promise<{ success: boolean; error?: string; errorType?: string }> => {
       try {
         let project: PersistedProject = null;
@@ -772,7 +805,11 @@ export function useDeploymentConfig() {
           project = projectResponse?.data?.project ?? projectResponse?.project ?? null;
         }
 
-        const response = await deployApi.prepare({ source: "local", path });
+        const response = await deployApi.prepare({
+          source: "local",
+          path,
+          ...scanComposePath(context?.composePath, project),
+        });
 
         if (response?.error) {
           return { success: false, error: response.error, errorType: "api_error" };
@@ -801,6 +838,49 @@ export function useDeploymentConfig() {
       }
     },
     [buildPreparedConfig],
+  );
+
+  // ── Re-scan pinned to an explicit compose path ─────────────────────────────
+  // The one config field that cannot be applied locally: projectType, the service
+  // list, and each service's env all come from the compose file, so pointing at a
+  // different file means re-reading the source. Routes back through the same
+  // initialize* path the wizard entered by, so the resulting config is identical
+  // to a fresh scan of that path — no partially-updated middle state.
+  const rescanWithComposePath = useCallback(
+    async (composePath: string): Promise<{ success: boolean; error?: string; errorType?: string }> => {
+      // "" clears the pin: the initialize* paths drop a blank value, so the scan
+      // falls back to ordinary root detection.
+      const trimmed = composePath.trim();
+
+      if (config.localPath) {
+        return initializeFromLocal(config.localPath, {
+          projectId: config.projectId,
+          composePath: trimmed,
+        });
+      }
+      if (!config.owner || !config.repo) {
+        return {
+          success: false,
+          error: "This project has no git or local source to re-scan",
+          errorType: "api_error",
+        };
+      }
+      const result = await initializeFromRepo(config.owner, config.repo, undefined, {
+        branch: config.branch,
+        projectId: config.projectId,
+        composePath: trimmed,
+      });
+      return { success: result.success, error: result.error, errorType: result.errorType };
+    },
+    [
+      config.localPath,
+      config.owner,
+      config.repo,
+      config.branch,
+      config.projectId,
+      initializeFromLocal,
+      initializeFromRepo,
+    ],
   );
 
   // ── Folder upload: seed from the uploaded source's scan ─────────────────────
@@ -1009,5 +1089,6 @@ export function useDeploymentConfig() {
     initializeFromLocal,
     initializeFromUpload,
     initializeFromProject,
+    rescanWithComposePath,
   };
 }

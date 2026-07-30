@@ -24,7 +24,6 @@ import {
   DockerRuntime,
   STATIC_RELEASE_BASE,
   resolveStaticOutputPath,
-  DEFAULT_BUILD_RESOURCE_CONFIG,
   ensurePortAvailable,
   allocateHostPort,
   runDeployPipeline,
@@ -58,7 +57,7 @@ import {
   toRoutedDomainInputs,
 } from "../../lib/routing-domains";
 import { normalizeTargetPath } from "../../lib/public-endpoints";
-import { withDefaults } from "../../lib/resources";
+import { resolveRuntimeResources, resolveBuildResources } from "../../lib/resources";
 import { resolveBuildGitToken } from "../github/clone-auth";
 import { openDeployRelay } from "../../lib/git-forwarding";
 import { resolveOrgOwner } from "../../lib/org-actor";
@@ -503,8 +502,14 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
 
     await emitInitialServiceChecks(serviceFanOut, project, dep);
 
-    const prodResources = withDefaults(snapshot.resources);
-    const buildResources = withDefaults(snapshot.buildResources, DEFAULT_BUILD_RESOURCE_CONFIG);
+    // Target-aware: cloud falls back to the metered free tier, self-hosted falls
+    // back to NO limits (the operator's box is the cap). Using the cloud default
+    // on both is what pinned every self-hosted container to 512 MB.
+    const isCloudDeploy = resolveEffectiveTarget(plat.target, snapshot) === "cloud";
+    const prodResources = resolveRuntimeResources(snapshot.resources, { isCloud: isCloudDeploy });
+    const buildResources = resolveBuildResources(snapshot.buildResources, {
+      isCloud: isCloudDeploy,
+    });
 
     // Decrypt env vars from deployment (self-contained). decryptEnvMap
     // drops keys that fail decryption rather than leaking ciphertext into

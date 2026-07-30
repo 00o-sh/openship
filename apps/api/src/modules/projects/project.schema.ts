@@ -5,7 +5,13 @@
  */
 
 import { Type, type Static, type TLiteral } from "@sinclair/typebox";
-import { STACK_IDS, ALL_PACKAGE_MANAGERS } from "@repo/core";
+import {
+  STACK_IDS,
+  ALL_PACKAGE_MANAGERS,
+  ALL_RESOURCE_TIERS,
+  CLOUD_RESOURCE_TIER_IDS,
+  type ResourceTier,
+} from "@repo/core";
 
 // ─── Shared enums (derived from registry) ────────────────────────────────────
 
@@ -16,6 +22,32 @@ export const FrameworkEnum = Type.Union(
 export const PackageManagerEnum = Type.Union(
   ALL_PACKAGE_MANAGERS.map((pm) => Type.Literal(pm)) as [TLiteral<string>, ...TLiteral<string>[]],
 );
+
+/**
+ * Resource-tier validators derived from the ONE tier list in @repo/core, the
+ * same way FrameworkEnum derives from STACKS. Spelling the literals out per
+ * schema is how the accepted set drifts between endpoints.
+ */
+export const ResourceTierEnum = (opts?: { description?: string }) =>
+  Type.Union(
+    // Typed as the real union (not TLiteral<string>) so `Static<>` keeps the
+    // literal type and consumers don't need a cast back from `string`.
+    ALL_RESOURCE_TIERS.map((t) => Type.Literal(t)) as [
+      TLiteral<ResourceTier>,
+      ...TLiteral<ResourceTier>[],
+    ],
+    opts,
+  );
+
+/** Cloud-selectable subset — no "unlimited" (a metered workspace must be sized). */
+export const CloudResourceTierEnum = (opts?: { description?: string }) =>
+  Type.Union(
+    CLOUD_RESOURCE_TIER_IDS.map((t) => Type.Literal(t)) as [
+      TLiteral<Exclude<ResourceTier, "unlimited">>,
+      ...TLiteral<Exclude<ResourceTier, "unlimited">>[],
+    ],
+    opts,
+  );
 
 /**
  * Validator block for "this row is a source-built monorepo sub-app."
@@ -110,6 +142,8 @@ const ComposeServiceSchema = Type.Object({
   environment: Type.Optional(Type.Record(Type.String(), Type.String())),
   volumes: Type.Optional(Type.Array(Type.String({ maxLength: 500 }), { maxItems: 50 })),
   command: Type.Optional(Type.String({ maxLength: 2000 })),
+  // #332: structured argv passed through from folder/scan (compose Cmd, no `sh -c`).
+  commandArgv: Type.Optional(Type.Array(Type.String({ maxLength: 2000 }), { maxItems: 100 })),
   restart: Type.Optional(Type.String({ maxLength: 50 })),
   exposed: Type.Optional(Type.Boolean()),
   exposedPort: Type.Optional(Type.String({ maxLength: 100 })),
@@ -232,6 +266,12 @@ export const CreateProjectBody = Type.Object({
    */
   volumes: Type.Optional(Type.Array(Type.String({ maxLength: 500 }), { maxItems: 50 })),
   rootDirectory: Type.Optional(Type.String({ maxLength: 200 })),
+  /**
+   * Where the compose file lives when it is NOT at the auto-detected root —
+   * the file itself (`deploy/stack.yml`) or the directory holding it
+   * (`deploy/docker-compose`). Makes the project a compose/services deploy.
+   */
+  composePath: Type.Optional(Type.String({ maxLength: 300 })),
   startCommand: Type.Optional(Type.String({ maxLength: 500 })),
   buildImage: Type.Optional(Type.String({ maxLength: 200 })),
   productionMode: Type.Optional(
@@ -383,21 +423,33 @@ export const MergeEnvVarsBody = Type.Object({
   }),
 });
 
+/**
+ * A cpu/memory/disk selection.
+ *
+ * `tier` picks a preset; explicit numbers are the "custom" path. `0` means NO
+ * LIMIT (self-hosted default — the machine is the cap). The upper bound here is
+ * only a sanity rail: the REAL ceiling is the target machine's probed capacity,
+ * enforced in project-resources.service so a large box isn't artificially
+ * capped (the old flat `maximum: 8192` made >8 GB impossible to request).
+ */
+const ResourceSelection = Type.Object({
+  tier: Type.Optional(
+    ResourceTierEnum({ description: "Resource preset. 'unlimited' = no caps (self-hosted only)." }),
+  ),
+  cpuCores: Type.Optional(
+    Type.Number({ minimum: 0, maximum: 1024, description: "vCPU limit. 0 = no limit." }),
+  ),
+  memoryMb: Type.Optional(
+    Type.Number({ minimum: 0, maximum: 4194304, description: "Memory limit in MB. 0 = no limit." }),
+  ),
+  diskMb: Type.Optional(
+    Type.Number({ minimum: 0, maximum: 204800, description: "Disk limit in MB. 0 = no limit." }),
+  ),
+});
+
 export const UpdateResourcesBody = Type.Object({
-  production: Type.Optional(
-    Type.Object({
-      cpuCores: Type.Optional(Type.Number({ minimum: 0.25, maximum: 4 })),
-      memoryMb: Type.Optional(Type.Number({ minimum: 128, maximum: 8192 })),
-      diskMb: Type.Optional(Type.Number({ minimum: 64, maximum: 204800 })),
-    }),
-  ),
-  build: Type.Optional(
-    Type.Object({
-      cpuCores: Type.Optional(Type.Number({ minimum: 0.25, maximum: 4 })),
-      memoryMb: Type.Optional(Type.Number({ minimum: 128, maximum: 8192 })),
-      diskMb: Type.Optional(Type.Number({ minimum: 64, maximum: 204800 })),
-    }),
-  ),
+  production: Type.Optional(ResourceSelection),
+  build: Type.Optional(ResourceSelection),
   sleepMode: Type.Optional(Type.Union([Type.Literal("auto_sleep"), Type.Literal("always_on")])),
   port: Type.Optional(Type.Number({ minimum: 1, maximum: 65535 })),
 });
@@ -444,6 +496,8 @@ export const SetOptionsBody = Type.Object(
       Type.Union([Type.Array(Type.String({ maxLength: 500 }), { maxItems: 50 }), Type.Null()]),
     ),
     rootDirectory: Type.Optional(Type.String()),
+    /** Compose file location; `null` clears it and restores root detection. */
+    composePath: Type.Optional(Type.Union([Type.String({ maxLength: 300 }), Type.Null()])),
     startCommand: Type.Optional(Type.String()),
     productionPort: Type.Optional(Type.Union([Type.Number(), Type.String()])),
     packageManager: Type.Optional(Type.String()),

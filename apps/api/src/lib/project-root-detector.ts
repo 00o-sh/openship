@@ -166,7 +166,12 @@ export function isIgnoredRepoPath(value?: string): boolean {
   return normalized.split("/").some((segment) => IGNORED_REPO_DIRS.has(segment.toLowerCase()));
 }
 
-function buildSnapshot(input: ProjectRootSnapshotInput): ProjectRootSnapshot {
+/**
+ * Normalize one directory's raw listing into a snapshot + its detected stack.
+ * Exported for callers that already KNOW the root (a user-declared compose path),
+ * where the scoring in `selectPreferredProjectRoot` would only second-guess them.
+ */
+export function buildProjectRootSnapshot(input: ProjectRootSnapshotInput): ProjectRootSnapshot {
   const fileContents = normalizeFileContents(input.fileContents);
 
   return {
@@ -646,7 +651,7 @@ function selectPreferredCandidate(
     fallback: (root: ProjectRootSnapshot) => ProjectRootSnapshot | null;
   },
 ): ProjectRootSnapshot | null {
-  const root = buildSnapshot(rootInput);
+  const root = buildProjectRootSnapshot(rootInput);
   if (!options.canSelect(root)) {
     return options.fallback(root);
   }
@@ -655,7 +660,7 @@ function selectPreferredCandidate(
   let bestScore = -1;
 
   for (const candidateInput of candidateInputs) {
-    const candidate = buildSnapshot(candidateInput);
+    const candidate = buildProjectRootSnapshot(candidateInput);
     if (!options.isEligible(candidate)) {
       continue;
     }
@@ -905,7 +910,7 @@ export function discoverMonorepoApps(
   candidateInputs: ProjectRootSnapshotInput[],
 ): { apps: MonorepoApp[]; workspace: MonorepoWorkspace } | null {
   const candidates = candidateInputs
-    .map(buildSnapshot)
+    .map(buildProjectRootSnapshot)
     .filter(isMonorepoAppCandidate);
 
   const workspacePackageManager = detectPackageManager(
@@ -929,7 +934,7 @@ export function discoverMonorepoApps(
     prepareCommand = getInstallCommand(resolvedPackageManager) || "";
   } else {
     // Implicit monorepo: deployable root app + ≥1 self-contained nested app.
-    const rootSnapshot = buildSnapshot(rootInput);
+    const rootSnapshot = buildProjectRootSnapshot(rootInput);
     const independent = candidates.filter(isIndependentlyDeployable);
     if (!isDeployableRootApp(rootSnapshot) || independent.length < 1) return null;
     apps = [

@@ -47,6 +47,15 @@
     "outputDirectoryDesc": "Verzeichnis mit der Build-Ausgabe",
     "sourceFolderLabel": "Quellordner",
     "sourceFolderDesc": "Aus einem Unterverzeichnis innerhalb des Repositorys oder lokalen Projekts bauen.",
+    "composePath": {
+      "title": "Compose-Datei",
+      "subtitle": "Automatisch im Projektstamm erkannt",
+      "label": "Pfad zur Compose-Datei",
+      "description": "Für Repos, die compose außerhalb des Stammverzeichnisses ablegen — gib die Datei (deploy/stack.yml) oder den enthaltenden Ordner (deploy/docker-compose) an. Scannt das Repo neu und deployt die dort deklarierten Services.",
+      "apply": "Scannen",
+      "scanning": "Wird gescannt…",
+      "scanFailed": "Dieser Compose-Pfad konnte nicht gescannt werden."
+    },
     "buildImageLabel": "Build-Image",
     "buildImageDesc": "Builder-Container-Image für Cloud- oder Server-Builds. Überschreibe es, wenn das erkannte Basis-Image falsch ist.",
     "productionPathsLabel": "Produktionspfade",

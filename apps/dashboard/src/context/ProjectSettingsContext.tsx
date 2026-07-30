@@ -117,6 +117,8 @@ interface BuildData {
   productionPort: string;
   buildImage: string;
   rootDirectory: string;
+  /** Explicit compose file location; "" when the root is detected normally. */
+  composePath: string;
   hasBuild: boolean;
   hasServer: boolean;
   isLoading: boolean;
@@ -370,6 +372,9 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
       ...projectData.options,
       // buildImage lives at top-level on the project, not in options.
       buildImage: projectData.buildImage || "node:22",
+      // Same — a top-level column. Shown read-only; edited through the deploy
+      // wizard, since changing it has to re-scan the repo for services.
+      composePath: projectData.composePath || "",
       isLoading: isLoadingProjectInfo,
       error: projectInfoError,
     }),

@@ -35,6 +35,7 @@ import { deriveProjectRouteState } from "../domains/project-route.service";
 import { registerStartupHook } from "../../lib/startup";
 import { buildServiceRouteDomains, serviceCustomHostnames } from "../../lib/routing-domains";
 import { resolveServicePublicEndpoints } from "../../lib/public-endpoints";
+import { resolveRuntimeResources } from "../../lib/resources";
 import { assertFreeEndpointsAllowed } from "../../lib/free-domain-guard";
 import { ensurePendingServiceDomain, removeServiceDomain, reuseServerCertForDomain } from "../domains/domain.service";
 import { buildUpstreamUrl, resolveRouteStrategy } from "../../lib/upstream-url";
@@ -378,6 +379,7 @@ export async function createService(
     environment: data.environment ?? {},
     volumes: data.volumes ?? [],
     command: trimOrNull(data.command),
+    commandArgv: data.commandArgv ?? null, // #332
     restart: data.restart ?? "unless-stopped",
     advanced: data.advanced ?? {},
     ...routing,
@@ -1357,6 +1359,12 @@ async function provisionServiceContainer(
   });
   try {
     const result = await deployComposeServices(project, dep, runtime, logger, {
+      // The project's own caps. Omitting this fell back to the cloud free tier
+      // inside createServiceDeployConfig, so adding/starting a single service
+      // always produced a 512 MB container no matter what the project was set to.
+      resources: resolveRuntimeResources(project.resources as Record<string, unknown> | null, {
+        isCloud: resolved.effectiveTarget === "cloud",
+      }),
       // Strictly scope to THIS service: carry live siblings forward as-is, but
       // never (re)deploy or reap a service we weren't asked to touch. Without
       // this, provisioning one service could re-deploy a freshly-added sibling

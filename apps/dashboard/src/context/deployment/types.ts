@@ -1,7 +1,7 @@
 import type { Terminal } from "@xterm/xterm";
 import type { FrameworkId, EnvironmentVariable } from "@/components/import-project/types";
 import type { PrepareComposeService, PrepareSingleAppCandidate } from "@/lib/api/deploy";
-import { getBuildImage, STACKS, type ProjectType, type BuildStrategy, type DeployTarget, type RuntimeMode, type StackId, type RoutingConfig } from "@repo/core";
+import { getBuildImage, STACKS, type ProjectType, type BuildStrategy, type DeployTarget, type RuntimeMode, type StackId, type RoutingConfig, type ResourceTier as CoreResourceTier } from "@repo/core";
 import type { BuildLog } from "@/utils/deploymentPhaseDetector";
 import { randomUUID } from "@/lib/random-uuid";
 
@@ -208,12 +208,13 @@ export interface DeploymentModeSnapshots {
 }
 
 /**
- * Resource tier IDs for Openship Cloud deploys. The label, RAM/CPU/disk
- * shape and price are placeholder values defined alongside the picker UI
- * — see `CLOUD_RESOURCE_TIERS` in `DeployTargetStep.tsx`. The backend
- * is the source of truth for what each tier actually provisions.
+ * Resource tier IDs for Openship Cloud deploys — DERIVED from the one tier union
+ * in @repo/core, which the backend provisioner reads too. `unlimited` is excluded
+ * because a metered cloud workspace must be provisioned at a concrete size.
+ * The picker's display specs come from the same core table (see
+ * `CLOUD_RESOURCE_TIERS` in `DeployTargetStep.tsx`).
  */
-export type CloudResourceTier = "micro" | "low" | "medium" | "high" | "custom";
+export type CloudResourceTier = Exclude<CoreResourceTier, "unlimited">;
 
 /**
  * User-supplied resource values when `cloudResourceTier === "custom"`.
@@ -243,6 +244,14 @@ export interface DeploymentConfig {
   owner: string;
   /** Absolute path for local projects (mutually exclusive with owner/repo git source) */
   localPath?: string;
+  /**
+   * Explicit compose file location, for repos that keep it outside the detected
+   * root (e.g. `deploy/docker-compose/docker-compose.yml`). Set via
+   * `rescanWithComposePath` — it can't be edited locally like other fields
+   * because the whole service list is derived from that file — and persisted so
+   * redeploys re-read the same path.
+   */
+  composePath?: string;
   /** Folder-upload deploy: the upload session whose workspace/staging dir holds
    *  the source. Sent to buildAccess so the build adopts that uploaded source. */
   uploadSessionId?: string;
@@ -328,6 +337,7 @@ export const DEFAULT_CONFIG: DeploymentConfig = {
   repo: "",
   owner: "",
   localPath: undefined,
+  composePath: undefined,
   uploadSessionId: undefined,
   buildStrategy: "server",
   deployTarget: "cloud",
@@ -718,11 +728,24 @@ export interface DeploymentContextType {
     owner: string,
     repo: string,
     force?: string,
-    context?: { branch?: string; projectId?: string },
+    context?: { branch?: string; projectId?: string; composePath?: string },
   ) => Promise<{ success: boolean; error?: string; errorType?: string; buildInProgress?: boolean }>;
   initializeFromLocal: (
     path: string,
-    context?: { projectId?: string },
+    context?: { projectId?: string; composePath?: string },
+  ) => Promise<{ success: boolean; error?: string; errorType?: string }>;
+  /**
+   * Re-run detection pinned to an explicit compose file path (or clear it with
+   * ""), then reload the config from that scan. This is what turns a repo the
+   * detector read as a single app into the compose project the user knows it is —
+   * the compose file sits in a subfolder the heuristics don't promote.
+   *
+   * Unlike the other config fields this one CANNOT be applied locally: the
+   * service list, env, and project type all come from the compose file, so the
+   * repo has to be re-read. Hence an explicit action rather than a plain input.
+   */
+  rescanWithComposePath: (
+    composePath: string,
   ) => Promise<{ success: boolean; error?: string; errorType?: string }>;
   /** Folder-upload hydration — seed from the user-picked stack's defaults
    *  (no auto-detection); falls back to the session scan when no stack given. */

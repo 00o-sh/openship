@@ -3,6 +3,7 @@
  */
 
 import { Type, type Static } from "@sinclair/typebox";
+import { CloudResourceTierEnum } from "../projects/project.schema";
 
 // ─── Route params ────────────────────────────────────────────────────────────
 
@@ -134,15 +135,7 @@ export const BuildAccessBody = Type.Object({
         "ONE-TIME migration image handover: serviceName → an already-present image ref. Those services deploy from that image with no build/pull; used only on a migration's first deploy.",
     }),
   ),
-  cloudResourceTier: Type.Optional(
-    Type.Union([
-      Type.Literal("micro"),
-      Type.Literal("low"),
-      Type.Literal("medium"),
-      Type.Literal("high"),
-      Type.Literal("custom"),
-    ]),
-  ),
+  cloudResourceTier: Type.Optional(CloudResourceTierEnum()),
   cloudResourceCustom: Type.Optional(
     Type.Object(
       { cpuCores: Type.Number(), memoryMb: Type.Number(), diskMb: Type.Number() },
@@ -165,6 +158,13 @@ export const PrepareDeployBody = Type.Object({
   repo: Type.Optional(Type.String({ description: "GitHub repo name (github source)." })),
   branch: Type.Optional(Type.String({ description: "Git branch (github source)." })),
   path: Type.Optional(Type.String({ description: "Local filesystem path (local source; self-hosted only)." })),
+  composePath: Type.Optional(
+    Type.String({
+      maxLength: 300,
+      description:
+        "Where the compose file lives when it is not at the auto-detected root — the file itself (\"deploy/stack.yml\", which also covers non-standard filenames) or the directory holding it (\"deploy/docker-compose\"). Detects the project as a compose/services deploy; errors when no compose file is there.",
+    }),
+  ),
 });
 
 // POST /:id/build/respond — answer a build gate/prompt.

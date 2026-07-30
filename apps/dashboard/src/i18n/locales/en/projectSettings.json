@@ -298,14 +298,13 @@
       "framework": "Framework",
       "packageManager": "Package manager",
       "runtimeIsolation": "Runtime isolation",
-      "resources": "Resources",
-      "resourcesValue": "{cpu} vCPU · {memory} MB",
       "runtimePort": "Runtime port",
       "installCommand": "Install command",
       "buildCommand": "Build command",
       "noBuildStep": "No build step",
       "outputDirectory": "Output directory",
       "rootDirectory": "Root directory",
+      "composePath": "Compose File",
       "startCommand": "Start command",
       "staticNoServer": "Static (no server)",
       "modeSandboxed": "Sandboxed (container)",
@@ -552,53 +551,53 @@
   },
   "resources": {
     "title": "Machine Power",
-    "description": "Configure the machine power for your project.",
+    "description": "CPU and memory limits for this project's containers.",
+    "loading": "Reading the target machine…",
+    "machineCapacity": "Machine: {cpu} vCPU · {memory}",
+    "exceedsMachine": "Exceeds this machine",
+    "appliesOnNextDeploy": "Limits are applied when the container is recreated — redeploy for a change to take effect.",
     "tiers": {
-      "lightweight": {
-        "name": "Lightweight",
+      "unlimited": {
+        "name": "No limits",
+        "description": "Use the whole machine (default)",
+        "spec": "Machine capacity"
+      },
+      "micro": {
+        "name": "Micro",
+        "description": "Tiny sidecars and workers"
+      },
+      "low": {
+        "name": "Low",
         "description": "Small apps and static sites"
       },
-      "standard": {
-        "name": "Standard",
+      "medium": {
+        "name": "Medium",
         "description": "Most web applications"
       },
-      "performance": {
-        "name": "Performance",
+      "high": {
+        "name": "High",
         "description": "High-traffic applications"
-      },
-      "enterprise": {
-        "name": "Enterprise",
-        "description": "Large scale production apps"
-      },
-      "autoscale": {
-        "name": "Auto Scale",
-        "description": "Scales based on demand"
       }
     },
-    "dynamic": "Dynamic",
     "custom": {
       "name": "Custom",
-      "description": "Define your own resources",
-      "clickToConfigure": "Click to configure"
+      "description": "Set your own limits",
+      "notSet": "Not set"
     },
-    "cpuValue": "{cpu} vCPU",
     "customPanel": {
-      "title": "Configure Custom Resources",
-      "cpuCores": "CPU Cores",
-      "cpuRange": "Range: 0.25 - 4.00",
+      "boundedBy": "This machine has {cpu} vCPU and {memory}. Enter 0 for no limit.",
+      "capacityUnknown": "Could not read this machine's capacity, so no ceiling is enforced. Enter 0 for no limit.",
+      "cpuCores": "CPU cores",
       "memory": "Memory (MB)",
-      "memoryRange": "Range: 128 - 8192",
+      "zeroMeansNoLimit": "0 = no limit",
       "cancel": "Cancel",
-      "saving": "Saving...",
-      "save": "Save Configuration"
+      "saving": "Saving…",
+      "save": "Save"
     },
     "toast": {
-      "updated": "Resources updated successfully",
-      "updateFailed": "Failed to update resources",
-      "cpuRange": "CPU must be between 0.25 and 4.00 cores",
-      "memoryRange": "Memory must be between 128 MB and 8192 MB",
-      "customSaved": "Custom resources saved successfully",
-      "customSaveFailed": "Failed to save custom resources"
+      "updated": "Machine power updated",
+      "updateFailed": "Failed to update machine power",
+      "invalidValues": "CPU and memory must be 0 or a positive number"
     }
   },
   "sleep": {

@@ -47,6 +47,15 @@
     "outputDirectoryDesc": "Derleme çıktısını içeren dizin",
     "sourceFolderLabel": "Kaynak Klasör",
     "sourceFolderDesc": "Depodaki veya yerel projedeki bir alt dizinden derleyin.",
+    "composePath": {
+      "title": "Compose dosyası",
+      "subtitle": "Proje kökünde otomatik algılanır",
+      "label": "Compose dosyasının yolu",
+      "description": "compose dosyasını kök dizin dışında tutan depolar için — dosyayı (deploy/stack.yml) veya onu içeren klasörü (deploy/docker-compose) girin. Depo yeniden taranır ve tanımlanan servisler dağıtılır.",
+      "apply": "Tara",
+      "scanning": "Taranıyor…",
+      "scanFailed": "Bu Compose yolu taranamadı."
+    },
     "buildImageLabel": "Derleme İmajı",
     "buildImageDesc": "Bulut veya sunucu derlemeleri için derleyici konteyner imajı. Tespit edilen taban imajı yanlışsa değiştirin.",
     "productionPathsLabel": "Canlı ortam yolları",

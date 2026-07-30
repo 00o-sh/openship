@@ -465,6 +465,10 @@ async function reconcileComposeDrift(
       repo: project.gitRepo,
       branch,
       ctx,
+      // Without this, a subpath compose project re-scans at the DETECTED root and
+      // finds no compose (or the wrong one), so `services` comes back empty and
+      // the reconcile below silently stops tracking upstream changes forever.
+      composePath: project.composePath ?? undefined,
     });
     const services = info.services ?? [];
     if (services.length === 0) return;
@@ -1280,6 +1284,17 @@ export async function redeployBuildSession(
   const frozenMeta = oldDep.meta as DeploymentConfigSnapshot | null;
   const meta = frozenMeta ?? buildConfigSnapshot(project, resolvedBranch);
   const branch = meta.branch || resolvedBranch;
+
+  // Resources are a RUNTIME knob, not part of the build identity, so they must be
+  // re-read from the project on every redeploy. Freezing them meant a
+  // PATCH /projects/:id/resources was silently ignored forever: the container was
+  // recreated from the original snapshot each time (and a manual
+  // `docker update --memory` got wiped along with it). Reuse of the frozen
+  // *source* (commit, build config) is still intentional — only these two fields
+  // are refreshed. Rollback goes through triggerDeployment's reuseSnapshot path,
+  // not here, so restoring an exact prior state is unaffected.
+  meta.resources = (project.resources as ResourceConfig) || null;
+  meta.buildResources = (project.buildResources as ResourceConfig) || null;
 
   if (!frozenMeta) {
     const t = await resolveSnapshotTarget(project);

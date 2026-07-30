@@ -27,19 +27,26 @@ export type AmbientGitVia = "gh" | "helper" | "ssh";
 // ─── Resource configuration ──────────────────────────────────────────────────
 
 export interface ResourceConfig {
-  /** CPU cores (fractional, e.g. 0.5, 1.0, 2.0) - the universal unit all runtimes use */
+  /** CPU cores (fractional, e.g. 0.5, 1.0, 2.0) - the universal unit all
+   *  runtimes use. `0` = NO LIMIT (see UNLIMITED_RESOURCES in @repo/core). */
   cpuCores: number;
-  /** Memory limit in megabytes */
+  /** Memory limit in megabytes. `0` = NO LIMIT. */
   memoryMb: number;
   /** Writable disk in megabytes */
   diskMb: number;
 }
 
-/** Single source of truth - production/runtime resources (the free-tier limit).
- *  Deliberately small: a runtime doesn't need build-sized resources, and cloud
- *  runtimes are shrunk to this after the build so they don't hog the pool.
- *  Matches the cloud "low" tier (cloud-resources.ts) so a tier-less / fallback
- *  deploy lands at the same 0.5 vCPU · 512 MB as an explicit free-tier pick. */
+/** CLOUD-ONLY production default (the metered free tier). Deliberately small: a
+ *  runtime doesn't need build-sized resources, and cloud runtimes are shrunk to
+ *  this after the build so they don't hog the pool. Matches the cloud "low" tier
+ *  (cloud-resources.ts) so a tier-less cloud deploy lands at the same
+ *  0.5 vCPU · 512 MB as an explicit free-tier pick.
+ *
+ *  Do NOT use this as a self-hosted fallback. A self-hosted box is the
+ *  operator's own hardware with no pool to protect, so its default is
+ *  UNLIMITED_RESOURCES — applying this tier there silently OOM-killed
+ *  memory-hungry images (ML models, headless browsers) at 512 MB. Resolve the
+ *  right default per target with `resolveRuntimeResources` (apps/api). */
 export const DEFAULT_RESOURCE_CONFIG: ResourceConfig = {
   cpuCores: 0.5,
   memoryMb: 512,

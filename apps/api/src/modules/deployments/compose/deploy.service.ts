@@ -16,13 +16,13 @@ import {
   resolvePublicUrlPlaceholders,
   getAppPrepareSteps,
   resolveProjectVolumes,
+  UNLIMITED_RESOURCES,
   type ComposeAdvanced,
 } from "@repo/core";
 import { getTemplateForOrg } from "../../apps/catalog-source";
 import { attachLinkedNetworks } from "../attach-linked-networks";
 import {
   BuildLogger,
-  DEFAULT_RESOURCE_CONFIG,
   DockerRuntime,
   allocateHostPort,
   runDeployPipeline,
@@ -284,6 +284,31 @@ function appRowVolumes(project: Project, service: Service): string[] {
   return resolveProjectVolumes(project.volumes as string[] | null, project.framework);
 }
 
+/**
+ * Effective caps for ONE service: its own compose-authored limits override the
+ * project-wide config field by field, so a service that declares only
+ * `mem_limit` keeps the project's CPU setting.
+ *
+ * Before this, an uploaded compose file's `mem_limit` / `deploy.resources.limits`
+ * were parsed nowhere and silently discarded — a service asking for 4 GB got
+ * whatever the project was set to.
+ */
+function resolveServiceResources(
+  service: Service,
+  projectResources: ResourceConfig | undefined,
+): ResourceConfig | undefined {
+  const own = (service.advanced as ComposeAdvanced | null)?.resources;
+  if (!own || (own.cpuCores === undefined && own.memoryMb === undefined)) {
+    return projectResources;
+  }
+  const base = projectResources ?? UNLIMITED_RESOURCES;
+  return {
+    cpuCores: own.cpuCores ?? base.cpuCores,
+    memoryMb: own.memoryMb ?? base.memoryMb,
+    diskMb: base.diskMb,
+  };
+}
+
 function createServiceRuntimeConfig(opts: {
   project: Project;
   dep: Deployment;
@@ -301,6 +326,12 @@ function createServiceRuntimeConfig(opts: {
   // monorepo → startCommand (with command fallback if missing), compose →
   // command. No branching on kind needed.
   const runtimeCommand = service.startCommand ?? service.command ?? undefined;
+  // #332: pass the structured argv for a compose `command` (docker-compose Cmd,
+  // no `sh -c`). Only for compose rows — a monorepo sub-app's `startCommand` is a
+  // shell string, so force null there to keep the legacy `sh -c` shell behavior.
+  const commandArgv = service.startCommand
+    ? null
+    : ((service.commandArgv as string[] | null) ?? null);
   return {
     deploymentId: dep.id,
     projectId: project.id,
@@ -312,6 +343,7 @@ function createServiceRuntimeConfig(opts: {
     volumes: appRowVolumes(project, service),
     namespaceVolumes: service.namespaceVolumes,
     command: runtimeCommand,
+    commandArgv,
     restart: service.restart ?? "unless-stopped",
     // "update" trigger → force a fresh pull so a moved mutable tag (:latest/:1)
     // actually rolls forward. Every other trigger stays pull-if-missing.
@@ -359,7 +391,11 @@ function createServiceDeployConfig(opts: {
     startCommand,
     stack,
     envVars: environment,
-    resources: resources ?? DEFAULT_RESOURCE_CONFIG,
+    // No fallback tier. An absent config means "no limit" (the runtime omits
+    // Memory/NanoCpus entirely) — substituting the cloud free tier here is what
+    // capped every compose container at 512 MB regardless of project settings.
+    // Cloud callers resolve a concrete tier before reaching this function.
+    resources: resources ?? UNLIMITED_RESOURCES,
     restartPolicy: toDeployRestartPolicy(service.restart ?? undefined),
     runtimeName: publicSlug ?? `${project.slug}-${service.name}`,
     publicEndpoints: servicePublicEndpoints.length > 0 ? servicePublicEndpoints : undefined,
@@ -1012,7 +1048,7 @@ export async function deployComposeServices(
       service: svc,
       image,
       environment: mergedEnv,
-      resources: opts?.resources,
+      resources: resolveServiceResources(svc, opts?.resources),
       // Cloud stores the workspace id as the service's containerId. Reuse the
       // previous deployment's workspace so its disk (volume data) survives the
       // redeploy. Only meaningful on cloud; docker recreates containers.
@@ -1060,7 +1096,7 @@ export async function deployComposeServices(
       service: svc,
       image,
       environment: mergedEnv,
-      resources: opts?.resources,
+      resources: resolveServiceResources(svc, opts?.resources),
       buildSessionId: opts?.buildSessionId,
     });
     const { routes: preparedRoutes, warnings: routeClaimWarnings } = await prepareServiceRoutes({
