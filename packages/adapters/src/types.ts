@@ -416,6 +416,22 @@ interface BaseRouteConfig {
   /** Whether TLS is enabled */
   tls: boolean;
   /**
+   * TLS for this host terminates on THIS box (we hold or will hold its cert),
+   * rather than at an upstream ingress or Openship Cloud's edge.
+   *
+   * When set, the routing provider guarantees a :443 listener for the host from
+   * the moment the route exists — serving a temporary self-signed cert until the
+   * real one is issued. Without a listener, an unmatched SNI hits the edge's
+   * `ssl_reject_handshake` default, so the origin REFUSES the handshake for a
+   * domain we route (Cloudflare reports that as error 525, and it deadlocks
+   * issuance — see #308).
+   *
+   * Left unset for `externalIngress` hosts and managed `*.opsh.io` hosts, whose
+   * TLS is someone else's: presenting a placeholder cert for those would be wrong,
+   * not merely unnecessary.
+   */
+  terminatesTlsLocally?: boolean;
+  /**
    * When set, adds a `/_openship/hooks/` location that proxies
    * webhook requests to the Openship API at this URL.
    * Example: "http://127.0.0.1:4000/api/webhooks/"

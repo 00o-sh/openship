@@ -17,15 +17,39 @@ interface FakeOpts {
   failReload?: boolean;
   /** Domains whose Let's Encrypt fullchain exists (drives the TLS branch). */
   certDomains?: string[];
+  /** Simulate an edge with no `openssl` CLI (bootstrap cert can't be produced). */
+  noOpenssl?: boolean;
 }
 
 /** Stateful fake executor: in-memory file map + atomic-rename (`mv`) handling.
  *  Detection commands throw so reload() keeps the cached sitesDir. */
-function makeExecutor(files: Map<string, string>, opts: FakeOpts, calls: string[]): CommandExecutor {
+function makeExecutor(
+  files: Map<string, string>,
+  opts: FakeOpts,
+  calls: string[],
+  removed: string[] = [],
+): CommandExecutor {
   const exec = async (command: string): Promise<string> => {
     calls.push(command);
     // openresty path detection (reload re-detects) → fail so cached paths stick.
     if (/\s-V\b|command -v|which\s/.test(command)) throw new Error("no openresty in test");
+    if (command.startsWith("openssl ")) {
+      if (opts.noOpenssl) throw new Error("openssl: not found");
+      // Real openssl writes the pair; the fake just records the two staged paths so
+      // the `mv` below has something to move.
+      for (const m of command.matchAll(/'([^']*\.pem)'/g)) files.set(m[1], "PEM");
+      return "";
+    }
+    if (command.startsWith("mv -f ")) {
+      // Pair swap: `mv -f 'staging/fullchain.pem' 'staging/privkey.pem' 'dir'/`
+      const paths = [...command.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+      const dir = paths.pop()!;
+      for (const src of paths) {
+        const c = files.get(src);
+        if (c !== undefined) { files.set(`${dir}/${src.split("/").pop()}`, c); files.delete(src); }
+      }
+      return "";
+    }
     const mv = command.match(/^mv '([^']+)' '([^']+)'$/);
     if (mv) {
       const c = files.get(mv[1]);
@@ -50,18 +74,22 @@ function makeExecutor(files: Map<string, string>, opts: FakeOpts, calls: string[
     exists: async (p: string) =>
       files.has(p) || (opts.certDomains ?? []).some((d) => p.startsWith(`/etc/letsencrypt/live/${d}/`)),
     mkdir: async () => {},
-    rm: async (p: string) => { files.delete(p); },
+    rm: async (p: string) => { removed.push(p); files.delete(p); },
   } as unknown as CommandExecutor;
 }
 
 function setup(opts: FakeOpts = {}) {
   const files = new Map<string, string>();
   const calls: string[] = [];
-  const nginx = new NginxProvider({ paths: PATHS, executor: makeExecutor(files, opts, calls) });
-  return { nginx, files, calls, conf: (slug: string) => files.get(`${SITES}/${slug}.conf`) };
+  const removed: string[] = [];
+  const nginx = new NginxProvider({ paths: PATHS, executor: makeExecutor(files, opts, calls, removed) });
+  return { nginx, files, calls, removed, conf: (slug: string) => files.get(`${SITES}/${slug}.conf`) };
 }
 
 const PROXY: RouteConfig = { domain: "app.example.com", tls: true, targetUrl: "http://127.0.0.1:3009" };
+/** Same route, flagged as one whose TLS this box terminates (a custom domain). */
+const OURS: RouteConfig = { ...PROXY, terminatesTlsLocally: true };
+const BOOTSTRAP_DIR = "/etc/letsencrypt/openship-bootstrap/app.example.com";
 
 describe("NginxProvider config generation", () => {
   test("proxy route with no cert yet → HTTP-only block", async () => {
@@ -154,6 +182,72 @@ describe("NginxProvider config generation", () => {
     expect(reloadCmd!.indexOf(" -t")).toBeLessThan(reloadCmd!.indexOf("-s reload"));
   });
 
+  test("a domain we terminate TLS for gets a :443 listener BEFORE its cert exists", async () => {
+    const { nginx, conf } = setup(); // no cert yet
+    await nginx.registerRoute(OURS);
+    const c = conf("app-example-com")!;
+    // The whole point of #308: without this block an HTTPS request for a domain we
+    // DO route falls through to the edge's `ssl_reject_handshake` default, so the
+    // origin refuses the handshake — Cloudflare reports that as error 525, and the
+    // ACME challenge it redirects to HTTPS fails for the same reason, forever.
+    expect(c).toContain("listen 443 ssl;");
+    expect(c).toContain(`ssl_certificate ${BOOTSTRAP_DIR}/fullchain.pem;`);
+    expect(c).toContain(`ssl_certificate_key ${BOOTSTRAP_DIR}/privkey.pem;`);
+    // Placeholder state is legible on the box.
+    expect(c).toContain("openship-bootstrap-tls");
+    // :80 must keep SERVING: plain HTTP answers the ACME challenge, and pushing a
+    // browser onto an untrusted cert is worse than serving HTTP.
+    expect(c).not.toContain("return 301 https://");
+    expect(c).toContain("location /.well-known/acme-challenge/");
+    // Both blocks are name-bound, so unknown SNI still hits the reject-handshake
+    // default — no cross-serving regression.
+    expect(c.match(/server_name app\.example\.com;/g)?.length).toBe(2);
+  });
+
+  test("the placeholder cert is NOT written to certbot's live/ tree", async () => {
+    const { nginx, files } = setup();
+    await nginx.registerRoute(OURS);
+    // Putting it in live/ would make certsExist() true → provisionCert short-circuits
+    // and an untrusted cert is reported as `active`, with renewal satisfied.
+    expect([...files.keys()].some((p) => p.startsWith("/etc/letsencrypt/live/"))).toBe(false);
+    expect(files.get(`${BOOTSTRAP_DIR}/fullchain.pem`)).toBe("PEM");
+  });
+
+  test("no openssl on the edge → HTTP-only, deploy still succeeds", async () => {
+    const { nginx, conf } = setup({ noOpenssl: true });
+    await nginx.registerRoute(OURS); // must not throw
+    const c = conf("app-example-com")!;
+    expect(c).not.toContain("listen 443 ssl;");
+    expect(c).toContain("proxy_pass http://127.0.0.1:3009;");
+  });
+
+  test("a host whose TLS is NOT ours never gets a placeholder cert", async () => {
+    const { nginx, conf, calls } = setup();
+    // externalIngress / managed *.opsh.io: TLS terminates elsewhere, so presenting
+    // a self-signed cert for the name would be wrong, not merely unnecessary.
+    await nginx.registerRoute({ ...PROXY, terminatesTlsLocally: false });
+    expect(conf("app-example-com")!).not.toContain("listen 443 ssl;");
+    expect(calls.some((c) => c.startsWith("openssl "))).toBe(false);
+  });
+
+  test("the real cert supersedes the placeholder and deletes it", async () => {
+    const { nginx, conf, removed } = setup({ certDomains: ["app.example.com"] });
+    await nginx.registerRoute(OURS);
+    const c = conf("app-example-com")!;
+    expect(c).toContain("ssl_certificate /etc/letsencrypt/live/app.example.com/fullchain.pem;");
+    expect(c).not.toContain("openship-bootstrap");
+    // Removed only AFTER the reload — until the new conf is live, OpenResty is
+    // still reading the placeholder paths.
+    expect(removed).toContain(BOOTSTRAP_DIR);
+  });
+
+  test("removeRoute cleans up the placeholder cert", async () => {
+    const { nginx, removed } = setup();
+    await nginx.registerRoute(OURS);
+    await nginx.removeRoute("app.example.com");
+    expect(removed).toContain(BOOTSTRAP_DIR);
+  });
+
   test("a failed `openresty -t` rolls the vhost back to the prior config", async () => {
     const { nginx, files, conf } = setup({ failReload: true });
     // Seed a known-good prior conf for this slug.
@@ -220,6 +314,58 @@ describe("registerRoute renders proxy directives at server scope", () => {
     const { nginx, conf } = setup({ certDomains: ["app.example.com"] });
     await nginx.registerRoute(PROXY);
     expect(conf("app-example-com")!).not.toContain("client_max_body_size");
+  });
+});
+
+// A CDN in front of us may terminate TLS and reach origin on plain :80
+// (Cloudflare's "Flexible" mode). Two things must hold there.
+describe("behind a TLS-terminating CDN", () => {
+  test("the :80 redirect is conditional, so a CDN-terminated request can't loop", async () => {
+    const { nginx, conf } = setup({ certDomains: ["app.example.com"] });
+    await nginx.registerRoute(OURS);
+    const c = conf("app-example-com")!;
+    // Unconditional `301 → https` on :80 sends the request back to the CDN, which
+    // comes back here on :80: an infinite redirect loop.
+    expect(c).toContain('if ($http_x_forwarded_proto = "https")');
+    expect(c).toContain("set $openship_redirect_https 0;");
+    expect(c).toContain("if ($openship_redirect_https) {");
+    expect(c).toContain("return 301 https://$server_name$request_uri;");
+    // …and when it does NOT redirect, :80 has to be able to serve — including the
+    // rules guard, so rate limits / bans aren't bypassable by arriving on :80.
+    const http = c.slice(c.indexOf("listen 80;"), c.indexOf("listen 443 ssl;"));
+    expect(http).toContain("proxy_pass http://127.0.0.1:3009;");
+    if (luaSourceAvailable()) expect(http).toContain(`access_by_lua_file ${RULES_GUARD_PATH};`);
+  });
+
+  test("the CDN's X-Forwarded-Proto is forwarded, not overwritten with $scheme", async () => {
+    const { nginx, conf } = setup({ certDomains: ["app.example.com"] });
+    await nginx.registerRoute(OURS);
+    const c = conf("app-example-com")!;
+    // `$scheme` reads "http" for a request the browser made over https, which breaks
+    // app-generated absolute URLs, secure cookies, and framework HTTPS guards.
+    expect(c).toContain("proxy_set_header X-Forwarded-Proto $openship_fwd_proto;");
+    expect(c).not.toContain("proxy_set_header X-Forwarded-Proto $scheme;");
+    // Falls back to $scheme when no CDN set the header.
+    expect(c).toContain("set $openship_fwd_proto $scheme;");
+    expect(c).toContain("set $openship_fwd_proto $http_x_forwarded_proto;");
+  });
+
+  test("every block that sends the header also defines the variable", async () => {
+    // A vhost referencing an undefined variable fails `openresty -t`, which means
+    // the reload is refused and registerRoute rolls the route back — so the two must
+    // never drift apart. Built-in variables only, deliberately: no http-level `map`
+    // an already-deployed edge image wouldn't have.
+    for (const opts of [{}, { certDomains: ["app.example.com"] }]) {
+      const { nginx, conf } = setup(opts);
+      await nginx.registerRoute({ ...OURS, webhookProxy: "http://127.0.0.1:4000/api/webhooks/" });
+      const c = conf("app-example-com")!;
+      const blocks = c.split(/^server \{$/m).slice(1);
+      for (const block of blocks) {
+        if (block.includes("$openship_fwd_proto")) {
+          expect(block).toContain("set $openship_fwd_proto $scheme;");
+        }
+      }
+    }
   });
 });
 

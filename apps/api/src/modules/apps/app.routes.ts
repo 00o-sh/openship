@@ -8,6 +8,7 @@
 import { Hono } from "hono";
 import { secureRouter } from "../../lib/secure-router";
 import * as ctrl from "./app.controller";
+import { InstallAppBody, AddCustomAppBody } from "./app.schema";
 
 const r = secureRouter(new Hono(), {
   module: "apps",
@@ -33,6 +34,7 @@ r.post(
   "/custom",
   {
     tag: "project:write",
+    body: AddCustomAppBody,
     mcp: { description: "Add a custom app from an uploaded JSON definition (stored per-org, unverified)." },
   },
   ctrl.addCustom,
@@ -48,6 +50,7 @@ r.post(
     tag: "project:write",
     collection: true,
     projectCreate: true,
+    body: InstallAppBody,
     mcp: { description: "Install an app from the catalog as a project (or return a flow route for wizard apps)." },
   },
   ctrl.install,

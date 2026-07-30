@@ -110,10 +110,14 @@ function inputSchema(
     properties[p] = { type: "string", description: `Path parameter :${p}` };
   }
   properties.query = { type: "object", description: "Optional query-string parameters", additionalProperties: true };
-  if (hasBody) {
-    // The route's TypeBox body schema (JSON Schema at runtime) when declared,
-    // else a permissive fallback so a body can still be passed.
-    properties.body = bodySchema ?? { type: "object", description: "Request JSON body", additionalProperties: true };
+  if (hasBody && bodySchema) {
+    // Emit the route's TypeBox body schema (JSON Schema at runtime) verbatim.
+    // Convention: a mutating MCP route that takes a structured body declares it
+    // via `spec.body` (which also drives auto-validation); one with NO `spec.body`
+    // is a no-body action and advertises no `body` param at all — never a
+    // permissive blob that would make an agent guess at fields that don't exist.
+    // So "add a typed body to an MCP tool" == "add spec.body to its route".
+    properties.body = bodySchema;
   }
   return {
     type: "object",

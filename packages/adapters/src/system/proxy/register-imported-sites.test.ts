@@ -48,12 +48,20 @@ describe("registerImportedSites", () => {
     const registered = await registerImportedSites(routing as RoutingProvider, ssl as SslProvider, fakeExecutor(), sites, o);
 
     expect(registered).toEqual(["a.com", "b.com"]);
-    expect(routing.registerRoute).toHaveBeenCalledWith({ domain: "a.com", tls: false, targetUrl: "http://127.0.0.1:3000" });
+    // terminatesTlsLocally tracks `ssl`: a plain-HTTP imported site gets no TLS
+    // listener, so no placeholder cert is minted for it either.
+    expect(routing.registerRoute).toHaveBeenCalledWith({
+      domain: "a.com",
+      tls: false,
+      terminatesTlsLocally: false,
+      targetUrl: "http://127.0.0.1:3000",
+    });
     // An imported root lives outside the managed base by nature, so it must be
     // registered as ADOPTED or assertValidStaticRoot refuses it.
     expect(routing.registerRoute).toHaveBeenCalledWith({
       domain: "b.com",
       tls: false,
+      terminatesTlsLocally: false,
       staticRoot: "/var/www/b",
       staticRootAdopted: true,
     });

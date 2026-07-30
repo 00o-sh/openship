@@ -10,6 +10,7 @@ import { Hono } from "hono";
 import { secureRouter } from "../../lib/secure-router";
 import { cloudProjectProxy } from "../../lib/cloud/project-router";
 import * as ctrl from "./project-connection.controller";
+import { CreateConnectionBody, CreateBundleBody } from "./project-connection.schema";
 
 const r = secureRouter(new Hono(), {
   module: "projects",
@@ -45,6 +46,7 @@ r.post(
   "/",
   {
     tag: "project:write",
+    body: CreateConnectionBody,
     mcp: { description: "Connect a database app into this project (inject its connection URL as a secret env)." },
   },
   cloudProjectProxy,
@@ -55,6 +57,7 @@ r.post(
   "/bundle",
   {
     tag: "project:write",
+    body: CreateBundleBody,
     mcp: { description: "Wire several outputs from one source app into this project atomically (all-or-nothing)." },
   },
   cloudProjectProxy,

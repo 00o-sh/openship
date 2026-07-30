@@ -186,6 +186,19 @@ export function isSafeCertPath(p: string): boolean {
 }
 
 /**
+ * Path segment holding the temporary self-signed certs Openship serves while a
+ * domain's real cert is still being issued (see `ensureBootstrapCert` in
+ * infra/nginx.ts). Lives here, next to the adoption rules, because the ONE thing
+ * that must never happen to this material is being adopted as a real cert.
+ */
+export const BOOTSTRAP_CERT_SEGMENT = "openship-bootstrap";
+
+/** Is this path one of our own placeholder certs rather than a real one? */
+export function isBootstrapCertPath(p: string): boolean {
+  return p.split("/").includes(BOOTSTRAP_CERT_SEGMENT);
+}
+
+/**
  * Read a cert path pair a proxy config DECLARED. The paths come from parsing
  * untrusted config, so both are gated on {@link isSafeCertPath} before they reach
  * a shell — the takeover checked this, cert reuse didn't, and they read the same
@@ -195,6 +208,14 @@ export function isSafeCertPath(p: string): boolean {
  * if that comes back empty, inside that container. A containerized proxy's certs
  * frequently live only in its own volume, where a host read is indistinguishable
  * from "no cert".
+ *
+ * Openship's OWN placeholder certs are refused here, at the single funnel every
+ * declared-pair read passes through. A bootstrap cert would otherwise sail past
+ * `validateCertFor` — right hostname, unexpired — and be classified
+ * `renewable: false` (self-signed issuer), i.e. adopted as a bring-your-own cert
+ * that certbot never reissues. A migrated or taken-over domain would then serve a
+ * self-signed cert PERMANENTLY. Declining lands on every caller's existing
+ * "unreadable → issue a fresh certificate" path instead.
  */
 export async function readDeclaredPair(
   exec: CommandExecutor,
@@ -203,6 +224,7 @@ export async function readDeclaredPair(
   container?: string | null,
 ): Promise<ManualCert | null> {
   if (!isSafeCertPath(certPath) || !isSafeCertPath(keyPath)) return null;
+  if (isBootstrapCertPath(certPath) || isBootstrapCertPath(keyPath)) return null;
   const certPem = await readMaybeInContainer(exec, certPath, container);
   const keyPem = await readMaybeInContainer(exec, keyPath, container);
   return certPem && keyPem ? { certPem, keyPem } : null;

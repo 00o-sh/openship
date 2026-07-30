@@ -152,6 +152,26 @@ export const BuildAccessBody = Type.Object({
   cloneStrategy: Type.Optional(Type.Union([Type.Literal("api-host"), Type.Literal("server")])),
 });
 
+// POST /prepare — detect stack/build config before deploying. All optional:
+// the controller resolves source from (owner,repo) vs path and enforces the
+// conditional requireds (owner+repo for github, path for local).
+export const PrepareDeployBody = Type.Object({
+  source: Type.Optional(
+    Type.Union([Type.Literal("github"), Type.Literal("local")], {
+      description: "Source kind; inferred from owner/repo vs path when omitted.",
+    }),
+  ),
+  owner: Type.Optional(Type.String({ description: "GitHub repo owner (github source)." })),
+  repo: Type.Optional(Type.String({ description: "GitHub repo name (github source)." })),
+  branch: Type.Optional(Type.String({ description: "Git branch (github source)." })),
+  path: Type.Optional(Type.String({ description: "Local filesystem path (local source; self-hosted only)." })),
+});
+
+// POST /:id/build/respond — answer a build gate/prompt.
+export const BuildRespondBody = Type.Object({
+  action: Type.String({ description: "The gate response (e.g. approve / continue / cancel)." }),
+});
+
 // ─── Inferred types ──────────────────────────────────────────────────────────
 
 export type TDeploymentIdParam = Static<typeof DeploymentIdParam>;

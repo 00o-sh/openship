@@ -163,6 +163,11 @@ export async function reconcileProjectRoutes(
       .registerRoute({
         domain: r.hostname,
         tls: true,
+        // A custom domain's TLS is ours to terminate, so the edge must keep a :443
+        // listener up for it even before its cert exists — otherwise the origin
+        // refuses the handshake and a proxied domain shows Cloudflare 525 (#308).
+        // A free *.opsh.io host is fronted by Cloud's edge; not ours.
+        terminatesTlsLocally: r.isCustomDomain,
         // staticRoot wins when present: it is the more specific instruction, and a
         // caller that resolved a doc root has already decided this domain serves
         // files. registerRoute keys off which one is set.

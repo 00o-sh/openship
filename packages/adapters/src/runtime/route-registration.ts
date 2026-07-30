@@ -9,6 +9,8 @@ export interface RoutedDomainInput {
   hostname: string;
   tls: boolean;
   provisionSsl?: boolean;
+  /** TLS terminates on the serving box — see RouteConfig.terminatesTlsLocally. */
+  terminatesTlsLocally?: boolean;
   targetPort?: number;
   targetPath?: string;
 }
@@ -96,12 +98,18 @@ export async function registerResolvedRoutes(
     );
 
     if (hasPortTarget && typeof targetUrl === "string") {
-      routeConfig = { domain: domain.hostname, tls: domain.tls, targetUrl };
+      routeConfig = {
+        domain: domain.hostname,
+        tls: domain.tls,
+        terminatesTlsLocally: domain.terminatesTlsLocally,
+        targetUrl,
+      };
     } else if (hasPathTarget && typeof staticRoot === "string") {
       const targetPath = domain.targetPath!;
       routeConfig = {
         domain: domain.hostname,
         tls: domain.tls,
+        terminatesTlsLocally: domain.terminatesTlsLocally,
         staticRoot: targetPath === "/"
           ? staticRoot
           : pathPosix.join(staticRoot, targetPath.slice(1)),
