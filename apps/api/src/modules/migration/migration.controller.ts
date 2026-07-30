@@ -167,6 +167,10 @@ export async function adoptServer(c: Context) {
     volumeStrategies?: Record<string, "reuse" | "copy">;
     serviceSubpaths?: Record<string, string>;
     serviceEnv?: Record<string, Record<string, string>>;
+    /** Compose project to resolve `serviceNames` in (`null` = standalone group).
+     *  Omit for the legacy server-wide match — ambiguous when several stacks
+     *  share service names like `app`/`db`/`redis`. */
+    composeProject?: string | null;
   }>();
   const { serverId, projectName, serviceNames, flatDocker, volumeStrategies, serviceSubpaths, serviceEnv } = body;
   if (!serverId) return c.json({ error: "serverId is required" }, 400);
@@ -195,6 +199,7 @@ export async function adoptServer(c: Context) {
       volumeStrategies,
       serviceSubpaths,
       serviceEnv,
+      ...("composeProject" in body ? { composeProject: body.composeProject } : {}),
     });
     return c.json({ success: true, ...result });
   } catch (err) {
