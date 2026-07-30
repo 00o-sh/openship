@@ -40,6 +40,10 @@ export interface McpToolDef {
     /** Resource type a grant must be on to enable this tool for a restricted
      *  principal (project-rooted sub-resources resolve to "project"). */
     grantRoot: string;
+    /** The dedicated project-create route (POST /projects, POST /apps install).
+     *  Reachable by an "own projects" create-capable grant — see the
+     *  canCreateProjects arm in filterToolsForPrincipal. */
+    projectCreate: boolean;
   };
 }
 
@@ -49,6 +53,11 @@ export interface McpPrincipal {
   readOnly: boolean;
   /** Resource types the token holds grants on — only consulted when role === "restricted". */
   grantedRootTypes: ReadonlySet<string>;
+  /** True when the token holds a create-capable project wildcard grant
+   *  ({project, "*", permissions:["create"]}) — the "own projects" scope. Lets a
+   *  restricted token see the project-create routes and the project list (which
+   *  it may call, filtered to its self-created projects). Mirrors permission.ts. */
+  canCreateProjects: boolean;
 }
 
 /**
@@ -170,6 +179,7 @@ export function getMcpTools(): McpToolDef[] {
             ((parsed?.isList ?? false) || collection || ORG_SINGLETON_RESOURCES.has(leaf)) &&
             pathParams.length === 0,
           grantRoot: PROJECT_ROOTED.has(leaf as CheckedResourceType) ? "project" : (parsed?.root ?? ""),
+          projectCreate: !isPublicSpec(spec) && spec.projectCreate === true,
         },
       };
     });
@@ -208,10 +218,9 @@ function principalHasGrantFor(granted: ReadonlySet<string>, grantRoot: string): 
  * its grant set. `tools/call` still enforces per call — this only trims what's
  * advertised. A tool is listed iff the caller could succeed at it for some input.
  *
- * Note: `projectCreate` (POST /projects under the "own projects" scope) stays
- * wildcard-hidden here — grantedRootTypes tracks only resource TYPES, so it
- * can't distinguish a create-any-project grant from a grant on one project.
- * That tool is under-advertised for such tokens; call-time still allows it.
+ * The "own projects" scope ({project, "*", create}) is handled explicitly via
+ * `principal.canCreateProjects`: such a token may CREATE projects and LIST its
+ * own, mirroring both arms of the runtime check in permission.ts.
  */
 export function filterToolsForPrincipal(tools: McpToolDef[], principal: McpPrincipal): McpToolDef[] {
   return tools.filter((t) => {
@@ -221,6 +230,14 @@ export function filterToolsForPrincipal(tools: McpToolDef[], principal: McpPrinc
 
     if (principal.role !== "restricted") {
       return roleAllowsResourceType(principal.role, t.perm.leaf as CheckedResourceType);
+    }
+    // "Own projects" scope: the create-capable project wildcard grant reaches the
+    // dedicated create routes (POST /projects, POST /apps) and the project list
+    // (which the caller filters to its self-created projects). Checked before the
+    // wildcard gate, since these are exactly the wildcard ops it can pass.
+    if (principal.canCreateProjects) {
+      if (t.perm.projectCreate) return true;
+      if (t.perm.leaf === "project" && t.perm.action === "list") return true;
     }
     // Restricted: org-wide ops (list / create / org-singleton with no resource
     // param) are always denied for a scoped token; a per-resource op needs a

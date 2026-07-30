@@ -12,7 +12,9 @@ import {
  * treated as org-wide wildcards. See mcp-tools.filterToolsForPrincipal.
  */
 
-function tool(partial: Partial<McpToolDef> & { method: string; perm: McpToolDef["perm"] }): McpToolDef {
+type PartialPerm = Omit<McpToolDef["perm"], "projectCreate"> & { projectCreate?: boolean };
+
+function tool(partial: Partial<McpToolDef> & { method: string; perm: PartialPerm }): McpToolDef {
   return {
     name: partial.name ?? "t",
     description: "",
@@ -22,7 +24,7 @@ function tool(partial: Partial<McpToolDef> & { method: string; perm: McpToolDef[
     path: partial.path ?? "/api/x",
     pathParams: partial.pathParams ?? [],
     hasBody: partial.hasBody ?? false,
-    perm: partial.perm,
+    perm: { projectCreate: false, ...partial.perm },
   };
 }
 
@@ -59,8 +61,14 @@ const projList = tool({
   method: "GET",
   perm: { root: "project", leaf: "project", action: "list", wildcard: true, grantRoot: "project" },
 });
+const projCreate = tool({
+  name: "post_projects",
+  method: "POST",
+  // collection create → wildcard, but reachable via the own-projects scope
+  perm: { root: "project", leaf: "project", action: "write", wildcard: true, grantRoot: "project", projectCreate: true },
+});
 
-const ALL = [ghGetRepo, ghBranches, ghListAll, projGet, projUpdate, projList];
+const ALL = [ghGetRepo, ghBranches, ghListAll, projGet, projUpdate, projList, projCreate];
 const names = (tools: McpToolDef[]) => tools.map((t) => t.name).sort();
 
 function principal(p: Partial<McpPrincipal>): McpPrincipal {
@@ -68,6 +76,7 @@ function principal(p: Partial<McpPrincipal>): McpPrincipal {
     role: p.role ?? "restricted",
     readOnly: p.readOnly ?? false,
     grantedRootTypes: p.grantedRootTypes ?? new Set(),
+    canCreateProjects: p.canCreateProjects ?? false,
   };
 }
 
@@ -102,11 +111,23 @@ describe("filterToolsForPrincipal", () => {
     }
   });
 
-  it("project-scoped token sees per-project tools but not GitHub or the org list", () => {
+  it("project-scoped token sees per-project tools but not GitHub, the org list, or create", () => {
     const out = filterToolsForPrincipal(ALL, principal({ grantedRootTypes: new Set(["project"]) }));
     expect(names(out)).toContain("get_projects_by_id");
     expect(names(out)).toContain("patch_projects_by_id");
     expect(names(out)).not.toContain("get_projects"); // wildcard list
+    expect(names(out)).not.toContain("post_projects"); // create needs the own-projects scope
+    expect(names(out)).not.toContain("get_github_repos_by_owner_by_repo");
+  });
+
+  it("own-projects scope (canCreateProjects) sees create + the project list", () => {
+    const out = filterToolsForPrincipal(
+      ALL,
+      principal({ grantedRootTypes: new Set(["project"]), canCreateProjects: true }),
+    );
+    expect(names(out)).toContain("post_projects"); // may create
+    expect(names(out)).toContain("get_projects"); // may list (filtered to self-created)
+    // still no GitHub, since no github grant
     expect(names(out)).not.toContain("get_github_repos_by_owner_by_repo");
   });
 });
