@@ -15,6 +15,7 @@
 import { env } from "../../config/env";
 import { repos } from "@repo/db";
 import { foundingAdminId } from "../../modules/system/self-app.controller";
+import { resolveInstancePublicIp } from "../server-target";
 import { registerStartupHook } from "./index";
 
 /**
@@ -52,8 +53,10 @@ export async function ensureLocalServerRegistered(): Promise<boolean> {
   if (await repos.server.findLocal(organizationId)) return false; // already registered
 
   // ssh* fields are display-only for an isLocal row (never dialed). Prefer a
-  // real address so the servers list reads truthfully.
-  const displayHost = env.SERVER_IP || env.HOST_DOMAIN || "127.0.0.1";
+  // real address so the servers list reads truthfully AND the DNS A record for a
+  // domain deployed here points at the box's public IP rather than loopback.
+  // Detected once, here at "ensure this server" — never on a per-request path.
+  const displayHost = env.SERVER_IP || env.HOST_DOMAIN || (await resolveInstancePublicIp()) || "127.0.0.1";
 
   await repos.server.create({
     organizationId,

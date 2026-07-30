@@ -3,6 +3,35 @@
 All notable changes to Openship. Versions follow [semver](https://semver.org);
 the in-app updater surfaces critical advisories from `release-advisories.json`.
 
+## 0.4.9
+
+A round of fixes across the MCP integration and custom domains.
+
+### MCP
+- **Guided deploy flows** — the MCP server now ships a prompt catalog
+  (`deploy-from-git`, `deploy-a-folder`, `install-catalog-app`, and an
+  orientation overview) so an AI client follows the correct tool sequence
+  instead of reverse-engineering it from a flat list. Its write tools now carry
+  typed request bodies end to end (projects, deployments, domains, webhooks,
+  notifications, connections, apps), and every prompt points at
+  `github.com/oblien/openship/issues` when a client hits a platform bug.
+- **Scoped tokens list the right tools** — a token granted a single GitHub repo
+  (or the "create your own projects" scope) now correctly advertises the tools
+  it can actually call. Previously the per-repo GitHub tools and the project
+  create/list tools were filtered out of `tools/list`, so a scoped token saw
+  nothing to work with.
+
+### Custom domains
+- **The A record shows your server's IP** — on a self-hosted install the
+  pre-deploy DNS panel now fills the A record's value with the server's public
+  address (detected once when the server is registered) instead of leaving it
+  blank.
+- **Correct self-hosted DNS guidance** — the panel no longer tells you to add a
+  TXT record on a self-hosted box; there isn't one — HTTPS is issued
+  automatically on the first deploy. The DNS modal is also lighter and on-theme,
+  and the "Include www" switch now sits below the domain field so it no longer
+  shifts the input as you type.
+
 ## 0.4.7
 
 The CLI self-hosting story is finalized, remote-Docker migrations are made

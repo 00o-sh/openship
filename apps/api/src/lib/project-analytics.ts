@@ -18,6 +18,7 @@ import {
   containerCommand,
   resolveOurEdgeContainer,
   sq,
+  type LogEntry,
 } from "@repo/adapters";
 import { tunnelRequest, tunnelStream } from "./ssh-tunnel";
 import { sshManager } from "./ssh-manager";
@@ -371,14 +372,28 @@ export async function mgmtStream(serverId: string, path: string) {
 }
 
 /**
+ * The exact bytes a `streamExec` chunk carried.
+ *
+ * `streamExec` is a RAW passthrough on every real executor — LocalExecutor and
+ * SystemSshExecutor both say "Do NOT split on \n or trim here" — so a chunk is an
+ * arbitrary slice of the byte stream: several frames, one frame, or half a line.
+ * `rawData` is base64 of the untouched bytes; `message` is the decoded text and is
+ * all a synthesized entry (a process error) has.
+ *
+ * Exported for the test that pins SSE framing across a mid-frame split.
+ */
+export function streamChunkBytes(log: LogEntry): Buffer {
+  return log.rawData ? Buffer.from(log.rawData, "base64") : Buffer.from(log.message, "utf8");
+}
+
+/**
  * Live log streaming over the exec transport, for a local/containerized edge that
  * has no SSH forward. Same `TunnelStreamHandle` shape as the tunnel version, so
  * the SSE controllers piping this are unchanged.
  *
- * `curl -N` disables buffering so each line the mgmt API emits arrives as it is
- * produced rather than in blocks; `streamExec`'s per-line callback is what carries
- * them. Without this branch the server-logs stream was as dead as the analytics
- * scrape on every CLI / compose install.
+ * `curl -N` disables buffering so each frame the mgmt API emits arrives as it is
+ * produced rather than in blocks. Without this branch the server-logs stream was
+ * as dead as the analytics scrape on every CLI / compose install.
  */
 async function execMgmtStream(serverId: string, path: string) {
   const executor = await sshManager.acquire(serverId);
@@ -400,7 +415,15 @@ async function execMgmtStream(serverId: string, path: string) {
   // is exactly when the SSE stream should end.
   void executor
     .streamExec(containerCommand(container, `curl -sN ${sq(url)}`), (log) => {
-      if (!ended) stream.write(`${log.message}\n`);
+      // Byte-exact, and NO added newline. This used to write `${log.message}\n`,
+      // which broke SSE framing: chunks split anywhere, so the extra newline landed
+      // inside a `data:` line as often as after one. A frame cut mid-JSON parses as
+      // truncated and the browser drops the event (the client swallows malformed
+      // data by design), which is why the live tail showed nothing until you
+      // reloaded and the history fetch filled it in. Frame boundaries belong to the
+      // edge (pipe_stream.lua already emits `event: request\ndata: …\n\n`); this
+      // transport must not reinterpret them.
+      if (!ended) stream.write(streamChunkBytes(log));
     })
     .then(finish)
     .catch((err) => {

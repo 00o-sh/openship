@@ -41,7 +41,12 @@ import * as prepareService from "../deployments/prepare.service";
 import { sshManager } from "../../lib/ssh-manager";
 import { env } from "../../config";
 import { domainWebhookUrl } from "../../lib/public-url";
-import { resolveProjectTrafficSource, fetchMgmt, mgmtStream } from "../../lib/project-analytics";
+import {
+  resolveProjectTrafficSource,
+  fetchMgmt,
+  mgmtStream,
+  probeMgmt,
+} from "../../lib/project-analytics";
 import { refreshProjectFaviconIfStale } from "../../lib/favicon-detector";
 import { getAdminOblienClient } from "../../lib/oblien-user-client";
 import { cloudClient } from "../../lib/cloud/client";
@@ -1138,8 +1143,11 @@ export async function serverLogStreamToken(c: Context) {
 }
 
 /**
- * GET /projects/:id/server-logs/stream - SSE stream of HTTP request logs
- * from the OpenResty pipe_stream on the managed server.
+ * GET /projects/:id/server-logs/stream - SSE stream of HTTP request logs from the
+ * edge's pipe_stream on the managed server.
+ *
+ * The frames are the EDGE's (`event: request\ndata: …\n\n`) and are relayed
+ * byte-for-byte — nothing here re-frames them, or the browser drops events.
  *
  * Cloud projects use stream-token + direct edge connection instead.
  * Auto-deploys Lua scripts once per API session per server.
@@ -1179,15 +1187,33 @@ export async function serverLogStream(c: Context) {
       }
 
       const reqPath = `/logs/stream?domain=${encodeURIComponent(domain)}`;
-      const conn = await mgmtStream(serverId, reqPath);
+      // The transport either returns null (tunnel refused / mgmt answered non-2xx)
+      // or THROWS (no edge container on this box) — the throw used to escape here and
+      // kill the stream with no message at all, leaving the UI on a bare
+      // "connection lost".
+      let conn: Awaited<ReturnType<typeof mgmtStream>> = null;
+      let failure = "";
+      try {
+        conn = await mgmtStream(serverId, reqPath);
+      } catch (err) {
+        failure = safeErrorMessage(err);
+      }
       if (!conn) {
+        // Distinguish "the edge isn't answering at all" from "the edge is up but
+        // refused this request" (a blank/unknown domain makes pipe_stream.lua 400,
+        // which the transport reports the same way as a dead port). One extra probe,
+        // only on the failure path, turns an unactionable message into a diagnosis.
+        // Names the EDGE, not OpenResty: on a container install the operator has an
+        // `openship-edge` container, and no `openresty` service to go looking for.
+        const edgeUp = !failure && (await probeMgmt(serverId).catch(() => false));
+        const error = edgeUp
+          ? `The Openship edge is running but refused the log stream for ${domain}. ` +
+            `Check that this domain is routed through the edge, then retry.`
+          : `Couldn't reach the Openship edge's log service on this server` +
+            `${failure ? `: ${failure}` : ""}. Make sure the edge is running (\`docker ps\` should ` +
+            `show openship-edge) and redeploy the routing if it isn't.`;
         await sseStream
-          .writeSSE({
-            event: "error",
-            data: JSON.stringify({
-              error: "Failed to connect to log service - ensure OpenResty is running",
-            }),
-          })
+          .writeSSE({ event: "error", data: JSON.stringify({ error }) })
           .catch(() => {});
         return;
       }

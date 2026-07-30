@@ -202,11 +202,15 @@ export async function setPrimary(c: Context) {
 
 /** POST /domains/preview - get DNS records for a hostname (no DB write) */
 export async function preview(c: Context) {
+  const ctx = getRequestContext(c);
   const body = await c.req.json<{ hostname: string }>();
   if (!body.hostname?.trim()) {
     return c.json({ error: "hostname is required" }, 400);
   }
-  const result = await domainService.previewRecords(body.hostname.trim().toLowerCase());
+  const result = await domainService.previewRecords(
+    body.hostname.trim().toLowerCase(),
+    ctx.organizationId,
+  );
   return c.json({ data: result });
 }
 
