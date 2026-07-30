@@ -552,8 +552,9 @@ function toProjectInfo(
     try {
       const parsed = parseComposeFile(composeContent, { envFileContent: composeEnvContent });
       services = parsed.services;
-    } catch {
-      // Invalid YAML - continue without services.
+    } catch (err) {
+      const detail = err instanceof Error && err.message ? err.message : "Unknown parser error";
+      throw new Error(`Could not parse the Docker Compose file: ${detail}`, { cause: err });
     }
   }
 

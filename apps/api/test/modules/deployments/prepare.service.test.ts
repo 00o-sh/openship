@@ -12,6 +12,37 @@ describe("resolveProjectInfo", () => {
     await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
+  it("reports missing required Compose variables instead of returning no services", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "openship-prepare-"));
+    tempDirs.push(tempDir);
+
+    await writeFile(
+      join(tempDir, "compose.yaml"),
+      [
+        "services:",
+        "  web:",
+        "    image: nginx:alpine",
+        "    environment:",
+        "      API_PASSWORD: ${API_PASSWORD:?Set API_PASSWORD}",
+      ].join("\n"),
+    );
+
+    await expect(resolveProjectInfo({ source: "local", path: tempDir })).rejects.toThrow(
+      "Could not parse the Docker Compose file: Set API_PASSWORD",
+    );
+  });
+
+  it("reports invalid Compose YAML instead of returning no services", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "openship-prepare-"));
+    tempDirs.push(tempDir);
+
+    await writeFile(join(tempDir, "compose.yaml"), "services:\n  web: [unterminated\n");
+
+    await expect(resolveProjectInfo({ source: "local", path: tempDir })).rejects.toThrow(
+      "Could not parse the Docker Compose file:",
+    );
+  });
+
   it("reads compose files from the selected nested root for local projects", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "openship-prepare-"));
     tempDirs.push(tempDir);
