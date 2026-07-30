@@ -63,6 +63,19 @@ const HealthcheckSchema = Type.Object(
 const AdvancedSchema = Type.Object(
   {
     healthcheck: Type.Optional(HealthcheckSchema),
+    /** Per-service cpu/memory caps (compose `mem_limit`/`cpus` or
+     *  `deploy.resources.limits`). Overrides the project-wide config field by
+     *  field; `0` = no limit. The real ceiling is the target machine's capacity,
+     *  enforced at deploy time — these bounds are sanity rails. */
+    resources: Type.Optional(
+      Type.Object(
+        {
+          cpuCores: Type.Optional(Type.Number({ minimum: 0, maximum: 1024 })),
+          memoryMb: Type.Optional(Type.Number({ minimum: 0, maximum: 4194304 })),
+        },
+        { additionalProperties: false },
+      ),
+    ),
   },
   { additionalProperties: false },
 );
@@ -81,6 +94,9 @@ const ComposeFieldsBlock = {
   environment: Type.Optional(Type.Record(Type.String(), Type.String())),
   volumes: Type.Optional(Type.Array(Type.String({ maxLength: 500 }), { maxItems: 50 })),
   command: Type.Optional(Type.String({ maxLength: 1000 })),
+  // #332: structured argv (docker-compose Cmd — no `sh -c`). Send an argv array
+  // to run an entrypoint+CMD image correctly; `command` string stays supported.
+  commandArgv: Type.Optional(Type.Array(Type.String({ maxLength: 2000 }), { maxItems: 100 })),
   advanced: Type.Optional(AdvancedSchema),
   exposed: Type.Optional(Type.Boolean()),
   exposedPort: Type.Optional(Type.String({ maxLength: 50 })),

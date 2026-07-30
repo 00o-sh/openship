@@ -175,14 +175,13 @@
       "framework": "フレームワーク",
       "packageManager": "パッケージマネージャー",
       "runtimeIsolation": "ランタイム分離",
-      "resources": "リソース",
-      "resourcesValue": "{cpu} vCPU · {memory} MB",
       "runtimePort": "ランタイムポート",
       "installCommand": "インストールコマンド",
       "buildCommand": "ビルドコマンド",
       "noBuildStep": "ビルドステップなし",
       "outputDirectory": "出力ディレクトリ",
       "rootDirectory": "ルートディレクトリ",
+      "composePath": "Compose ファイル",
       "startCommand": "起動コマンド",
       "staticNoServer": "静的（サーバーなし）",
       "modeSandboxed": "サンドボックス化（コンテナ）",
@@ -422,53 +421,53 @@
   },
   "resources": {
     "title": "マシンパワー",
-    "description": "プロジェクトのマシンパワーを設定します。",
+    "description": "このプロジェクトのコンテナに適用する CPU とメモリの上限。",
+    "loading": "対象マシンを読み取っています…",
+    "machineCapacity": "マシン: {cpu} vCPU · {memory}",
+    "exceedsMachine": "このマシンの容量を超えています",
+    "appliesOnNextDeploy": "上限はコンテナの再作成時に適用されます。変更を反映するには再デプロイしてください。",
     "tiers": {
-      "lightweight": {
-        "name": "ライトウェイト",
-        "description": "小規模なアプリと静的サイト"
+      "unlimited": {
+        "name": "上限なし",
+        "description": "マシン全体を使う（既定）",
+        "spec": "マシンの容量"
       },
-      "standard": {
-        "name": "スタンダード",
-        "description": "ほとんどのウェブアプリケーション"
+      "micro": {
+        "name": "Micro",
+        "description": "小さなサイドカーやワーカー"
       },
-      "performance": {
-        "name": "パフォーマンス",
+      "low": {
+        "name": "Low",
+        "description": "小規模アプリと静的サイト"
+      },
+      "medium": {
+        "name": "Medium",
+        "description": "ほとんどの Web アプリケーション"
+      },
+      "high": {
+        "name": "High",
         "description": "高トラフィックのアプリケーション"
-      },
-      "enterprise": {
-        "name": "エンタープライズ",
-        "description": "大規模な本番アプリ"
-      },
-      "autoscale": {
-        "name": "オートスケール",
-        "description": "需要に応じてスケールします"
       }
     },
-    "dynamic": "ダイナミック",
     "custom": {
       "name": "カスタム",
-      "description": "独自のリソースを定義します",
-      "clickToConfigure": "クリックして設定"
+      "description": "上限を自分で指定する",
+      "notSet": "未設定"
     },
-    "cpuValue": "{cpu} vCPU",
     "customPanel": {
-      "title": "カスタムリソースを設定",
-      "cpuCores": "CPU コア",
-      "cpuRange": "範囲: 0.25 - 4.00",
-      "memory": "メモリ（MB）",
-      "memoryRange": "範囲: 128 - 8192",
+      "boundedBy": "このマシンには {cpu} vCPU と {memory} があります。0 を入力すると上限なしになります。",
+      "capacityUnknown": "このマシンの容量を読み取れなかったため、上限は適用されません。0 を入力すると上限なしになります。",
+      "cpuCores": "CPU コア数",
+      "memory": "メモリ (MB)",
+      "zeroMeansNoLimit": "0 = 上限なし",
       "cancel": "キャンセル",
-      "saving": "保存中...",
-      "save": "設定を保存"
+      "saving": "保存中…",
+      "save": "保存"
     },
     "toast": {
-      "updated": "リソースを更新しました",
-      "updateFailed": "リソースの更新に失敗しました",
-      "cpuRange": "CPU は 0.25 から 4.00 コアの間で指定してください",
-      "memoryRange": "メモリは 128 MB から 8192 MB の間で指定してください",
-      "customSaved": "カスタムリソースを保存しました",
-      "customSaveFailed": "カスタムリソースの保存に失敗しました"
+      "updated": "マシンパワーを更新しました",
+      "updateFailed": "マシンパワーの更新に失敗しました",
+      "invalidValues": "CPU とメモリは 0 または正の数を指定してください"
     }
   },
   "sleep": {

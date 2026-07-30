@@ -274,14 +274,13 @@
       "framework": "Framework",
       "packageManager": "Paket yöneticisi",
       "runtimeIsolation": "Çalışma zamanı izolasyonu",
-      "resources": "Kaynaklar",
-      "resourcesValue": "{cpu} vCPU · {memory} MB",
       "runtimePort": "Çalışma zamanı portu",
       "installCommand": "Yükleme komutu",
       "buildCommand": "Derleme komutu",
       "noBuildStep": "Derleme adımı yok",
       "outputDirectory": "Çıktı dizini",
       "rootDirectory": "Kök dizin",
+      "composePath": "Compose dosyası",
       "startCommand": "Başlatma komutu",
       "staticNoServer": "Statik (sunucu yok)",
       "modeSandboxed": "Korumalı Alan (konteyner)",
@@ -527,54 +526,54 @@
     "projectFallback": "Proje"
   },
   "resources": {
-    "title": "Makine Gücü",
-    "description": "Projeniz için makine gücünü yapılandırın.",
+    "title": "Makine gücü",
+    "description": "Bu projenin konteynerleri için CPU ve bellek sınırları.",
+    "loading": "Hedef makine okunuyor…",
+    "machineCapacity": "Makine: {cpu} vCPU · {memory}",
+    "exceedsMachine": "Bu makineyi aşıyor",
+    "appliesOnNextDeploy": "Sınırlar konteyner yeniden oluşturulduğunda uygulanır — değişikliğin etkili olması için yeniden dağıtın.",
     "tiers": {
-      "lightweight": {
-        "name": "Hafif (Lightweight)",
+      "unlimited": {
+        "name": "Sınır yok",
+        "description": "Makinenin tamamını kullan (varsayılan)",
+        "spec": "Makine kapasitesi"
+      },
+      "micro": {
+        "name": "Micro",
+        "description": "Küçük sidecar'lar ve worker'lar"
+      },
+      "low": {
+        "name": "Düşük",
         "description": "Küçük uygulamalar ve statik siteler"
       },
-      "standard": {
-        "name": "Standart",
+      "medium": {
+        "name": "Orta",
         "description": "Çoğu web uygulaması"
       },
-      "performance": {
-        "name": "Performans",
+      "high": {
+        "name": "Yüksek",
         "description": "Yüksek trafikli uygulamalar"
-      },
-      "enterprise": {
-        "name": "Kurumsal",
-        "description": "Büyük ölçekli canlı ortam uygulamaları"
-      },
-      "autoscale": {
-        "name": "Otomatik Ölçekleme",
-        "description": "Talebe göre ölçeklenir"
       }
     },
-    "dynamic": "Dinamik",
     "custom": {
       "name": "Özel",
-      "description": "Kendi kaynaklarınızı tanımlayın",
-      "clickToConfigure": "Yapılandırmak için tıklayın"
+      "description": "Kendi sınırlarınızı belirleyin",
+      "notSet": "Ayarlanmadı"
     },
-    "cpuValue": "{cpu} vCPU",
     "customPanel": {
-      "title": "Özel Kaynakları Yapılandır",
-      "cpuCores": "CPU Çekirdekleri",
-      "cpuRange": "Aralık: 0.25 - 4.00",
+      "boundedBy": "Bu makinede {cpu} vCPU ve {memory} var. Sınır olmaması için 0 girin.",
+      "capacityUnknown": "Bu makinenin kapasitesi okunamadı, bu yüzden üst sınır uygulanmıyor. Sınır olmaması için 0 girin.",
+      "cpuCores": "CPU çekirdeği",
       "memory": "Bellek (MB)",
-      "memoryRange": "Aralık: 128 - 8192",
+      "zeroMeansNoLimit": "0 = sınır yok",
       "cancel": "İptal",
-      "saving": "Kaydediliyor...",
-      "save": "Yapılandırmayı Kaydet"
+      "saving": "Kaydediliyor…",
+      "save": "Kaydet"
     },
     "toast": {
-      "updated": "Kaynaklar başarıyla güncellendi",
-      "updateFailed": "Kaynaklar güncellenemedi",
-      "cpuRange": "CPU 0.25 ile 4.00 çekirdek arasında olmalıdır",
-      "memoryRange": "Bellek 128 MB ile 8192 MB arasında olmalıdır",
-      "customSaved": "Özel kaynaklar başarıyla kaydedildi",
-      "customSaveFailed": "Özel kaynaklar kaydedilemedi"
+      "updated": "Makine gücü güncellendi",
+      "updateFailed": "Makine gücü güncellenemedi",
+      "invalidValues": "CPU ve bellek 0 veya pozitif bir sayı olmalıdır"
     }
   },
   "sleep": {

@@ -56,6 +56,7 @@ export interface RepoComposeService {
   dependsOn: string[];
   volumes: string[];
   command?: string;
+  commandArgv?: string[] | null; // #332
   restart?: string;
 }
 
@@ -99,6 +100,7 @@ export async function parseRepoCompose(
         dependsOn: s.dependsOn ?? [],
         volumes: s.volumes ?? [],
         command: s.command ?? undefined,
+        commandArgv: s.commandArgv ?? null, // #332
         restart: s.restart ?? undefined,
       }));
     } catch {
@@ -281,8 +283,17 @@ export function buildAdoptedServiceRows(
       environment: serviceEnv?.[s.name] ? unmaskEnv(serviceEnv[s.name], s.env) : s.env,
       volumes: s.volumes.map(volumeToComposeString).filter((v): v is string => v !== null),
       command: s.command,
+      commandArgv: s.commandArgv ?? null, // #332: adopt the real argv, not sh -c
       restart: s.restart,
-      advanced: s.healthcheck ? { healthcheck: s.healthcheck } : undefined,
+      // Built additively: an adopted container's live cpu/memory caps must
+      // survive even when it has no healthcheck (and vice versa).
+      advanced:
+        s.healthcheck || s.resources
+          ? {
+              ...(s.healthcheck && { healthcheck: s.healthcheck }),
+              ...(s.resources && { resources: s.resources }),
+            }
+          : undefined,
     };
   });
   return { rows, renames, handover, claimedHostPorts };
@@ -412,6 +423,7 @@ export async function adoptServerStack(opts: {
           : rs.environment ?? {},
         volumes: rs.volumes ?? [],
         command: rs.command,
+        commandArgv: rs.commandArgv ?? null, // #332
         restart: rs.restart,
       });
     }

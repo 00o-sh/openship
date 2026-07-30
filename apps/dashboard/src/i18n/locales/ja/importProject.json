@@ -47,6 +47,15 @@
     "outputDirectoryDesc": "ビルド出力を格納するディレクトリ",
     "sourceFolderLabel": "ソースフォルダ",
     "sourceFolderDesc": "リポジトリまたはローカルプロジェクト内のサブディレクトリからビルドします。",
+    "composePath": {
+      "title": "Compose ファイル",
+      "subtitle": "プロジェクトのルートで自動検出",
+      "label": "Compose ファイルのパス",
+      "description": "compose をルート以外に置いているリポジトリ向け — ファイル（deploy/stack.yml）またはそれを含むフォルダ（deploy/docker-compose）を指定します。リポジトリを再スキャンし、宣言されたサービスをデプロイします。",
+      "apply": "スキャン",
+      "scanning": "スキャン中…",
+      "scanFailed": "その Compose パスをスキャンできませんでした。"
+    },
     "buildImageLabel": "ビルドイメージ",
     "buildImageDesc": "クラウドまたはサーバービルド用のビルダーコンテナイメージ。検出されたベースイメージが正しくない場合は上書きしてください。",
     "productionPathsLabel": "本番パス",

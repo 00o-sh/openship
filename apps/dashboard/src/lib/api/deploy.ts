@@ -1,11 +1,19 @@
 import { api } from "./client";
 import { endpoints } from "./endpoints";
-import type { StackId, ComposeAdvanced, RoutingConfig } from "@repo/core";
+import type { StackId, ComposeAdvanced, RoutingConfig, OpenshipResourceTier } from "@repo/core";
 import type { CloudResourceTier, CloudResourceCustom, PublicEndpoint, PortCheckUI, OutputCheckUI } from "@/context/deployment/types";
 
 export type PrepareProjectSource =
-  | { source?: "github"; owner: string; repo: string; branch?: string; force?: string | boolean }
-  | { source: "local"; path: string };
+  | {
+      source?: "github";
+      owner: string;
+      repo: string;
+      branch?: string;
+      force?: string | boolean;
+      /** Pin the compose file location (file or directory) instead of detecting the root. */
+      composePath?: string;
+    }
+  | { source: "local"; path: string; composePath?: string };
 
 export interface PrepareComposeService {
   name: string;
@@ -100,6 +108,9 @@ export interface PrepareProjectResponse extends PrepareAppConfig {
     branches?: Array<{ name: string }>;
   };
   singleAppCandidate?: PrepareSingleAppCandidate;
+  /** The compose path this scan used (request value, or the one openship.json
+   *  declared). Absent when the root was detected normally. */
+  composePath?: string;
   services?: PrepareComposeService[];
   monorepoApps?: PrepareMonorepoApp[];
   monorepoWorkspace?: PrepareMonorepoWorkspace;
@@ -121,7 +132,8 @@ export interface PrepareProjectResponse extends PrepareAppConfig {
     targetPath?: string;
   }>;
   /** Declared cloud sizing (tier OR explicit cpu/mem/disk). Seeds resource tier. */
-  resources?: { tier?: "micro" | "low" | "medium" | "high"; cpuCores?: number; memoryMb?: number; diskMb?: number };
+  /** Tier ids come from @repo/core (OpenshipResourceTier) — not re-spelled here. */
+  resources?: { tier?: OpenshipResourceTier; cpuCores?: number; memoryMb?: number; diskMb?: number };
   error?: string;
   current_status?: string;
   exists?: boolean;

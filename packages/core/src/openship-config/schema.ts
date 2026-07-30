@@ -19,7 +19,9 @@ export type OpenshipRuntime = "bare" | "docker";
 export type OpenshipProductionMode = "host" | "static" | "standalone";
 export type OpenshipDomainType = "free" | "custom";
 export type OpenshipRestart = "no" | "always" | "on-failure" | "unless-stopped";
-export type OpenshipResourceTier = "micro" | "low" | "medium" | "high";
+/** Cloud sizing presets, plus "unlimited" — no caps, the self-hosted default
+ *  (the machine itself is the ceiling). */
+export type OpenshipResourceTier = "unlimited" | "micro" | "low" | "medium" | "high";
 
 export const OPENSHIP_RUNTIMES: readonly OpenshipRuntime[] = ["bare", "docker"];
 export const OPENSHIP_PRODUCTION_MODES: readonly OpenshipProductionMode[] = [
@@ -35,6 +37,7 @@ export const OPENSHIP_RESTARTS: readonly OpenshipRestart[] = [
   "unless-stopped",
 ];
 export const OPENSHIP_RESOURCE_TIERS: readonly OpenshipResourceTier[] = [
+  "unlimited",
   "micro",
   "low",
   "medium",
@@ -79,6 +82,10 @@ export interface OpenshipService {
   exposedPort?: string;
   domain?: string;
   healthcheck?: OpenshipHealthcheck;
+  /** Per-service cpu/memory caps, overriding the top-level `resources` field by
+   *  field. Parity with compose `mem_limit` / `deploy.resources.limits`, which
+   *  the compose parser now honors. `0` = no limit. */
+  resources?: OpenshipResources;
 }
 
 /**
@@ -118,6 +125,13 @@ export interface OpenshipConfig {
   framework?: StackId;
   packageManager?: string;
   rootDirectory?: string;
+  /**
+   * Where the compose file lives, when it isn't at the project root — either the
+   * file itself (`"deploy/stack.yml"`, which also covers non-standard filenames)
+   * or the directory holding it (`"deploy/docker-compose"`). Declaring this makes
+   * the project a compose/services deploy.
+   */
+  composePath?: string;
   installCommand?: string;
   buildCommand?: string;
   startCommand?: string;

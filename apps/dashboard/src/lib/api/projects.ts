@@ -22,6 +22,8 @@ export interface ProjectOptionsBody {
    *  defaults; `[]` turns persistence off. */
   volumes?: string[] | null;
   rootDirectory?: string;
+  /** Compose file location (file or directory); "" / null clears the pin. */
+  composePath?: string | null;
   productionPort?: number;
   productionMode?: string;
   hasServer?: boolean;
@@ -141,6 +143,8 @@ export const projectsApi = {
     outputDirectory?: string;
     productionPaths?: string;
     rootDirectory?: string;
+    /** Compose file location, for a compose file outside the detected root. */
+    composePath?: string;
     startCommand?: string;
     buildImage?: string;
     port?: number;
@@ -464,6 +468,10 @@ export const projectsApi = {
   /** Set or clear the webhook domain */
   setWebhookDomain: (id: string | number, domain: string | null) =>
     api.post<any>(endpoints.projects.webhookDomain(id), { domain }),
+
+  /** Read resources + the target machine's probed capacity (the ceiling for a
+   *  custom value) + whether this target requires an explicit limit (cloud). */
+  getResources: (id: string | number) => api.get<any>(endpoints.projects.resources(id)),
 
   /** Set resources (POST - tier-based) */
   setResources: (id: string | number, resources: Record<string, any>) =>

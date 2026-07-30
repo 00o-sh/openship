@@ -364,6 +364,10 @@ export interface RollbackInput {
    *  that this deployment's artifact is archived (rollback-restorable)
    *  before invoking the runtime. */
   to: DeploymentRef;
+  /** The target's cpu/memory caps, so the cold-start-from-image path can
+   *  re-create the container with the limits it originally had instead of
+   *  dropping them. Undefined/0 = no cap (self-hosted default). */
+  resources?: ResourceConfig;
 }
 
 export interface MakeActiveResult {
@@ -397,6 +401,13 @@ export interface MultiServiceDeployConfig {
    *  create time. False for grandfathered pre-migration services (bare names). */
   namespaceVolumes: boolean;
   command?: string;
+  /**
+   * #332: structured argv for the container Cmd (docker-compose semantics —
+   * overrides image CMD, NO implicit `sh -c`). When set, it wins over `command`.
+   * `null`/absent → fall back to the legacy `["sh","-c",command]` wrap; `[]` →
+   * clear the image CMD.
+   */
+  commandArgv?: string[] | null;
   restart?: string;
   /**
    * Force a fresh `docker pull` of the image tag even when a local copy exists.
@@ -616,6 +627,10 @@ export interface DockerContainerDetail {
     retries?: number;
     startPeriod?: number;
   };
+  /** Live cpu/memory caps read off HostConfig, so adopting a container keeps the
+   *  limits it was actually running with — including one set by hand with
+   *  `docker update --memory`. Omitted fields mean the container had no cap. */
+  resources?: { cpuCores?: number; memoryMb?: number };
   composeProject?: string;
   composeService?: string;
   /** com.docker.compose.project.config_files — absolute compose paths on the host. */

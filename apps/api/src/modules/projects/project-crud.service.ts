@@ -161,7 +161,11 @@ export async function enrichProject(p: Project) {
     serverId,
     serverName,
     ...readActiveDeploymentSummary(activeDep),
-    resources: encodeResources(production, build, p.sleepMode ?? "auto_sleep", p.port ?? 3000),
+    // isCloud decides the fallback when nothing is configured: the metered free
+    // tier on cloud, NO limits self-hosted (the machine is the cap).
+    resources: encodeResources(production, build, p.sleepMode ?? "auto_sleep", p.port ?? 3000, {
+      isCloud: deployTarget === "cloud",
+    }),
   };
 }
 
@@ -217,7 +221,11 @@ export async function enrichProjectsBatch(
       serverId,
       serverName,
       ...readActiveDeploymentSummary(activeDep),
-      resources: encodeResources(production, build, p.sleepMode ?? "auto_sleep", p.port ?? 3000),
+      // isCloud decides the fallback when nothing is configured: the metered
+      // free tier on cloud, NO limits self-hosted (the machine is the cap).
+      resources: encodeResources(production, build, p.sleepMode ?? "auto_sleep", p.port ?? 3000, {
+        isCloud: deployTarget === "cloud",
+      }),
     };
   });
 }
@@ -255,6 +263,17 @@ function resolveProjectSource(data: TCreateProjectBody) {
 
 function normalizeEnvironmentSlug(input?: string | null, fallback = "production") {
   return slugify(input || fallback) || fallback;
+}
+
+/**
+ * The compose pin as it should hit the column: a trimmed path, or NULL to go back
+ * to detecting the root. Blank-means-null in ONE place, because every write path
+ * needs it — the settings form sends `""` for a blanked field, and the deploy
+ * wizard sends `""` when the user clears the pin. Returning `""` instead would
+ * leave a falsy-but-present value that still counts as "declared" downstream.
+ */
+function normalizeComposePath(value: string | null | undefined): string | null {
+  return value?.trim() ? value.trim() : null;
 }
 
 function environmentNameFromSlug(slug: string) {
@@ -327,6 +346,7 @@ function buildProductionProjectInput(
     // stack's persistentPaths at deploy — that's what makes it zero-config.
     volumes: data.volumes,
     rootDirectory: data.rootDirectory,
+    composePath: normalizeComposePath(data.composePath),
     startCommand: data.startCommand,
     buildImage: data.buildImage,
     productionMode: data.productionMode ?? (data.hasServer === false ? "static" : "host"),
@@ -824,6 +844,7 @@ export async function ensureProject(
     if (data.productionPaths !== undefined) update.productionPaths = data.productionPaths;
     if (data.volumes !== undefined) update.volumes = data.volumes;
     if (data.rootDirectory !== undefined) update.rootDirectory = data.rootDirectory;
+    if (data.composePath !== undefined) update.composePath = normalizeComposePath(data.composePath);
     if (data.startCommand !== undefined) update.startCommand = data.startCommand;
     if (data.buildImage !== undefined) update.buildImage = data.buildImage;
     if (data.port !== undefined) update.port = data.port;
@@ -1317,6 +1338,7 @@ export async function createProjectEnvironment(
     productionPaths: base.productionPaths,
     volumes: base.volumes,
     rootDirectory: base.rootDirectory,
+    composePath: base.composePath,
     startCommand: base.startCommand,
     buildImage: base.buildImage,
     productionMode: base.productionMode,
@@ -1618,6 +1640,15 @@ export async function updateOptions(
     update.volumes = options.volumes;
   }
   if (options.rootDirectory !== undefined) update.rootDirectory = options.rootDirectory;
+  // String-or-null only. Empty/blank clears it: the settings form sends "" for a
+  // blanked field, and no compose path means "go back to detecting the root".
+  if (options.composePath !== undefined) {
+    const composePath = options.composePath;
+    if (composePath !== null && typeof composePath !== "string") {
+      throw new ValidationError("composePath must be a string, or null");
+    }
+    update.composePath = normalizeComposePath(composePath);
+  }
   if (options.startCommand !== undefined) update.startCommand = options.startCommand;
   if (options.productionPort !== undefined) update.port = options.productionPort;
   if (options.packageManager !== undefined) update.packageManager = options.packageManager;

@@ -43,9 +43,36 @@ describe("parseOpenshipConfig", () => {
   });
 
   it("rejects a bad enum (runtime) and bad resource range", () => {
-    const { errors } = parseOpenshipConfig({ runtime: "vm", resources: { cpuCores: 99 } });
+    const { errors } = parseOpenshipConfig({ runtime: "vm", resources: { cpuCores: 99999 } });
     expect(errors.some((e) => e.startsWith("runtime:"))).toBe(true);
     expect(errors.some((e) => e.includes("resources.cpuCores"))).toBe(true);
+  });
+
+  // The bounds here are sanity rails, not the real ceiling — that's the target
+  // machine's probed capacity, enforced server-side. A flat 4-core / 8192 MB max
+  // used to make a large self-hosted box impossible to describe.
+  it("accepts resource values a big self-hosted box can actually back", () => {
+    const { errors, config } = parseOpenshipConfig({
+      resources: { cpuCores: 32, memoryMb: 131072 },
+    });
+    expect(errors.filter((e) => e.includes("resources"))).toEqual([]);
+    expect(config?.resources).toMatchObject({ cpuCores: 32, memoryMb: 131072 });
+  });
+
+  it("accepts 0 (no limit) and the unlimited tier", () => {
+    const { errors, config } = parseOpenshipConfig({
+      resources: { tier: "unlimited", cpuCores: 0, memoryMb: 0 },
+    });
+    expect(errors.filter((e) => e.includes("resources"))).toEqual([]);
+    expect(config?.resources).toMatchObject({ tier: "unlimited", cpuCores: 0, memoryMb: 0 });
+  });
+
+  it("parses per-service resources (parity with compose mem_limit)", () => {
+    const { errors, config } = parseOpenshipConfig({
+      services: [{ name: "api", image: "x", resources: { memoryMb: 4096 } }],
+    });
+    expect(errors).toEqual([]);
+    expect(config?.services?.[0]?.resources).toMatchObject({ memoryMb: 4096 });
   });
 
   it("coerces a string port and validates env value shape", () => {
@@ -109,10 +136,32 @@ describe("parseOpenshipConfig", () => {
         },
       },
       { $schema: "x", domains: ["app.acme.com", { domain: "api.acme.com", port: 8080, type: "custom" }] },
+      { composePath: "deploy/docker-compose/docker-compose.yml" },
     ];
     for (const ex of examples) {
       const { errors } = parseOpenshipConfig(ex);
       expect(errors, JSON.stringify(ex)).toEqual([]);
     }
+  });
+
+  describe("composePath", () => {
+    it("round-trips a file path and a directory path", () => {
+      for (const composePath of ["deploy/docker-compose/docker-compose.yml", "deploy/docker-compose"]) {
+        const { config, errors, warnings } = parseOpenshipConfig({ composePath });
+        expect(errors).toEqual([]);
+        expect(warnings).toEqual([]);
+        expect(config?.composePath).toBe(composePath);
+      }
+    });
+
+    it("rejects a non-string", () => {
+      const { errors } = parseOpenshipConfig({ composePath: 42 });
+      expect(errors).toEqual(["composePath: must be a string"]);
+    });
+
+    it("is absent (not undefined-valued) when undeclared", () => {
+      const { config } = parseOpenshipConfig({ framework: "nextjs" });
+      expect(config && "composePath" in config).toBe(false);
+    });
   });
 });

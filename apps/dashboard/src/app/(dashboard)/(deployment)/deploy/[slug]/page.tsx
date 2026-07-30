@@ -6,6 +6,7 @@ import ProjectSettings from "@/components/import-project/ProjectSettings";
 import BuildSettings from "@/components/import-project/BuildSettings";
 import DockerSettings from "@/components/import-project/DockerSettings";
 import ComposeServices from "@/components/import-project/ComposeServices";
+import { ComposePathField } from "@/components/import-project/ComposePathField";
 import EnvironmentVariables from "@/components/import-project/EnvironmentVariables";
 import MonorepoApps from "@/components/import-project/MonorepoApps";
 import RoutingSection from "@/components/import-project/RoutingSection";
@@ -331,6 +332,11 @@ const DeployRepository: React.FC = () => {
             {config.projectType === "docker" && <DockerSettings />}
             {config.projectType === "services" && <ComposeServices />}
             {isMonorepoFlow && <MonorepoApps />}
+            {/* Outside every type-specific section on purpose: a repo whose compose
+                file lives in a subfolder scans as an app/docker project, and applying
+                a path flips this to `services` — so the control has to survive that
+                flip to stay correctable. */}
+            <ComposePathField />
             {!isServiceDeployment &&
                 !(isMonorepoFlow && config.serviceDeploymentMode !== "single") && (
                 <EnvironmentVariables collapsible />

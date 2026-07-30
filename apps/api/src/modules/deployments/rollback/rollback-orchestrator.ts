@@ -26,7 +26,7 @@
  */
 
 import { repos, type Deployment } from "@repo/db";
-import type { DeploymentRef } from "@repo/adapters";
+import type { DeploymentRef, ResourceConfig } from "@repo/adapters";
 import { AppError } from "@repo/core";
 import { resolveDeploymentRuntime } from "../../../lib/deployment-runtime";
 import { resolveRollbackWindow } from "../release-retention";
@@ -209,9 +209,16 @@ async function rollbackViaSnapshot(
   // workspace stopped, etc.) AND starts `to`. We don't call
   // runtime.archive() separately afterwards — that would just call
   // stop again on an already-stopped container.
+  // A rollback restores prior state, so the FROZEN snapshot is the right
+  // resource source here (unlike a redeploy, which re-reads the project).
+  const targetResources = (target.meta as DeploymentConfigSnapshot | null)?.resources as
+    | ResourceConfig
+    | undefined;
+
   const result = await runtime.makeActive({
     from: currentActive ? toRef(currentActive) : null,
     to: toRef(target),
+    resources: targetResources ?? undefined,
   });
 
   // ── Atomic-ish DB writes with compensating runtime rollback ────────
@@ -251,6 +258,9 @@ async function rollbackViaSnapshot(
           // whatever id is now live.
           from: { ...toRef(target), containerId: result.containerId ?? target.containerId },
           to: toRef(currentActive),
+          resources: (currentActive.meta as DeploymentConfigSnapshot | null)?.resources as
+            | ResourceConfig
+            | undefined,
         });
       } else {
         // No prior active means we just promoted into an empty slot.

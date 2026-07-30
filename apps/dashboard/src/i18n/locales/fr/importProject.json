@@ -47,6 +47,15 @@
     "outputDirectoryDesc": "Répertoire contenant la sortie de compilation",
     "sourceFolderLabel": "Dossier source",
     "sourceFolderDesc": "Compiler depuis un sous-répertoire à l'intérieur du dépôt ou du projet local.",
+    "composePath": {
+      "title": "Fichier Compose",
+      "subtitle": "Détecté automatiquement à la racine du projet",
+      "label": "Chemin vers le fichier Compose",
+      "description": "Pour les dépôts qui placent compose hors de la racine — indiquez le fichier (deploy/stack.yml) ou le dossier qui le contient (deploy/docker-compose). Le dépôt est réanalysé et les services déclarés sont déployés.",
+      "apply": "Analyser",
+      "scanning": "Analyse…",
+      "scanFailed": "Impossible d'analyser ce chemin Compose."
+    },
     "buildImageLabel": "Image de compilation",
     "buildImageDesc": "Image de conteneur de compilation pour les builds cloud ou serveur. Remplacez-la lorsque l'image de base détectée est incorrecte.",
     "productionPathsLabel": "Chemins de production",

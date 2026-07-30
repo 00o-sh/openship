@@ -129,6 +129,16 @@ export type ComposeAdvanced = {
    * no migration.
    */
   files?: { path: string; content: string }[];
+  /**
+   * Per-service cpu/memory caps authored in the compose file, normalized from
+   * either the short form (`mem_limit`, `cpus`) or the swarm form
+   * (`deploy.resources.limits.{memory,cpus}`). These were silently dropped
+   * before — an uploaded compose that asked for 4 GB still got the project-wide
+   * value — so a service that declares its own limit now overrides the project
+   * default at deploy time. `0`/absent = inherit the project (see
+   * UNLIMITED_RESOURCES in ./resources).
+   */
+  resources?: { cpuCores?: number; memoryMb?: number };
 };
 
 /**

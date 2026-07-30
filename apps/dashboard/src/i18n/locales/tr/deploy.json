@@ -135,11 +135,7 @@
     "continue": "Devam et",
     "chooseServer": "Bir sunucu seçin",
     "thisServerBadge": "Bu Sunucu",
-<<<<<<< HEAD
-    "thisServerHost": "Mevcut host — dağıtımlar burada çalışır",
-=======
     "thisServerHost": "Mevcut ana makine — dağıtımlar burada çalışır",
->>>>>>> 23275c62 (env mask across all endpoints, mcp finalize, projects volumes up)
     "searchPlaceholder": "Sunucularda ara…",
     "noServersMatch": "Aramanızla eşleşen sunucu bulunamadı.",
     "requireCloudFeature": "Openship Bulut'a Dağıtılıyor",

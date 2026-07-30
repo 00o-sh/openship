@@ -90,11 +90,18 @@ import { githubTarballUrl, downloadTarballOnRemote } from "./source-tarball";
 import { scopeVolumeBinds, isHostPathSource } from "./volume-namespace";
 import { createDockerBuildContext, prepareSourceTree, resolveServiceDockerfile } from "./docker-build-context";
 import { startExecStream, daemonConnectionFrom } from "./docker-exec-stream";
+import { resolveComposeCmd } from "./compose-cmd";
 import { resolveDockerfileCandidates } from "./docker-paths";
 import type { ContainerStabilitySample } from "./stability";
 import { generateDockerfile, staticBuilderOutputPath } from "./docker-build-plan";
 import { transferLocalDirectory } from "./transfer";
 import { safeErrorMessage, type ComposeAdvanced, type ComposeHealthcheck } from "@repo/core";
+import {
+  dockerResourceLimits,
+  dockerBuildResourceLimits,
+  describeResourceLimits,
+  inspectResourceLimits,
+} from "./resource-limits";
 import {
   type DockerConnectionOptions,
   type DockerTransport,
@@ -1015,6 +1022,10 @@ export class DockerRuntime implements RuntimeAdapter {
             ...config.envVars,
             NODE_ENV: "production",
           },
+          // Omitted entirely unless the project set a build cap — a self-hosted
+          // build should be free to use the machine (a production build often
+          // needs several GB). Opt-in only; see dockerBuildResourceLimits.
+          ...dockerBuildResourceLimits(config.resources),
           forcerm: true,
         },
       );
@@ -1723,6 +1734,7 @@ export class DockerRuntime implements RuntimeAdapter {
                   sessionId: spec.config.sessionId,
                 }),
                 buildargs: { ...spec.config.envVars, NODE_ENV: "production" },
+                ...dockerBuildResourceLimits(spec.config.resources),
                 forcerm: true,
               },
             );
@@ -1853,6 +1865,14 @@ export class DockerRuntime implements RuntimeAdapter {
         level: "info",
       });
     }
+    // State the caps in the build log. A silent 512 MB cap is how #333 hid: the
+    // deploy reported ready while the container OOM-crash-looped, with nothing
+    // anywhere saying a limit had been applied.
+    log({
+      timestamp: new Date().toISOString(),
+      message: `Resource limits: ${describeResourceLimits(config.resources)}\n`,
+      level: "info",
+    });
 
     const container = await this.docker.createContainer({
       name: containerName,
@@ -1867,8 +1887,9 @@ export class DockerRuntime implements RuntimeAdapter {
       HostConfig: {
         RestartPolicy: restartPolicy,
         Binds: binds,
-        Memory: config.resources.memoryMb * 1024 * 1024,
-        CpuShares: Math.round(config.resources.cpuCores * 1024),
+        // Omitted entirely when the project has no cap (self-hosted default) —
+        // see dockerResourceLimits. Never substitute a tier here.
+        ...dockerResourceLimits(config.resources),
         // Publish on the LOOPBACK interface only — the edge (host process, or a
         // host-net OpenResty container) reaches it at 127.0.0.1:<hostPort>, and
         // it never faces the network. Binding 0.0.0.0 here would expose every
@@ -2085,7 +2106,13 @@ export class DockerRuntime implements RuntimeAdapter {
     const container = await this.docker.createContainer({
       Image: input.to.imageRef,
       name: `dep-${input.to.id}`,
-      HostConfig: { RestartPolicy: { Name: "unless-stopped" } },
+      HostConfig: {
+        RestartPolicy: { Name: "unless-stopped" },
+        // Carry the rolled-back deployment's own caps forward. Without this a
+        // cold start from a retained image quietly returned the container to
+        // "no limits" for a project that had deliberately set some.
+        ...dockerResourceLimits(input.resources),
+      },
     });
     await container.start();
     return { containerId: container.id };
@@ -2226,6 +2253,7 @@ export class DockerRuntime implements RuntimeAdapter {
             startPeriod: hc.StartPeriod,
           }
         : undefined,
+      resources: inspectResourceLimits(data.HostConfig),
       composeProject: labels["com.docker.compose.project"] || undefined,
       composeService: labels["com.docker.compose.service"] || undefined,
       composeConfigFiles: configFiles
@@ -3143,10 +3171,9 @@ export class DockerRuntime implements RuntimeAdapter {
       ...Object.entries(config.environment).map(([k, v]) => `${k}=${v}`),
     ];
 
-    // Command
-    const cmd = config.command
-      ? ["sh", "-c", config.command]
-      : undefined;
+    // Command (#332): argv Cmd, no implicit `sh -c` (that broke entrypoint+CMD
+    // images). See resolveComposeCmd.
+    const cmd = resolveComposeCmd(config);
 
     // Port bindings
     const { exposedPorts, portBindings } = parsePortBindings(config.ports);
@@ -3168,6 +3195,12 @@ export class DockerRuntime implements RuntimeAdapter {
     log({
       timestamp: new Date().toISOString(),
       message: `Creating service container ${containerName} from ${config.image}...\n`,
+      level: "info",
+    });
+    // Per-service caps, stated explicitly — see the single-app path for why.
+    log({
+      timestamp: new Date().toISOString(),
+      message: `Resource limits: ${describeResourceLimits(config.resources)}\n`,
       level: "info",
     });
 
@@ -3210,12 +3243,7 @@ export class DockerRuntime implements RuntimeAdapter {
       ExposedPorts: exposedPorts,
       HostConfig: {
         RestartPolicy: restartPolicy,
-        ...(config.resources?.memoryMb && {
-          Memory: config.resources.memoryMb * 1024 * 1024,
-        }),
-        ...(config.resources?.cpuCores && {
-          CpuShares: Math.round(config.resources.cpuCores * 1024),
-        }),
+        ...dockerResourceLimits(config.resources),
         PortBindings: portBindings,
         Binds: binds,
         NetworkMode: group.id,

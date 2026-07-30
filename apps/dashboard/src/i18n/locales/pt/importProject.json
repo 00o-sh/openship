@@ -47,6 +47,15 @@
     "outputDirectoryDesc": "Diretório com o resultado do build",
     "sourceFolderLabel": "Pasta de Origem",
     "sourceFolderDesc": "Compila a partir de um subdiretório dentro do repositório ou projeto local.",
+    "composePath": {
+      "title": "Arquivo Compose",
+      "subtitle": "Detectado automaticamente na raiz do projeto",
+      "label": "Caminho para o arquivo Compose",
+      "description": "Para repositórios que mantêm o compose fora da raiz — informe o arquivo (deploy/stack.yml) ou a pasta que o contém (deploy/docker-compose). O repositório é reanalisado e os serviços declarados são implantados.",
+      "apply": "Analisar",
+      "scanning": "Analisando…",
+      "scanFailed": "Não foi possível analisar esse caminho do Compose."
+    },
     "buildImageLabel": "Imagem de Build",
     "buildImageDesc": "Imagem de container do compilador para builds em cloud ou servidor. Substitua-a quando a imagem base detectada estiver incorreta.",
     "productionPathsLabel": "Caminhos de Produção",

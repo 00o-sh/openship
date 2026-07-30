@@ -175,14 +175,13 @@
       "framework": "Framework",
       "packageManager": "Gestionnaire de paquets",
       "runtimeIsolation": "Isolation d'exécution",
-      "resources": "Ressources",
-      "resourcesValue": "{cpu} vCPU · {memory} Mo",
       "runtimePort": "Port d'exécution",
       "installCommand": "Commande d'installation",
       "buildCommand": "Commande de build",
       "noBuildStep": "Aucune étape de build",
       "outputDirectory": "Répertoire de sortie",
       "rootDirectory": "Répertoire racine",
+      "composePath": "Fichier Compose",
       "startCommand": "Commande de démarrage",
       "staticNoServer": "Statique (sans serveur)",
       "modeSandboxed": "En bac à sable (conteneur)",
@@ -429,53 +428,53 @@
   },
   "resources": {
     "title": "Puissance de la machine",
-    "description": "Configurez la puissance de la machine pour votre projet.",
+    "description": "Limites de CPU et de mémoire pour les conteneurs de ce projet.",
+    "loading": "Lecture de la machine cible…",
+    "machineCapacity": "Machine : {cpu} vCPU · {memory}",
+    "exceedsMachine": "Dépasse cette machine",
+    "appliesOnNextDeploy": "Les limites s'appliquent à la recréation du conteneur — redéployez pour qu'un changement prenne effet.",
     "tiers": {
-      "lightweight": {
-        "name": "Léger",
-        "description": "Petites applications et sites statiques"
+      "unlimited": {
+        "name": "Aucune limite",
+        "description": "Utiliser toute la machine (par défaut)",
+        "spec": "Capacité de la machine"
       },
-      "standard": {
-        "name": "Standard",
+      "micro": {
+        "name": "Micro",
+        "description": "Petits sidecars et workers"
+      },
+      "low": {
+        "name": "Faible",
+        "description": "Petites applis et sites statiques"
+      },
+      "medium": {
+        "name": "Moyenne",
         "description": "La plupart des applications web"
       },
-      "performance": {
-        "name": "Performance",
+      "high": {
+        "name": "Élevée",
         "description": "Applications à fort trafic"
-      },
-      "enterprise": {
-        "name": "Entreprise",
-        "description": "Applications de production à grande échelle"
-      },
-      "autoscale": {
-        "name": "Mise à l'échelle automatique",
-        "description": "S'adapte en fonction de la demande"
       }
     },
-    "dynamic": "Dynamique",
     "custom": {
       "name": "Personnalisé",
-      "description": "Définissez vos propres ressources",
-      "clickToConfigure": "Cliquez pour configurer"
+      "description": "Définissez vos propres limites",
+      "notSet": "Non défini"
     },
-    "cpuValue": "{cpu} vCPU",
     "customPanel": {
-      "title": "Configurer les ressources personnalisées",
-      "cpuCores": "Cœurs CPU",
-      "cpuRange": "Plage : 0.25 - 4.00",
+      "boundedBy": "Cette machine dispose de {cpu} vCPU et {memory}. Saisissez 0 pour aucune limite.",
+      "capacityUnknown": "Impossible de lire la capacité de cette machine, aucun plafond n'est donc appliqué. Saisissez 0 pour aucune limite.",
+      "cpuCores": "Cœurs de CPU",
       "memory": "Mémoire (Mo)",
-      "memoryRange": "Plage : 128 - 8192",
+      "zeroMeansNoLimit": "0 = aucune limite",
       "cancel": "Annuler",
-      "saving": "Enregistrement...",
-      "save": "Enregistrer la configuration"
+      "saving": "Enregistrement…",
+      "save": "Enregistrer"
     },
     "toast": {
-      "updated": "Ressources mises à jour avec succès",
-      "updateFailed": "Échec de la mise à jour des ressources",
-      "cpuRange": "Le CPU doit être compris entre 0.25 et 4.00 cœurs",
-      "memoryRange": "La mémoire doit être comprise entre 128 Mo et 8192 Mo",
-      "customSaved": "Ressources personnalisées enregistrées avec succès",
-      "customSaveFailed": "Échec de l'enregistrement des ressources personnalisées"
+      "updated": "Puissance de la machine mise à jour",
+      "updateFailed": "Échec de la mise à jour de la puissance de la machine",
+      "invalidValues": "Le CPU et la mémoire doivent valoir 0 ou un nombre positif"
     }
   },
   "sleep": {

@@ -657,6 +657,7 @@ export function useDeploymentBuild(
             outputDirectory: config.options.outputDirectory,
             productionPaths: config.options.productionPaths,
             rootDirectory: config.options.rootDirectory,
+            composePath: config.composePath ?? "",
             productionPort:
               config.options.hasServer && config.options.productionPort
                 ? Number(config.options.productionPort)
@@ -699,6 +700,10 @@ export function useDeploymentBuild(
         installCommand: config.options.installCommand,
         startCommand: config.options.startCommand,
         rootDirectory: config.options.rootDirectory,
+        // Always sent, never omitted: the API normalizes blank to NULL, so this
+        // both persists a pin (the push-triggered drift reconcile needs it to
+        // re-read the SAME file) and clears one the user removed.
+        composePath: config.composePath ?? "",
         port: config.options.hasServer && config.options.productionPort
           ? Number(config.options.productionPort)
           : undefined,
