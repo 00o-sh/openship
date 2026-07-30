@@ -33,7 +33,6 @@ const MISSING_BASELINE: Record<string, number> = {
   emails: 42,
   projectDetail: 42,
   brand: 40,
-  deploy: 18,
   library: 119,
   billing: 6,
 
