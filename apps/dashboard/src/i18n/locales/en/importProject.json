@@ -123,6 +123,11 @@
       "clipboardEmpty": "Clipboard is empty",
       "clipboardInvalid": "Clipboard does not contain valid KEY=VALUE environment variables",
       "clipboardBlocked": "Clipboard access was blocked. Click inside the environment box and paste with Cmd/Ctrl+V."
+    },
+    "reveal": {
+      "show": "Show values",
+      "hide": "Hide values",
+      "error": "Couldn’t reveal values"
     }
   },
   "composeServices": {

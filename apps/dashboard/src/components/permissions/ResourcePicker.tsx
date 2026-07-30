@@ -28,6 +28,8 @@ import {
 import { getApiErrorMessage } from "@/lib/api";
 import { useToast } from "@/context/ToastContext";
 import { useI18n, interpolate } from "@/components/i18n-provider";
+import { LevelSwitch, type LevelOption } from "./LevelSwitch";
+import { ResourceAvatar } from "./ResourceAvatar";
 
 // Re-export for existing importers (TeamTab et al.) — canonical defs live in @/lib/api.
 export type { Permission, PickerGrant, ResourceType } from "@/lib/api";
@@ -90,6 +92,14 @@ function writeGrant(
   return next;
 }
 
+export interface LevelsConfig {
+  options: readonly LevelOption[];
+  /** A row's permissions → the id of the option to show as active. */
+  resolve: (permissions: Permission[]) => string;
+  /** A chosen option id → the exact permission set to write. */
+  toPermissions: (id: string) => Permission[];
+}
+
 interface ResourcePickerProps {
   /** Current selection (controlled). Caller owns the array. */
   value: PickerGrant[];
@@ -101,6 +111,34 @@ interface ResourcePickerProps {
   fixedType?: ResourceType;
   /** Default permissions when a resource is first checked. Defaults to ["read"]. */
   defaultPermissions?: Permission[];
+  /**
+   * Types whose "All X" wildcard row must NOT be offered.
+   *
+   * Needed because a wildcard is not universally mintable: `{project,"*"}` on a
+   * TOKEN must be exactly `["create"]` (apps/api token.schema.ts
+   * `wildcardProjectGrantRejected`), so offering "All projects · read/write" in a
+   * token-scoping flow builds a selection the server rejects with 400
+   * INVALID_GRANT_SCOPE. The same row is legitimate for MEMBER grants, hence a
+   * per-call-site prop rather than a rule baked in here.
+   */
+  suppressWildcardTypes?: ResourceType[];
+  /**
+   * Render named access levels instead of the read/write/admin chips.
+   *
+   * Opt-in and fully caller-defined so this component owns no level vocabulary:
+   * the MCP consent screen shows View / Deploy & manage / Full control, while the
+   * member-grants and PAT editors keep the raw chips. `resolve` maps a row's
+   * permissions to the active option, `toPermissions` maps a chosen option back to
+   * the exact set to write.
+   */
+  levels?: LevelsConfig;
+  /**
+   * Called whenever a catalog page loads, with the entries it fetched. Lets a
+   * caller that renders its own view of the selection (e.g. the MCP consent
+   * screen's summary panel) show "storefront" instead of a raw cuid, without
+   * re-fetching the same catalogs. Must be referentially stable.
+   */
+  onCatalogLoaded?: (type: ResourceType, entries: CatalogEntry[]) => void;
   disabled?: boolean;
 }
 
@@ -110,6 +148,9 @@ export function ResourcePicker({
   availableTypes,
   fixedType,
   defaultPermissions = ["read"],
+  suppressWildcardTypes,
+  levels,
+  onCatalogLoaded,
   disabled,
 }: ResourcePickerProps) {
   const { showToast } = useToast();
@@ -133,6 +174,9 @@ export function ResourcePicker({
 
   const isGithub = activeTab === "github";
   const isSingleton = activeTab === "billing" || activeTab === "audit";
+  const wildcardSuppressed =
+    !isGithub && !!suppressWildcardTypes?.includes(activeTab as ResourceType);
+  const showWildcardRow = !isSingleton && !wildcardSuppressed;
 
   const loadCatalog = useCallback(
     async (type: ResourceType) => {
@@ -140,6 +184,7 @@ export function ResourcePicker({
       try {
         const res = await permissionsApi.listResources(type);
         setCatalog(res.data ?? []);
+        onCatalogLoaded?.(type, res.data ?? []);
       } catch (err) {
         showToast(getApiErrorMessage(err, w.failedLoadResources), "error", "Picker");
         setCatalog([]);
@@ -147,7 +192,7 @@ export function ResourcePicker({
         setLoading(false);
       }
     },
-    [showToast],
+    [showToast, onCatalogLoaded],
   );
 
   useEffect(() => {
@@ -178,6 +223,11 @@ export function ResourcePicker({
     onChange(writeGrant(value, resourceType, resourceId, next));
   };
 
+  /** Replace a row's permissions outright — the level control's writer. */
+  const setPermissions = (resourceType: ResourceType, resourceId: string, perms: Permission[]) => {
+    onChange(writeGrant(value, resourceType, resourceId, perms));
+  };
+
   const filteredCatalog = useMemo(() => {
     if (!search.trim()) return catalog;
     const q = search.trim().toLowerCase();
@@ -185,9 +235,11 @@ export function ResourcePicker({
   }, [catalog, search]);
 
   // When the "All X" wildcard is selected, the specific rows are covered by it —
-  // render them disabled so the user can't pick a redundant subset.
+  // render them disabled so the user can't pick a redundant subset. Never while
+  // the wildcard row is suppressed: its checkbox is the only way to clear it, so
+  // an unclearable "covered by All X" would disable the whole list for good.
   const wildcardActive =
-    !isGithub && !isSingleton && !!findGrantIn(value, activeTab as ResourceType, "*");
+    showWildcardRow && !isGithub && !!findGrantIn(value, activeTab as ResourceType, "*");
 
   const countForTab = (tab: TabId) =>
     tab === "github"
@@ -234,6 +286,8 @@ export function ResourcePicker({
           value={value}
           onChange={onChange}
           defaultPermissions={defaultPermissions}
+          levels={levels}
+          onCatalogLoaded={onCatalogLoaded}
           disabled={disabled}
         />
       ) : (
@@ -261,7 +315,7 @@ export function ResourcePicker({
               </div>
             ) : (
               <>
-                {!isSingleton && (
+                {showWildcardRow && (
                   <ResourceRow
                     resourceType={activeTab as ResourceType}
                     resourceId="*"
@@ -270,6 +324,8 @@ export function ResourcePicker({
                     grant={findGrantIn(value, activeTab as ResourceType, "*")}
                     onToggleResource={toggleResource}
                     onTogglePermission={togglePermission}
+                    onSetPermissions={setPermissions}
+                    levels={levels}
                     disabled={disabled}
                   />
                 )}
@@ -292,6 +348,8 @@ export function ResourcePicker({
                       grant={findGrantIn(value, activeTab as ResourceType, entry.id)}
                       onToggleResource={toggleResource}
                       onTogglePermission={togglePermission}
+                      onSetPermissions={setPermissions}
+                      levels={levels}
                       disabled={disabled || wildcardActive}
                       covered={wildcardActive}
                     />
@@ -355,6 +413,35 @@ function PermissionChips({
   );
 }
 
+/** One row's access control: named levels when the caller configured them,
+ *  otherwise the read/write/admin chips. */
+function GrantControl({
+  levels,
+  perms,
+  onToggle,
+  onSet,
+  disabled,
+}: {
+  levels?: LevelsConfig;
+  perms: Permission[];
+  onToggle: (p: Permission) => void;
+  onSet: (perms: Permission[]) => void;
+  disabled?: boolean;
+}) {
+  if (levels) {
+    return (
+      <LevelSwitch
+        options={levels.options}
+        value={levels.resolve(perms)}
+        disabled={disabled}
+        onChange={(id) => onSet(levels.toPermissions(id))}
+        size="sm"
+      />
+    );
+  }
+  return <PermissionChips perms={perms} onToggle={onToggle} disabled={disabled} />;
+}
+
 // ── Flat catalog row ─────────────────────────────────────────────────────────
 function ResourceRow({
   resourceType,
@@ -364,6 +451,8 @@ function ResourceRow({
   grant,
   onToggleResource,
   onTogglePermission,
+  onSetPermissions,
+  levels,
   disabled,
   covered,
 }: {
@@ -374,6 +463,8 @@ function ResourceRow({
   grant: PickerGrant | undefined;
   onToggleResource: (rt: ResourceType, rid: string) => void;
   onTogglePermission: (rt: ResourceType, rid: string, p: Permission) => void;
+  onSetPermissions: (rt: ResourceType, rid: string, perms: Permission[]) => void;
+  levels?: LevelsConfig;
   disabled?: boolean;
   /** True when an "All X" wildcard is selected — this specific row is redundant
    *  and shown dimmed + non-interactive. */
@@ -416,9 +507,11 @@ function ResourceRow({
           )}
         </div>
         {checked && !covered && (
-          <PermissionChips
+          <GrantControl
+            levels={levels}
             perms={grant?.permissions ?? []}
             onToggle={(p) => onTogglePermission(resourceType, resourceId, p)}
+            onSet={(perms) => onSetPermissions(resourceType, resourceId, perms)}
             disabled={disabled}
           />
         )}
@@ -459,11 +552,15 @@ function GitHubTree({
   value,
   onChange,
   defaultPermissions,
+  levels,
+  onCatalogLoaded,
   disabled,
 }: {
   value: PickerGrant[];
   onChange: (v: PickerGrant[]) => void;
   defaultPermissions: Permission[];
+  levels?: LevelsConfig;
+  onCatalogLoaded?: (type: ResourceType, entries: CatalogEntry[]) => void;
   disabled?: boolean;
 }) {
   const { showToast } = useToast();
@@ -482,7 +579,9 @@ function GitHubTree({
     permissionsApi
       .listResources("github_installation")
       .then((res) => {
-        if (!cancelled) setOrgs(res.data ?? []);
+        if (cancelled) return;
+        setOrgs(res.data ?? []);
+        onCatalogLoaded?.("github_installation", res.data ?? []);
       })
       .catch((err) => {
         if (!cancelled) showToast(getApiErrorMessage(err, w.failedLoadOrgs), "error", "Picker");
@@ -595,6 +694,7 @@ function GitHubTree({
                   {isOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4 rtl:rotate-180" />}
                 </button>
                 <Checkbox checked={wholeOrg} disabled={disabled} onClick={() => toggleOrg(login)} />
+                <ResourceAvatar resourceType="github_installation" resourceId={login} className="size-5" />
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-foreground truncate">
                     {org.label}
@@ -608,7 +708,8 @@ function GitHubTree({
                   </p>
                 </div>
                 {wholeOrg && (
-                  <PermissionChips
+                  <GrantControl
+                    levels={levels}
                     perms={grant?.permissions ?? []}
                     onToggle={(p) => {
                       const cur = grant?.permissions ?? [];
@@ -621,6 +722,9 @@ function GitHubTree({
                         ),
                       );
                     }}
+                    onSet={(perms) =>
+                      onChange(writeGrant(value, "github_installation", login, perms))
+                    }
                     disabled={disabled}
                   />
                 )}
@@ -683,7 +787,8 @@ function GitHubTree({
                               </p>
                             </div>
                             {checked && (
-                              <PermissionChips
+                              <GrantControl
+                                levels={levels}
                                 perms={rg?.permissions ?? []}
                                 onToggle={(p) => {
                                   const cur = rg?.permissions ?? [];
@@ -696,6 +801,9 @@ function GitHubTree({
                                     ),
                                   );
                                 }}
+                                onSet={(perms) =>
+                                  onChange(writeGrant(value, "github_repository", repo.id, perms))
+                                }
                                 disabled={disabled}
                               />
                             )}

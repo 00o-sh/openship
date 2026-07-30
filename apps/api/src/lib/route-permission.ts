@@ -350,6 +350,26 @@ export interface PermissionSpec {
    *  routes (ensure/scan/import) that can reference existing projects. */
   projectCreate?: boolean;
   /**
+   * The route's BODY names the project it acts on (a required `projectId`), and
+   * its handler already asserts `{project, body.projectId, <action>}` itself.
+   * Skips the collection-level `{leaf,"*"}` pre-check here and lets that handler
+   * assert be the authority.
+   *
+   * Why this exists: `resourceId: "*"` is unsatisfiable for a `restricted`
+   * principal (`permission.ts` denies every wildcard except the project-create
+   * pair), so the pre-check wasn't a second line of defence for scoped tokens —
+   * it was the ONLY line, and it rejected them before the precise per-project
+   * check could pass. A token granted a project could not deploy that project.
+   * For owner/admin/member nothing changes: both checks resolve to the same
+   * `roleAllowsResourceType` answer.
+   *
+   * Only set this where BOTH hold, or the route loses its gate entirely:
+   *   1. `body` declares `projectId` as REQUIRED — the auto-wired validator runs
+   *      right after this middleware, so a missing id is a 400 before the handler.
+   *   2. The handler asserts on that id before doing any work.
+   */
+  collectionProject?: boolean;
+  /**
    * Restrict this route to self-hosted instances. The secure router mounts the
    * `localOnly` middleware ahead of auth, so a request in CLOUD_MODE gets a 404
    * before any handler runs. Declarative replacement for an inline
@@ -421,7 +441,13 @@ export function requirePermission(spec: PermissionSpec): MiddlewareHandler {
   return async (c: Context, next: Next) => {
     let leafId: string | undefined;
 
-    if (parsed.isList) {
+    if (spec.collectionProject) {
+      // The body names the target project and the handler asserts on it — see
+      // PermissionSpec.collectionProject for why the `"*"` pre-check is skipped
+      // rather than kept as belt-and-braces. `leafId` stays "*" so the audit
+      // record below is byte-identical to the collection branch's.
+      leafId = "*";
+    } else if (parsed.isList) {
       // List scope — org from request (X-Organization-Id header or
       // session default). No specific resource id.
       await permission.assert(getRequestContext(c), {

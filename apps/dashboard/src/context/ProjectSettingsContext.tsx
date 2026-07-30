@@ -26,6 +26,10 @@ interface ProjectOptions {
   buildCommand?: string;
   outputDirectory?: string;
   productionPaths?: string;
+  /** Declared persistent mounts; null = inheriting the framework's defaults. */
+  volumes?: string[] | null;
+  /** What a deploy would actually mount (declaration OR framework default). */
+  resolvedVolumes?: string[];
   installCommand?: string;
   startCommand?: string;
   productionPort?: string;
@@ -106,6 +110,8 @@ interface BuildData {
   buildCommand: string;
   outputDirectory: string;
   productionPaths: string;
+  volumes: string[] | null;
+  resolvedVolumes: string[];
   installCommand: string;
   startCommand: string;
   productionPort: string;
@@ -124,6 +130,8 @@ const BUILD_OPTION_DEFAULTS = {
   buildCommand: "",
   outputDirectory: ".",
   productionPaths: "",
+  volumes: null as string[] | null,
+  resolvedVolumes: [] as string[],
   installCommand: "bun install",
   startCommand: "npm start",
   productionPort: "",

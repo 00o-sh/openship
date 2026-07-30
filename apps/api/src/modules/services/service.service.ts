@@ -13,6 +13,7 @@ import {
 } from "@repo/adapters";
 import { scopedVolumeName, type CommandExecutor } from "@repo/adapters";
 import { encrypt, decrypt } from "../../lib/encryption";
+import { ENV_MASK, hasMaskedValue, maskDriftChanges, maskServiceEnv, unmaskEnv } from "../../lib/secret-env";
 import { assertResourceInOrg, platform } from "../../lib/controller-helpers";
 import type { RequestContext } from "../../lib/request-context";
 import {
@@ -116,15 +117,22 @@ function normalizeRoutingPatch(input: Parameters<typeof normalizeRoutingFields>[
 // ─── Drift (compose reconciliation) ────────────────────────────────────────
 
 /**
- * Attach a computed `drift` field: the base→upstream field diff when the repo
- * compose changed a value the user had edited (`driftSpec` set by
- * reconcileFromCompose). `null` when there's nothing pending review.
+ * Present a service row to the client: attach a computed `drift` field and mask
+ * the compose `environment` map (#336). `drift` is the base→upstream field diff
+ * when the repo compose changed a value the user had edited (`driftSpec` set by
+ * reconcileFromCompose), `null` when there's nothing pending review.
+ *
+ * Masking is OUTPUT-ONLY — the stored row keeps the real values (the deploy
+ * pipeline injects them). The env map here becomes all-`••••••••`; operators
+ * reveal real values on demand via the write-gated reveal endpoint, and writes
+ * treat the sentinel as "keep stored" (see secret-env.ts). The drift diff's
+ * `environment` from/to are masked too so the reconcile UI can't leak them.
  */
 function withDrift(svc: Service) {
   return {
-    ...svc,
+    ...maskServiceEnv(svc),
     drift: svc.driftSpec
-      ? { changes: composeSpecDiff(svc.importedSpec ?? {}, svc.driftSpec) }
+      ? { changes: maskDriftChanges(composeSpecDiff(svc.importedSpec ?? {}, svc.driftSpec)) }
       : null,
   };
 }
@@ -144,6 +152,21 @@ export async function getService(
 ) {
   const { svc } = await assertServiceAccess(ctx, projectId, serviceId);
   return withDrift(svc);
+}
+
+/**
+ * #336: return a service's REAL (unmasked) compose `environment`. This is the
+ * write-gated reveal that backs the "show values" toggle — the route tag is
+ * `project:service:write`, so a read-only caller can never reach the plaintext
+ * (the whole point: read = masked). `getService` above always masks.
+ */
+export async function revealServiceEnv(
+  ctx: RequestContext,
+  projectId: string,
+  serviceId: string,
+): Promise<Record<string, string>> {
+  const { svc } = await assertServiceAccess(ctx, projectId, serviceId);
+  return (svc.environment as Record<string, string> | null) ?? {};
 }
 
 /**
@@ -252,7 +275,10 @@ async function materializeAppServiceRow(project: Project): Promise<void> {
     enabled: true,
     sortOrder: -1, // app first in the fan-out
     ...routing,
-    // build fields left undefined → project-snapshot fallback (identical single-app build)
+    // build fields left undefined → project-snapshot fallback (identical single-app
+    // build). Persistent storage inherits the same way (see appRowVolumes in
+    // compose/deploy.service.ts), so editing it on the project keeps reaching the
+    // app after a sidecar is added — copying it here would freeze it instead.
   });
 }
 
@@ -297,6 +323,16 @@ export async function createService(
   const existing = await repos.service.findByName(projectId, name);
   if (existing) {
     throw new Error("service-name-already-exists");
+  }
+
+  // #336: a brand-new service has no stored env to restore from, so any masked
+  // sentinel the client sent is dropped (never persist "••••••••"). Warn so a
+  // real value accidentally lost this way is traceable.
+  if (data.environment && hasMaskedValue(data.environment)) {
+    console.warn(
+      `[services] create "${name}": dropping masked env value(s) with no stored source`,
+    );
+    data = { ...data, environment: unmaskEnv(data.environment, null) };
   }
 
   // Discriminator default: compose. Matches the DB column default.
@@ -374,7 +410,7 @@ export async function createService(
     );
   }
 
-  return created;
+  return maskServiceEnv(created);
 }
 
 export async function updateService(
@@ -388,6 +424,16 @@ export async function updateService(
   // Normalize routing: when exposed is turned off, clear routing fields.
   // When domainType changes, clear the irrelevant domain field.
   const patch: Record<string, any> = { ...data };
+
+  // #336: env values are masked on read. Restore any sentinel the client echoed
+  // back to the stored value so editing an unrelated field never overwrites a
+  // secret with "••••••••". A real (revealed-and-changed) value passes through.
+  if ("environment" in patch) {
+    patch.environment = unmaskEnv(
+      patch.environment,
+      svc.environment as Record<string, string> | null,
+    );
+  }
 
   if ("name" in patch && typeof patch.name === "string") {
     const name = patch.name.trim();
@@ -598,7 +644,7 @@ export async function updateService(
     }
   }
 
-  return updated;
+  return maskServiceEnv(updated);
 }
 
 /** Best-effort runtime/route teardown is bounded so a slow or unreachable box
@@ -736,7 +782,7 @@ export async function listServiceEnvVars(
   // Decrypt and mask secrets
   return vars.map((v) => ({
     ...v,
-    value: v.isSecret ? "••••••••" : decrypt(v.value),
+    value: v.isSecret ? ENV_MASK : decrypt(v.value),
   }));
 }
 
@@ -784,7 +830,22 @@ export async function syncComposeServices(
 ) {
   const project = await repos.project.findById(projectId);
   assertResourceInOrg(project, "Project", ctx.organizationId, projectId);
-  return repos.service.syncFromCompose(projectId, parsed);
+
+  // #336: env is masked on read, so the client may echo the mask sentinel back.
+  // Restore each service's masked values from its stored row (matched by name)
+  // before persisting, so a sync never overwrites a secret with "••••••••".
+  const stored = await repos.service.listByProject(projectId);
+  const storedEnvByName = new Map(
+    stored.map((s) => [s.name, (s.environment as Record<string, string> | null) ?? {}]),
+  );
+  const reconciled = parsed.map((svc) =>
+    svc.environment
+      ? { ...svc, environment: unmaskEnv(svc.environment, storedEnvByName.get(svc.name) ?? null) }
+      : svc,
+  );
+
+  const synced = await repos.service.syncFromCompose(projectId, reconciled);
+  return synced.map(maskServiceEnv);
 }
 
 // ─── Service Deployments (per-deployment state) ──────────────────────────────
@@ -1310,7 +1371,12 @@ async function provisionServiceContainer(
       usesManagedRouting: resolved.usesManagedRouting,
       serverId: resolved.serverId ?? undefined,
     });
-    if (result.status === "failed") {
+    const svc = result.services.find((s) => s.serviceId === serviceId);
+    // THIS service's own outcome decides, not the batch's: strict scope carries
+    // live siblings forward as successes, so an overall "ready" says nothing
+    // about the one service we were asked to start (its container may have
+    // crash-looped through the stabilization watch).
+    if (result.status === "failed" || svc?.status === "failed") {
       // A source-built service has no image to launch on the decoupled path
       // (it only builds through the deploy pipeline) — steer to Redeploy.
       if (service.build && !service.image) {
@@ -1318,9 +1384,8 @@ async function provisionServiceContainer(
           `"${service.name}" builds from source — use Redeploy to build and start it.`,
         );
       }
-      throw new Error(result.error ?? "Failed to start service");
+      throw new Error(svc?.error ?? result.error ?? "Failed to start service");
     }
-    const svc = result.services.find((s) => s.serviceId === serviceId);
     return { containerId: svc?.containerId ?? "", ip: svc?.ip };
   } finally {
     await runtime.dispose?.();

@@ -122,6 +122,11 @@
       "clipboardEmpty": "El portapapeles está vacío",
       "clipboardInvalid": "El portapapeles no contiene variables de entorno válidas con formato KEY=VALUE",
       "clipboardBlocked": "El acceso al portapapeles fue bloqueado. Haz clic dentro de la caja de entorno y pega con Cmd/Ctrl+V."
+    },
+    "reveal": {
+      "show": "Mostrar valores",
+      "hide": "Ocultar valores",
+      "error": "No se pudieron mostrar los valores"
     }
   },
   "composeServices": {

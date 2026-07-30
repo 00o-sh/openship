@@ -20,7 +20,15 @@ const r = secureRouter(new Hono(), {
 r.get("/", { tag: "domain:list", mcp: { description: "List domains for the org / project." } }, ctrl.list);
 r.post(
   "/",
-  { tag: "domain:write", body: AddDomainBody, mcp: { description: "Add a domain (free subdomain or custom)." } },
+  {
+    tag: "domain:write",
+    // `ctrl.add` asserts {project, body.projectId, write} itself (projectId is
+    // required by AddDomainBody). Without this the conditional-singleton
+    // fallback asserted {domain,"*"}, which no scoped token can pass.
+    collectionProject: true,
+    body: AddDomainBody,
+    mcp: { description: "Add a domain (free subdomain or custom)." },
+  },
   ctrl.add,
 );
 // Side-effect-free DNS probe — POST is used to carry hostname in body.

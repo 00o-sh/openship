@@ -75,6 +75,15 @@ r.get(
   ctrl.getById,
 );
 r.get(
+  // #336: real (unmasked) compose env. Write-gated on purpose — read-only
+  // callers only ever see the masked map from GET /:serviceId. No mcp block:
+  // revealing secrets stays a dashboard action, off the automation surface.
+  "/:serviceId/env-reveal",
+  { tag: "project:service:write" },
+  cloudProjectProxy,
+  ctrl.revealEnv,
+);
+r.get(
   "/:serviceId/volume-sizes",
   {
     tag: "project:service:read",

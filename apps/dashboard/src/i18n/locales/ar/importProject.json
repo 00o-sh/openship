@@ -123,6 +123,11 @@
       "clipboardEmpty": "الحافظة فارغة",
       "clipboardInvalid": "لا تحتوي الحافظة على متغيرات بيئة صالحة بصيغة KEY=VALUE",
       "clipboardBlocked": "تم حظر الوصول إلى الحافظة. انقر داخل مربع البيئة والصق باستخدام Cmd/Ctrl+V."
+    },
+    "reveal": {
+      "show": "إظهار القيم",
+      "hide": "إخفاء القيم",
+      "error": "تعذر إظهار القيم"
     }
   },
   "composeServices": {

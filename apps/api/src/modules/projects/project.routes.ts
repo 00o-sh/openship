@@ -81,7 +81,7 @@ r.post(
     body: FolderSessionBody,
     mcp: {
       description:
-        "Folder-upload deploy — STEP 1/4. Opens an upload session for a local source folder and returns `upload` = { url, method, headers }. NEXT, upload the gzipped tarball yourself: POST it to `upload.url` with the returned headers and Content-Type: application/gzip. That byte upload is NOT an MCP tool (raw binary can't cross JSON-RPC) — use an HTTP client. Then call folder/scan. Sequence: session → (out-of-band tarball upload) → folder/scan → projects/ensure → deployments/build/access.",
+        "Folder-upload deploy — STEP 1/4. Opens an upload session for a local source folder and returns `upload` = { url, absoluteUrl, method, headers, requiresAuth }. NEXT, upload the gzipped tarball yourself: POST it to `upload.absoluteUrl` (or resolve the API-relative `upload.url` against your own API base) with the returned headers and Content-Type: application/gzip — and, when `upload.requiresAuth` is true, the SAME Authorization: Bearer token you used to open the session. That byte upload is NOT an MCP tool (raw binary can't cross JSON-RPC) — use an HTTP client. Then call folder/scan. Sequence: session → (out-of-band tarball upload) → folder/scan → projects/ensure → deployments/build/access.",
     },
   },
   folder.createSession,
@@ -93,10 +93,17 @@ r.post(
     collection: true,
     mcp: {
       description:
-        "Folder-upload deploy — STEP 2/4. Run AFTER the tarball is uploaded. Detects the uploaded source's framework/build config (stack, packageManager, install/build/start commands, outputDirectory, productionPaths, port). Body may be empty ({}). Feed the result into projects/ensure (STEP 3).",
+        "Folder-upload deploy — STEP 2/4. Run AFTER the tarball is uploaded. Detects the uploaded source's framework/build config (stack, packageManager, install/build/start commands, outputDirectory, productionPaths, port) and, for a docker-compose folder, the `services` array. Body may be empty ({}). Feed the result into projects/ensure (STEP 3) — including `services` verbatim when present.",
     },
   },
   folder.scanSession,
+);
+r.get(
+  // #336: real (unmasked) compose env for the folder-scan wizard's reveal
+  // toggle. Write-gated (project:write); no mcp — reveal is a dashboard action.
+  "/folder/scan/:sessionId/env-reveal",
+  { tag: "project:write", collection: true },
+  folder.revealSessionEnv,
 );
 // The relay upload is SELF-HOSTED ONLY: on the SaaS the browser uploads
 // straight to the Oblien workspace, so the API never receives bytes. localOnly
@@ -123,7 +130,7 @@ r.post(
     body: EnsureProjectBody,
     mcp: {
       description:
-        "Folder-upload deploy — STEP 3/4. Create or update the project that carries the build config — deployments/build/access reads config from the PROJECT ROW, not the upload session, so this must run first. Map the folder/scan fields in (framework = the scan's stack id) and set gitProvider:'upload'. Pass projectId to update an existing project. Returns the project id for STEP 4.",
+        "Folder-upload deploy — STEP 3/4. Create or update the project that carries the build config — deployments/build/access reads config from the PROJECT ROW, not the upload session, so this must run first. Map the folder/scan fields in (framework = the scan's stack id) and set gitProvider:'upload'. For a docker-compose folder, pass the scan's `services` array through too — that persists the project's service set — AND pass `uploadSessionId` with it, since the scan masks env values (`••••••••`) and that is what restores them. Pass projectId to update an existing project. Returns the project id for STEP 4.",
     },
   },
   ctrl.ensure,

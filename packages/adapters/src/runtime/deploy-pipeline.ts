@@ -89,10 +89,10 @@ export interface DeployEnvironment {
    * the deploy failed — in the overlap path this auto-reverts to the old
    * deployment (it was never touched).
    *
-   * DEFERRED SEAM: no runtime implements this yet. It is the single insertion
-   * point for the (separately-designed) health-check execution — once a runtime
-   * provides it, the pipeline needs no further changes. Until then the call is
-   * a no-op.
+   * The server deploy composes two checks here: a stabilization watch (the
+   * container didn't bounce or exit — asked of the runtime, so it also covers
+   * remote/SSH targets) and, for local targets, a TCP probe on the app's port.
+   * Omit it for deployments with nothing to probe (a static file-serve).
    */
   healthCheck?(containerId: string, config: DeployConfig): Promise<void>;
 

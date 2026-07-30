@@ -36,6 +36,11 @@ r.post(
   {
     tag: "deployment:write",
     collection: true,
+    // `ctrl.create` asserts {project, body.projectId, write} itself (projectId is
+    // required by TriggerDeployBody), so the collection `"*"` pre-check is
+    // redundant — and it was the reason a project-scoped token could never
+    // redeploy a project it was granted.
+    collectionProject: true,
     body: TriggerDeployBody,
     mcp: {
       description:
@@ -61,6 +66,9 @@ r.post(
   {
     tag: "deployment:write",
     collection: true,
+    // `ctrl.buildAccess` asserts {project, body.projectId, write} itself — see
+    // the same flag on POST / above.
+    collectionProject: true,
     body: BuildAccessBody,
     mcp: {
       description:

@@ -30,6 +30,7 @@ export const endpoints = {
     deploymentSession: (id: string | number) => `projects/${id}/deployment-session`,
     connect: (id: string | number) => `projects/${id}/connect`,
     connections: (id: string | number) => `projects/${id}/connections`,
+    storage: (id: string | number) => `projects/${id}/storage`,
     connection: (id: string | number, linkId: string) => `projects/${id}/connections/${linkId}`,
     env: (id: string | number) => `projects/${id}/env`,
     git: (id: string | number) => `projects/${id}/git`,
@@ -58,6 +59,8 @@ export const endpoints = {
     ensure: "projects/ensure",
     folderSession: "projects/folder/session",
     folderScan: (sessionId: string) => `projects/folder/scan/${sessionId}`,
+    // #336: real (unmasked) per-service env for the folder-scan wizard reveal.
+    folderEnvReveal: (sessionId: string) => `projects/folder/scan/${sessionId}/env-reveal`,
     folderUpload: (sessionId: string) => `projects/folder/upload/${sessionId}`,
   },
 
@@ -108,6 +111,9 @@ export const endpoints = {
       `projects/${projectId}/services/${serviceId}/env`,
     envSet: (projectId: string | number, serviceId: string) =>
       `projects/${projectId}/services/${serviceId}/env`,
+    // #336: real (unmasked) compose env for the "show values" reveal.
+    envReveal: (projectId: string | number, serviceId: string) =>
+      `projects/${projectId}/services/${serviceId}/env-reveal`,
   },
 
   /* ---------------------------------------------------------------- */

@@ -124,6 +124,14 @@ export interface OpenshipConfig {
   outputDirectory?: string;
   buildImage?: string;
   productionPaths?: string[];
+  /**
+   * Paths the app keeps across deploys. Either the short app form — a path
+   * relative to the app root (`"storage"`, `"public/uploads"`) — or full compose
+   * syntax (`"uploads:/app/storage"`, `"/srv/data:/app/storage"`). Omit to inherit
+   * the framework's defaults (Laravel keeps `storage/`); declare `[]` to opt out.
+   * Compose services keep declaring their own under `services[].volumes`.
+   */
+  volumes?: string[];
   // ── Runtime ──
   runtime?: OpenshipRuntime;
   productionMode?: OpenshipProductionMode;

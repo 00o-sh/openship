@@ -24,6 +24,7 @@ import {
   servicesNeedCloud,
   cloudRequiredCode,
   CLOUD_UNREACHABLE_CODE,
+  stackExpectsBuildCommand,
 } from "@repo/core";
 import { cloudClient } from "../../lib/cloud/client";
 import { isCloudConnectedForOrg } from "../../lib/cloud/session";
@@ -938,7 +939,12 @@ function checkStack(snapshot: DeploymentConfigSnapshot): PreflightCheck {
     };
   }
 
-  if (snapshot.hasBuild && !snapshot.buildCommand) {
+  // Only flag this where the stack actually declares a build step. Plenty don't —
+  // Express/Hono/plain Node install and run, a `docker` project builds from its
+  // own Dockerfile, and a PHP app's build step exists only for an optional JS
+  // asset pipeline. For those, "no build command" is the normal state, and saying
+  // otherwise on every deploy is how a preflight warning becomes background noise.
+  if (snapshot.hasBuild && !snapshot.buildCommand && stackExpectsBuildCommand(snapshot.framework)) {
     return {
       id: "stack",
       label: "Stack configuration",

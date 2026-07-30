@@ -321,8 +321,8 @@
     "startCommandLabel": "Start command",
     "startCommandPlaceholder": "npm start",
     "startCommandHint": "Leave empty to serve the build output as static files from the edge (nothing runs). Enter a command to run it as a live server process.",
-    "modeStatic": "Static",
-    "modeProcess": "Server process",
+    "modeStatic": "ثابت",
+    "modeProcess": "عملية خادم",
     "portLabel": "Port"
   }
 }

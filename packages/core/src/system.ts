@@ -43,6 +43,26 @@ export const SYSTEM = {
     MAX_ERROR_MESSAGE_LENGTH: 512,
     /** Default restart policy for production containers */
     DEFAULT_RESTART_POLICY: "always" as const,
+    /**
+     * How long a just-started container is watched before a deploy may call
+     * itself ready. Container-create succeeding proves nothing: a bad start
+     * command exits within milliseconds and `restart: always` hides it behind a
+     * bounce loop. Measured from each container's OWN start time, so a stack
+     * whose earlier services have already been up this long waits only for the
+     * last one.
+     */
+    STABILIZE_WINDOW_MS: 15_000,
+    /** Inspect poll interval inside that window. */
+    STABILIZE_POLL_MS: 1_000,
+    /**
+     * Restarts within the window that mean "crash loop" rather than "waited for
+     * a dependency and recovered". Docker's restart backoff (100ms doubling)
+     * takes an instantly-exiting process past this in ~2s, while a service that
+     * times out waiting on a slow database manages one or two.
+     */
+    STABILIZE_CRASH_RESTARTS: 3,
+    /** Log lines folded into the failure message, so diagnosing needs no SSH. */
+    STABILIZE_LOG_TAIL_LINES: 20,
   },
 
   // ── SSE / Build Streaming ────────────────────────────────────────────

@@ -10,6 +10,7 @@ describe("parseOpenshipConfig", () => {
       buildCommand: "pnpm build",
       outputDirectory: ".next",
       productionPaths: [".next", "public"],
+      volumes: ["storage", "uploads:/app/public/uploads"],
       runtime: "docker",
       productionMode: "standalone",
       port: 3000,
@@ -27,6 +28,7 @@ describe("parseOpenshipConfig", () => {
       env: { PUBLIC_URL: "https://x", API_KEY: { value: "sk_1", secret: true } },
       resources: { tier: "medium" },
     });
+    expect(config?.volumes).toEqual(["storage", "uploads:/app/public/uploads"]);
     // normalized domains: string → object
     expect(config?.domains?.[0]).toEqual({ domain: "app.example.com" });
     expect(config?.domains?.[1]).toMatchObject({ domain: "api.example.com", port: 8080, type: "custom" });

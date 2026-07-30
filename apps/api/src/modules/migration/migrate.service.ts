@@ -21,6 +21,7 @@ import type { RequestContext } from "../../lib/request-context";
 import { ensureProject, createServicesProjectWithId } from "../projects/project-crud.service";
 import { getFileContent } from "../github/github.service";
 import { parseComposeFile } from "../../lib/compose-parser";
+import { unmaskEnv } from "../../lib/secret-env";
 import { createServerDockerRuntime } from "../../lib/deployment-runtime";
 import { sshManager } from "../../lib/ssh-manager";
 import { readProjectSnapshot } from "../../lib/openship-manifest";
@@ -275,8 +276,9 @@ export function buildAdoptedServiceRows(
       // Only keep dependencies on services we're also adopting.
       dependsOn: s.dependsOn.filter((d) => selected.has(d)).map((d) => firstUnique.get(d) ?? d),
       // Env override (edited in the wizard) keyed by the DISCOVERED name; default
-      // = the container's live env.
-      environment: serviceEnv?.[s.name] ?? s.env,
+      // = the container's live env. #336: the wizard sees env masked, so restore
+      // any echoed mask sentinel from the freshly-discovered live env (server truth).
+      environment: serviceEnv?.[s.name] ? unmaskEnv(serviceEnv[s.name], s.env) : s.env,
       volumes: s.volumes.map(volumeToComposeString).filter((v): v is string => v !== null),
       command: s.command,
       restart: s.restart,
@@ -404,7 +406,10 @@ export async function adoptServerStack(opts: {
         ports,
         // Keep deps only on services this project actually has (adopted or new).
         dependsOn: (rs.dependsOn ?? []).filter((d) => repoServices.has(d) || adoptedNames.has(d)),
-        environment: serviceEnv?.[name] ?? rs.environment ?? {},
+        // #336: restore masked sentinels from the repo compose env (real values).
+        environment: serviceEnv?.[name]
+          ? unmaskEnv(serviceEnv[name], rs.environment ?? {})
+          : rs.environment ?? {},
         volumes: rs.volumes ?? [],
         command: rs.command,
         restart: rs.restart,

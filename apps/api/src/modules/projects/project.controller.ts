@@ -10,6 +10,7 @@
 import type { Context } from "hono";
 import { streamSSE } from "../../lib/sse";
 import { assertResourceInOrg, param } from "../../lib/controller-helpers";
+import { maskDeploymentEnv } from "../../lib/secret-env";
 import { serviceKind } from "../../lib/deployable-service";
 import { reconcileProjectRoutes } from "../../lib/route-apply.service";
 import { isLoopbackHost, isReservedLoopbackPort } from "../../lib/public-endpoints";
@@ -23,10 +24,11 @@ import * as projectTeardown from "./project-teardown";
 import { getRouteStrategy } from "../settings/settings.service";
 import { checkProjectPorts } from "./port-check.service";
 import { checkProjectOutput } from "./output-check.service";
-import { AppError, safeErrorMessage } from "@repo/core";
+import { AppError, resolveProjectVolumes, safeErrorMessage } from "@repo/core";
 import type {
   TCreateProjectBody,
   TCreateProjectEnvironmentBody,
+  TEnsureProjectBody,
   TUpdateProjectBody,
   TMergeEnvVarsBody,
   TUpdateResourcesBody,
@@ -70,7 +72,7 @@ const luaDeployedServers = new Set<string>();
 
 function logEnsureProjectError(
   userId: string,
-  body: TCreateProjectBody & { projectId?: string },
+  body: TEnsureProjectBody,
   err: unknown,
 ) {
   console.error("[PROJECT] Failed to ensure project", {
@@ -99,7 +101,7 @@ function logEnsureProjectError(
 
 export async function ensure(c: Context) {
   const ctx = getRequestContext(c);
-  const body = await c.req.json<TCreateProjectBody & { projectId?: string }>();
+  const body = await c.req.json<TEnsureProjectBody>();
 
   if (!body.name) {
     return c.json({ success: false, error: "name is required" }, 400);
@@ -1907,7 +1909,8 @@ export async function listDeployments(c: Context) {
     environment,
   });
   return c.json({
-    data: result.rows,
+    // #336: mask meta.composeServices[].environment (twin of deployment.controller list).
+    data: result.rows.map(maskDeploymentEnv),
     total: result.total,
     page: result.page,
     perPage: result.perPage,
@@ -1963,6 +1966,14 @@ export async function getInfo(c: Context) {
     hasServer,
     hasBuild: project.hasBuild ?? true,
     rootDirectory: project.rootDirectory ?? "./",
+    // Two fields, because "" and "inherits the framework default" are different
+    // answers: `volumes` is what the project declared (null = not declared) and
+    // `resolvedVolumes` is what a deploy would actually mount, so the editor can
+    // show the inherited value as a placeholder instead of pretending it's unset.
+    volumes: (project.volumes as string[] | null) ?? null,
+    resolvedVolumes: hasServer
+      ? resolveProjectVolumes(project.volumes as string[] | null, project.framework)
+      : [],
     isLoading: false,
     error: null,
   };

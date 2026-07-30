@@ -105,6 +105,16 @@ export {
   type RouteRegistrationOptions,
   registerResolvedRoutes,
 } from "./runtime/route-registration";
+// Post-deploy stabilization watch — "the container was created" is not "the
+// container stayed up", and every point-in-time status read says it did.
+export {
+  type ContainerStabilitySample,
+  type StabilityOptions,
+  type StabilityStatus,
+  type StabilityVerdict,
+  classifyStability,
+  watchContainerStability,
+} from "./runtime/stability";
 export {
   type PortOccupant,
   probeListeningPort,

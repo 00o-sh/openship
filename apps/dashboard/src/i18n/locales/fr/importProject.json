@@ -123,6 +123,11 @@
       "clipboardEmpty": "Le presse-papiers est vide",
       "clipboardInvalid": "Le presse-papiers ne contient pas de variables d'environnement KEY=VALUE valides",
       "clipboardBlocked": "L'accès au presse-papiers a été bloqué. Cliquez à l'intérieur de la zone d'environnement et collez avec Cmd/Ctrl+V."
+    },
+    "reveal": {
+      "show": "Afficher les valeurs",
+      "hide": "Masquer les valeurs",
+      "error": "Impossible d’afficher les valeurs"
     }
   },
   "composeServices": {

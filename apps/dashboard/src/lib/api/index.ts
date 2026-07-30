@@ -25,7 +25,14 @@ export { endpoints } from "./endpoints";
 
 /* --- Domain services ---------------------------------------------- */
 export { projectsApi } from "./projects";
-export type { RouteRuleRow, RouteRuleInput } from "./projects";
+export type {
+  RouteRuleRow,
+  RouteRuleInput,
+  BindObjectStorageBody,
+  ObjectStorageBinding,
+  ObjectStorageProviderSpec,
+  ObjectStorageView,
+} from "./projects";
 export { appsApi } from "./apps";
 export type { AppCatalogEntry, AppCatalogField, InstallAppResult } from "./apps";
 export { deployApi } from "./deploy";

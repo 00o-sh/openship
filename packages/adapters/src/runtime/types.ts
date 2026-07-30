@@ -27,6 +27,7 @@ import type {
 import type { ComposeAdvanced } from "@repo/core";
 import type { BuildLogger } from "./build-pipeline";
 import type { PortProbeExecutor } from "../system/port-listen";
+import type { ContainerStabilitySample } from "./stability";
 
 // ─── Capabilities ────────────────────────────────────────────────────────────
 
@@ -97,7 +98,14 @@ export type RuntimeCapability =
    * exec, or — for Bare — the host executor itself (the process shares the host
    * netns). Capability flag: "inContainerExec".
    */
-  | "inContainerExec";
+  | "inContainerExec"
+  /**
+   * Runtime can report a container's RESTART HISTORY and health, not just a
+   * point-in-time status — the readings the post-deploy stabilization watch
+   * needs to tell "up" from "bouncing" (`sampleStability`). Docker implements
+   * it; Cloud/Bare expose no restart counter, so their deploys skip the watch.
+   */
+  | "stabilityProbe";
 
 // ─── Interface ───────────────────────────────────────────────────────────────
 
@@ -179,6 +187,16 @@ export interface RuntimeAdapter {
 
   /** Get the current status and metadata */
   getContainerInfo(containerId: string): Promise<ContainerInfo>;
+
+  /**
+   * One stabilization reading: restart count, last exit code, healthcheck
+   * verdict, current uptime. `getContainerInfo` cannot answer this — it maps
+   * `restarting` onto `running` on purpose, so a crash-looping container reads
+   * as healthy there. Returns a `missing` sample when the container is gone.
+   * Only present when `supports("stabilityProbe")`; the post-deploy watch is
+   * skipped for runtimes without it.
+   */
+  sampleStability?(containerId: string): Promise<ContainerStabilitySample>;
 
   /** Get runtime logs */
   getRuntimeLogs(containerId: string, tail?: number): Promise<LogEntry[]>;

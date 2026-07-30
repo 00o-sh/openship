@@ -6,6 +6,7 @@ import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import { encodeLocalSlug, encodeRepoSlug } from "@/utils/repoSlug";
 import { EnvVarsEditor } from "./EnvVarsEditor";
+import { StorageSettings } from "./StorageSettings";
 
 /**
  * Project → Runtime tab. READ-ONLY by design.
@@ -228,6 +229,11 @@ export const BuildSettings = () => {
           />
         </div>
       </SectionCard>
+
+      {/* Storage — persistent paths + object storage. Editable in place (see the
+          component's own note on why it doesn't route through the wizard). Only
+          meaningful for a project with a running container. */}
+      {buildData.hasServer && <StorageSettings />}
 
       {/* Environment variables — edited in place via a safe per-variable editor
           (diff-merge; untouched secrets are never re-sent), NOT the wizard. */}
