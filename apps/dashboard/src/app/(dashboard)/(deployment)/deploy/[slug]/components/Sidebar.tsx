@@ -8,6 +8,7 @@ import DropdownMenu from "@/components/ui/DropdownMenu";
 import DomainSettings from "./DomainSettings";
 import BuildSummary from "./BuildSummary";
 import { CloudWaitlistModal } from "./CloudWaitlistModal";
+import DnsRecordsModal from "@/components/domains/DnsRecordsModal";
 import { useCloneStrategyGate } from "./CloneStrategyNudge";
 import { useDeployment } from "@/context/DeploymentContext";
 import {
@@ -220,12 +221,45 @@ const Sidebar: React.FC = () => {
   // Runtime isolation (Direct/Sandbox) for self-hosted server apps is now an
   // inline setting in the target step (ServerRuntimePicker) — config.runtimeMode
   // already carries the choice, so deploy proceeds with no interruption.
-  const continueDeploy = useCallback(async (overrides?: { buildStrategy?: BuildStrategy }) => {
+  const doDeploy = useCallback(async (overrides?: { buildStrategy?: BuildStrategy }) => {
     const deploymentId = await startDeployment(overrides);
     if (deploymentId) {
       router.push(`/build/${deploymentId}`);
     }
   }, [startDeployment, router]);
+
+  const continueDeploy = useCallback(async (overrides?: { buildStrategy?: BuildStrategy }) => {
+    // Pre-deploy DNS gate (self-hosted custom domain): surface the records to add
+    // BEFORE the deploy so DNS is pointed when the first-deploy SSL attempt runs.
+    // A failed attempt just marks the domain Action Required — never blocks the
+    // deploy. Informational-blocking: Deploy proceeds, Cancel aborts.
+    const custom = selfHosted
+      ? config.publicEndpoints.find((e) => e.domainType === "custom" && e.customDomain?.trim())
+      : undefined;
+    if (custom?.customDomain) {
+      const apex = custom.customDomain.trim().toLowerCase().replace(/^www\./, "");
+      const includeWww = config.publicEndpoints.some(
+        (e) => e.domainType === "custom" && e.customDomain?.trim().toLowerCase() === `www.${apex}`,
+      );
+      let modalId = "";
+      modalId = showModal({
+        customContent: (
+          <DnsRecordsModal
+            hostname={apex}
+            includeWww={includeWww}
+            onConfirm={() => {
+              hideModal(modalId);
+              void doDeploy(overrides);
+            }}
+            onCancel={() => hideModal(modalId)}
+          />
+        ),
+        maxWidth: "560px",
+      });
+      return;
+    }
+    await doDeploy(overrides);
+  }, [doDeploy, selfHosted, config.publicEndpoints, showModal, hideModal]);
 
   const handleDeploy = useCallback(async () => {
     // TODO: removed — temporary SaaS gate. The managed cloud isn't open yet, so

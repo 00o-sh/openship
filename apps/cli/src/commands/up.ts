@@ -16,10 +16,18 @@ import {
   composeIsViableDefault,
   ensureDocker,
   composeInternalToken,
+  composeTrustedOriginUrls,
   hasDockerCompose,
+  resolveComposePorts,
   sourceBuildDir,
 } from "../lib/compose";
-import { readInstanceUrl, resolvePorts } from "../lib/ports";
+import {
+  DEFAULT_API_PORT,
+  DEFAULT_DASHBOARD_PORT,
+  portMoveNotice,
+  readInstanceUrl,
+  resolvePorts,
+} from "../lib/ports";
 import { prepareFromSource, type FromSourceRun } from "../lib/from-source";
 import {
   markStoppedProxyImported,
@@ -159,9 +167,15 @@ function ensureAuthSecret(): string {
 
 export const upCommand = new Command("up")
   .description("Start Openship as a persistent service (boot + auto-restart); --foreground to run attached")
-  .option("--port <port>", "API port to listen on", "4000")
+  // No defaults on the port flags ON PURPOSE. A commander default makes the option
+  // always "set", which reads downstream as "the operator asked for 4000" — it
+  // outranked the ports the install was already configured with (rewriting an
+  // install pinned to 4100 back to 4000 on a plain re-run) and made the
+  // remembered-port path in resolvePorts dead code. Absent must mean absent; the
+  // preference chain in lib/ports.ts supplies 4000/3001 as the last resort.
+  .option("--port <port>", "API port to listen on (default: 4000, or the next free port if it's taken)")
   .option("--data-dir <dir>", "Directory for the embedded database")
-  .option("--dashboard-port <port>", "Dashboard port", "3001")
+  .option("--dashboard-port <port>", "Dashboard port (default: 3001, or the next free port if it's taken)")
   .option("--no-ui", "Run the API only — don't download/serve the dashboard")
   .option("--ui-version <tag>", "Dashboard release tag to run (default: this CLI's version)")
   .option("-f, --foreground", "Run attached in this terminal instead of as a background service")
@@ -346,6 +360,21 @@ async function runCompose(opts: UpOpts & { yes?: boolean }): Promise<{ apiPort: 
   // same `.env` `composeUp` will, and both need the effective public URL.
   const publicUrl = effectivePublicUrl(opts.publicUrl);
 
+  // No permanent port here either: the stack PUBLISHES the api + dashboard ports on
+  // the host, so an occupied 4000/3001 isn't a degraded install — it's a
+  // `bind: address already in use` that fails the whole `up`. Resolve once, before
+  // the prefetch writes `.env`, and pass the same values to both steps so the
+  // prefetched config and the started stack can't disagree.
+  const ports = await resolveComposePorts({ api: opts.port, dashboard: opts.dashboardPort });
+  const apiPort = String(ports.api);
+  const dashboardPort = String(ports.dashboard);
+  // A moved dashboard port silently invalidates any trusted origin that named the
+  // old one, so the notice checks the install's configured origins too.
+  const portNotice = portMoveNotice(ports, [...composeTrustedOriginUrls(), publicUrl]);
+  if (portNotice.length) {
+    console.log("\n" + portNotice.map((l) => chalk.yellow(`  ${l}`)).join("\n"));
+  }
+
   // Fetch the images BEFORE the preflight can stop anyone's proxy. A takeover that
   // pulls afterwards keeps the box dark for the whole download, and a pull that
   // fails takes their sites down for a problem we could have hit while they were
@@ -354,8 +383,8 @@ async function runCompose(opts: UpOpts & { yes?: boolean }): Promise<{ apiPort: 
     sourceBuildDir() ? "Building images before touching :80/:443…" : "Pulling images before touching :80/:443…",
   ).start();
   const fetched = composePrefetch({
-    apiPort: opts.port,
-    dashboardPort: opts.dashboardPort,
+    apiPort,
+    dashboardPort,
     publicUrl,
     trustProxy: opts.trustProxy,
     noHostControl: opts.hostControl === false ? true : undefined,
@@ -396,8 +425,8 @@ async function runCompose(opts: UpOpts & { yes?: boolean }): Promise<{ apiPort: 
   const res = await composeUp({
     // Prefetched above, before the preflight stopped anything.
     alreadyFetched: true,
-    apiPort: opts.port,
-    dashboardPort: opts.dashboardPort,
+    apiPort,
+    dashboardPort,
     publicUrl,
     trustProxy: opts.trustProxy,
     // commander maps `--no-host-control` to hostControl === false. `undefined` when
@@ -537,8 +566,8 @@ export async function startService(
       chalk.dim(`\n  service manager: ${p.kind}\n  path: ${p.path}\n\n`) + p.content + "\n",
     );
     return {
-      port: String(opts.port || "4000"),
-      dashPort: String(opts.dashboardPort || "3001"),
+      port: String(opts.port || DEFAULT_API_PORT),
+      dashPort: String(opts.dashboardPort || DEFAULT_DASHBOARD_PORT),
       publicUrl,
     };
   }
@@ -568,10 +597,11 @@ export async function startService(
     const res = installAndStart(flags);
     // The wizard renders its own summary via clack — stay silent for it.
     if (!runOpts.quiet) {
-      if (resolved.switched.api || resolved.switched.dashboard) {
-        console.log(
-          chalk.yellow(`\n  A preferred port was busy — using API ${port}, dashboard ${dashPort}.`),
-        );
+      // Same trap as the compose path: a public URL pinned to the port we just
+      // moved off is an origin the API will reject every login from.
+      const portNotice = portMoveNotice(resolved, [publicUrl]);
+      if (portNotice.length) {
+        console.log("\n" + portNotice.map((l) => chalk.yellow(`  ${l}`)).join("\n"));
       }
       const dashboardLine = publicUrl
         ? chalk.dim(`  Dashboard: ${publicUrl}  (login required)\n`)
@@ -648,8 +678,22 @@ async function runForeground(opts: UpOpts, source?: FromSourceRun): Promise<void
       ...process.env,
       PORT: port,
       NODE_ENV: "production",
-      // desktop mode → in-process job runner (no Redis).
-      DEPLOY_MODE: "desktop",
+      // BARE, not "desktop". This box is a server-host: openship runs ON it and it
+      // is itself a deploy target. Claiming "desktop" (once done here just to get
+      // the in-process job runner) made the API report `isServerHost: false`
+      // (health.routes.ts), so `registerSelfServerReconcile` — gated on
+      // modes:["selfhosted"] — never ran, "This Server" was never registered, and
+      // the deploy wizard offered Openship Cloud as the only target on a box the
+      // operator had just installed on purpose.
+      //
+      // It also mislabelled the security posture: DEPLOY_MODE=desktop relaxes the
+      // zero-auth gate and makes INTERNAL_TOKEN optional. "desktop" belongs to
+      // Electron alone (apps/desktop/src/main/services.ts:361) — the only launcher
+      // that is genuinely a single-user loopback app.
+      //
+      // The job runner is unaffected: it picks BullMQ vs in-process by REDIS
+      // REACHABILITY (app.ts:238), and OPENSHIP_JOB_RUNNER below already pins it.
+      DEPLOY_MODE: "bare",
       OPENSHIP_TARGET: "local",
       OPENSHIP_JOB_RUNNER: "in-process",
       PGLITE_DATA_DIR: dataDir,

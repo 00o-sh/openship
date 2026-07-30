@@ -40,7 +40,16 @@
     "verifySuffix": " for ownership verification.",
     "cloudInfoPre": "Add the ",
     "recordCname": "CNAME record",
-    "cloudInfoMid": " for routing, then add the "
+    "cloudInfoMid": " for routing, then add the ",
+    "modalTitle": "Point your domain, then deploy",
+    "modalSubtitle": "Add these records at your DNS provider so HTTPS can be issued on the first deploy. If DNS isn't ready yet, the site still deploys over HTTP and you can issue the certificate later from the Domains tab.",
+    "descCnameWww": "Points www to your apex domain",
+    "autoConfigTitle": "Auto-configure with my DNS provider",
+    "autoConfigDesc": "Connect your registrar and we'll add these records for you.",
+    "comingSoon": "Coming soon",
+    "deployAction": "Deploy",
+    "cancel": "Cancel",
+    "loadingRecords": "Loading DNS records…"
   },
   "buildSummary": {
     "title": "Deploy Summary",

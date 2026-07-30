@@ -17,7 +17,12 @@ import { OS_DIR } from "./paths";
 import chalk from "chalk";
 import { spinner, log, select, confirm, isCancel, cancel } from "@clack/prompts";
 import { serviceStatus, stop as stopService, type ServiceKind } from "./service";
-import { readInstanceUrl } from "./ports";
+import {
+  readInstanceUrl,
+  readStoredPorts as storedPorts,
+  storedApiPort as apiPort,
+  storedDashboardPort as dashboardPort,
+} from "./ports";
 import { startService, ensureInternalToken } from "../commands/up";
 import {
   resolveDataDir,
@@ -42,21 +47,10 @@ export function ensure<T>(value: T | symbol): T {
   return value as T;
 }
 
-export function storedPorts(): { api?: number; dashboard?: number } {
-  try {
-    const p = join(OS_DIR, "ports.json");
-    return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : {};
-  } catch {
-    return {};
-  }
-}
-
-export function apiPort(): number {
-  return storedPorts().api ?? 4000;
-}
-export function dashboardPort(): number {
-  return storedPorts().dashboard ?? 3001;
-}
+// Ports come from lib/ports.ts — the single reader/persister for every install
+// mode. Re-exported under these names because doctor + the control panel import
+// them from this module; they are NOT a second implementation.
+export { storedPorts, apiPort, dashboardPort };
 
 /** Internal-token-gated GET against the loopback API. null on any failure. */
 export async function internalGet(path: string, timeoutMs = 8000): Promise<any | null> {

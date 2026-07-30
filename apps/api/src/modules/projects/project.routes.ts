@@ -14,7 +14,6 @@
 
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
-import { tbValidator } from "@hono/typebox-validator";
 import { secureRouter } from "../../lib/secure-router";
 import { cloudProjectProxy } from "../../lib/cloud/project-router";
 import * as ctrl from "./project.controller";
@@ -70,10 +69,10 @@ r.post(
   {
     tag: "project:write",
     collection: true,
+    body: FolderSessionBody,
     mcp: {
       description:
         "Folder-upload deploy — STEP 1/4. Opens an upload session for a local source folder and returns `upload` = { url, method, headers }. NEXT, upload the gzipped tarball yourself: POST it to `upload.url` with the returned headers and Content-Type: application/gzip. That byte upload is NOT an MCP tool (raw binary can't cross JSON-RPC) — use an HTTP client. Then call folder/scan. Sequence: session → (out-of-band tarball upload) → folder/scan → projects/ensure → deployments/build/access.",
-      body: FolderSessionBody,
     },
   },
   folder.createSession,
@@ -112,10 +111,10 @@ r.post(
   {
     tag: "project:write",
     collection: true,
+    body: EnsureProjectBody,
     mcp: {
       description:
         "Folder-upload deploy — STEP 3/4. Create or update the project that carries the build config — deployments/build/access reads config from the PROJECT ROW, not the upload session, so this must run first. Map the folder/scan fields in (framework = the scan's stack id) and set gitProvider:'upload'. Pass projectId to update an existing project. Returns the project id for STEP 4.",
-      body: EnsureProjectBody,
     },
   },
   ctrl.ensure,
@@ -131,10 +130,10 @@ r.post(
     tag: "project:write",
     collection: true,
     projectCreate: true,
+    body: CreateProjectBody,
     mcp: {
       description:
         "Create a project from a git or local source (build config baked into the project). For a folder-upload deploy use projects/ensure instead (it accepts the folder/scan config and gitProvider:'upload').",
-      body: CreateProjectBody,
     },
   },
   ctrl.create,
@@ -151,7 +150,8 @@ r.patch(
   "/:id",
   {
     tag: "project:write",
-    mcp: { description: "Update a project's configuration (build config, source, options).", body: UpdateProjectBody },
+    body: UpdateProjectBody,
+    mcp: { description: "Update a project's configuration (build config, source, options)." },
   },
   cloudProjectProxy,
   ctrl.update,
@@ -163,7 +163,8 @@ r.post(
   "/:id/environments",
   {
     tag: "project:write",
-    mcp: { description: "Create a project environment (e.g. a preview).", body: CreateProjectEnvironmentBody },
+    body: CreateProjectEnvironmentBody,
+    mcp: { description: "Create a project environment (e.g. a preview)." },
   },
   cloudProjectProxy,
   ctrl.createEnvironment,
@@ -204,12 +205,12 @@ r.patch(
   "/:id/env",
   {
     tag: "project:write",
-    mcp: { description: "Merge env var changes (upserts + deletes); untouched vars are preserved.", body: MergeEnvVarsBody },
+    // Validated by the auto-wired tbValidator (spec.body) → a wrong-shape body
+    // is a 400, not a 500 in the service's data.upserts.map. #231
+    body: MergeEnvVarsBody,
+    mcp: { description: "Merge env var changes (upserts + deletes); untouched vars are preserved." },
   },
   cloudProjectProxy,
-  // Validate the body shape → 400 (not a 500 when the service does
-  // data.upserts.map on a wrong-shape-but-valid-JSON body). #231
-  tbValidator("json", MergeEnvVarsBody),
   ctrl.mergeEnvVars,
 );
 
@@ -241,7 +242,8 @@ r.patch(
   "/:id/resources",
   {
     tag: "project:write",
-    mcp: { description: "Update the project's CPU/RAM/disk, sleep mode, or port.", body: UpdateResourcesBody },
+    body: UpdateResourcesBody,
+    mcp: { description: "Update the project's CPU/RAM/disk, sleep mode, or port." },
   },
   cloudProjectProxy,
   ctrl.updateResources,

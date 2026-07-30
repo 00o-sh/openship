@@ -294,7 +294,15 @@ export function createDomainRepo(db: Database) {
      *  will renew this row, so it must be visible in the type. */
     async updateSsl(
       id: string,
-      data: { sslStatus: string; sslIssuer?: string; sslExpiresAt?: Date; manualSsl?: boolean },
+      data: {
+        sslStatus: string;
+        sslIssuer?: string;
+        sslExpiresAt?: Date;
+        manualSsl?: boolean;
+        // Set when a deploy-time issuance fails on a still-unverified domain — the
+        // reason shown behind the Action-Required dot. Column already exists.
+        lastVerifyError?: string | null;
+      },
     ) {
       await this.update(id, data);
     },

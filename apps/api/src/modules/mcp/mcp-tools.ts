@@ -143,7 +143,10 @@ export function getMcpTools(): McpToolDef[] {
       const leaf = parsed?.leaf ?? "";
       const pathParams = extractPathParams(route.path);
       const hasBody = BODY_METHODS.has(route.method);
-      const bodySchema = mcp?.body as Record<string, unknown> | undefined;
+      // Single-source body schema: the top-level `spec.body` (which also drives
+      // auto-validation) wins; `mcp.body` is a deprecated fallback.
+      const specBody = isPublicSpec(spec) ? undefined : spec.body;
+      const bodySchema = (specBody ?? mcp?.body) as Record<string, unknown> | undefined;
       return {
         name: toolName(route, taken),
         description: mcp?.description ?? `${route.method} ${route.path}`,
@@ -157,12 +160,44 @@ export function getMcpTools(): McpToolDef[] {
           root: parsed?.root ?? "",
           leaf,
           action: (parsed?.action ?? "read") as string,
-          wildcard: (parsed?.isList ?? false) || collection || ORG_SINGLETON_RESOURCES.has(leaf),
+          // "wildcard" = operates on the WHOLE org (a scoped token can never
+          // pass it). A list / collection / org-singleton op is org-wide ONLY
+          // when it carries no path params. WITH path params (e.g.
+          // /repos/:owner/:repo/branches, /projects/:id/deployments) it is
+          // scoped to a specific resource, so a grant on that resource's root
+          // type enables it — those must stay listable for scoped tokens.
+          wildcard:
+            ((parsed?.isList ?? false) || collection || ORG_SINGLETON_RESOURCES.has(leaf)) &&
+            pathParams.length === 0,
           grantRoot: PROJECT_ROOTED.has(leaf as CheckedResourceType) ? "project" : (parsed?.root ?? ""),
         },
       };
     });
   return cached;
+}
+
+/**
+ * GitHub is granted at three widths that all key off the same route root
+ * ("github"): the org-wide `github`, per-account `github_installation`, and
+ * per-repo `github_repository`. Any of them satisfies a github-rooted tool for
+ * `tools/list` purposes (call-time still resolves the exact width — see
+ * github-access.ts). Without this, a repo-scoped token (grant type
+ * `github_repository`) would advertise ZERO github tools even though it can
+ * call the per-repo ones.
+ */
+const GITHUB_GRANT_FAMILY: ReadonlySet<string> = new Set([
+  "github",
+  "github_installation",
+  "github_repository",
+]);
+
+/** Does the principal hold a grant whose root type enables this tool? */
+function principalHasGrantFor(granted: ReadonlySet<string>, grantRoot: string): boolean {
+  if (grantRoot === "github") {
+    for (const t of GITHUB_GRANT_FAMILY) if (granted.has(t)) return true;
+    return false;
+  }
+  return granted.has(grantRoot);
 }
 
 /**
@@ -172,6 +207,11 @@ export function getMcpTools(): McpToolDef[] {
  * owner/admin/member by `roleAllowsResourceType`, and a restricted principal by
  * its grant set. `tools/call` still enforces per call — this only trims what's
  * advertised. A tool is listed iff the caller could succeed at it for some input.
+ *
+ * Note: `projectCreate` (POST /projects under the "own projects" scope) stays
+ * wildcard-hidden here — grantedRootTypes tracks only resource TYPES, so it
+ * can't distinguish a create-any-project grant from a grant on one project.
+ * That tool is under-advertised for such tokens; call-time still allows it.
  */
 export function filterToolsForPrincipal(tools: McpToolDef[], principal: McpPrincipal): McpToolDef[] {
   return tools.filter((t) => {
@@ -182,10 +222,11 @@ export function filterToolsForPrincipal(tools: McpToolDef[], principal: McpPrinc
     if (principal.role !== "restricted") {
       return roleAllowsResourceType(principal.role, t.perm.leaf as CheckedResourceType);
     }
-    // Restricted: wildcard ("*") ops (list / create / org-singleton) are always
-    // denied for a scoped token; a per-resource op needs a grant on its root type.
+    // Restricted: org-wide ops (list / create / org-singleton with no resource
+    // param) are always denied for a scoped token; a per-resource op needs a
+    // grant on its root type (github grants matched as a family).
     if (t.perm.wildcard) return false;
-    return principal.grantedRootTypes.has(t.perm.grantRoot);
+    return principalHasGrantFor(principal.grantedRootTypes, t.perm.grantRoot);
   });
 }
 

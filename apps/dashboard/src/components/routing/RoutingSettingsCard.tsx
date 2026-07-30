@@ -46,6 +46,12 @@ export interface RoutingSettingsCardProps {
   /** Hide the Free/Custom segmented — the caller drives `domainType` from its
    *  own outer control (avoids a redundant nested toggle). */
   hideTypeToggle?: boolean;
+  /** Auto-clean a typed `www.` prefix off the custom hostname on commit — set for
+   *  the PRIMARY/apex input only (never the `www.<apex>` variant endpoint, which
+   *  would collapse into the apex). The `www.` variant is added via the card's own
+   *  "Include www" switch, so a user typing `www.example.com` as their primary
+   *  gets `example.com` + the toggle, not a conflicting duplicate route. */
+  stripWww?: boolean;
 }
 
 export function RoutingSettingsCard({
@@ -70,6 +76,7 @@ export function RoutingSettingsCard({
   actionSlot,
   portInline = false,
   hideTypeToggle = false,
+  stripWww = false,
 }: RoutingSettingsCardProps) {
   const { baseDomain } = usePlatform();
   const { t } = useI18n();
@@ -157,8 +164,29 @@ export function RoutingSettingsCard({
     void onDomainChange(next);
   };
 
+  // Clean a typed `www.` off the PRIMARY hostname (apex input only) — see stripWww.
+  const cleanCustomHost = (value: string) => {
+    const lowered = value.toLowerCase();
+    return stripWww ? lowered.replace(/^www\./, "") : lowered;
+  };
+
   const commitCustomDomain = () => {
-    void onCustomDomainChange(draftCustomDomain.toLowerCase());
+    const cleaned = cleanCustomHost(draftCustomDomain);
+    if (cleaned !== draftCustomDomain) setDraftCustomDomain(cleaned);
+    void onCustomDomainChange(cleaned);
+  };
+
+  // Strip on blur (not per-keystroke, which would fight the user typing "www.").
+  // Explicit mode commits the draft; change mode re-commits the already-live value.
+  const handleCustomDomainBlur = () => {
+    if (saveMode === "explicit") {
+      if (draftCustomDomain !== customDomain || cleanCustomHost(draftCustomDomain) !== draftCustomDomain) {
+        commitCustomDomain();
+      }
+    } else if (stripWww) {
+      const cleaned = cleanCustomHost(customDomain);
+      if (cleaned !== customDomain) void onCustomDomainChange(cleaned);
+    }
   };
 
   const commitPort = () => {
@@ -316,9 +344,7 @@ export function RoutingSettingsCard({
                         void onCustomDomainChange(next);
                       }
                     }}
-                    onBlur={() => {
-                      if (saveMode === "explicit" && draftCustomDomain !== customDomain) commitCustomDomain();
-                    }}
+                    onBlur={handleCustomDomainBlur}
                     placeholder="app.example.com"
                     className="flex-1 h-full px-3.5 text-sm bg-transparent outline-none text-foreground placeholder:text-muted-foreground/40"
                   />

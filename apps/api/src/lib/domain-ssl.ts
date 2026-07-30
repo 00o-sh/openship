@@ -16,7 +16,7 @@ import { resolveDeploymentPlatform, type DeploymentMeta } from "./deployment-run
  * budget. In-process mutex (single-process self-hosted) layered over a Postgres
  * advisory lock (multi-instance SaaS); see provision-lock.ts.
  */
-function sslIssueLockKey(hostname: string): string {
+export function sslIssueLockKey(hostname: string): string {
   return `ssl:issue:${hostname.trim().toLowerCase()}`;
 }
 

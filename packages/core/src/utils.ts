@@ -85,6 +85,41 @@ export function isValidCustomHostname(host: string): boolean {
   );
 }
 
+/**
+ * Public suffixes whose registrable domain is THREE labels (`example.co.uk`),
+ * not two. Deliberately NOT the full Public Suffix List — that needs a
+ * dependency we don't carry — just the handful common enough that mis-classifying
+ * `example.co.uk` as a subdomain would be visibly wrong. Extend as usage demands.
+ */
+const MULTI_PART_TLDS = new Set([
+  "co.uk", "org.uk", "gov.uk", "ac.uk", "me.uk", "net.uk", "ltd.uk", "plc.uk", "sch.uk",
+  "com.au", "net.au", "org.au", "edu.au", "gov.au", "id.au",
+  "co.nz", "net.nz", "org.nz",
+  "co.jp", "or.jp", "ne.jp",
+  "co.in", "net.in", "org.in", "firm.in",
+  "com.br", "net.br", "org.br",
+  "com.mx", "com.sg", "com.tr", "co.za", "com.cn",
+]);
+
+/**
+ * True when `host` is an APEX / registrable domain (`example.com`,
+ * `example.co.uk`) rather than a subdomain (`app.example.com`, `www.example.com`).
+ *
+ * Used to decide whether offering a `www.` variant makes sense — `www.<subdomain>`
+ * almost never does, so the UI hides the www toggle for subdomains. Heuristic, not
+ * the full PSL (no dependency): apex = exactly one label in front of the public
+ * suffix, where the suffix is two labels for the common multi-part TLDs above and
+ * one label otherwise. Input should already be normalized (see normalizeCustomHostname).
+ */
+export function isApexDomain(host: string): boolean {
+  const h = host.trim().toLowerCase().replace(/\.$/, "");
+  if (!isValidCustomHostname(h)) return false;
+  const labels = h.split(".");
+  const lastTwo = labels.slice(-2).join(".");
+  const suffixLabels = MULTI_PART_TLDS.has(lastTwo) ? 2 : 1;
+  return labels.length === suffixLabels + 1;
+}
+
 /** Generate a prefixed unique ID (e.g. "proj_abc123...") */
 export function generateId(prefix?: string): string {
   const bytes = new Uint8Array(12);

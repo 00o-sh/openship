@@ -5,7 +5,6 @@
  */
 
 import { Hono } from "hono";
-import { tbValidator } from "@hono/typebox-validator";
 import { secureRouter } from "../../lib/secure-router";
 import { cloudDomainProxy } from "../../lib/cloud/project-router";
 import * as ctrl from "./domain.controller";
@@ -21,8 +20,7 @@ const r = secureRouter(new Hono(), {
 r.get("/", { tag: "domain:list", mcp: { description: "List domains for the org / project." } }, ctrl.list);
 r.post(
   "/",
-  { tag: "domain:write", mcp: { description: "Add a domain (free subdomain or custom).", body: AddDomainBody } },
-  tbValidator("json", AddDomainBody),
+  { tag: "domain:write", body: AddDomainBody, mcp: { description: "Add a domain (free subdomain or custom)." } },
   ctrl.add,
 );
 // Side-effect-free DNS probe — POST is used to carry hostname in body.
@@ -43,8 +41,7 @@ r.post("/:id/verify-ssl", { tag: "domain:write", mcp: { description: "Check/veri
 // TLS is owned by the managed edge, so this 404s in CLOUD_MODE (localOnly gate).
 r.post(
   "/:id/certificate",
-  { tag: "domain:write", localOnly: true, mcp: { description: "Install an operator-supplied TLS certificate (bring-your-own / Cloudflare Origin CA).", body: UploadCertBody } },
-  tbValidator("json", UploadCertBody),
+  { tag: "domain:write", localOnly: true, body: UploadCertBody, mcp: { description: "Install an operator-supplied TLS certificate (bring-your-own / Cloudflare Origin CA)." } },
   cloudDomainProxy,
   ctrl.uploadCert,
 );
