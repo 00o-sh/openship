@@ -122,6 +122,11 @@
       "clipboardEmpty": "剪贴板为空",
       "clipboardInvalid": "剪贴板不包含有效的 KEY=VALUE 环境变量",
       "clipboardBlocked": "剪贴板访问被阻止。请点击环境变量框内部，并使用 Cmd/Ctrl+V 粘贴。"
+    },
+    "reveal": {
+      "show": "显示值",
+      "hide": "隐藏值",
+      "error": "无法显示值"
     }
   },
   "composeServices": {

@@ -267,6 +267,18 @@ export interface DeployConfig {
   restartPolicy?: "always" | "on-failure" | "no";
   /** Runtime-safe identifier used for workload/container/page naming. */
   runtimeName?: string;
+  /** Project slug — scopes named volumes to `openship-<slug>-<name>` so two
+   *  projects that pick the same volume name never share one. */
+  slug?: string;
+  /**
+   * Persistent mounts for this workload, in compose syntax
+   * (`name:/container/path`, or a host bind mount). Already resolved from the
+   * project's declaration or the stack's defaults by `resolveProjectVolumes`.
+   *
+   * Docker mounts them; bare symlinks the in-app paths into a shared directory
+   * that outlives releases; cloud has no volume primitive and warns.
+   */
+  volumes?: string[];
   /** Authoritative public route mappings for this workload. */
   publicEndpoints?: DeployPublicEndpoint[];
   /** Files/directories to copy into /app/production/ before starting the workload.

@@ -9,7 +9,12 @@ import {
   index,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import type { RoutingConfig, ProjectCompositeRoute, ReleaseSource } from "@repo/core";
+import type {
+  RoutingConfig,
+  ProjectCompositeRoute,
+  ReleaseSource,
+  ProjectObjectStorage,
+} from "@repo/core";
 import { organization } from "./organization";
 import { service } from "./service";
 
@@ -200,6 +205,28 @@ export const project = pgTable(
      * sub-app inside its own root directory.
      */
     workspacePrepareCommand: text("workspace_prepare_command"),
+
+    /* ── Persistent storage ─────────────────────────────────────────────── */
+    /**
+     * Paths this app's container keeps across deploys. Accepts the same compose
+     * syntax as `service.volumes` (`name:/container/path`, host bind mounts, a
+     * `:ro` mode) plus the short app form — a bare path relative to the app root
+     * (`storage`), which `@repo/core` volumes.ts expands.
+     *
+     * NULL means "use the stack's declared `persistentPaths`" (so a Laravel app
+     * keeps `storage/` with no configuration); an explicit `[]` means the user
+     * turned persistence off. Compose services keep declaring their own volumes
+     * on `service.volumes` — this is the single-app half of the same idea.
+     */
+    volumes: jsonb("volumes").$type<string[] | null>(),
+    /**
+     * Bound object-storage bucket (S3-compatible) — NON-SECRET metadata only:
+     * provider, endpoint, region, bucket, path-style, the source app when the
+     * bucket came from a MinIO project, and which env keys the binding wrote.
+     * The access key + secret live in the project's encrypted env store, which
+     * is the one place credentials are kept. Null when nothing is bound.
+     */
+    objectStorage: jsonb("object_storage").$type<ProjectObjectStorage | null>(),
 
     /* ── Resources (VM-native format) ───────────────────────────────────── */
     /** JSON: { cpuCores, memoryMb } */

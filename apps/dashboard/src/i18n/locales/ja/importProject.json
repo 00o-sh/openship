@@ -122,6 +122,11 @@
       "clipboardEmpty": "クリップボードが空です",
       "clipboardInvalid": "クリップボードに有効な KEY=VALUE 形式の環境変数が含まれていません",
       "clipboardBlocked": "クリップボードへのアクセスがブロックされました。環境ボックス内をクリックし、Cmd/Ctrl+V で貼り付けてください。"
+    },
+    "reveal": {
+      "show": "値を表示",
+      "hide": "値を非表示",
+      "error": "値を表示できませんでした"
     }
   },
   "composeServices": {

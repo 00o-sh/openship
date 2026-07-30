@@ -33,6 +33,11 @@
       "type": "array",
       "items": { "type": "string" }
     },
+    "volumes": {
+      "description": "Paths kept across deploys. A bare path is relative to the app (\"storage\"); a full mount also works (\"uploads:/app/storage\", \"/srv/data:/app/storage\"). Omit to inherit the framework's defaults; [] turns persistence off.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
 
     "runtime": {
       "description": "Runtime isolation for a single app. Services/docker projects are always \"docker\".",

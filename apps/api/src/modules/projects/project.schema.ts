@@ -94,6 +94,31 @@ const MonorepoAppSchema = Type.Object({
   environment: Type.Optional(Type.Record(Type.String(), Type.String())),
 });
 
+/**
+ * One compose service as parsed from a docker-compose.yml — the shape
+ * `folder/scan` (and `deployments/prepare`) returns in its `services[]`. Mirrors
+ * the wire `BuildServiceInput` of POST /deployments/build/access so a client can
+ * hand the SAME array to either step; both persist it with `syncFromCompose`.
+ */
+const ComposeServiceSchema = Type.Object({
+  name: Type.String({ minLength: 1, maxLength: 100 }),
+  image: Type.Optional(Type.String({ maxLength: 500 })),
+  build: Type.Optional(Type.String({ maxLength: 500 })),
+  dockerfile: Type.Optional(Type.String({ maxLength: 500 })),
+  ports: Type.Optional(Type.Array(Type.String({ maxLength: 100 }), { maxItems: 50 })),
+  dependsOn: Type.Optional(Type.Array(Type.String({ maxLength: 100 }), { maxItems: 50 })),
+  environment: Type.Optional(Type.Record(Type.String(), Type.String())),
+  volumes: Type.Optional(Type.Array(Type.String({ maxLength: 500 }), { maxItems: 50 })),
+  command: Type.Optional(Type.String({ maxLength: 2000 })),
+  restart: Type.Optional(Type.String({ maxLength: 50 })),
+  exposed: Type.Optional(Type.Boolean()),
+  exposedPort: Type.Optional(Type.String({ maxLength: 100 })),
+  domain: Type.Optional(Type.String({ maxLength: 63 })),
+  customDomain: Type.Optional(Type.String({ maxLength: 255 })),
+  domainType: Type.Optional(Type.Union([Type.Literal("free"), Type.Literal("custom")])),
+  publicEndpoints: Type.Optional(Type.Array(PublicEndpointSchema, { maxItems: 20 })),
+});
+
 const MonorepoWorkspaceSchema = Type.Object({
   packageManager: Type.String({ minLength: 1, maxLength: 32 }),
   /** Shell command run ONCE at the repo root before per-app builds.
@@ -200,6 +225,12 @@ export const CreateProjectBody = Type.Object({
   buildCommand: Type.Optional(Type.String({ maxLength: 500 })),
   outputDirectory: Type.Optional(Type.String({ maxLength: 200, pattern: "^[A-Za-z0-9._~/-]+$" })),
   productionPaths: Type.Optional(Type.String({ maxLength: 2000 })),
+  /**
+   * Persistent mounts, compose syntax or a bare app-relative path. Omit to keep
+   * the current value; send `[]` to turn persistence off (which is different
+   * from `null`/absent, where the stack's defaults apply).
+   */
+  volumes: Type.Optional(Type.Array(Type.String({ maxLength: 500 }), { maxItems: 50 })),
   rootDirectory: Type.Optional(Type.String({ maxLength: 200 })),
   startCommand: Type.Optional(Type.String({ maxLength: 500 })),
   buildImage: Type.Optional(Type.String({ maxLength: 200 })),
@@ -282,13 +313,27 @@ export const UpdateProjectBody = Type.Partial(CreateProjectBody);
 
 /**
  * POST /projects/ensure — CreateProjectBody plus an optional `projectId` to
- * update an existing project in place instead of creating a new one.
+ * update an existing project in place instead of creating a new one, and the
+ * compose `services` the source declared.
  */
 export const EnsureProjectBody = Type.Composite([
   CreateProjectBody,
   Type.Object({
     projectId: Type.Optional(
       Type.String({ description: "Update this existing project instead of creating a new one." }),
+    ),
+    services: Type.Optional(
+      Type.Array(ComposeServiceSchema, {
+        maxItems: 100,
+        description:
+          "Compose services for a multi-service project — pass the folder/scan (or deployments/prepare) `services` array through verbatim. Persisted as the project's service set: services not listed are removed, so send the WHOLE set.",
+      }),
+    ),
+    uploadSessionId: Type.Optional(
+      Type.String({
+        description:
+          "Folder-upload session the `services` came from. Only used to restore environment values the scan masked (`••••••••`) — it never changes the project's source or config. Pass it whenever you echo scanned services back, or those secrets are dropped.",
+      }),
     ),
   }),
 ]);
@@ -394,6 +439,10 @@ export const SetOptionsBody = Type.Object(
     installCommand: Type.Optional(Type.String()),
     outputDirectory: Type.Optional(Type.String()),
     productionPaths: Type.Optional(Type.String()),
+    /** Persistent mounts; `null` restores the stack's defaults. */
+    volumes: Type.Optional(
+      Type.Union([Type.Array(Type.String({ maxLength: 500 }), { maxItems: 50 }), Type.Null()]),
+    ),
     rootDirectory: Type.Optional(Type.String()),
     startCommand: Type.Optional(Type.String()),
     productionPort: Type.Optional(Type.Union([Type.Number(), Type.String()])),
@@ -413,6 +462,7 @@ export const SetOptionsBody = Type.Object(
 export type TProjectIdParam = Static<typeof ProjectIdParam>;
 export type TListProjectsQuery = Static<typeof ListProjectsQuery>;
 export type TCreateProjectBody = Static<typeof CreateProjectBody>;
+export type TEnsureProjectBody = Static<typeof EnsureProjectBody>;
 export type TUpdateProjectBody = Static<typeof UpdateProjectBody> & {
   rollbackWindow?: number | null;
 };

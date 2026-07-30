@@ -153,6 +153,7 @@ export function getMcpTools(): McpToolDef[] {
       const mcp = isPublicSpec(spec) ? undefined : spec.mcp;
       const parsed = isPublicSpec(spec) ? null : parsePermissionTag(spec.tag);
       const collection = !isPublicSpec(spec) && spec.collection === true;
+      const collectionProject = !isPublicSpec(spec) && spec.collectionProject === true;
       const leaf = parsed?.leaf ?? "";
       const pathParams = extractPathParams(route.path);
       const hasBody = BODY_METHODS.has(route.method);
@@ -179,7 +180,11 @@ export function getMcpTools(): McpToolDef[] {
           // /repos/:owner/:repo/branches, /projects/:id/deployments) it is
           // scoped to a specific resource, so a grant on that resource's root
           // type enables it — those must stay listable for scoped tokens.
+          // A `collectionProject` route is org-wide in SHAPE (no :id) but scoped
+          // in EFFECT — its handler authorizes the project named in the body, so
+          // a grant on that project is enough and it must stay listable.
           wildcard:
+            !collectionProject &&
             ((parsed?.isList ?? false) || collection || ORG_SINGLETON_RESOURCES.has(leaf)) &&
             pathParams.length === 0,
           grantRoot: PROJECT_ROOTED.has(leaf as CheckedResourceType) ? "project" : (parsed?.root ?? ""),

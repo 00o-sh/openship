@@ -122,6 +122,11 @@
       "clipboardEmpty": "A área de transferência está vazia",
       "clipboardInvalid": "A área de transferência não contém variáveis de ambiente KEY=VALUE válidas",
       "clipboardBlocked": "O acesso à área de transferência foi bloqueado. Clique dentro da caixa de ambiente e cole com Cmd/Ctrl+V."
+    },
+    "reveal": {
+      "show": "Mostrar valores",
+      "hide": "Ocultar valores",
+      "error": "Não foi possível revelar os valores"
     }
   },
   "composeServices": {

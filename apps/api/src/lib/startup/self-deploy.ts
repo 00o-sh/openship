@@ -74,6 +74,7 @@ function adoptSnapshot(project: Project, dashPort: number): DeploymentConfigSnap
     buildCommand: "",
     outputDirectory: "",
     productionPaths: [],
+    volumes: [],
     rootDirectory: ".",
     port: dashPort,
     startCommand: "",

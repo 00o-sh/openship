@@ -122,6 +122,11 @@
       "clipboardEmpty": "Zwischenablage ist leer",
       "clipboardInvalid": "Zwischenablage enthält keine gültigen KEY=VALUE-Umgebungsvariablen",
       "clipboardBlocked": "Zugriff auf die Zwischenablage wurde blockiert. Klicke in das Umgebungsfeld und füge mit Cmd/Strg+V ein."
+    },
+    "reveal": {
+      "show": "Werte anzeigen",
+      "hide": "Werte ausblenden",
+      "error": "Werte konnten nicht angezeigt werden"
     }
   },
   "composeServices": {

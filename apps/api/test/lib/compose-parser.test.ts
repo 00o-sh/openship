@@ -520,3 +520,55 @@ services:
     });
   });
 });
+
+describe("parseComposeFile - mandatory variable operators (:? and ?)", () => {
+  // Compose treats these as a hard stop, and the thrown message is the author's
+  // own word after the operator. Getting this wrong means a deploy silently
+  // proceeds with an empty image tag / port instead of telling the user which
+  // variable they forgot.
+  const compose = (expr: string) => `
+services:
+  app:
+    image: node:\${${expr}}
+`;
+
+  it(":? throws when the variable is unset", () => {
+    expect(() => parseComposeFile(compose("NODE_VERSION:?NODE_VERSION is required"))).toThrow(
+      "NODE_VERSION is required",
+    );
+  });
+
+  it(":? throws when the variable is set but empty", () => {
+    expect(() =>
+      parseComposeFile(compose("NODE_VERSION:?NODE_VERSION is required"), {
+        envFileContent: "NODE_VERSION=\n",
+      }),
+    ).toThrow("NODE_VERSION is required");
+  });
+
+  it(":? passes the value through when non-empty", () => {
+    const parsed = parseComposeFile(compose("NODE_VERSION:?NODE_VERSION is required"), {
+      envFileContent: "NODE_VERSION=22\n",
+    });
+    expect(parsed.services[0]?.image).toBe("node:22");
+  });
+
+  it("? throws only when the variable is unset", () => {
+    expect(() => parseComposeFile(compose("NODE_VERSION?NODE_VERSION is required"))).toThrow(
+      "NODE_VERSION is required",
+    );
+  });
+
+  it("? accepts an explicitly empty value (set-but-empty is not an error)", () => {
+    const parsed = parseComposeFile(compose("NODE_VERSION?NODE_VERSION is required"), {
+      envFileContent: "NODE_VERSION=\n",
+    });
+    expect(parsed.services[0]?.image).toBe("node:");
+  });
+
+  it("reports the author's message verbatim, punctuation and all", () => {
+    expect(() => parseComposeFile(compose("DB_URL:?DB_URL must be set (see README)"))).toThrow(
+      "DB_URL must be set (see README)",
+    );
+  });
+});

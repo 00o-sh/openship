@@ -14,7 +14,21 @@ import { resolveDeploymentRuntime, type DeploymentMeta } from "../../lib/deploym
 import { assertResourceInOrg } from "../../lib/controller-helpers";
 import { collectDeploymentManifest, executeCleanup } from "../projects/project-cleanup.service";
 import { assertGitHubRepoAccess } from "../github/github-access";
+import { maskDeploymentEnv } from "../../lib/secret-env";
 import { rollback, setPin } from "./rollback";
+
+/**
+ * #336: present a deployment to a CLIENT — masks `meta.composeServices[].environment`.
+ * This is the single boundary every client-facing return must go through; the
+ * raw `getDeployment` (and repos.deployment reads) stay unmasked for the internal
+ * mutating callers (delete/rollback/reject/keep) that need the real env. Prefer
+ * these over calling `maskDeploymentEnv` ad-hoc at each controller return so a new
+ * endpoint has one obvious thing to call instead of a per-site decision to forget.
+ */
+export const presentDeployment = <T extends { meta?: unknown } | null | undefined>(dep: T): T =>
+  maskDeploymentEnv(dep);
+export const presentDeployments = <T extends { meta?: unknown }>(deps: T[]): T[] =>
+  deps.map((d) => maskDeploymentEnv(d));
 
 /**
  * GitHub access gate for a deployment-scoped action (rollback, reject).

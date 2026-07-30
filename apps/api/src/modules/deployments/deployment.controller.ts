@@ -14,6 +14,7 @@ import * as buildService from "./build.service";
 import * as buildStatusService from "./build-status.service";
 import * as sslService from "./ssl.service";
 import * as prepareService from "./prepare.service";
+import { maskEnv, maskScanService } from "../../lib/secret-env";
 import { maybeProxyCloudProject, proxyToSaaS } from "../../lib/cloud/project-router";
 import { promoteProjectToCloud, TransferConflictError } from "../projects/transfer.service";
 import { env } from "../../config";
@@ -34,7 +35,7 @@ export async function list(c: Context) {
 
   return c.json({
     success: true,
-    data: result.rows,
+    data: deploymentService.presentDeployments(result.rows),
     total: result.total,
     page: result.page,
     perPage: result.perPage,
@@ -87,7 +88,7 @@ export async function create(c: Context) {
     refresh: body.refresh,
     trigger: body.trigger === "webhook" ? "webhook" : undefined,
   });
-  return c.json({ data: result }, 202);
+  return c.json({ data: { ...result, deployment: deploymentService.presentDeployment(result.deployment) } }, 202);
 }
 
 export async function getById(c: Context) {
@@ -99,7 +100,7 @@ export async function getById(c: Context) {
   // verification against the live host (deduped, fire-and-forget). The current
   // row is returned as-is; the resolved status arrives via the next poll/SSE.
   if (dep?.status === "reconciling") triggerReconcile(id);
-  return c.json({ data: dep });
+  return c.json({ data: deploymentService.presentDeployment(dep) });
 }
 
 export async function logs(c: Context) {
@@ -187,7 +188,7 @@ export async function rollback(c: Context) {
   // member must be granted it (default-deny). Owner passes.
   await deploymentService.assertGitHubAccessForDeployment(ctx, id, ctx.organizationId);
   const dep = await deploymentService.rollbackDeployment(id, ctx.organizationId);
-  return c.json({ data: dep });
+  return c.json({ data: deploymentService.presentDeployment(dep) });
 }
 
 export async function pin(c: Context) {
@@ -199,7 +200,7 @@ export async function pin(c: Context) {
     .catch(() => ({} as { pinned?: boolean }));
   const pinned = body.pinned !== false; // default true on POST
   const dep = await deploymentService.setDeploymentPin(id, ctx.organizationId, pinned);
-  return c.json({ data: dep });
+  return c.json({ data: deploymentService.presentDeployment(dep) });
 }
 
 export async function reject(c: Context) {
@@ -221,7 +222,7 @@ export async function keep(c: Context) {
   await permission.assert(getRequestContext(c), { resourceType: "deployment", resourceId: id, action: "write" });
   try {
     const result = await deploymentService.keepDeployment(id, ctx.organizationId);
-    return c.json(result);
+    return c.json({ ...result, deployment: deploymentService.presentDeployment(result.deployment) });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to keep deployment";
     return c.json({ success: false, error: message }, 400);
@@ -276,7 +277,7 @@ export async function restart(c: Context) {
   const id = param(c, "id");
   await permission.assert(getRequestContext(c), { resourceType: "deployment", resourceId: id, action: "write" });
   const dep = await deploymentService.restartDeployment(id, ctx.organizationId);
-  return c.json({ data: dep });
+  return c.json({ data: deploymentService.presentDeployment(dep) });
 }
 
 export async function containerInfo(c: Context) {
@@ -346,7 +347,14 @@ export async function prepare(c: Context) {
     }
 
     const info = await prepareService.resolveProjectInfo(input);
-    return c.json(info);
+    // #336: mask env on output like the sibling scan endpoints (scanLocal /
+    // folder scan go through projectInfoToScanResponse). The deploy pipeline
+    // re-derives real values from source, so masking the scan is display-only.
+    return c.json({
+      ...info,
+      ...(info.services && { services: info.services.map(maskScanService) }),
+      ...(info.rootEnv && { rootEnv: maskEnv(info.rootEnv) }),
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to initialize deploy";
     return c.json({ error: message }, 400);

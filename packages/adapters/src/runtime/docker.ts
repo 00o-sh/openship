@@ -91,6 +91,7 @@ import { scopeVolumeBinds, isHostPathSource } from "./volume-namespace";
 import { createDockerBuildContext, prepareSourceTree, resolveServiceDockerfile } from "./docker-build-context";
 import { startExecStream, daemonConnectionFrom } from "./docker-exec-stream";
 import { resolveDockerfileCandidates } from "./docker-paths";
+import type { ContainerStabilitySample } from "./stability";
 import { generateDockerfile, staticBuilderOutputPath } from "./docker-build-plan";
 import { transferLocalDirectory } from "./transfer";
 import { safeErrorMessage, type ComposeAdvanced, type ComposeHealthcheck } from "@repo/core";
@@ -429,6 +430,7 @@ export class DockerRuntime implements RuntimeAdapter {
     "projectContainerSweep",
     "deploymentContainerQuery",
     "hostContainerQuery",
+    "stabilityProbe",
   ]);
 
   /** Docker honors every extended compose key we currently support. */
@@ -1827,11 +1829,30 @@ export class DockerRuntime implements RuntimeAdapter {
 
     const restartPolicy = resolveRestartPolicy(config.restartPolicy);
 
+    // Persistent mounts. Each deploy creates a NEW container from a NEW image,
+    // so anything the app wrote to its own filesystem is gone unless it lives on
+    // a volume that outlives the container. Named volumes are project-scoped
+    // through the same helper the multi-service path uses, so two projects can't
+    // land on one daemon-level volume; bind mounts pass through.
+    const scopedBinds = scopeVolumeBinds(
+      config.slug || config.runtimeName || config.projectId,
+      config.volumes ?? [],
+      true,
+    );
+    const binds = scopedBinds.length > 0 ? scopedBinds : undefined;
+
     log({
       timestamp: new Date().toISOString(),
       message: `Creating container ${containerName} from ${imageRef}...\n`,
       level: "info",
     });
+    if (binds) {
+      log({
+        timestamp: new Date().toISOString(),
+        message: `Persistent storage: ${binds.join(", ")}\n`,
+        level: "info",
+      });
+    }
 
     const container = await this.docker.createContainer({
       name: containerName,
@@ -1845,6 +1866,7 @@ export class DockerRuntime implements RuntimeAdapter {
       ExposedPorts: { [`${config.port}/tcp`]: {} },
       HostConfig: {
         RestartPolicy: restartPolicy,
+        Binds: binds,
         Memory: config.resources.memoryMb * 1024 * 1024,
         CpuShares: Math.round(config.resources.cpuCores * 1024),
         // Publish on the LOOPBACK interface only — the edge (host process, or a
@@ -2449,6 +2471,56 @@ export class DockerRuntime implements RuntimeAdapter {
       ip,
       hostPort,
       uptimeSeconds: uptimeSeconds && uptimeSeconds > 0 ? uptimeSeconds : undefined,
+    };
+  }
+
+  /**
+   * One stabilization reading for the post-deploy watch. Unlike
+   * `getContainerInfo` this keeps `restarting` distinct and carries
+   * `RestartCount` / `ExitCode` / health — the only fields that separate a
+   * container that is UP from one that is bouncing. A vanished container is a
+   * `missing` sample (not a throw): that is a verdict, not a transport error.
+   */
+  async sampleStability(containerId: string): Promise<ContainerStabilitySample> {
+    let data: Dockerode.ContainerInspectInfo;
+    try {
+      data = await this.docker.getContainer(containerId).inspect();
+    } catch (err) {
+      if (isDockerNotFoundError(err)) {
+        return {
+          state: "missing",
+          exitCode: null,
+          restartCount: 0,
+          health: null,
+          errorLine: null,
+          oomKilled: false,
+          restartPolicy: null,
+        };
+      }
+      throw err;
+    }
+
+    const rawState = (data.State?.Status ?? "").toLowerCase().trim();
+    const state: ContainerStabilitySample["state"] = (
+      ["created", "running", "restarting", "paused", "exited", "dead", "removing"] as const
+    ).includes(rawState as never)
+      ? (rawState as ContainerStabilitySample["state"])
+      : "unknown";
+
+    const rawHealth = (data.State?.Health?.Status ?? "").toLowerCase().trim();
+    const health: ContainerStabilitySample["health"] =
+      rawHealth === "healthy" || rawHealth === "unhealthy" || rawHealth === "starting"
+        ? rawHealth
+        : null;
+
+    return {
+      state,
+      exitCode: typeof data.State?.ExitCode === "number" ? data.State.ExitCode : null,
+      restartCount: typeof data.RestartCount === "number" ? data.RestartCount : 0,
+      health,
+      errorLine: data.State?.Error?.trim() ? data.State.Error.trim() : null,
+      oomKilled: data.State?.OOMKilled === true,
+      restartPolicy: data.HostConfig?.RestartPolicy?.Name ?? null,
     };
   }
 

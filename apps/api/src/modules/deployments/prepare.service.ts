@@ -9,6 +9,7 @@ import * as githubService from "../github/github.service";
 import type { RequestContext } from "../../lib/request-context";
 import { MANIFEST_FILES, type RepoFile, type StackResult } from "../../lib/stack-detector";
 import { parseComposeEnvFile, parseComposeFile, type ComposeService } from "../../lib/compose-parser";
+import { maskEnv, maskScanService } from "../../lib/secret-env";
 import {
   applyWorkspaceContext,
   discoverMonorepoApps,
@@ -87,6 +88,9 @@ export interface ProjectInfo {
   outputDirectory: string;
   rootDirectory: string;
   productionPaths: string[];
+  /** Declared persistent mounts. Undefined = the project inherits the stack's
+   *  `persistentPaths`; `[]` = the user opted out. */
+  volumes?: string[];
   port: number;
   services?: ComposeService[];
   monorepoApps?: MonorepoApp[];
@@ -249,6 +253,8 @@ function applyOpenshipOverlay(info: ProjectInfo, config: OpenshipConfig | undefi
   if (config.rootDirectory) info.rootDirectory = config.rootDirectory;
   if (config.buildImage) info.buildImage = config.buildImage;
   if (config.productionPaths) info.productionPaths = config.productionPaths;
+  // Declared `[]` is meaningful (persistence off), so test for presence, not truth.
+  if (config.volumes) info.volumes = config.volumes;
   if (config.port !== undefined) info.port = config.port;
   if (config.productionMode) info.productionMode = config.productionMode;
   if (config.runtime) info.runtimeMode = config.runtime;
@@ -307,14 +313,18 @@ export function projectInfoToScanResponse(result: ProjectInfo) {
     rootDirectory: result.rootDirectory,
     productionPaths: result.productionPaths,
     port: result.port,
-    services: result.services,
+    // #336: env values (and their environmentMeta) are masked on output. The
+    // deploy pipeline recovers the real values by re-parsing the source, and the
+    // wizard reveals them on demand via the write-gated reveal endpoint.
+    services: (result.services ?? []).map(maskScanService),
     // Declared-overlay fields (openship.json) — omitted from the response when
     // absent so a repo without the file yields the exact same payload as before.
     ...(result.productionMode && { productionMode: result.productionMode }),
+    ...(result.volumes && { volumes: result.volumes }),
     ...(result.runtimeMode && { runtimeMode: result.runtimeMode }),
     ...(result.publicEndpoints && { publicEndpoints: result.publicEndpoints }),
     ...(result.resources && { resources: result.resources }),
-    ...(result.rootEnv && Object.keys(result.rootEnv).length > 0 && { rootEnv: result.rootEnv }),
+    ...(result.rootEnv && Object.keys(result.rootEnv).length > 0 && { rootEnv: maskEnv(result.rootEnv) }),
     ...(result.routing && { routing: result.routing }),
     ...(result.monorepoWorkspace && { monorepoWorkspace: result.monorepoWorkspace }),
     ...(result.monorepoApps && { monorepoApps: result.monorepoApps }),

@@ -1,5 +1,7 @@
 export * from "./types";
 export * from "./stacks";
+export * from "./volumes";
+export * from "./object-storage";
 export * from "./constants";
 export * from "./edge-image-ref";
 export * from "./system";

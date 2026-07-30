@@ -24,6 +24,7 @@ import {
   safeErrorMessage,
   getRuntimeImage,
   isReleaseProvider,
+  resolveProjectVolumes,
   type StackId,
   type DeployTarget,
   type BuildStrategy,
@@ -44,6 +45,7 @@ import { firePreDeployBackups } from "../backups/triggers/pre-deploy";
 import { resolveSmartRoute } from "./smart-route";
 import { resolveProjectInfo } from "./prepare.service";
 import { getFolderSession } from "../projects/folder/session-store";
+import { hasMaskedValue, unmaskEnv } from "../../lib/secret-env";
 import { type RequestContext } from "../../lib/request-context";
 import { type PortCheckResult } from "../../lib/deployment-runtime";
 import * as sessionManager from "./session-manager";
@@ -154,6 +156,10 @@ export interface DeploymentConfigSnapshot {
   buildCommand: string;
   outputDirectory: string;
   productionPaths: string[];
+  /** Resolved persistent mounts (compose syntax) — the project's declaration or
+   *  the stack default. Snapshotted so a redeploy of an OLD deployment mounts
+   *  what that deployment mounted, not what the project says today. */
+  volumes: string[];
   rootDirectory: string;
   port: number;
   startCommand: string;
@@ -316,6 +322,7 @@ export function buildConfigSnapshot(
     buildCommand: project.buildCommand!,
     outputDirectory: project.outputDirectory!,
     productionPaths: parseProductionPaths(project.productionPaths, project.framework),
+    volumes: resolveProjectVolumes(project.volumes as string[] | null, project.framework),
     rootDirectory: project.rootDirectory || "",
     port: project.port ?? 3000,
     startCommand: project.startCommand!,
@@ -853,6 +860,34 @@ export async function requestBuildAccess(ctx: RequestContext, input: BuildAccess
 
   await checkNoActiveBuild(project.id);
 
+  // Folder-upload: resolve the session UP FRONT — its scanned compose services
+  // feed the service-mode decision below. The snapshot mutations it drives still
+  // happen further down, after target resolution (which the upload mode overrides).
+  const uploadSession = input.uploadSessionId
+    ? getFolderSession(input.uploadSessionId)
+    : undefined;
+  if (input.uploadSessionId && (!uploadSession || uploadSession.orgId !== ctx.organizationId)) {
+    throw new AppError("Upload session not found or expired — re-upload the folder.", 400);
+  }
+
+  // The uploaded folder's compose file is the ONLY description a folder deploy
+  // has of its service set, and the scan already parsed it — so adopt those
+  // services when the caller didn't forward them itself (the documented
+  // session → scan → ensure → deploy flow has no step that does, so a
+  // multi-service upload deployed with ZERO service rows and failed with "No
+  // services were found for this project"). Narrow on purpose: only for a project
+  // with no service rows yet, so an existing services project keeps its own rows
+  // and any operator edits, and an explicit "single" request is left alone.
+  let effectiveServices: DeployableService[] | undefined = services;
+  if (
+    !effectiveServices?.length &&
+    serviceDeploymentMode !== "single" &&
+    uploadSession?.services?.length &&
+    (await listProjectComposeServices(project.id)).length === 0
+  ) {
+    effectiveServices = uploadSession.services;
+  }
+
   const resolvedBranch = await resolveProjectBranch(ctx, project, branch);
 
   // Reconcile the repo's compose BEFORE resolving the service set — the third
@@ -865,6 +900,28 @@ export async function requestBuildAccess(ctx: RequestContext, input: BuildAccess
   // services reuse their running image (no rebuild) and everything else in the
   // compose is taken from the repo. Best-effort; self-guards to compose+git projects.
   await reconcileComposeDrift(ctx, project, resolvedBranch);
+
+  // #336: the wizard sees compose env MASKED, so a deploy request can echo the
+  // "••••••••" sentinel back. Recover the real values before they're persisted
+  // to the snapshot / service rows (else containers launch with KEY=••••••••).
+  // Recovery sources, all plaintext: the staged upload's scan (session.services,
+  // captured pre-mask) and the stored service rows — which reconcileComposeDrift
+  // above just refreshed from a git repo's compose, so this also covers a git
+  // first-deploy. A revealed-and-edited value arrives real and passes through.
+  if (effectiveServices?.length && effectiveServices.some((s) => hasMaskedValue(s.environment))) {
+    const realEnvByName = new Map<string, Record<string, string>>();
+    for (const s of await listProjectComposeServices(project.id)) {
+      realEnvByName.set(s.name, (s.environment as Record<string, string> | null) ?? {});
+    }
+    for (const s of uploadSession?.services ?? []) {
+      if (s.name && s.environment) realEnvByName.set(s.name, s.environment);
+    }
+    effectiveServices = effectiveServices.map((s) =>
+      s.environment && hasMaskedValue(s.environment)
+        ? { ...s, environment: unmaskEnv(s.environment, realEnvByName.get(s.name) ?? null) }
+        : s,
+    );
+  }
 
   const projectDomains = await listProjectRouteRows(project.id);
   let routeState = await resolveProjectRouteState(project, { projectDomains });
@@ -887,7 +944,14 @@ export async function requestBuildAccess(ctx: RequestContext, input: BuildAccess
   // default. An internal-only services stack (e.g. a migrated postgres/redis)
   // must deploy with no public route — defaulting a free .opsh.io project domain
   // here made self-hosted migration fail preflight (free domains need cloud edge).
-  const isServicesDeploy = serviceDeploymentMode === "services" || !!services?.length;
+  // A service-FIRST project (docker-compose / services framework) is a services
+  // deploy even when this request carries no service list — its rows already
+  // describe the set. Keyed on the project's own framework, so a normal app that
+  // merely had a sidecar service added still defaults its project domain below.
+  const isServicesDeploy =
+    serviceDeploymentMode === "services" ||
+    !!effectiveServices?.length ||
+    (serviceDeploymentMode !== "single" && isMultiServiceProject(project));
   let nextPublicEndpoints = publicEndpoints;
   if (
     nextPublicEndpoints === undefined &&
@@ -909,7 +973,7 @@ export async function requestBuildAccess(ctx: RequestContext, input: BuildAccess
   const requestedServiceMode =
     serviceDeploymentMode === "single"
       ? "single"
-      : serviceDeploymentMode === "services" || services?.length
+      : serviceDeploymentMode === "services" || effectiveServices?.length
         ? "services"
         : undefined;
 
@@ -922,8 +986,8 @@ export async function requestBuildAccess(ctx: RequestContext, input: BuildAccess
   if (handoverImages && Object.keys(handoverImages).length > 0) {
     snapshot.handoverImages = handoverImages;
   }
-  if (requestedServiceMode === "services" && services?.length) {
-    snapshot.composeServices = services;
+  if (requestedServiceMode === "services" && effectiveServices?.length) {
+    snapshot.composeServices = effectiveServices;
     // Persist compose services to the canonical service table NOW, at
     // deploy-request time — not only deep inside the compose pipeline. A build
     // that FAILS before the pipeline's own sync (clone/prepare error, image
@@ -933,7 +997,7 @@ export async function requestBuildAccess(ctx: RequestContext, input: BuildAccess
     // is idempotent and strictly owns compose rows, so filter out monorepo
     // entries (they'd create ghost compose rows) exactly like the pipeline does.
     // Best-effort: a persist failure must never block the deploy.
-    const composeOnly = services.filter((s) => serviceKind(s) === "compose");
+    const composeOnly = effectiveServices.filter((s) => serviceKind(s) === "compose");
     if (composeOnly.length) {
       await repos.service
         .syncFromCompose(project.id, composeOnly)
@@ -963,17 +1027,13 @@ export async function requestBuildAccess(ctx: RequestContext, input: BuildAccess
   //   - self-hosted (api-relay): build from the staging dir like a local folder.
   // The session/workspace outlive this call (session TTL; workspace made
   // permanent on deploy), so nothing is disposed here.
-  if (input.uploadSessionId) {
-    const session = getFolderSession(input.uploadSessionId);
-    if (!session || session.orgId !== ctx.organizationId) {
-      throw new AppError("Upload session not found or expired — re-upload the folder.", 400);
-    }
-    if (session.mode === "oblien-direct") {
-      snapshot.uploadWorkspaceId = session.workspaceId;
+  if (uploadSession) {
+    if (uploadSession.mode === "oblien-direct") {
+      snapshot.uploadWorkspaceId = uploadSession.workspaceId;
       snapshot.sourceStaged = true;
       snapshot.deployTarget = "cloud";
     } else {
-      snapshot.localPath = session.stagingDir;
+      snapshot.localPath = uploadSession.stagingDir;
     }
   }
 

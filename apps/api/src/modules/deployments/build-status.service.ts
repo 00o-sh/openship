@@ -5,6 +5,7 @@ import { loadDeployment, type DeploymentConfigSnapshot } from "./build.service";
 import { STEP_INDEX, STEP_PROGRESS } from "./build-steps";
 import { isMultiServiceProject } from "./compose";
 import { serviceKind } from "../../lib/deployable-service";
+import { maskServicesEnv } from "../../lib/secret-env";
 import { resolveProjectRouteState } from "../domains/project-route.service";
 
 // Read-only build/deploy status projection for the deployment-detail UI + the
@@ -157,8 +158,10 @@ export async function getBuildSessionStatus(deploymentId: string) {
           // only (monorepo sub-apps carry a different shape). The dashboard
           // hydrates config.services from this so "Edit Configuration" shows the
           // real compose wizard even with an empty service table.
-          composeServices: (snapshot?.composeServices ?? []).filter(
-            (s) => serviceKind(s) === "compose",
+          // #336: env masked on output (deploy re-derives / unmask-merges real
+          // values on the way back in).
+          composeServices: maskServicesEnv(
+            (snapshot?.composeServices ?? []).filter((s) => serviceKind(s) === "compose"),
           ),
         }
       : {};

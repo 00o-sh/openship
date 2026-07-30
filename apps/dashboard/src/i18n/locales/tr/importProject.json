@@ -123,6 +123,11 @@
       "clipboardEmpty": "Pano boş",
       "clipboardInvalid": "Pano geçerli KEY=VALUE ortam değişkenleri içermiyor",
       "clipboardBlocked": "Pano erişimi engellendi. Ortam kutusunun içine tıklayın ve Cmd/Ctrl+V ile yapıştırın."
+    },
+    "reveal": {
+      "show": "Değerleri göster",
+      "hide": "Değerleri gizle",
+      "error": "Değerler gösterilemedi"
     }
   },
   "composeServices": {

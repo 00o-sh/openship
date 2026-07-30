@@ -30,6 +30,7 @@ value. Validated by `openship config validate` (same parser the deploy uses).
 | `runtime` | `bare` \| `docker` | Runtime isolation for a single app. Services/docker projects are always `docker`. Seeds a new deploy's runtime. |
 | `productionMode` | `host` \| `static` \| `standalone` | `static` ⇒ served as files, no server (sets `hasServer=false`). |
 | `port` | integer 1–65535 | Server port. |
+| `volumes` | string[] | Paths kept across deploys. Bare path = relative to the app (`storage`), or a full mount (`uploads:/app/storage`, `/srv/data:/app/var`). Omit to inherit the framework defaults (Laravel keeps `storage/`); `[]` turns persistence off. Compose services use `services[].volumes` instead. |
 
 ## Env
 

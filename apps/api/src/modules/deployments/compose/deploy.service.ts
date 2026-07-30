@@ -15,6 +15,7 @@ import {
   resolveServiceHostnameLabel,
   resolvePublicUrlPlaceholders,
   getAppPrepareSteps,
+  resolveProjectVolumes,
   type ComposeAdvanced,
 } from "@repo/core";
 import { getTemplateForOrg } from "../../apps/catalog-source";
@@ -56,6 +57,11 @@ import { ensureRoutingReady } from "../../../lib/edge-reconcile";
 import * as sessionManager from "../session-manager";
 import { isStaticService } from "../../../lib/deployable-service";
 import { auditPorts } from "../port-audit.service";
+import {
+  recordUnstableServices,
+  verifyDeployedContainers,
+  type StabilityTarget,
+} from "../stability-audit.service";
 import type { PortCheckResult } from "../../../lib/deployment-runtime";
 import { resolveServicePort } from "./domain-helpers";
 import { buildCompositeRegistration, buildDomainFanoutRegistrations } from "./composite-route";
@@ -256,6 +262,28 @@ function createServicePipelineLogger(
   });
 }
 
+/**
+ * Persistent mounts for one row in the fan-out.
+ *
+ * A row's own `volumes` always wins. The fallback covers ONE case: the #231
+ * materialized app row — the single app's own service row, created when the
+ * project gained its first sidecar. Its build fields deliberately inherit from
+ * the project snapshot rather than being copied, and storage inherits the same
+ * way, so the project's "persistent storage" setting keeps reaching the app
+ * after a sidecar is added instead of freezing at whatever it was that day.
+ *
+ * Deliberately keyed on the app row (a `monorepo` row named after the project)
+ * and not on every inheriting row: a real monorepo's sub-apps would otherwise
+ * all mount the SAME volume at the same path.
+ */
+function appRowVolumes(project: Project, service: Service): string[] {
+  const own = (service.volumes as string[] | null) ?? [];
+  if (own.length > 0) return own;
+  const isAppRow = serviceKind(service) === "monorepo" && service.name === project.slug;
+  if (!isAppRow) return [];
+  return resolveProjectVolumes(project.volumes as string[] | null, project.framework);
+}
+
 function createServiceRuntimeConfig(opts: {
   project: Project;
   dep: Deployment;
@@ -281,7 +309,7 @@ function createServiceRuntimeConfig(opts: {
     image,
     ports: (service.ports as string[]) ?? [],
     environment,
-    volumes: (service.volumes as string[]) ?? [],
+    volumes: appRowVolumes(project, service),
     namespaceVolumes: service.namespaceVolumes,
     command: runtimeCommand,
     restart: service.restart ?? "unless-stopped",
@@ -611,6 +639,10 @@ export async function deployComposeServices(
 
   const results: ComposeDeployResult["services"] = [];
   const portChecks: PortCheckResult[] = [];
+  // Containers THIS deploy created, watched for stability once the whole stack
+  // is up. Carried-forward and static services are deliberately absent: a
+  // pre-existing container's health isn't this deploy's verdict to give.
+  const stabilityTargets: StabilityTarget[] = [];
   // Per-domain routing failures across all services (domains are optional —
   // never fatal). Aggregated into the deployment's routing action-required signal.
   const composeRouteWarnings: string[] = [];
@@ -1227,6 +1259,14 @@ export async function deployComposeServices(
         hostPort: persistedHostPort ?? undefined,
       });
       successful += 1;
+      if (result.containerId) {
+        stabilityTargets.push({
+          serviceId: svc.id,
+          serviceName: svc.name,
+          containerId: result.containerId,
+          startedAtMs: Date.now(),
+        });
+      }
 
       // Broadcast per-service "running" status to SSE subscribers
       sessionManager.broadcastServiceStatus(dep.id, {
@@ -1237,7 +1277,9 @@ export async function deployComposeServices(
         hostPort: persistedHostPort ?? undefined,
       });
 
-      logger.log(`Service "${svc.name}" deployed successfully.\n`, "info", {
+      // "Started" — not yet "stayed up". The stabilization watch after the loop
+      // is what can still demote this to failed.
+      logger.log(`Service "${svc.name}" started.\n`, "info", {
         serviceName: svc.name,
       });
 
@@ -1383,6 +1425,42 @@ export async function deployComposeServices(
   // helper). Advisory — a link-networking failure never fails the deploy.
   await attachLinkedNetworks(project.id, runtime, (m, level) => logger.log(`${m}\n`, level));
 
+  // ── Stabilization: did the containers we just created STAY up? ───────────────
+  // Up to here "success" meant docker accepted the create+start call, which a
+  // container whose command dies instantly also does — and `restart: always`
+  // then hides the crash behind a bounce loop that every status read shows as
+  // "Up 1 second". So watch them for a window and demote what didn't hold.
+  //
+  // Runs HERE, after every container exists and the linked networks are
+  // attached, for a reason: a service that waits on a peer (database still
+  // running initdb) legitimately restarts a couple of times, and gating each
+  // service inline as it was created would fail the deploy for a stack that
+  // converges seconds later. Watching them together, after the stack is whole,
+  // separates "bouncing hard" from "waited, then settled".
+  const stabilityWarnings: string[] = [];
+  if (stabilityTargets.length > 0) {
+    const findings = await verifyDeployedContainers(runtime, stabilityTargets, logger);
+    for (const finding of findings) {
+      if (finding.verdict.ok && finding.verdict.warning) {
+        stabilityWarnings.push(`${finding.target.serviceName}: ${finding.verdict.warning}`);
+      }
+    }
+    // Rows + SSE are the audit's business; this loop only reconciles the
+    // in-memory result set the summary below is computed from.
+    const demoted = await recordUnstableServices({ deploymentId: dep.id, findings, logger });
+    for (const result of results) {
+      const finding = result.serviceId ? demoted.get(result.serviceId) : undefined;
+      if (!finding || result.status === "failed") continue;
+      result.status = "failed";
+      // `detail` (headline + log tail), not the headline alone: when every
+      // service crash-loops this becomes the DEPLOYMENT's errorMessage, and the
+      // whole point is that it answers "why" without an SSH session.
+      result.error = finding.detail;
+      successful = Math.max(0, successful - 1);
+      unavailableServiceNames.add(finding.target.serviceName);
+    }
+  }
+
   // ── App prepare steps (in-container lifecycle hooks) ────────────────────────
   // Run template-declared prepare commands INSIDE the target service's container
   // (e.g. Convex mints its admin key from INSTANCE_SECRET+INSTANCE_NAME) and
@@ -1409,6 +1487,10 @@ export async function deployComposeServices(
         const service = services.find((s) => s.name === step.service);
         const result = service ? results.find((r) => r.serviceId === service.id) : undefined;
         if (!service || !result?.containerId) continue;
+        // Don't exec into a container the stabilization watch just failed: a
+        // `mustSucceed` step would report ITS timeout as the deploy's cause and
+        // bury the crash loop that actually explains everything.
+        if (result.status === "failed") continue;
 
         // `once`: skip when the value was already captured on a prior deploy.
         if (step.once && step.persistAs) {
@@ -1684,7 +1766,11 @@ export async function deployComposeServices(
   const warning =
     failed.length > 0
       ? `${failed.length}/${ordered.length} services failed: ${failedNames.join(", ")}`
-      : undefined;
+      : // Nothing failed, but something bounced on its way up — worth saying,
+        // since a service that restarted twice at boot often restarts in prod.
+        stabilityWarnings.length > 0
+        ? stabilityWarnings.join("; ")
+        : undefined;
   const firstFailure = failed.find((service) => service.error?.trim())?.error;
 
   // Any unverified service → the deploy's outcome is UNKNOWN. Resolve to

@@ -18,12 +18,65 @@ export interface ProjectOptionsBody {
   startCommand?: string;
   outputDirectory?: string;
   productionPaths?: string;
+  /** Persistent mounts. `null` clears the override and restores the framework's
+   *  defaults; `[]` turns persistence off. */
+  volumes?: string[] | null;
   rootDirectory?: string;
   productionPort?: number;
   productionMode?: string;
   hasServer?: boolean;
   hasBuild?: boolean;
   runtimeMode?: "bare" | "docker";
+}
+
+/** A bucket bound to a project, as returned by the API (never any credentials —
+ *  those live in the project's encrypted env store). */
+export interface ObjectStorageBinding {
+  provider: string;
+  endpoint?: string | null;
+  region?: string | null;
+  bucket: string;
+  forcePathStyle?: boolean | null;
+  sourceProjectId?: string | null;
+  envKeys: string[];
+  boundAt: string;
+}
+
+export interface ObjectStorageProviderSpec {
+  id: string;
+  label: string;
+  endpointPlaceholder: string;
+  defaultRegion: string;
+  forcePathStyle: boolean;
+}
+
+export interface ObjectStorageView {
+  binding: ObjectStorageBinding | null;
+  /** Local persistent mounts — declared (null = inheriting) and resolved. */
+  volumes: string[] | null;
+  resolvedVolumes: string[];
+  envPreset: string;
+  envKeys: string[];
+  candidates: Array<{
+    projectId: string;
+    name: string;
+    appTemplateId: string | null;
+    defaultBucket: string;
+  }>;
+  providers: Record<string, ObjectStorageProviderSpec>;
+}
+
+/** Bind body: either `sourceProjectId` (an installed storage app) or an explicit
+ *  provider + credentials. `bucket` is required either way. */
+export interface BindObjectStorageBody {
+  bucket: string;
+  sourceProjectId?: string;
+  mode?: "internal" | "public";
+  provider?: string;
+  endpoint?: string;
+  region?: string;
+  accessKeyId?: string;
+  secretAccessKey?: string;
 }
 
 export interface ScanProjectResponse {
@@ -285,6 +338,23 @@ export const projectsApi = {
    */
   setOptions: (id: string | number, options: ProjectOptionsBody) =>
     api.post<any>(endpoints.projects.options(id), options),
+
+  /** Object storage: the bucket bound to this project's filesystem config, plus
+   *  the installed apps and providers it could be bound to. */
+  getObjectStorage: (id: string | number) =>
+    api.get<{ data: ObjectStorageView }>(endpoints.projects.storage(id)),
+
+  /** Bind a bucket — an installed MinIO app (`sourceProjectId`) or an external
+   *  provider. Verified server-side before any env is written. */
+  bindObjectStorage: (id: string | number, body: BindObjectStorageBody) =>
+    api.post<{ data: { binding: ObjectStorageBinding; requiresRedeploy: true } }>(
+      endpoints.projects.storage(id),
+      body,
+    ),
+
+  /** Remove the binding and the env vars it injected. */
+  unbindObjectStorage: (id: string | number) =>
+    api.delete<{ data: { removed: boolean } }>(endpoints.projects.storage(id)),
 
   /** Source-drift status for the "project outdated" banner. `mode` discriminates:
    *  "commit" (git HEAD vs deployed sha) or "release" (newest advertised version

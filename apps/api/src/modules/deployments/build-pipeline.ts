@@ -73,6 +73,7 @@ import { buildBackgroundContext } from "../../lib/request-context";
 import * as sessionManager from "./session-manager";
 import { onFailure, onSuccess, onCancelled, setDeploymentStatus, type LifecycleContext } from "./deployment-lifecycle";
 import { auditPorts } from "./port-audit.service";
+import { verifyDeployedContainers } from "./stability-audit.service";
 import { auditStaticOutput, staticOutputTargets } from "./output-audit.service";
 import { createBuildConfig } from "./build-config";
 import { resolveClonePlan } from "./clone-plan";
@@ -1029,17 +1030,37 @@ function buildDeployEnvironment(
     plannedDomains: ReturnType<typeof buildProjectRouteDomains>;
   },
 ): DeployEnvironment {
-  const { runtime, system, targetExecutor, routeState, logger, effectiveTarget } = phase;
+  const { runtime, system, targetExecutor, routeState, logger, effectiveTarget, project } = phase;
   const { serve, previousRuntime, plannedDomains } = deps;
 
   return {
     canOverlap: serve.canOverlap,
-    // Post-activate readiness gate. Only wired for LOCAL targets: the app runs on
-    // this host, so a refused/timed-out probe genuinely means it failed to come up
-    // (throwing here auto-reverts to the previous deployment). Remote (SSH) and
-    // cloud targets aren't reachable from the API process. The strategy supplies
-    // the probe for a running process; a static file-serve has none.
-    healthCheck: effectiveTarget === "local" ? serve.healthCheck : undefined,
+    // Post-activate readiness gate, in two layers:
+    //
+    //  1. Stabilization — watch the container we just started and fail if it
+    //     bounces or exits. Asked of the RUNTIME (docker inspect), so unlike the
+    //     TCP probe it works for remote/SSH targets too: those deploys used to
+    //     have no post-start verification at all, which is how a crash-looping
+    //     container could be reported `ready`.
+    //  2. TCP probe — local targets only; the app runs on this host, so a
+    //     refused/timed-out connection genuinely means it never came up.
+    //
+    // Throwing here fails the deploy before traffic is repointed, so the overlap
+    // path auto-reverts to the previous (untouched) deployment.
+    healthCheck: async (containerId, cfg) => {
+      // A path-shaped id is a static release DIR — files, not a process.
+      if (!containerId.includes("/")) {
+        const [unstable] = (
+          await verifyDeployedContainers(
+            runtime,
+            [{ serviceName: project.name || project.slug || "app", containerId }],
+            logger,
+          )
+        ).filter((finding) => !finding.verdict.ok);
+        if (unstable) throw new Error(unstable.detail);
+      }
+      if (effectiveTarget === "local") await serve.healthCheck?.(containerId, cfg);
+    },
     reactivatePrevious:
       previousRuntime.name === "bare"
         ? (id: string) => (id.includes("/") ? Promise.resolve() : previousRuntime.start(id))
@@ -1300,9 +1321,13 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
     resources: prodResources,
     restartPolicy: serve.restartPolicy,
     runtimeName: project.slug ?? project.id,
+    slug: project.slug ?? project.id,
     publicEndpoints: routeState.publicEndpoints,
     outputDirectory: snapshot.outputDirectory,
     productionPaths: snapshot.productionPaths.length ? snapshot.productionPaths : undefined,
+    // `?? []` because a snapshot persisted before this field existed has none —
+    // redeploying an old deployment must not crash on it.
+    volumes: snapshot.volumes ?? [],
     // Bare uses this to hard-link identical files across releases.
     // Other runtimes ignore it.
     previousDeploymentId: project.activeDeploymentId ?? undefined,

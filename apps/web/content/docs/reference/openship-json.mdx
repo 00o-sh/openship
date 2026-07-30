@@ -58,8 +58,34 @@ It's **JSON, not JSONC** — no comments, no trailing commas.
     runtime: { type: '"bare" | "docker"', description: 'Runtime isolation for a single app. Services/docker projects are always "docker".' },
     productionMode: { type: '"host" | "static" | "standalone"', description: '"static" ⇒ served as files, no server.' },
     port: { type: 'integer', description: 'Port the server listens on (1–65535).' },
+    volumes: { type: 'string[]', description: 'Paths kept across deploys. Omit to inherit the framework defaults; [] turns persistence off.' },
   }}
 />
+
+## Persistent storage
+
+Everything a container writes is discarded when the next version replaces it. `volumes`
+names the paths to keep.
+
+A bare path is relative to the app; full compose syntax works too, so you can point a
+mount at a specific volume name or a host directory:
+
+```json
+{
+  "volumes": ["storage", "uploads:/app/public/uploads", "/srv/data:/app/var"]
+}
+```
+
+Omit the field to inherit the framework's own defaults (a Laravel app keeps `storage/`
+with no configuration). Declare `[]` to turn persistence off entirely — that is
+different from omitting it.
+
+Named volumes are scoped per project, so two projects that both declare `storage` never
+share one. On a bare (non-container) deploy the same paths are kept outside the release
+directory and symlinked in. Openship Cloud has no volume primitive: a declared mount is
+reported and skipped there, so use object storage for uploads instead.
+
+Compose services declare their own mounts under [`services[].volumes`](#services).
 
 ## Environment variables
 
@@ -195,6 +221,7 @@ dashboard for now.
 |---|---|
 | `framework`, `packageManager`, `*Command`, `outputDirectory`, `buildImage`, `productionPaths`, `rootDirectory` | Build settings |
 | `port`, `productionMode`, `runtime` | Runtime settings (`hasServer`, runtime isolation) |
+| `volumes` | Configuration → Persistent storage |
 | `env` | Environment variables (seeded as editable rows) |
 | `domains` | Public endpoints / custom domains |
 | `routes` | Reverse-proxy routing (`routingConfig`) |
