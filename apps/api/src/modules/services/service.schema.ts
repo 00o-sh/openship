@@ -148,6 +148,99 @@ export const UpdateServiceBody = Type.Object(
   { additionalProperties: false },
 );
 
+/**
+ * Reconcile a project's compose services against a parsed compose file.
+ *
+ * Entries carry every field `repos.service.syncFromCompose` consumes
+ * (`ParsedComposeService` in @repo/db): `name` keys the row, `kind` filters
+ * monorepo entries out, and the rest are the compose-owned and routing fields.
+ * Declaring all of them - rather than leaning on `additionalProperties` - is
+ * what lets an MCP agent discover the surface instead of guessing at it.
+ *
+ * Deliberately OPEN and unbounded, unlike Create/Update above: the payload is
+ * machine-produced from `docker compose config`, whose scalars carry no length
+ * limit and whose `restart` accepts forms outside the four-value enum
+ * (`on-failure:3`). `advanced` stays an open object because ComposeAdvanced
+ * grows per phase (healthcheck, files, ...) and this is an import path, not the
+ * curated Create/Update surface. Mass assignment isn't a concern either way:
+ * the repo layer rebuilds each row field-by-field through `toComposeSpec` +
+ * `normalizeRoutingFields` rather than spreading the entry.
+ *
+ * `services: []` is left to the handler, which rejects it with its own message.
+ */
+export const SyncServicesBody = Type.Object({
+  services: Type.Array(
+    Type.Object(
+      {
+        name: Type.String({
+          minLength: 1,
+          description: "Compose service name - keys the service row.",
+        }),
+        kind: Type.Optional(
+          Type.String({ description: 'Defaults to "compose"; "monorepo" entries are skipped.' }),
+        ),
+        image: Type.Optional(Type.String()),
+        build: Type.Optional(
+          Type.String({ description: "Build context, relative to the compose file." }),
+        ),
+        dockerfile: Type.Optional(Type.String()),
+        ports: Type.Optional(
+          Type.Array(Type.String(), { description: 'Compose port mappings, e.g. "8080:80".' }),
+        ),
+        dependsOn: Type.Optional(Type.Array(Type.String())),
+        environment: Type.Optional(Type.Record(Type.String(), Type.String())),
+        volumes: Type.Optional(Type.Array(Type.String())),
+        command: Type.Optional(Type.String()),
+        restart: Type.Optional(
+          Type.String({
+            description: 'Compose restart policy, e.g. "unless-stopped" or "on-failure:3".',
+          }),
+        ),
+        advanced: Type.Optional(
+          Type.Object(
+            {},
+            {
+              additionalProperties: true,
+              description: "Extended compose block stored as-is (healthcheck, files, ...).",
+            },
+          ),
+        ),
+        exposed: Type.Optional(Type.Boolean()),
+        exposedPort: Type.Optional(Type.String()),
+        domain: Type.Optional(Type.String()),
+        customDomain: Type.Optional(Type.String()),
+        domainType: Type.Optional(
+          Type.String({
+            description: '"custom" routes the custom domain; anything else is treated as "free".',
+          }),
+        ),
+        publicEndpoints: Type.Optional(
+          Type.Array(
+            Type.Object(
+              {
+                port: Type.Optional(Type.Union([Type.Number(), Type.String()])),
+                domain: Type.Optional(Type.String()),
+                customDomain: Type.Optional(Type.String()),
+                domainType: Type.Optional(Type.String()),
+                targetPath: Type.Optional(Type.String()),
+              },
+              { additionalProperties: true },
+            ),
+            {
+              description: "Additional public routes, one per port. Entry[0] mirrors the scalars.",
+            },
+          ),
+        ),
+      },
+      { additionalProperties: true },
+    ),
+    {
+      description:
+        "The full service list from the compose file - services missing from it are removed.",
+    },
+  ),
+});
+
 export const SetServiceEnvVarsBody = Type.Object(
   {
     environment: Type.Union([
@@ -172,4 +265,5 @@ export const SetServiceEnvVarsBody = Type.Object(
 
 export type TCreateServiceBody = Static<typeof CreateServiceBody>;
 export type TUpdateServiceBody = Static<typeof UpdateServiceBody>;
+export type TSyncServicesBody = Static<typeof SyncServicesBody>;
 export type TSetServiceEnvVarsBody = Static<typeof SetServiceEnvVarsBody>;
