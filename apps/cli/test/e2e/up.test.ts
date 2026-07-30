@@ -10,23 +10,45 @@ const h = vi.hoisted(() => ({
   prefetchResult: true,
   prefetchCalls: 0,
   internalToken: "tok" as string | null,
+  /** Ports the stack will publish — moved off the preference when busy. */
+  resolvedPorts: {
+    api: 4000,
+    dashboard: 3001,
+    switched: { api: false, dashboard: false },
+    preferred: { api: 4000, dashboard: 3001 },
+  },
+  /** Trusted-origin URLs the install is configured with. */
+  trustedOriginUrls: [] as string[],
+  /** Ports handed to composePrefetch / composeUp (they must agree). */
+  portArgs: [] as Array<{ apiPort?: string; dashboardPort?: string }>,
+  /** What the command asked the resolver to prefer. */
+  portPrefs: [] as Array<{ api?: string; dashboard?: string }>,
 }));
 vi.mock("../../src/lib/compose", () => ({
   hasDockerCompose: () => h.hasDocker,
   composeIsViableDefault: () => true,
+  // Host ports are resolved ONCE before `.env` is written, then passed to both
+  // compose steps — a busy 4000/3001 fails `up` outright, so it has to move.
+  resolveComposePorts: async (p: { api?: string; dashboard?: string }) => {
+    h.portPrefs.push(p);
+    return h.resolvedPorts;
+  },
+  composeTrustedOriginUrls: () => h.trustedOriginUrls,
   // `up` now installs Docker rather than degrading to bare (same helper the
   // wizard uses); the fixture reports whether it's present/installable.
   ensureDocker: async () => h.hasDocker,
   // Images are fetched BEFORE the preflight is allowed to stop the operator's
   // proxy. Counted so the tests below can pin that ordering down, and failable
   // so the "fetch failed → nothing was touched" path is covered.
-  composePrefetch: () => {
+  composePrefetch: (o: { apiPort?: string; dashboardPort?: string }) => {
     h.prefetchCalls++;
+    h.portArgs.push({ apiPort: o.apiPort, dashboardPort: o.dashboardPort });
     return h.prefetchResult;
   },
   // async: composeUp awaits the vhost sanitize before `up -d`.
-  composeUp: async () => {
+  composeUp: async (o: { apiPort?: string; dashboardPort?: string }) => {
     h.composeUpCalls++;
+    h.portArgs.push({ apiPort: o.apiPort, dashboardPort: o.dashboardPort });
     return h.composeUpResult;
   },
   composeInternalToken: () => h.internalToken,
@@ -54,16 +76,19 @@ vi.mock("@repo/adapters/proxy", async (importOriginal) => ({
   edgeIsBroken: async () => e.edgeBroken,
   edgeCrashReason: async () => e.edgeCrashReason,
 }));
-// waitForEdgeRunning (edge-import.ts) does `new LocalExecutor().exec("docker
-// inspect …")` to confirm the edge container is actually up before importing
-// migrated sites — mirror `e.edgeBroken` so it resolves the same way the rest
-// of the edge-chain fixtures already do, instead of the class being callable
-// but exec-less (that threw "exec.exec is not a function" the instant any
-// test's flow reached this check).
 vi.mock("@repo/adapters", () => ({
   LocalExecutor: class {
-    async exec() {
-      return e.edgeBroken ? "false" : "true";
+    /**
+     * `waitForEdgeRunning` polls `docker inspect -f '{{.State.Running}}'` through
+     * this executor before importing migrated sites. There's no docker in the
+     * harness, so report the edge as up — otherwise the import gate never opens
+     * and the assertion below sees zero registered sites.
+     *
+     * Not optional: an executor stub without `exec` throws
+     * "exec.exec is not a function" from inside the poll loop.
+     */
+    async exec(): Promise<string> {
+      return "true\n";
     }
   },
 }));
@@ -116,6 +141,17 @@ beforeEach(() => {
   h.prefetchCalls = 0;
   h.composeUpCalls = 0;
   h.internalToken = "tok";
+  h.resolvedPorts = {
+    api: 4000,
+    dashboard: 3001,
+    switched: { api: false, dashboard: false },
+    preferred: { api: 4000, dashboard: 3001 },
+  };
+  h.portArgs = [];
+  h.portPrefs = [];
+  h.trustedOriginUrls = [];
+  (upCommand as any).setOptionValue?.("port", undefined);
+  (upCommand as any).setOptionValue?.("dashboardPort", undefined);
   e.plan = { proceed: true };
   e.calls = 0;
   e.rollbacks = 0;
@@ -263,6 +299,95 @@ describe("openship up --compose (edge chain)", () => {
 
     await runCommand(upCommand, ["--compose"]);
     expect(e.rollbacks).toBe(0);
+  });
+
+  it("carries the resolved ports into BOTH compose steps when a port is busy", async () => {
+    // The desktop app never dies on a busy port; a VPS install must not either. The
+    // stack publishes API_PORT/DASHBOARD_PORT on the host, so 4000 held by anything
+    // else is a hard `bind: address already in use` — the ports move instead, and
+    // prefetch and up have to be handed the SAME values (they each render `.env`,
+    // and a disagreement would pull/build one config and start another).
+    h.resolvedPorts = {
+      api: 4001,
+      dashboard: 3002,
+      switched: { api: true, dashboard: true },
+      preferred: { api: 4000, dashboard: 3001 },
+    };
+    h.composeUpResult = { ok: true, apiPort: "4001", dashPort: "3002" };
+
+    await runCommand(upCommand, ["--compose"]);
+
+    expect(h.portArgs).toHaveLength(2);
+    for (const call of h.portArgs) {
+      expect(call).toEqual({ apiPort: "4001", dashboardPort: "3002" });
+    }
+    // Told, not silently moved: the operator has to know which port to browse and firewall.
+    expect(con.text()).toMatch(/preferred port was busy.*API 4001.*dashboard 3002/i);
+    expect(con.text()).toContain("http://localhost:3002");
+  });
+
+  it("asks for NO port preference when the flags weren't passed", async () => {
+    // A commander default would make the flags always "set", which reads as "the
+    // operator asked for 4000" — outranking the ports the install is configured with
+    // and rewriting a stack pinned to 4100 back to 4000 on a plain re-run. Asserted
+    // on the option itself as well: a default is applied at registration time, so
+    // the per-test reset above would otherwise hide its return.
+    const opts = (upCommand as any).options as Array<{ long?: string; defaultValue?: unknown }>;
+    expect(opts.find((o) => o.long === "--port")?.defaultValue).toBeUndefined();
+    expect(opts.find((o) => o.long === "--dashboard-port")?.defaultValue).toBeUndefined();
+
+    await runCommand(upCommand, ["--compose"]);
+    expect(h.portPrefs).toEqual([{ api: undefined, dashboard: undefined }]);
+  });
+
+  it("passes an explicit --port through as the preference", async () => {
+    await runCommand(upCommand, ["--compose", "--port", "4100", "--dashboard-port", "3100"]);
+    expect(h.portPrefs).toEqual([{ api: "4100", dashboard: "3100" }]);
+  });
+
+  it("warns when a trusted origin still names the port we moved off", async () => {
+    // The stack comes up fine and then 403s every login with ORIGIN_REJECTED,
+    // because trustedOrigins still contains the old port. Nothing else in the output
+    // points at the cause, so the move has to say it.
+    h.resolvedPorts = {
+      api: 4000,
+      dashboard: 3002,
+      switched: { api: false, dashboard: true },
+      preferred: { api: 4000, dashboard: 3001 },
+    };
+    h.trustedOriginUrls = ["http://192.168.1.50:3001"];
+
+    await runCommand(upCommand, ["--compose"]);
+
+    const out = con.text();
+    expect(out).toContain("http://192.168.1.50:3001");
+    expect(out).toMatch(/still names port 3001/);
+    expect(out).toMatch(/rejected/i);
+  });
+
+  it("leaves a reverse proxy's own port alone when reporting a move", async () => {
+    // `https://ops.example.com:8443` names the proxy in front, not the dashboard —
+    // warning about it would send the operator to change the one correct thing.
+    h.resolvedPorts = {
+      api: 4000,
+      dashboard: 3002,
+      switched: { api: false, dashboard: true },
+      preferred: { api: 4000, dashboard: 3001 },
+    };
+    h.trustedOriginUrls = ["https://ops.example.com:8443"];
+
+    await runCommand(upCommand, ["--compose"]);
+
+    expect(con.text()).not.toMatch(/still names port/);
+  });
+
+  it("stays quiet about ports when the preferred ones were free", async () => {
+    await runCommand(upCommand, ["--compose"]);
+    expect(h.portArgs).toEqual([
+      { apiPort: "4000", dashboardPort: "3001" },
+      { apiPort: "4000", dashboardPort: "3001" },
+    ]);
+    expect(con.text()).not.toMatch(/preferred port was busy/i);
   });
 
   it("rejects an invalid --edge value before any side effects", async () => {

@@ -599,7 +599,7 @@ export async function deployComposeServices(
     // Reuses the map built above (needsDomainMap covers this branch).
     routeContext = {
       routing: opts.routing,
-      trackedSsl: createTrackedSslProvider(opts.ssl, domainByHostname),
+      trackedSsl: createTrackedSslProvider(opts.ssl, domainByHostname, (m) => logger.log(`${m}\n`)),
       usesManagedRouting: opts.usesManagedRouting,
       organizationId: dep.organizationId,
       serverId: opts.serverId,

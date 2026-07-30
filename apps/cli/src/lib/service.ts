@@ -16,6 +16,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { IS_ALT_HOME, OS_DIR } from "./paths";
+import { readStoredPorts } from "./ports";
 
 const HOME = homedir();
 const LOG_DIR = join(OS_DIR, "logs");
@@ -349,17 +350,18 @@ export function serviceStatus(): { kind: ServiceKind; installed: boolean; runnin
  * reaper) can orphan the API + dashboard onto the port — leaving `stop`
  * reporting success while `lsof -i :4000` still shows live processes. Scoped to
  * OUR ports (from ports.json) so it never touches an unrelated app. POSIX only.
+ *
+ * Reads through readStoredPorts (OS_DIR), NOT a hardcoded `~/.openship`: this used
+ * to inline its own path, so a from-source install (OPENSHIP_HOME=~/.openship-dev)
+ * swept the PRODUCTION install's ports — `openship stop` in the dev tree could
+ * SIGKILL the production API and dashboard. Every other part of this file already
+ * derives from OS_DIR precisely so the two installs can't fight.
  */
 function sweepOrphanPorts(): void {
   if (process.platform === "win32") return;
-  let ports: number[] = [];
-  try {
-    const raw = readFileSync(join(HOME, ".openship", "ports.json"), "utf8");
-    const p = JSON.parse(raw) as { api?: number; dashboard?: number };
-    ports = [p.api, p.dashboard].filter((n): n is number => typeof n === "number");
-  } catch {
-    return; // no remembered ports → nothing scoped to sweep
-  }
+  const stored = readStoredPorts();
+  const ports = [stored.api, stored.dashboard].filter((n): n is number => typeof n === "number");
+  if (ports.length === 0) return; // no remembered ports → nothing scoped to sweep
   const self = process.pid;
   for (const port of ports) {
     const q = run("lsof", ["-ti", `tcp:${port}`]);

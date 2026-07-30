@@ -10,15 +10,12 @@
  */
 import { Command } from "commander";
 import chalk from "chalk";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-
-import { OS_DIR } from "../lib/paths";
 import { apiRequest, getApiUrl, ApiError } from "../lib/api-client";
 import { getActiveContext } from "../lib/config";
 import { serviceStatus } from "../lib/service";
 import { readInstallMethod, composePs } from "../lib/compose";
 import { isJsonMode, printJson } from "../lib/output";
+import { readStoredPorts } from "../lib/ports";
 
 interface Health {
   status?: string;
@@ -33,14 +30,6 @@ interface HealthEnv {
   cloudApiUrl?: string | null;
   machineName?: string;
   hostDomain?: string;
-}
-
-function readPorts(): { api?: number; dashboard?: number } {
-  try {
-    return JSON.parse(readFileSync(join(OS_DIR, "ports.json"), "utf8"));
-  } catch {
-    return {};
-  }
 }
 
 export const statusCommand = new Command("status")
@@ -65,7 +54,7 @@ export const statusCommand = new Command("status")
     }
 
     const svc = serviceStatus();
-    const ports = readPorts();
+    const ports = readStoredPorts();
 
     let health: Health | null = null;
     let envInfo: HealthEnv | null = null;

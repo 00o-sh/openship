@@ -1406,7 +1406,7 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
   });
 
   const deploySsl = plannedDomains.some((domain) => domain.provisionSsl)
-    ? createTrackedSslProvider(ssl, domainByHostname)
+    ? createTrackedSslProvider(ssl, domainByHostname, (m) => logger.log(`${m}\n`))
     : ssl;
 
   // (Pre-deploy backups now fire once in executeBuildAndDeploy, covering all

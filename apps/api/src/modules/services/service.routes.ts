@@ -18,7 +18,6 @@
  */
 
 import { Hono } from "hono";
-import { tbValidator } from "@hono/typebox-validator";
 import { secureRouter } from "../../lib/secure-router";
 import { cloudProjectProxy } from "../../lib/cloud/project-router";
 import * as ctrl from "./service.controller";
@@ -51,10 +50,10 @@ r.post(
     // and 400s "Missing route param" before the handler runs.
     tag: "project:service:write",
     collection: true,
-    mcp: { description: "Add a service to a project.", body: CreateServiceBody },
+    body: CreateServiceBody,
+    mcp: { description: "Add a service to a project." },
   },
   cloudProjectProxy,
-  tbValidator("json", CreateServiceBody),
   ctrl.create,
 );
 r.get(
@@ -100,10 +99,10 @@ r.patch(
   "/:serviceId",
   {
     tag: "project:service:write",
-    mcp: { description: "Update a service's configuration.", body: UpdateServiceBody },
+    body: UpdateServiceBody,
+    mcp: { description: "Update a service's configuration." },
   },
   cloudProjectProxy,
-  tbValidator("json", UpdateServiceBody),
   ctrl.update,
 );
 r.delete(
@@ -143,10 +142,10 @@ r.put(
   "/:serviceId/env",
   {
     tag: "project:service:write",
-    mcp: { description: "Replace a service's environment variables.", body: SetServiceEnvVarsBody },
+    body: SetServiceEnvVarsBody,
+    mcp: { description: "Replace a service's environment variables." },
   },
   cloudProjectProxy,
-  tbValidator("json", SetServiceEnvVarsBody),
   ctrl.setEnvVars,
 );
 

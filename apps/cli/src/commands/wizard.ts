@@ -17,7 +17,7 @@
 import chalk from "chalk";
 import open from "open";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   intro,
@@ -46,7 +46,14 @@ import {
 } from "../lib/loopback-api";
 import { ensureDashboard } from "../lib/dashboard";
 import { serviceStatus, stop as stopService, restart as restartService } from "../lib/service";
-import { saveInstanceUrl, readInstanceUrl } from "../lib/ports";
+import {
+  saveInstanceUrl,
+  readInstanceUrl,
+  portMoveNotice,
+  readStoredPorts,
+  storedApiPort,
+  storedDashboardPort,
+} from "../lib/ports";
 import { runRepair, looksCorrupted, lastServiceError } from "../lib/repair";
 import {
   ensureDocker,
@@ -55,6 +62,8 @@ import {
   composeUp,
   composeInternalToken,
   composePrefetch,
+  composeTrustedOriginUrls,
+  resolveComposePorts,
   sourceBuildDir,
   readInstallMethod,
   composeDown,
@@ -712,6 +721,14 @@ export async function runWizard(): Promise<void> {
     }
   }
   if (method === "compose") {
+    // Ports are a preference, not a fixture: the stack publishes them on the host,
+    // so a busy 4000/3001 would fail `up` outright. Resolved once here and passed to
+    // both compose steps (they each render `.env`, so they must agree).
+    const ports = await resolveComposePorts({});
+    const apiPort = String(ports.api);
+    const dashboardPort = String(ports.dashboard);
+    const moved = portMoveNotice(ports, composeTrustedOriginUrls());
+    if (moved.length) log.info(moved.join("\n"));
     // Fetch FIRST, cut over second — same rule as `openship up`. Pulling after the
     // preflight stops a foreign proxy keeps the box dark for the whole download, and
     // a failed pull takes their sites down for a problem that never reached them.
@@ -722,6 +739,8 @@ export async function runWizard(): Promise<void> {
     );
     if (
       !composePrefetch({
+        apiPort,
+        dashboardPort,
         publicUrl,
         trustProxy: behindProxy,
         version: __CLI_VERSION__,
@@ -748,6 +767,8 @@ export async function runWizard(): Promise<void> {
     const up = await composeUp({
       // Prefetched above, before the preflight stopped anything.
       alreadyFetched: true,
+      apiPort,
+      dashboardPort,
       publicUrl,
       trustProxy: behindProxy,
       version: __CLI_VERSION__,
@@ -1045,16 +1066,6 @@ export async function runWizard(): Promise<void> {
   });
 }
 
-/** The resolved API/dashboard ports the service last used. */
-function storedPorts(): { api?: number; dashboard?: number } {
-  const p = join(OS_DIR, "ports.json");
-  try {
-    return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : {};
-  } catch {
-    return {};
-  }
-}
-
 /**
  * Control panel for an ALREADY-SET-UP box — what bare `openship` shows instead of
  * re-running setup once a service is installed. Manage the running instance
@@ -1068,9 +1079,9 @@ export async function runControl(): Promise<void> {
   // so derive liveness + drive start/stop/restart through docker compose instead.
   const running = isCompose ? composeRunning() : svc.running;
   const managerLabel = isCompose ? "docker compose" : svc.kind === "unsupported" ? "none" : svc.kind;
-  const ports = storedPorts();
-  const apiPort = String(ports.api ?? 4000);
-  const dashUrl = `http://localhost:${ports.dashboard ?? 3001}`;
+  const ports = readStoredPorts();
+  const apiPort = String(storedApiPort());
+  const dashUrl = `http://localhost:${storedDashboardPort()}`;
   const publicUrl = readInstanceUrl();
   // The real front door: the public domain if one was set, else the local dashboard.
   const primaryUrl = publicUrl && !/^https?:\/\/localhost/i.test(publicUrl) ? publicUrl : dashUrl;

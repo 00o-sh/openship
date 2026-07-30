@@ -19,6 +19,8 @@ const h = vi.hoisted(() => ({
   existing: new Set<string>(),
   written: new Map<string, string>(),
   composeCalls: [] as string[][],
+  /** `docker ps` rows for the port query: "<config_files>\t<published ports>". */
+  dockerPsPorts: "",
 }));
 
 vi.mock("node:child_process", () => ({
@@ -30,6 +32,11 @@ vi.mock("node:child_process", () => ({
     // No pre-existing db volume → the password-reconcile path stays out of the
     // compose sequences these tests assert on.
     if (cmd === "docker" && args[0] === "volume") return { status: 1, stdout: "", stderr: "" };
+    // Only the published-ports query (composeHeldPorts), not the container sweep
+    // orphanedStackContainers runs with its own format.
+    if (cmd === "docker" && args[0] === "ps" && args.some((a) => a.includes("{{.Ports}}"))) {
+      return { status: 0, stdout: h.dockerPsPorts, stderr: "" };
+    }
     return { status: 0, stdout: "", stderr: "" };
   },
 }));
@@ -68,7 +75,16 @@ vi.mock("@repo/adapters", async () => {
   };
 });
 
-import { composePaths, composeUp, composeUpdate, resolveEnvConfig } from "../../src/lib/compose";
+import {
+  composeEnvPorts,
+  composeHeldPorts,
+  composePaths,
+  composeUp,
+  composeUpdate,
+  resolveComposePorts,
+  resolveEnvConfig,
+} from "../../src/lib/compose";
+import { getFreePort } from "../../src/lib/ports";
 
 /** The `.env` this run wrote, parsed back into key → value. */
 function writtenEnv(): Record<string, string> {
@@ -127,6 +143,7 @@ beforeEach(() => {
   h.existing = new Set();
   h.written = new Map();
   h.composeCalls = [];
+  h.dockerPsPorts = "";
 });
 
 describe("resolveEnvConfig", () => {
@@ -193,6 +210,85 @@ describe("composeUp — re-run on a configured install", () => {
     const res = await composeUp({});
     expect(res.apiPort).toBe("4100");
     expect(res.dashPort).toBe("3100");
+  });
+
+  it("keeps a pinned publish interface across a re-run", async () => {
+    // Same failure shape as the dropped public URL: `.env` is regenerated from
+    // scratch, so a key nothing writes is a key that disappears — here silently
+    // republishing the api + dashboard on every interface of the box.
+    seedEnv({ ...CONFIGURED, OPENSHIP_BIND_ADDR: "127.0.0.1" });
+    await composeUp({});
+    expect(writtenEnv().OPENSHIP_BIND_ADDR).toBe("127.0.0.1");
+  });
+
+  it("tells the api which dashboard port to route the domain to", async () => {
+    // The self-app boot reconcile points the operator's domain at
+    // 127.0.0.1:OPENSHIP_DASHBOARD_PORT, which silently defaults to 3001 when the
+    // key is absent. Ports are dynamic, so omitting it publishes a domain routed to
+    // a port nothing listens on.
+    seedEnv(CONFIGURED);
+    await composeUp({});
+    const env = writtenEnv();
+    expect(env.OPENSHIP_DASHBOARD_PORT).toBe(env.DASHBOARD_PORT);
+    expect(env.OPENSHIP_DASHBOARD_PORT).toBe("3100");
+  });
+});
+
+describe("compose port resolution", () => {
+  it("prefers the ports the install is already configured with", async () => {
+    seedEnv(CONFIGURED);
+    expect(composeEnvPorts()).toEqual({ api: 4100, dashboard: 3100 });
+  });
+
+  it("has no preference on a first install", async () => {
+    expect(composeEnvPorts()).toEqual({ api: undefined, dashboard: undefined });
+  });
+
+  it("ignores a junk port in the .env rather than proposing NaN", async () => {
+    seedEnv({ ...CONFIGURED, API_PORT: "not-a-port", DASHBOARD_PORT: "0" });
+    expect(composeEnvPorts()).toEqual({ api: undefined, dashboard: undefined });
+  });
+
+  it("counts the ports OUR OWN stack publishes as reclaimable", async () => {
+    // Both host and IPv6 mappings for the same container port, plus a foreign
+    // container that must not be claimed as ours.
+    h.dockerPsPorts = [
+      `${composePaths.file}\t0.0.0.0:4100->4100/tcp, [::]:4100->4100/tcp`,
+      `${composePaths.file}\t0.0.0.0:3100->3100/tcp`,
+      `/srv/other/docker-compose.yml\t0.0.0.0:9999->9999/tcp`,
+      `\t`,
+    ].join("\n");
+
+    const held = composeHeldPorts();
+    expect(held.sort()).toEqual([3100, 4100]);
+    expect(held).not.toContain(9999);
+  });
+
+  it("resolves a flagless re-run back to the install's own ports", async () => {
+    // End-to-end wiring of the preference chain: no flags, so the `.env` decides and
+    // a running stack's own ports are reclaimable rather than "occupied". (That the
+    // reclaim actually survives a HELD port is pinned in ports.test.ts, against a
+    // real bound socket.) Probing is kept on loopback so the test binds nothing
+    // externally.
+    seedEnv({ ...CONFIGURED, OPENSHIP_BIND_ADDR: "127.0.0.1" });
+    h.dockerPsPorts = `${composePaths.file}\t0.0.0.0:4100->4100/tcp, 0.0.0.0:3100->3100/tcp`;
+
+    const r = await resolveComposePorts({});
+    expect(r.api).toBe(4100);
+    expect(r.dashboard).toBe(3100);
+    expect(r.switched).toEqual({ api: false, dashboard: false });
+  });
+
+  it("lets an explicit --port outrank the configured one", async () => {
+    seedEnv({ ...CONFIGURED, OPENSHIP_BIND_ADDR: "127.0.0.1" });
+    // A port this box genuinely has free, so the assertion is about precedence and
+    // not about whatever happens to be listening on the machine running the tests.
+    const wanted = await getFreePort();
+
+    const r = await resolveComposePorts({ api: String(wanted) });
+
+    expect(r.api).toBe(wanted);
+    expect(r.dashboard).toBe(3100);
   });
 
   it("leaves the containers alone when nothing changed", async () => {

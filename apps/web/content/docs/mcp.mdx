@@ -175,6 +175,15 @@ can't mint itself a fresh credential or escape its own scope. Manage tokens and 
 dashboard or the [Tokens API](/docs/api/tokens), not from an agent.
 </Callout>
 
+## Guided flows
+
+Some tasks are a chain of calls in a specific order — deploying a repo, uploading a folder, installing a
+catalog app. The server ships a small set of **prompts** (`prompts/list` / `prompts/get`) that spell those
+chains out step by step, referencing the exact tools to call. Compatible clients surface them as
+slash-commands or starters, so an agent can pick a flow and follow it rather than reverse-engineering the
+order from the flat tool list. See the [MCP API reference](/docs/api/mcp#guided-flows-prompts) for the full
+catalog.
+
 ## Verify from the terminal
 
 To confirm a token works and see what it can do, ask for the tool list:

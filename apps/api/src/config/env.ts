@@ -468,6 +468,38 @@ if (env.DEPLOY_MODE === "desktop" && !env.OPENSHIP_AUTH_MODE && env.NODE_ENV !==
   );
 }
 
+// ─── "desktop" belongs to Electron alone ──────────────────────────────────
+//
+// DEPLOY_MODE=desktop is a POSTURE, not a convenience: it relaxes the zero-auth
+// gate (zero-auth-guard.ts), makes INTERNAL_TOKEN optional (internal-auth.ts),
+// silences the zero-auth banner, and reports `isServerHost: false` so the
+// dashboard stops treating the box as a deploy target.
+//
+// The CLI used to claim it on a bare VPS install purely to get an in-process job
+// runner. The result: a server-host install that identified as a laptop — no
+// "This Server" row (its startup hook is gated on modes:["selfhosted"]), a deploy
+// wizard offering only Openship Cloud, and a relaxed auth posture on a networked
+// box. The job runner never needed it (Redis reachability decides that).
+//
+// Electron declares BOTH DEPLOY_MODE=desktop and OPENSHIP_LOCAL_DASHBOARD_URL (it
+// serves the dashboard on a dynamic loopback port and must tell the API where).
+// Nothing else does. So a `desktop` claim without it is a launcher bug: warn
+// loudly rather than refuse, since a refusal here would brick the desktop app if
+// that pairing ever changes, and zeroAuthAllowed() still independently requires a
+// kernel-reported loopback peer.
+if (
+  env.DEPLOY_MODE === "desktop" &&
+  !env.OPENSHIP_LOCAL_DASHBOARD_URL &&
+  env.NODE_ENV !== "test"
+) {
+  console.warn(
+    `[env] DEPLOY_MODE="desktop" but OPENSHIP_LOCAL_DASHBOARD_URL is unset — ` +
+      `"desktop" is for the Electron app only. A server install should declare ` +
+      `DEPLOY_MODE="bare" (host processes) or "docker" (compose); claiming desktop ` +
+      `relaxes the zero-auth + internal-token gates and hides this box as a deploy target.`,
+  );
+}
+
 // ─── gh CLI auth modes are forbidden on the SaaS host ─────────────────────
 //
 // The multi-tenant SaaS (CLOUD_MODE=true) has no operator `gh` CLI and must

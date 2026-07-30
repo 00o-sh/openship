@@ -36,6 +36,7 @@
  */
 
 import type { Hono, MiddlewareHandler, Handler } from "hono";
+import { tbValidator } from "@hono/typebox-validator";
 import {
   requirePermission,
   publicRoute,
@@ -166,6 +167,14 @@ export function secureRouter<T extends Hono>(
         ? publicRoute({ reason: mergedSpec.reason })
         : requirePermission(mergedSpec as PermissionSpec),
     );
+    // Body validation is declared once on the spec (`body`) and auto-wired here,
+    // right after the permission check and ahead of the handlers — so the schema
+    // is never duplicated between a manual `tbValidator(...)` handler and the MCP
+    // block. Runs before any cloud proxy (validating locally before forwarding is
+    // safe: Hono caches the parsed body, so the proxy still re-reads it).
+    if (!isPublicSpec(mergedSpec) && (mergedSpec as PermissionSpec).body) {
+      chain.push(tbValidator("json", (mergedSpec as PermissionSpec).body!));
+    }
     chain.push(...handlers);
 
     // Hono's method signatures are loose — use a typed indexer.
