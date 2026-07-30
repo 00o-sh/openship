@@ -7,7 +7,19 @@
       "announce": true,
       "affects": "<0.4.8",
       "title": "Update to Openship 0.4.8",
-      "message": "Openship 0.4.8 is available. See the release notes for what's new — updating is recommended.",
+      "message": "Openship 0.4.8 contains important fixes. Update as soon as you can.",
+      "action": {
+        "label": "Update now",
+        "kind": "update"
+      }
+    },
+    {
+      "id": "update-0.4.9",
+      "severity": "recommended",
+      "announce": false,
+      "affects": "<0.4.9",
+      "title": "Update to Openship 0.4.9",
+      "message": "Openship 0.4.9 is available with fixes across MCP and custom domains. See the release notes — updating is recommended.",
       "action": {
         "label": "Update now",
         "kind": "update"

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Server, Clock, User, AlertCircle } from "lucide-react";
 import { getCountryFlagUrl } from "@/lib/country";
 import './logs.css';
@@ -58,6 +58,17 @@ export const ServerLogs: React.FC<ServerLogsProps> = ({
   useEffect(() => {
     setSelectedDomain((current) => (current && domains.includes(current) ? current : domain || ""));
   }, [domain, domains]);
+
+  // The stream effect keys off the domain SET, as a string. `domains` is rebuilt by
+  // useMemo on every domainsData change, so depending on the array (or on
+  // `isLoading`, which flips on every refetch) re-ran the effect for reasons that
+  // have nothing to do with routing — and each re-run called setServerLogs([]) and
+  // reopened the EventSource, so the visible log list emptied itself while you
+  // watched it. Content, not identity.
+  const domainsKey = useMemo(() => domains.join(","), [domains]);
+  // Read inside the effect without depending on it (see above).
+  const domainsLoadingRef = useRef(false);
+  domainsLoadingRef.current = Boolean(domainsData?.isLoading);
 
   const formatBytes = useCallback((bytes?: number) => {
     const b = typeof bytes === 'number' ? bytes : 0;
@@ -135,10 +146,9 @@ export const ServerLogs: React.FC<ServerLogsProps> = ({
     // routed domain. With no domain there's nothing to stream — surface the
     // "add a domain" hint (renderEmpty) instead of a misleading connection
     // error. Wait while the domain list is still loading; this effect re-runs
-    // when it resolves (domains is in the deps).
-    if (domainsData?.isLoading) return;
-    if (domains.length === 0) {
-      setIsLoading(false);
+    // when it resolves (domainsKey is in the deps).
+    if (!domainsKey) {
+      if (!domainsLoadingRef.current) setIsLoading(false);
       return;
     }
 
@@ -159,6 +169,11 @@ export const ServerLogs: React.FC<ServerLogsProps> = ({
         const entry = normalizeLogEntry(d);
         if (entry) {
           setIsLoading(false);
+          // Live data means whatever failed earlier has recovered. Without this the
+          // error stays latched forever — invisible while logs are on screen (the
+          // banner only renders for an EMPTY list), then revealed the moment you hit
+          // Clear, which read as "Clear broke the log stream".
+          setError(null);
           addServerLog(entry);
         }
       } catch { /* malformed data */ }
@@ -259,7 +274,7 @@ export const ServerLogs: React.FC<ServerLogsProps> = ({
       cancelled = true;
       es?.close();
     };
-  }, [projectId, selectedDomain, domains, domainsData?.isLoading, setServerLogs, addServerLog, mergeServerLogs, normalizeLogEntry]);
+  }, [projectId, selectedDomain, domainsKey, setServerLogs, addServerLog, mergeServerLogs, normalizeLogEntry]);
 
   const logsStrings = useMemo(() => {
     return serverLogsData.logs.map((log: any) =>

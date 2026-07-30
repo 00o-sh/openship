@@ -339,25 +339,6 @@ const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
       </div>
 
       <div className="p-4 space-y-4">
-        {wwwToggle?.show && (
-          <div className="flex items-center justify-between gap-4 rounded-xl border border-border/50 bg-muted/25 px-4 py-3">
-            <div className="min-w-0">
-              <p className="text-[13px] font-medium text-foreground">
-                {t.projectSettings.domains.add.includeWww}
-              </p>
-              <p className="truncate text-[12px] text-muted-foreground">
-                {interpolate(t.projectSettings.domains.add.includeWwwDesc, {
-                  domain: wwwToggle.apex ?? "",
-                })}
-              </p>
-            </div>
-            <Switch
-              checked={wwwToggle.included}
-              onChange={(next) => wwwToggle.onToggle(next)}
-              ariaLabel={t.projectSettings.domains.add.includeWww}
-            />
-          </div>
-        )}
         {hasMultipleEndpoints ? endpoints.map((endpoint, index) => {
           const isOpen = expandedIds.has(endpoint.id);
           const summary =
@@ -405,6 +386,21 @@ const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
         }) : renderRoutingCard(
           endpoints[0],
           allowRemoveAll ? removeButton(endpoints[0].id) : undefined,
+        )}
+
+        {/* Single compact row, kept UNDER the domain input so toggling it (or its
+            appearance once a domain is typed) never shifts the input above. */}
+        {wwwToggle?.show && (
+          <div className="flex items-center justify-between gap-4 rounded-xl bg-muted/30 px-4 py-3">
+            <span className="text-[13px] font-medium text-foreground">
+              {t.projectSettings.domains.add.includeWww}
+            </span>
+            <Switch
+              checked={wwwToggle.included}
+              onChange={(next) => wwwToggle.onToggle(next)}
+              ariaLabel={t.projectSettings.domains.add.includeWww}
+            />
+          </div>
         )}
       </div>
     </div>

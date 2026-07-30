@@ -42,6 +42,14 @@ describe("mcp prompts catalog", () => {
     expect(text).toContain("prod");
   });
 
+  it("every prompt tells the agent where to report platform bugs", () => {
+    for (const p of listPrompts()) {
+      const res = getPrompt(p.name, {});
+      const text = (res!.messages[0] as { content: { text: string } }).content.text;
+      expect(text).toContain("https://github.com/oblien/openship/issues");
+    }
+  });
+
   it("returns null for an unknown prompt", () => {
     expect(getPrompt("does-not-exist", {})).toBeNull();
   });

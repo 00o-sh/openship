@@ -230,6 +230,18 @@ describe("NginxProvider config generation", () => {
     expect(calls.some((c) => c.startsWith("openssl "))).toBe(false);
   });
 
+  test("a host that STOPS terminating TLS here drops its placeholder", async () => {
+    // Cleanup keys off what was emitted, not off "a real cert arrived", so a route
+    // re-registered without the flag (external ingress adopted later, or a caller
+    // that claimed it too broadly) converges instead of leaving a stale :443
+    // listener and stale key material behind.
+    const { nginx, removed } = setup();
+    await nginx.registerRoute(OURS);
+    expect(removed).not.toContain(BOOTSTRAP_DIR);
+    await nginx.registerRoute({ ...PROXY, terminatesTlsLocally: false });
+    expect(removed).toContain(BOOTSTRAP_DIR);
+  });
+
   test("the real cert supersedes the placeholder and deletes it", async () => {
     const { nginx, conf, removed } = setup({ certDomains: ["app.example.com"] });
     await nginx.registerRoute(OURS);
@@ -347,7 +359,11 @@ describe("behind a TLS-terminating CDN", () => {
     expect(c).not.toContain("proxy_set_header X-Forwarded-Proto $scheme;");
     // Falls back to $scheme when no CDN set the header.
     expect(c).toContain("set $openship_fwd_proto $scheme;");
-    expect(c).toContain("set $openship_fwd_proto $http_x_forwarded_proto;");
+    // Only an exact "https" is honoured, and the LITERAL is forwarded — never the
+    // client's own string, which is legally a list ("http, https") behind chained
+    // proxies and would confuse a framework comparing it to "https".
+    expect(c).toContain("set $openship_fwd_proto https;");
+    expect(c).not.toContain("set $openship_fwd_proto $http_x_forwarded_proto;");
   });
 
   test("every block that sends the header also defines the variable", async () => {
