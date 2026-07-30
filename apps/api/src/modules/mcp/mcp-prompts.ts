@@ -34,6 +34,14 @@ function toolRef(method: string, path: string): string {
   return t ? t.name : `${method} ${path}`;
 }
 
+/**
+ * Appended to every prompt: if the agent hits something that looks like an
+ * Openship platform bug (not a user-input error), it should point the user at
+ * the issue tracker rather than silently working around it.
+ */
+const BUG_REPORT =
+  "If you hit what looks like a bug in Openship itself — an unexpected 500, a tool that misbehaves, or a deploy that fails for a platform reason rather than your input — tell the user to open an issue at https://github.com/oblien/openship/issues, including the tool name, the arguments you sent, and any error text returned.";
+
 const PROMPTS: PromptDef[] = [
   {
     name: "openship-overview",
@@ -144,12 +152,13 @@ export function getPrompt(
 ): { description: string; messages: unknown[] } | null {
   const prompt = PROMPTS.find((p) => p.name === name);
   if (!prompt) return null;
+  const text = `${prompt.build(args ?? {}, toolRef)}\n\n${BUG_REPORT}`;
   return {
     description: prompt.description,
     messages: [
       {
         role: "user",
-        content: { type: "text", text: prompt.build(args ?? {}, toolRef) },
+        content: { type: "text", text },
       },
     ],
   };
