@@ -327,7 +327,7 @@ http {
 const GEOIP_DIR = "/usr/share/GeoIP";
 const GEOIP_DB_PATH = `${GEOIP_DIR}/GeoLite2-Country.mmdb`;
 const GEOIP_DB_URL =
-  "https://github.com/P3TERX/GeoLite.mmdb/releases/download/2026.04.07/GeoLite2-Country.mmdb";
+  "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-Country.mmdb";
 
 // ── Local Lua source directory ───────────────────────────────────────────────
 
