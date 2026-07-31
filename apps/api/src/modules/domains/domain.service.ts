@@ -14,8 +14,8 @@
  * in the SSL status pill on the next read.
  */
 
-import { repos, type Domain, type Project } from "@repo/db";
-import { NotFoundError, ConflictError, ValidationError, safeErrorMessage, normalizeCustomHostname, isValidCustomHostname, SYSTEM } from "@repo/core";
+import { repos, normalizeRoutingFields, type Domain, type Project } from "@repo/db";
+import { NotFoundError, ConflictError, ValidationError, safeErrorMessage, normalizeCustomHostname, isValidCustomHostname, wwwSiblingHostname, SYSTEM } from "@repo/core";
 import { platform, assertResourceInOrg } from "../../lib/controller-helpers";
 import { buildBackgroundContext, type RequestContext } from "../../lib/request-context";
 import {
@@ -27,9 +27,10 @@ import {
 } from "../../lib/domain-ssl";
 import { getRoutingBaseDomain } from "../../lib/routing-domains";
 import { resolveRecords } from "../../lib/dns-resolver";
-import { resolveProjectServerHost, resolveLocalServerHost } from "../../lib/server-target";
+import { resolveProjectServerHost, resolveLocalServerHost, resolveInstancePublicIp, isLoopbackHost } from "../../lib/server-target";
 import { reconcileProjectRoutes } from "../../lib/route-apply.service";
 import { generateToken } from "../../lib/domain-token";
+import { publicEndpointHostname, resolveServicePublicEndpoints } from "../../lib/public-endpoints";
 import { sshManager } from "../../lib/ssh-manager";
 import type { DeploymentMeta } from "../../lib/deployment-runtime";
 import type { TAddDomainBody } from "./domain.schema";
@@ -205,10 +206,11 @@ async function addWwwSibling(
   data: TAddDomainBody,
   hostname: string,
 ): Promise<void> {
-  if (hostname.startsWith("www.")) return;
+  const www = wwwSiblingHostname(hostname);
+  if (!www) return;
   await addDomain(ctx, {
     projectId: data.projectId,
-    hostname: `www.${hostname}`,
+    hostname: www,
     isPrimary: false,
     externalIngress: data.externalIngress,
   });
@@ -304,9 +306,13 @@ export async function removeServiceDomain(opts: {
 
 // ─── Preview records (no auth, no DB write) ──────────────────────────────────
 
-export async function previewRecords(hostname: string, organizationId?: string) {
+export async function previewRecords(
+  hostname: string,
+  organizationId?: string,
+  includeWww = false,
+) {
   const token = generateToken(hostname);
-  return buildRecords(hostname, token, undefined, false, organizationId);
+  return buildRecords(hostname, token, undefined, false, organizationId, includeWww);
 }
 
 // ─── Get DNS records (existing domain) ───────────────────────────────────────
@@ -834,7 +840,58 @@ export async function removeDomain(ctx: RequestContext, domainId: string) {
     console.error(`[DOMAIN] Failed to remove route for ${domain.hostname}:`, err);
   }
 
+  // A service-scoped row is only HALF the routing config — the owning SERVICE row
+  // also carries `exposed`/`domain`/`customDomain`/`publicEndpoints`. Deleting
+  // just the domain row left the service still configured for that hostname,
+  // which is why removing a free route then made every later action demand Cloud:
+  // preflight's `servicesNeedCloud` kept seeing the stale *.opsh.io slug and
+  // reported "Connect Openship Cloud to expose services on free *.opsh.io
+  // subdomains" — even while the user was adding a CUSTOM domain.
+  //
+  // ONE transaction, because the two writes describe one outcome. As separate
+  // awaits a failure between them recreates exactly that stale state, with the
+  // row already gone so there's nothing left to retry against.
+  const serviceRouting = domain.serviceId
+    ? await resolveRemainingServiceRouting(domain.serviceId, domain.hostname)
+    : null;
+
+  if (domain.serviceId && serviceRouting) {
+    await repos.domain.removeWithServiceRouting(domainId, {
+      serviceId: domain.serviceId,
+      routing: serviceRouting,
+    });
+    return;
+  }
+
   await repos.domain.remove(domainId);
+}
+
+/**
+ * The routing columns a service should keep once `hostname` is gone: the
+ * surviving endpoints, or fully unexposed when none remain — "exposed with no
+ * hostname" is the state that produces a dead Pending route.
+ *
+ * Pure resolution (one read, no writes) so the caller can commit it inside the
+ * same transaction as the domain delete. Returns null when the service row is
+ * missing, so the caller falls back to a plain delete.
+ */
+async function resolveRemainingServiceRouting(
+  serviceId: string,
+  hostname: string,
+): Promise<Record<string, unknown> | null> {
+  const svc = await repos.service.findById(serviceId);
+  if (!svc) return null;
+  const target = hostname.toLowerCase();
+
+  const remaining = resolveServicePublicEndpoints(svc).filter(
+    (endpoint) => publicEndpointHostname(endpoint)?.toLowerCase() !== target,
+  );
+
+  // Still serving something → stay exposed on the survivors, with entry[0]
+  // mirrored onto the scalar columns by normalizeRoutingFields.
+  return remaining.length > 0
+    ? { ...normalizeRoutingFields({ exposed: true, publicEndpoints: remaining }) }
+    : { ...normalizeRoutingFields({ exposed: false }) };
 }
 
 // ─── SSL ─────────────────────────────────────────────────────────────────────
@@ -1241,7 +1298,12 @@ async function buildRecords(
   project?: Project,
   externalIngress = false,
   organizationId?: string,
+  /** Mirror the "Include www" toggle: that toggle claims a SECOND hostname, so
+   *  the panel must show ITS record too. Without this the user turned www on and
+   *  saw only the apex record, then wondered why www never resolved. */
+  includeWww = false,
 ): Promise<{ mode: "cloud" | "selfhosted" | "external"; records: DnsRecord[] }> {
+  const wwwHostname = includeWww ? wwwSiblingHostname(hostname) : null;
   const { target, runtime } = platform();
 
   const { routeHost, routeName, txtHost, txtName } = dnsRecordHosts(hostname);
@@ -1260,10 +1322,28 @@ async function buildRecords(
       cnameTarget = result.requiredRecords.cname.target;
     } catch { /* Oblien unreachable */ }
 
-    return {
-      mode: "cloud",
-      records: [{ type: "CNAME", host: routeHost, name: routeName, value: cnameTarget ?? "" }, txt],
-    };
+    const records: DnsRecord[] = [
+      { type: "CNAME", host: routeHost, name: routeName, value: cnameTarget ?? "" },
+      txt,
+    ];
+    if (wwwHostname) {
+      // The www sibling is its OWN hostname, so it needs its own CNAME + the
+      // ownership TXT for that name — the shared edge verifies each separately.
+      const www = dnsRecordHosts(wwwHostname);
+      records.push({
+        type: "CNAME",
+        host: www.routeHost,
+        name: www.routeName,
+        value: cnameTarget ?? "",
+      });
+      records.push({
+        type: "TXT",
+        host: www.txtHost,
+        name: www.txtName,
+        value: generateToken(wwwHostname),
+      });
+    }
+    return { mode: "cloud", records };
   }
 
   // ── Self-hosted ──
@@ -1278,13 +1358,27 @@ async function buildRecords(
   // front would answer with its own IP — so it's a hint, not a gate. Read the
   // box's public address (resolved once at ensure-server): the deployed project's
   // server, else this org's "This Server" row for the pre-deploy preview.
-  const serverIp =
+  let serverIp =
     (await resolveProjectServerHost(project)) ??
     (organizationId ? await resolveLocalServerHost(organizationId) : null);
-  return {
-    mode: "selfhosted",
-    records: [{ type: "A", host: routeHost, name: routeName, value: serverIp ?? "" }],
-  };
+  // A loopback is the local row's display host when no public IP was known at
+  // registration — useless as "point your domain here". Re-detect live for this
+  // (user-initiated, off-hot-path) preview; leave EMPTY so the UI shows a
+  // placeholder rather than a dead `127.0.0.1` the operator would copy verbatim.
+  if (!serverIp || isLoopbackHost(serverIp)) {
+    const detected = await resolveInstancePublicIp().catch(() => null);
+    serverIp = detected && !isLoopbackHost(detected) ? detected : null;
+  }
+  const records: DnsRecord[] = [
+    { type: "A", host: routeHost, name: routeName, value: serverIp ?? "" },
+  ];
+  if (wwwHostname) {
+    // Same box, so the same A value — a CNAME to the apex would also work, but an
+    // A keeps both rows identical and independent of apex-CNAME restrictions.
+    const www = dnsRecordHosts(wwwHostname);
+    records.push({ type: "A", host: www.routeHost, name: www.routeName, value: serverIp ?? "" });
+  }
+  return { mode: "selfhosted", records };
 }
 
 /** Build a human-readable verification failure message. */

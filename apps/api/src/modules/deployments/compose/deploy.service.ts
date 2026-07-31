@@ -56,6 +56,7 @@ import { ensureManagedEdgeProxy } from "../../../lib/managed-edge-proxy";
 import { ensureRoutingReady } from "../../../lib/edge-reconcile";
 import * as sessionManager from "../session-manager";
 import { isStaticService } from "../../../lib/deployable-service";
+import { computeKeepSet } from "../image-gc";
 import { auditPorts } from "../port-audit.service";
 import {
   recordUnstableServices,
@@ -624,6 +625,17 @@ export async function deployComposeServices(
   const previousByServiceId = new Map(previousServiceDeps.map((row) => [row.serviceId, row]));
   const enabledServiceIds = new Set(enabled.map((svc) => svc.id));
 
+  // Images every retained release still needs (active + pinned + the newest
+  // `rollbackWindow` deployments, per service). Loaded lazily and ONCE per
+  // deploy — it's only consulted when a service actually supersedes an image,
+  // and the same keep set the image GC and retention prune use, so "what is
+  // still restorable" has exactly one definition.
+  let keepSetPromise: Promise<Set<string>> | null = null;
+  const retentionKeepSet = () => {
+    keepSetPromise ??= computeKeepSet(project).catch(() => new Set<string>());
+    return keepSetPromise;
+  };
+
   // Full/forceAll deploy (no explicit target subset) churn-avoidance: an
   // image-only (external) service that hasn't changed since the active
   // deployment has nothing to rebuild — recreating it just bounces a DB (brief
@@ -847,6 +859,7 @@ export async function deployComposeServices(
       await repos.service.createServiceDeployment({
         deploymentId: dep.id,
         serviceId: svc.id,
+        serviceName: svc.name,
         status: "failure",
         imageRef: opts?.builtImages?.get(svc.id) ?? svc.image ?? null,
       });
@@ -898,6 +911,7 @@ export async function deployComposeServices(
       await repos.service.createServiceDeployment({
         deploymentId: dep.id,
         serviceId: svc.id,
+        serviceName: svc.name,
         status: "failure",
         imageRef: svc.image ?? null,
       });
@@ -932,6 +946,7 @@ export async function deployComposeServices(
       await repos.service.createServiceDeployment({
         deploymentId: dep.id,
         serviceId: svc.id,
+        serviceName: svc.name,
         status: "failure",
       });
       results.push({
@@ -999,6 +1014,7 @@ export async function deployComposeServices(
       await repos.service.createServiceDeployment({
         deploymentId: dep.id,
         serviceId: svc.id,
+        serviceName: svc.name,
         status: "success",
         imageRef: image,
       });
@@ -1277,6 +1293,7 @@ export async function deployComposeServices(
         await repos.service.createServiceDeployment({
           deploymentId: dep.id,
           serviceId: svc.id,
+          serviceName: svc.name,
           containerId: result.containerId,
           status: "success",
           imageRef: image,
@@ -1328,17 +1345,31 @@ export async function deployComposeServices(
         if (pc) portChecks.push({ ...pc, serviceId: svc.id, serviceName: svc.name });
       }
 
+      // Reclaim the image this service just moved off — UNLESS it's still in the
+      // retention keep set. A rollback restore re-deploys a past release's own
+      // tag, so two deployment rows legitimately reference one image; removing
+      // "the previous one" then deletes an image another retained release (or the
+      // one we just restored FROM, if the user rolls forward again) still needs.
       if (previous?.imageRef && previous.imageRef !== image && runtime instanceof DockerRuntime) {
-        await runtime.removeImage(previous.imageRef).catch((err) => {
-          const message = err instanceof Error ? err.message : "Unknown error";
+        const keep = await retentionKeepSet();
+        if (keep.has(previous.imageRef)) {
           logger.log(
-            `Warning: failed to remove previous image for "${svc.name}": ${message}\n`,
-            "warn",
-            {
-              serviceName: svc.name,
-            },
+            `Keeping previous image for "${svc.name}" — still within the rollback window.\n`,
+            "info",
+            { serviceName: svc.name },
           );
-        });
+        } else {
+          await runtime.removeImage(previous.imageRef).catch((err) => {
+            const message = err instanceof Error ? err.message : "Unknown error";
+            logger.log(
+              `Warning: failed to remove previous image for "${svc.name}": ${message}\n`,
+              "warn",
+              {
+                serviceName: svc.name,
+              },
+            );
+          });
+        }
       }
 
       // Sync the managed edge proxy for EACH free .opsh.io route (a multi-port
@@ -1400,6 +1431,7 @@ export async function deployComposeServices(
         await repos.service.createServiceDeployment({
           deploymentId: dep.id,
           serviceId: svc.id,
+          serviceName: svc.name,
           containerId: deployedContainerId,
           status: "indeterminate",
           imageRef: image,
@@ -1440,6 +1472,7 @@ export async function deployComposeServices(
         await repos.service.createServiceDeployment({
           deploymentId: dep.id,
           serviceId: svc.id,
+          serviceName: svc.name,
           status: "failure",
           imageRef: image,
         });

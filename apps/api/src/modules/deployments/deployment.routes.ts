@@ -113,6 +113,18 @@ r.post(
   cloudDeploymentProxy,
   ctrl.buildRedeploy,
 );
+r.get(
+  "/:id/restore-plan",
+  {
+    tag: "deployment:read",
+    mcp: {
+      description:
+        "How a rollback to this deployment would run: instant from its retained image, or a rebuild from its commit.",
+    },
+  },
+  cloudDeploymentProxy,
+  ctrl.restorePlan,
+);
 r.post(
   "/:id/rollback",
   { tag: "deployment:write", mcp: { description: "Roll back to this deployment's artifact/commit." } },

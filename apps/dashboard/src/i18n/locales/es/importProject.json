@@ -54,7 +54,8 @@
       "description": "Para repos que guardan compose fuera de la raíz: indica el archivo (deploy/stack.yml) o la carpeta que lo contiene (deploy/docker-compose). Vuelve a escanear el repo y despliega los servicios que declara.",
       "apply": "Escanear",
       "scanning": "Escaneando…",
-      "scanFailed": "No se pudo escanear esa ruta de Compose."
+      "scanFailed": "No se pudo escanear esa ruta de Compose.",
+      "subtitleOptIn": "¿Desplegar con Docker Compose? Indica el archivo."
     },
     "buildImageLabel": "Imagen de compilación",
     "buildImageDesc": "Imagen del contenedor compilador para compilaciones en la nube o en el servidor. Sobrescríbela cuando la imagen base detectada sea incorrecta.",

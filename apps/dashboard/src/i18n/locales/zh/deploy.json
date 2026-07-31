@@ -49,7 +49,8 @@
     "comingSoon": "即将推出",
     "deployAction": "部署",
     "cancel": "取消",
-    "loadingRecords": "正在加载 DNS 记录…"
+    "loadingRecords": "正在加载 DNS 记录…",
+    "serverIpPlaceholder": "您服务器的公网 IP"
   },
   "buildSummary": {
     "title": "部署摘要",
@@ -194,7 +195,15 @@
       "apiHostServerDesc": "在 Openship 主机上克隆，然后上传。适用于任何环境。",
       "serverLabel": "在服务器上",
       "serverDesc": "在服务器上克隆——无需上传。最适合大型仓库。"
-    }
+    },
+    "rollbackTitle": "回滚与备份",
+    "rollbackHint": "此服务器上可恢复的历史版本数量，以及部署前会备份的内容。",
+    "rollbackFirstDeploy": "首次部署后可在项目设置中修改。",
+    "backupSummaryNone": "尚无备份策略",
+    "backupSummaryConfigured": "{count} 条备份策略 · 部署前：{preDeploy}",
+    "backupManage": "管理备份",
+    "on": "开启",
+    "off": "关闭"
   },
   "summary": {
     "buildAndDeploy": "构建并部署：",

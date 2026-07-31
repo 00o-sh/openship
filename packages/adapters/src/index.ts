@@ -75,6 +75,10 @@ export type {
 export { assertCapability, isMultiServiceRuntime } from "./runtime/types";
 export { DockerRuntime, type DockerConnectionOptions } from "./runtime/docker";
 export {
+  resolveLocalDockerSocketPath,
+  DEFAULT_DOCKER_SOCKET_PATH,
+} from "./runtime/docker-transport";
+export {
   transferImage,
   type ImageTransferOptions,
   type ImageTransferResult,

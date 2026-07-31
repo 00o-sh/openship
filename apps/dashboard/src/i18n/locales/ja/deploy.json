@@ -49,7 +49,8 @@
     "comingSoon": "近日公開",
     "deployAction": "デプロイ",
     "cancel": "キャンセル",
-    "loadingRecords": "DNS レコードを読み込み中…"
+    "loadingRecords": "DNS レコードを読み込み中…",
+    "serverIpPlaceholder": "サーバーのパブリックIP"
   },
   "buildSummary": {
     "title": "デプロイの概要",
@@ -194,7 +195,15 @@
       "apiHostServerDesc": "Openshipホスト上でクローンしてからアップロードします。どこでも動作します。",
       "serverLabel": "サーバー上",
       "serverDesc": "サーバー上でクローンします — アップロードなし。大きなリポジトリに最適です。"
-    }
+    },
+    "rollbackTitle": "ロールバックとバックアップ",
+    "rollbackHint": "このサーバーで復元可能な過去バージョン数と、デプロイ前にバックアップされる対象。",
+    "rollbackFirstDeploy": "最初のデプロイ後にプロジェクト設定で変更できます。",
+    "backupSummaryNone": "バックアップ設定なし",
+    "backupSummaryConfigured": "バックアップ設定 {count} 件 · デプロイ前: {preDeploy}",
+    "backupManage": "バックアップを管理",
+    "on": "有効",
+    "off": "無効"
   },
   "summary": {
     "buildAndDeploy": "ビルドとデプロイ:",

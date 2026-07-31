@@ -49,7 +49,8 @@
     "comingSoon": "قريبًا",
     "deployAction": "نشر",
     "cancel": "إلغاء",
-    "loadingRecords": "جارٍ تحميل سجلات DNS…"
+    "loadingRecords": "جارٍ تحميل سجلات DNS…",
+    "serverIpPlaceholder": "عنوان IP العام لخادمك"
   },
   "buildSummary": {
     "title": "ملخص النشر",
@@ -194,7 +195,15 @@
       "apiHostServerDesc": "استنسخ على مضيف Openship، ثم ارفع سياق البناء. يعمل في كل مكان.",
       "serverLabel": "على الخادم",
       "serverDesc": "استنسخ مباشرة على الخادم — دون رفع، الأفضل للمستودعات الكبيرة."
-    }
+    },
+    "rollbackTitle": "التراجع والنسخ الاحتياطي",
+    "rollbackHint": "عدد النسخ السابقة التي تبقى قابلة للاستعادة على هذا الخادم، وما يُنسخ احتياطيًا قبل النشر.",
+    "rollbackFirstDeploy": "قابل للتعديل في إعدادات المشروع بعد أول عملية نشر.",
+    "backupSummaryNone": "لا توجد سياسة نسخ احتياطي بعد",
+    "backupSummaryConfigured": "{count} سياسة نسخ احتياطي · قبل النشر: {preDeploy}",
+    "backupManage": "إدارة النسخ الاحتياطي",
+    "on": "مفعّل",
+    "off": "معطّل"
   },
   "summary": {
     "buildAndDeploy": "البناء والنشر:",

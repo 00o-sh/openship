@@ -54,7 +54,8 @@
       "description": "Pour les dépôts qui placent compose hors de la racine — indiquez le fichier (deploy/stack.yml) ou le dossier qui le contient (deploy/docker-compose). Le dépôt est réanalysé et les services déclarés sont déployés.",
       "apply": "Analyser",
       "scanning": "Analyse…",
-      "scanFailed": "Impossible d'analyser ce chemin Compose."
+      "scanFailed": "Impossible d'analyser ce chemin Compose.",
+      "subtitleOptIn": "Déployer avec Docker Compose ? Indiquez le fichier."
     },
     "buildImageLabel": "Image de compilation",
     "buildImageDesc": "Image de conteneur de compilation pour les builds cloud ou serveur. Remplacez-la lorsque l'image de base détectée est incorrecte.",

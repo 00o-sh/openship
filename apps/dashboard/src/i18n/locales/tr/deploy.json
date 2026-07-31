@@ -49,7 +49,8 @@
     "comingSoon": "Yakında",
     "deployAction": "Dağıt",
     "cancel": "İptal",
-    "loadingRecords": "DNS kayıtları yükleniyor…"
+    "loadingRecords": "DNS kayıtları yükleniyor…",
+    "serverIpPlaceholder": "sunucunuzun genel IP adresi"
   },
   "buildSummary": {
     "title": "Dağıtım Özeti",
@@ -194,7 +195,15 @@
       "apiHostServerDesc": "Openship üzerinde klonlayın, ardından yükleyin.",
       "serverLabel": "Sunucuda",
       "serverDesc": "Sunucuda klonlayın. Yükleme yok."
-    }
+    },
+    "rollbackTitle": "Geri alma ve yedekler",
+    "rollbackHint": "Bu sunucuda kaç eski sürümün geri yüklenebilir kaldığı ve dağıtımdan önce neyin yedeklendiği.",
+    "rollbackFirstDeploy": "İlk dağıtımdan sonra proje ayarlarından düzenlenebilir.",
+    "backupSummaryNone": "Henüz yedek kuralı yok",
+    "backupSummaryConfigured": "{count} yedek kuralı · dağıtım öncesi: {preDeploy}",
+    "backupManage": "Yedekleri yönet",
+    "on": "açık",
+    "off": "kapalı"
   },
   "summary": {
     "buildAndDeploy": "Derle ve Dağıt:",

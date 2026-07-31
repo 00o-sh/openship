@@ -354,18 +354,22 @@
       "title": "Stratégie de restauration",
       "rebuild": "Reconstruction (git)",
       "instant": "Instantanée (snapshot)",
-      "descRebuild": "La restauration reclone et reconstruit l'ancien commit — moins coûteuse, mais plus lente et peut échouer si ce commit ne se compile plus.",
-      "descInstant": "Conserve l'artefact de build de chaque version sur le disque pour une restauration en quelques secondes. Utilise davantage de disque, plafonné par la limite d'historique.",
+      "descRebuild": "Ne conserve aucun artefact supplémentaire. Une restauration réutilise encore une image conservée si elle existe, sinon elle reconstruit l'ancien commit.",
+      "descInstant": "Conserve aussi l'artefact d'exécution de chaque version pour qu'une restauration ne reconstruise jamais. Consomme plus de disque, borné par la limite d'historique.",
       "toggleAria": "Basculer la rétention des snapshots"
     },
     "rollbackHistory": {
       "title": "Historique de restauration",
       "valueOne": "{count} version",
       "valueOther": "{count} versions",
-      "descSnapshot": "Nombre de versions récentes qui conservent leur artefact de build pour la restauration. Les plus anciennes sont purgées pour libérer de l'espace disque.",
-      "descGit": "S'applique uniquement au mode Instantané (snapshot) — le mode Git ne conserve aucun artefact à retenir.",
+      "descSnapshot": "Combien de versions récentes restent restaurables. Les plus anciennes sont supprimées pour libérer de l'espace.",
+      "descGit": "Conservé quelle que soit la stratégie : les images des versions récentes sont gardées, donc une restauration peut éviter la reconstruction si l'une est encore présente.",
       "decreaseAria": "Diminuer l'historique de restauration",
-      "increaseAria": "Augmenter l'historique de restauration"
+      "increaseAria": "Augmenter l'historique de restauration",
+      "sizeEach": "~{size} chacune",
+      "diskFree": "{size} libres",
+      "autoBadge": "dimensionné automatiquement",
+      "manualBadge": "défini manuellement"
     },
     "commits": {
       "title": "Commits récents",
@@ -749,6 +753,12 @@
       "checking": "Vérification de l'edge…",
       "recheck": "Revérifier",
       "foreignProxyHint": "Un autre proxy occupe 80/443"
+    },
+    "diagnosis": {
+      "title": "Pourquoi cela ne fonctionne pas",
+      "noneYet": "Aucune vérification n'a encore été effectuée, il n'y a donc aucun résultat. Ajoutez les enregistrements DNS affichés, puis lancez Vérifier.",
+      "attempts": "{count} tentative(s) échouée(s) à ce jour.",
+      "pillHint": "Afficher la raison"
     }
   },
   "routeRules": {

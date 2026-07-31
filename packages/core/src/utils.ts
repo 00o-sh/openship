@@ -44,6 +44,23 @@ export function normalizeCustomHostname(raw: string): string {
 }
 
 /**
+ * The `www.` sibling of a hostname, or null when there isn't one to claim
+ * because the hostname already IS a www host.
+ *
+ * ONE rule, because "Include www" fans out to three places that each need the
+ * same answer — the row the add path creates, the SAN the cert covers, and the
+ * DNS record the setup panel shows. Three inline `www.${host}` prefixes meant a
+ * "no stacking www on www" guard could exist in one and be missing in another,
+ * producing a `www.www.example.com` row or a record for a hostname that never
+ * gets a row.
+ */
+export function wwwSiblingHostname(hostname: string): string | null {
+  const host = normalizeCustomHostname(hostname);
+  if (!host || host.startsWith("www.")) return null;
+  return `www.${host}`;
+}
+
+/**
  * True when `value` is a plausible email address.
  *
  * The ONE email rule, because the CLI had two and both let bad input through: the

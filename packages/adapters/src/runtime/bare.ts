@@ -109,6 +109,9 @@ export class BareRuntime implements RuntimeAdapter {
     "streamLogs",
     "containerIp",
     "rollback",
+    // The release dir + supervisor unit survive a redeploy, so restoring a
+    // past release really is an in-place unit swap (see makeActive).
+    "unitRestore",
     "inContainerExec",
   ]);
 

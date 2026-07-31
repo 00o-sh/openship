@@ -406,6 +406,9 @@ export class CloudRuntime implements MultiServiceRuntimeAdapter {
     "usage",
     "containerIp",
     "rollback",
+    // One workspace per deployment, stopped-not-deleted on archive, so its
+    // disk is still there to start back up (see makeActive).
+    "unitRestore",
     "serviceShell",
     "inContainerExec",
   ]);

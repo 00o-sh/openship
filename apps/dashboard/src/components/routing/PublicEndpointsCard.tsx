@@ -7,6 +7,7 @@ import { Switch } from "@/components/ui/Switch";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import type { PublicEndpoint } from "@/context/deployment/types";
 import { createPublicEndpoint } from "@/context/deployment/types";
+import { useDefaultDomainType } from "@/context/CloudContext";
 
 interface PublicEndpointsCardProps {
   projectName: string;
@@ -58,6 +59,7 @@ const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
   const { t } = useI18n();
   const w = t.widgets.routing.publicEndpoints;
   const hasMultipleEndpoints = endpoints.length > 1;
+  const newEndpointDomainType = useDefaultDomainType();
 
   // With multiple domains, collapse each into a compact row so the list isn't
   // a huge stack of full forms — click a row to expand its editor. A single
@@ -119,9 +121,11 @@ const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
         hasServer
           ? {
               port: lastEndpoint?.port || runtimePort || "",
+              domainType: newEndpointDomainType,
             }
           : {
               targetPath: lastEndpoint?.targetPath || "/",
+              domainType: newEndpointDomainType,
             },
       )),
     ]);

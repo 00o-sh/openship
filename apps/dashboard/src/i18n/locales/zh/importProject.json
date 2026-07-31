@@ -54,7 +54,8 @@
       "description": "适用于将 compose 放在根目录之外的仓库 — 填写文件（deploy/stack.yml）或包含它的文件夹（deploy/docker-compose）。将重新扫描仓库并部署其中声明的服务。",
       "apply": "扫描",
       "scanning": "扫描中…",
-      "scanFailed": "无法扫描该 Compose 路径。"
+      "scanFailed": "无法扫描该 Compose 路径。",
+      "subtitleOptIn": "使用 Docker Compose 部署？请指定文件。"
     },
     "buildImageLabel": "构建镜像",
     "buildImageDesc": "用于云端或服务器构建的构建容器镜像。当检测到的基础镜像有误时可覆盖此项。",

@@ -311,7 +311,7 @@ describe("resolveProjectInfo", () => {
 
       await expect(
         resolveProjectInfo({ source: "local", path: tempDir, composePath: "deploy" }),
-      ).rejects.toThrow(/could not be parsed/);
+      ).rejects.toThrow(/Could not parse the Docker Compose file at "deploy"/);
     });
   });
 });

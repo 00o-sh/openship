@@ -48,6 +48,7 @@ export const endpoints = {
     incomingWebhookDeliveries: (id: string | number, hookId: string) =>
       `projects/${id}/incoming-webhooks/${hookId}/deliveries`,
     resources: (id: string | number) => `projects/${id}/resources`,
+    rollbackCapacity: (id: string | number) => `projects/${id}/rollback-capacity`,
     cloneToken: (id: string | number) => `projects/${id}/clone-token`,
     sleepMode: (id: string | number) => `projects/${id}/sleep-mode`,
     deployments: (id: string | number) => `projects/${id}/deployments`,
@@ -126,6 +127,7 @@ export const endpoints = {
     keep: (id: string) => `deployments/${id}/keep`,
     skipPortCheck: (id: string) => `deployments/${id}/skip-port-check`,
     rollback: (id: string) => `deployments/${id}/rollback`,
+    restorePlan: (id: string) => `deployments/${id}/restore-plan`,
     cancel: (id: string) => `deployments/${id}/cancel`,
     prepare: "deployments/prepare",
     buildAccess: "deployments/build/access",

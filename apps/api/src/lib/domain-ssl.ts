@@ -1,6 +1,6 @@
 import type { Project } from "@repo/db";
 import type { ManualCert, SslProvider, SslResult } from "@repo/adapters";
-import { ForbiddenError, NotFoundError, SYSTEM } from "@repo/core";
+import { ForbiddenError, NotFoundError, wwwSiblingHostname, SYSTEM } from "@repo/core";
 import { repos } from "@repo/db";
 import { env } from "../config/env";
 import { platform } from "./controller-helpers";
@@ -282,8 +282,8 @@ export async function manageDomainSsl(
   const result = await runAction(domainRecord.hostname, opts.action);
   await persistSslResult(domainRecord.id, domainRecord.sslStatus, result);
 
-  if (opts.includeWww) {
-    const wwwHostname = `www.${domainRecord.hostname}`;
+  const wwwHostname = opts.includeWww ? wwwSiblingHostname(domainRecord.hostname) : null;
+  if (wwwHostname) {
     const wwwRecord = await repos.domain.findByHostname(wwwHostname);
 
     if (wwwRecord && wwwRecord.projectId === domainRecord.projectId && wwwRecord.verified) {

@@ -21,6 +21,7 @@ import {
   type BuildConfigSnapshotLike,
 } from "../build-config";
 import * as sessionManager from "../session-manager";
+import { pinnedImageForService } from "../pinned-artifacts";
 import { serviceKind, isStaticService } from "../../../lib/deployable-service";
 import { normalizeProjectRootDirectory } from "../../../lib/project-root-detector";
 import { resolveServicePort } from "./domain-helpers";
@@ -218,18 +219,15 @@ export async function buildComposeImages(opts: {
   //     would drop every Dockerfile-based monorepo sub-app to neither bucket -
   //     the same silent "No image available" failure.
   // External = compose rows with a pre-built image and no Dockerfile build.
-  // ONE-TIME image handover (migration cutover): a service named here deploys
-  // from an already-present image (a transferred / running container's image)
-  // with NO build and NO pull — it is seeded straight into imageRefs, exactly
-  // like a freshly-built one, so the SAME native deploy step consumes it. Keyed
-  // by service name (migration knows repo-service names). Only present on the
-  // migration's first deploy (per-deployment snapshot), so a later Redeploy has
-  // no handover and rebuilds/pulls natively — no separate migration deploy path.
-  const handover = opts.snapshot.handoverImages ?? {};
-  const isHandedOver = (service: { name: string }) => {
-    const img = handover[service.name];
-    return typeof img === "string" && img.length > 0;
-  };
+  // PINNED ARTIFACT: a service whose image is pinned deploys from that
+  // already-present image with NO build and NO pull — seeded straight into
+  // imageRefs, exactly like a freshly-built one, so the SAME native deploy step
+  // consumes it. Two producers, one mechanism (see pinned-artifacts.ts): the
+  // migration cutover's one-time handover, and a rollback restoring a past
+  // release's retained images. A plain Redeploy strips the pins and rebuilds
+  // natively — no separate migration or rollback deploy path exists.
+  const isHandedOver = (service: { name: string }) =>
+    !!pinnedImageForService(opts.snapshot, service.name);
 
   const buildable = enabled.filter(
     (service) =>
@@ -267,8 +265,9 @@ export async function buildComposeImages(opts: {
   }
 
   for (const service of enabled) {
-    if (!isHandedOver(service)) continue;
-    imageRefs.set(service.id, handover[service.name]);
+    const pinned = pinnedImageForService(opts.snapshot, service.name);
+    if (!pinned) continue;
+    imageRefs.set(service.id, pinned);
     sessionManager.broadcastServiceStatus(opts.dep.id, {
       serviceName: service.name,
       serviceId: service.id,

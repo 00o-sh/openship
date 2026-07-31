@@ -4,6 +4,7 @@ import {
   timestamp,
   boolean,
   integer,
+  bigint,
   jsonb,
   uniqueIndex,
   index,
@@ -255,22 +256,40 @@ export const project = pgTable(
      * deploy time (the prior wizard-only behavior).
      */
     runtimeMode: text("runtime_mode"),
-    /** Number of previous successful releases to retain for rollback (null = use instance default) */
+    /**
+     * How many past releases stay restorable. Explicit operator override;
+     * NULL = AUTO — use `rollbackWindowComputed` (sized from the deploy
+     * host's free disk), falling back to
+     * `instance_settings.default_rollback_window`. Resolved in exactly one
+     * place: `resolveRollbackWindow` (modules/deployments/release-retention.ts).
+     */
     rollbackWindow: integer("rollback_window"),
     /**
-     * Default rollback strategy snapshotted onto each new deployment
-     * via `deployment.rollbackStrategy`.
+     * The auto-sized window, recomputed once per successful deploy from
+     * `snapshotSizeBytes` + the host's free disk (see computeAutoRollbackWindow
+     * in @repo/core). Persisted so retention prune, the image GC and the deploy
+     * wizard's label all read it with zero I/O. Null = never measured.
+     */
+    rollbackWindowComputed: integer("rollback_window_computed"),
+    /** Mean on-disk size of ONE retained release for this project, in bytes
+     *  (measured from the project's own built images). Null = never measured. */
+    snapshotSizeBytes: bigint("snapshot_size_bytes", { mode: "number" }),
+    /** When snapshotSizeBytes / rollbackWindowComputed were last measured. */
+    capacityMeasuredAt: timestamp("capacity_measured_at"),
+    /**
+     * Retention preference for this project's rollback artifacts:
      *
-     *   - `"git"`      → no archive; rollback checks out the previous
-     *     successful deploy's commit_sha and rebuilds in place. Saves
-     *     disk at the cost of build time on restore. Default for new
-     *     projects since most are GitHub-backed and commits ARE the
-     *     rollback fuel.
-     *   - `"snapshot"` → archive image/workspace, rollback restores it.
-     *     Use when build is expensive and instant rollback matters.
+     *   - `"git"`      → don't hold a per-deployment unit; a restore rebuilds
+     *     from the target's commit. Cheapest on disk. Default.
+     *   - `"snapshot"` → keep past artifacts restorable so a rollback skips
+     *     the build entirely.
      *
-     * Stored per-project so a project can opt into either mode without
-     * touching the global default.
+     * NOTE this is a preference about RETENTION, not a frozen decision about
+     * how a given rollback runs: the restore mode is resolved at rollback time
+     * from what's actually still on the host (rollback/restore-plan.ts), so
+     * flipping this affects existing history too. On Docker an instant restore
+     * is available either way — images are retained by the rollback-window keep
+     * set regardless of this setting.
      */
     defaultRollbackStrategy: text("default_rollback_strategy")
       .notNull()

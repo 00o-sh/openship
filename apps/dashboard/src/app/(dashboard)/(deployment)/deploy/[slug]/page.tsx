@@ -358,6 +358,7 @@ const DeployRepository: React.FC = () => {
                             targets={targets}
                             autoSkipAllowed={autoSkipTargetRef.current}
                             onContinue={() => setStep("config")}
+                            projectId={projectId}
                         />
                     </div>
                 )}

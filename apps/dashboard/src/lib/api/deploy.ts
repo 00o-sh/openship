@@ -3,6 +3,20 @@ import { endpoints } from "./endpoints";
 import type { StackId, ComposeAdvanced, RoutingConfig, OpenshipResourceTier } from "@repo/core";
 import type { CloudResourceTier, CloudResourceCustom, PublicEndpoint, PortCheckUI, OutputCheckUI } from "@/context/deployment/types";
 
+/** How a rollback to a given deployment would run — see the API's restore plan. */
+export interface RestorePlanUI {
+  /** `redeploy-pinned` = instant (reuses the retained image), `unit-swap` =
+   *  instant (restarts the retained unit), `rebuild` = builds the commit again,
+   *  `ineligible` = can't be restored (already active, not successful). */
+  mode: "redeploy-pinned" | "unit-swap" | "rebuild" | "ineligible";
+  /** True when the restore clones the repo (so it needs GitHub access). */
+  needsRepository: boolean;
+  /** Services that must rebuild because their image aged out. */
+  rebuildServices: string[];
+  code?: string;
+  reason?: string;
+}
+
 export type PrepareProjectSource =
   | {
       source?: "github";
@@ -181,10 +195,16 @@ export const deployApi = {
   checkOutput: (projectId: string) =>
     api.post<{ data: OutputCheckUI[] }>(endpoints.projects.outputCheck(projectId)),
 
-  /** Roll back to a previous successful deployment. The orchestrator
-   *  validates artifact-retained + not-already-active before swapping. */
+  /** Roll back to a previous successful deployment. The orchestrator resolves
+   *  HOW at call time — instant from the retained image, or a rebuild from the
+   *  target's commit — so this never fails just because an artifact aged out. */
   rollback: (id: string) =>
     api.post<any>(endpoints.deploy.rollback(id)),
+
+  /** How a rollback to this deployment WOULD run, for the confirm dialog's copy.
+   *  Read-only; safe to call when the menu opens. */
+  restorePlan: (id: string) =>
+    api.get<{ data: RestorePlanUI }>(endpoints.deploy.restorePlan(id)),
 
   /** Pin / unpin a deployment. Pinned deployments are exempt from the
    *  retention prune — their artifact stays rollback-restorable

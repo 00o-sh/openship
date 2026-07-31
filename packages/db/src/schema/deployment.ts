@@ -134,33 +134,32 @@ export const deployment = pgTable("deployment", {
    */
   forceAll: boolean("force_all").notNull().default(false),
   /**
-   * How the rollback artifact for THIS deployment is preserved /
-   * restored.
+   * The project's retention preference at the time this deployment was
+   * created (`project.defaultRollbackStrategy`) — HISTORICAL RECORD ONLY.
    *
-   *   - `"snapshot"` → existing path: container image + workspace
-   *     snapshot are archived; rollback re-runs the same artifact.
-   *   - `"git"`     → no artifact archive; rollback checks out
-   *     `commitShaBefore` and rebuilds in place. Cheap on disk but
-   *     pays a build cost on restore. Selected per-project via
-   *     `project.defaultRollbackStrategy` and snapshotted onto the
-   *     deployment at create time so changing the project setting
-   *     later doesn't invalidate past rollback targets.
+   * Nothing branches on it: how a rollback to this deployment actually runs
+   * is resolved at rollback time from what is still on the host — instant
+   * from the retained artifact, or a rebuild from `commitSha` — see
+   * modules/deployments/rollback/restore-plan.ts. Freezing the decision here
+   * was what made "flip the toggle to instant" fail to apply to any release
+   * that already existed.
    */
   rollbackStrategy: text("rollback_strategy").notNull().default("snapshot"),
 
   /* ── Rollback / retention ───────────────────────────────────────────── */
   /**
-   * Set by the rollback orchestrator when the artifact is archived
-   * (preserved in non-active state for potential rollback). Nulled when
-   * the artifact is purged. Read by the dashboard as "is this deployment
-   * still rollbackable?". Only the orchestrator writes this column.
+   * Set by the rollback orchestrator on every successful deploy: "this
+   * deployment's artifact is retained, so restoring it can skip the build".
+   * Nulled when retention purges the artifact — a rollback then degrades to
+   * a rebuild from `commitSha` rather than becoming unavailable. Only the
+   * orchestrator writes this column.
    */
   artifactRetainedAt: timestamp("artifact_retained_at"),
   /**
-   * User-tagged "keep this version rollbackable indefinitely". Pinned
+   * User-tagged "keep this version restorable indefinitely". Pinned
    * deployments are exempt from the orchestrator's retention prune
-   * (project.rollbackWindow). Hard-capped per project via
-   * instance_settings.maxPinnedDeployments to bound disk usage.
+   * (project.rollbackWindow) and don't consume its budget. Capped per
+   * project by MAX_PINNED_PER_PROJECT in the orchestrator, to bound disk.
    */
   pinned: boolean("pinned").notNull().default(false),
 

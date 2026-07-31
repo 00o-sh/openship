@@ -298,13 +298,7 @@ export const serviceDeployment = pgTable(
     /** Public URL of the GitHub check run (denormalized for the dashboard). */
     checkRunUrl: text("check_run_url"),
 
-    /* ── Rollback / logs pointers ───────────────────────────────────── */
-    /**
-     * Per-service mirror of `deployment.artifactRetainedAt` — set
-     * when this service's artifact (image / workspace snapshot) is
-     * archived for rollback. Null = not retained / already purged.
-     */
-    artifactRetainedAt: timestamp("artifact_retained_at"),
+    /* ── Logs pointer ────────────────────────────────────────────────── */
     /**
      * Pointer into the deployment's build_session.logs structure
      * scoping which log section belongs to this service (e.g.

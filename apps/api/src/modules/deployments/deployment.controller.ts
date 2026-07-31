@@ -184,11 +184,25 @@ export async function rollback(c: Context) {
   const ctx = getRequestContext(c);
   const id = param(c, "id");
   await permission.assert(getRequestContext(c), { resourceType: "deployment", resourceId: id, action: "admin" });
-  // GitHub access gate: a git-strategy rollback re-clones the repo, so a
-  // member must be granted it (default-deny). Owner passes.
-  await deploymentService.assertGitHubAccessForDeployment(ctx, id, ctx.organizationId);
+  // GitHub access gate — only when this restore actually needs the repo. A
+  // rebuild re-clones, so a member must be granted access (default-deny); an
+  // instant restore from a retained image touches no repository at all, and
+  // demanding GitHub access for it would block the fastest recovery path for
+  // exactly the members most likely to need it.
+  const preview = await deploymentService.previewRestore(id, ctx.organizationId);
+  if (preview.needsRepository) {
+    await deploymentService.assertGitHubAccessForDeployment(ctx, id, ctx.organizationId);
+  }
   const dep = await deploymentService.rollbackDeployment(id, ctx.organizationId);
   return c.json({ data: deploymentService.presentDeployment(dep) });
+}
+
+/** GET /deployments/:id/restore-plan — how a rollback here would run. */
+export async function restorePlan(c: Context) {
+  const ctx = getRequestContext(c);
+  const id = param(c, "id");
+  await permission.assert(ctx, { resourceType: "deployment", resourceId: id, action: "read" });
+  return c.json({ data: await deploymentService.previewRestore(id, ctx.organizationId) });
 }
 
 export async function pin(c: Context) {

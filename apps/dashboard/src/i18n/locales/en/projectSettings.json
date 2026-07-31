@@ -477,18 +477,22 @@
       "title": "Rollback strategy",
       "rebuild": "Rebuild (git)",
       "instant": "Instant (snapshot)",
-      "descRebuild": "Rollback re-clones & rebuilds the old commit — cheaper, but slower and can fail if that commit no longer builds.",
-      "descInstant": "Keeps each version's build artifact on disk for rollback in seconds. Uses extra disk, capped by the history limit.",
+      "descRebuild": "Holds no extra artifacts. A rollback still reuses a retained image when one is left on the host, and rebuilds the old commit otherwise.",
+      "descInstant": "Also keeps each version's runtime artifact so a restore never has to rebuild. Uses more disk, bounded by the history limit.",
       "toggleAria": "Toggle snapshot retention"
     },
     "rollbackHistory": {
       "title": "Rollback history",
       "valueOne": "{count} version",
       "valueOther": "{count} versions",
-      "descSnapshot": "How many recent versions keep their build artifact for rollback. Older ones are pruned to reclaim disk.",
-      "descGit": "Applies only to Instant (snapshot) mode — Git mode keeps no artifacts to retain.",
+      "descSnapshot": "How many recent versions stay restorable. Older ones are pruned to reclaim disk.",
+      "descGit": "Kept regardless of strategy: images from recent versions are retained, so a rollback can skip the build when one is still on the host.",
       "decreaseAria": "Decrease rollback history",
-      "increaseAria": "Increase rollback history"
+      "increaseAria": "Increase rollback history",
+      "sizeEach": "~{size} each",
+      "diskFree": "{size} free",
+      "autoBadge": "sized automatically",
+      "manualBadge": "set manually"
     },
     "commits": {
       "title": "Recent Commits",
@@ -880,6 +884,12 @@
       "checking": "Checking edge…",
       "recheck": "Re-check",
       "foreignProxyHint": "Another proxy holds 80/443"
+    },
+    "diagnosis": {
+      "title": "Why this isn't working",
+      "noneYet": "No check has run yet, so there's no result to show. Add the DNS records shown for this domain, then run Verify.",
+      "attempts": "{count} failed attempt(s) so far.",
+      "pillHint": "Show why"
     }
   }
 }

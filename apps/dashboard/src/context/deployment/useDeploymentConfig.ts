@@ -23,6 +23,7 @@ import {
   syncActiveModeSnapshot,
 } from "./mode-config";
 import { normalizeSubdomain } from "@/utils/subdomain";
+import { useDefaultDomainType } from "@/context/CloudContext";
 
 type PersistedProject = Record<string, any> | null;
 
@@ -51,7 +52,10 @@ interface PreparedProjectContext {
   monorepoWorkspace?: MonorepoWorkspaceConfig;
 }
 
-function buildMonorepoApps(response: PrepareProjectResponse): MonorepoAppConfig[] | undefined {
+function buildMonorepoApps(
+  response: PrepareProjectResponse,
+  domainType: "free" | "custom",
+): MonorepoAppConfig[] | undefined {
   if (!response.monorepoApps?.length) return undefined;
 
   return response.monorepoApps.map((app): MonorepoAppConfig => {
@@ -78,7 +82,10 @@ function buildMonorepoApps(response: PrepareProjectResponse): MonorepoAppConfig[
       hasServer,
       hasBuild,
       envVars: [],
-      publicEndpoints: ensurePublicEndpoints(undefined, hasServer ? { port: portString } : { targetPath: "/" }),
+      publicEndpoints: ensurePublicEndpoints(
+        undefined,
+        hasServer ? { port: portString, domainType } : { targetPath: "/", domainType },
+      ),
     };
   });
 }
@@ -179,12 +186,13 @@ function buildSingleAppEndpoints(
   primaryDomain: string,
   hasServer: boolean,
   port: string,
+  domainType: "free" | "custom",
 ): PublicEndpoint[] {
   return ensurePublicEndpoints(
     mapStoredPublicEndpoints(project),
     hasServer
-      ? { port, domain: primaryDomain, domainType: "free" }
-      : { targetPath: "/", domain: primaryDomain, domainType: "free" },
+      ? { port, domain: primaryDomain, domainType }
+      : { targetPath: "/", domain: primaryDomain, domainType },
   );
 }
 
@@ -351,6 +359,7 @@ function buildSavedProjectResponse(
 
 function resolvePreparedProjectContext(
   response: PrepareProjectResponse,
+  domainType: "free" | "custom",
 ): PreparedProjectContext {
   const projectType = response.projectType || "app";
   // Multi-app projects (compose services AND monorepos) default to separate
@@ -369,7 +378,7 @@ function resolvePreparedProjectContext(
   const composeDefaults = projectType === "services"
     ? buildComposeDefaults(response, detectedStack)
     : undefined;
-  const monorepoApps = projectType === "monorepo" ? buildMonorepoApps(response) : undefined;
+  const monorepoApps = projectType === "monorepo" ? buildMonorepoApps(response, domainType) : undefined;
   const monorepoWorkspace = projectType === "monorepo" ? buildMonorepoWorkspace(response) : undefined;
 
   return {
@@ -391,6 +400,7 @@ function resolvePreparedRoutingState(
   project: PersistedProject,
   repoName: string,
   context: Pick<PreparedProjectContext, "projectType" | "preparedOptions" | "monorepoApps">,
+  domainType: "free" | "custom",
 ): PreparedRoutingState {
   const effectiveHasServer = context.projectType === "services"
     ? context.preparedOptions.hasServer
@@ -422,7 +432,7 @@ function resolvePreparedRoutingState(
         port: app.port || "",
         targetPath: app.hasServer ? "" : "/",
         domain: label,
-        domainType: "free",
+        domainType,
       });
     });
     return {
@@ -456,7 +466,13 @@ function resolvePreparedRoutingState(
     effectiveHasServer,
     primaryPort,
     hasStoredPort,
-    publicEndpoints: buildSingleAppEndpoints(project, primaryDomain, effectiveHasServer, primaryPort),
+    publicEndpoints: buildSingleAppEndpoints(
+      project,
+      primaryDomain,
+      effectiveHasServer,
+      primaryPort,
+      domainType,
+    ),
   };
 }
 
@@ -522,6 +538,9 @@ function resolvePreparedSingleModeDefaults(
 export function useDeploymentConfig() {
   const [config, setConfig] = useState<DeploymentConfig>(DEFAULT_CONFIG);
   const userBuildPref = useRef<BuildMode>("auto");
+  // Free subdomains need Cloud, so a Cloud-less self-hosted instance seeds new
+  // endpoints as custom instead of offering a `.opsh.io` name preflight rejects.
+  const newEndpointDomainType = useDefaultDomainType();
 
   const normalizeConfig = useCallback((next: DeploymentConfig): DeploymentConfig => {
     return syncActiveModeSnapshot(syncPublicEndpointState(next));
@@ -628,8 +647,14 @@ export function useDeploymentConfig() {
         localPath,
         uploadSessionId,
       } = args;
-      const preparedContext = resolvePreparedProjectContext(response);
-      const routingState = resolvePreparedRoutingState(response, project, repoName, preparedContext);
+      const preparedContext = resolvePreparedProjectContext(response, newEndpointDomainType);
+      const routingState = resolvePreparedRoutingState(
+        response,
+        project,
+        repoName,
+        preparedContext,
+        newEndpointDomainType,
+      );
       const runtimeConfig = resolvePreparedRuntimeConfig(
         response,
         project,

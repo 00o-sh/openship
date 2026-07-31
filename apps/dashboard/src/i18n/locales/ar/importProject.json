@@ -54,7 +54,8 @@
       "description": "للمستودعات التي تحفظ ملف compose خارج الجذر — أدخل الملف (deploy/stack.yml) أو المجلد الذي يحتويه (deploy/docker-compose). يعيد فحص المستودع وينشر الخدمات المعرّفة فيه.",
       "apply": "فحص",
       "scanning": "جارٍ الفحص…",
-      "scanFailed": "تعذّر فحص مسار Compose هذا."
+      "scanFailed": "تعذّر فحص مسار Compose هذا.",
+      "subtitleOptIn": "هل تنشر باستخدام Docker Compose؟ حدد الملف."
     },
     "buildImageLabel": "صورة البناء",
     "buildImageDesc": "صورة حاوية البناء للبناء السحابي أو على الخادم. تجاوزها عندما تكون الصورة الأساسية المكتشفة خاطئة.",

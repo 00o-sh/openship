@@ -49,7 +49,8 @@
     "comingSoon": "Bientôt disponible",
     "deployAction": "Déployer",
     "cancel": "Annuler",
-    "loadingRecords": "Chargement des enregistrements DNS…"
+    "loadingRecords": "Chargement des enregistrements DNS…",
+    "serverIpPlaceholder": "l’IP publique de ton serveur"
   },
   "buildSummary": {
     "title": "Récapitulatif du déploiement",
@@ -194,7 +195,15 @@
       "apiHostServerDesc": "Clonez sur l'hôte Openship, puis téléversez. Fonctionne partout.",
       "serverLabel": "Sur le serveur",
       "serverDesc": "Clonez sur le serveur — sans téléversement. Idéal pour les gros dépôts."
-    }
+    },
+    "rollbackTitle": "Restauration et sauvegardes",
+    "rollbackHint": "Combien de versions précédentes restent restaurables sur ce serveur, et ce qui est sauvegardé avant un déploiement.",
+    "rollbackFirstDeploy": "Modifiable dans les paramètres du projet après le premier déploiement.",
+    "backupSummaryNone": "Aucune règle de sauvegarde",
+    "backupSummaryConfigured": "{count} règle(s) de sauvegarde · avant déploiement : {preDeploy}",
+    "backupManage": "Gérer les sauvegardes",
+    "on": "activé",
+    "off": "désactivé"
   },
   "summary": {
     "buildAndDeploy": "Builder et déployer :",

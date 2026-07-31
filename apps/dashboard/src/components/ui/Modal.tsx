@@ -88,13 +88,13 @@ export function Modal({
       />
 
       {/* Modal surface: the SOLID card token at 96% + its own blur, so it reads
-          as elevated glass but never shows the page through it. It was 50%, which
-          in dark (#060606 over a black scrim) looked fine and in LIGHT (#ffffff
-          over a white veil) let the whole page ghost through the panel — the
-          "transparent modal" bug. Keep this high; the blur + ring + shadow are
-          what sell the glass, not the transparency. */}
+          as elevated glass but never shows the page through it (it was 50%, which
+          in LIGHT let the page ghost through — the "transparent modal" bug). The
+          fill + blur + shadow are what sell the glass. NO resting border/ring —
+          per the card-surface convention no theme draws one; `border-border/50`
+          renders nothing and just keeps us consistent with every other card. */}
       <div
-        className="relative w-full border border-border/60 ring-1 ring-inset ring-foreground/[0.06] rounded-2xl shadow-2xl backdrop-blur-2xl flex flex-col transition-all duration-300 !overflow-x-hidden"
+        className="relative w-full border border-border/50 rounded-2xl shadow-2xl backdrop-blur-2xl flex flex-col transition-all duration-300 !overflow-x-hidden"
         style={{
           background: 'color-mix(in oklab, var(--th-card-bg-solid) 96%, transparent)',
           width,

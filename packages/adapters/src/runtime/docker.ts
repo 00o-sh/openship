@@ -53,6 +53,31 @@ import { PassThrough, Writable, type Readable } from "node:stream";
  */
 const isDockerNotFoundError = isRuntimeNotFoundError;
 
+/**
+ * Is this image tag one WE built, and therefore ours to delete?
+ *
+ * Only `openship/…` tags are (see `imageTag`), and every build mints a globally
+ * unique one (`openship/<slug>:<session>`), so exactly one deployment row ever
+ * owns a given tag. Anything else is either pulled from a registry
+ * (`postgres:17`) or adopted by a docker-migration import — and those two are
+ * precisely the tags that must NOT be deleted by row:
+ *
+ *   - a migration import reuses ONE mutable, registry-less tag across every
+ *     sibling service, so untagging it for one row strands the others with a
+ *     tag that no longer resolves and cannot be re-pulled;
+ *   - a registry tag is shared with anything else on the box using it, and
+ *     deleting it buys nothing (it re-pulls).
+ *
+ * This mirrors the safety model `image-gc` already documents — it only ever
+ * considers images carrying the `openship.project` label, which `labels()`
+ * stamps on final build images and never on pulled/adopted ones. Structural, so
+ * it needs no daemon round-trip: the caller's keep-set answers "does another
+ * RETAINED release need this tag", and this answers "is it even ours".
+ */
+export function ownsBuiltImage(imageRef: string): boolean {
+  return imageRef.startsWith("openship/");
+}
+
 /** Clamp a terminal window dimension to a sane min/max with default. */
 function clampShellWindow(
   value: number | undefined,
@@ -75,8 +100,6 @@ import type {
   MultiServiceDeployConfig,
   MultiServiceDeployResult,
   DeploymentRef,
-  RollbackInput,
-  MakeActiveResult,
   DockerContainerSummary,
   DockerContainerDetail,
   DockerMount,
@@ -2059,68 +2082,26 @@ export class DockerRuntime implements RuntimeAdapter {
     }));
   }
 
-  // ── Rollback primitives ──────────────────────────────────────────────
+  // ── Rollback primitives (retention half only) ────────────────────────
   //
-  // Docker semantics:
-  //   makeActive — prefer `start` of the retained container (fast,
-  //     preserves PID/state). If the container was GC'd but the image
-  //     is still tagged, `run` from imageRef to provision a fresh
-  //     container. Stop the previous active as part of the swap.
-  //   archive   — `docker stop`. Image stays tagged. Container kept
-  //     for fast restart on later makeActive.
-  //   purge     — `docker rm` (force) + `docker rmi`. Past this point
-  //     rollback to this deployment is impossible.
-
-  async makeActive(input: RollbackInput): Promise<MakeActiveResult> {
-    // 1) Stop the currently-active deployment (if any) so we don't have
-    //    two containers serving the same port. Errors here are non-fatal
-    //    — if the previous container is already gone the swap continues.
-    if (input.from?.containerId) {
-      try {
-        await this.stop(input.from.containerId);
-      } catch {
-        // already stopped / gone — ignore
-      }
-    }
-
-    // 2) Try fast-start the target's existing container.
-    if (input.to.containerId) {
-      try {
-        await this.start(input.to.containerId);
-        return { containerId: input.to.containerId };
-      } catch {
-        // container missing — fall through to run-from-image
-      }
-    }
-
-    // 3) Container is gone but image is still tagged: provision a fresh
-    //    container from the retained image. Same parameters the original
-    //    deploy used — but we don't have the full DeployConfig here, so
-    //    we use minimal defaults. If the orchestrator needs richer
-    //    re-provisioning it can call `deploy()` instead.
-    if (!input.to.imageRef) {
-      throw new Error(
-        `Cannot make deployment ${input.to.id} active: container is gone and no imageRef is stored. Artifact has been purged.`,
-      );
-    }
-    const container = await this.docker.createContainer({
-      Image: input.to.imageRef,
-      name: `dep-${input.to.id}`,
-      HostConfig: {
-        RestartPolicy: { Name: "unless-stopped" },
-        // Carry the rolled-back deployment's own caps forward. Without this a
-        // cold start from a retained image quietly returned the container to
-        // "no limits" for a project that had deliberately set some.
-        ...dockerResourceLimits(input.resources),
-      },
-    });
-    await container.start();
-    return { containerId: container.id };
-  }
+  // Docker deliberately does NOT implement `makeActive` — see the
+  // "unitRestore" capability. A redeploy REMOVES the previous container
+  // (loopback-port routing can't overlap two containers on one host
+  // port), so there is no unit left to restart; the durable artifact is
+  // the IMAGE. Restore therefore re-materializes the container through
+  // the normal deploy step from the target's frozen snapshot + retained
+  // image (modules/deployments/rollback/restore-plan.ts), which is the
+  // only way env, published port, volumes, labels, network and routing
+  // all come back correctly.
+  //
+  //   archive — `docker stop` (usually a no-op: the container is gone).
+  //             The image stays tagged, retained by the rollback-window
+  //             keep-set in modules/deployments/image-gc.
+  //   purge   — `docker rm` (force) + `docker rmi`. Past this point an
+  //             instant restore of this deployment is impossible and
+  //             rollback degrades to a rebuild from its commit.
 
   async archive(deployment: DeploymentRef): Promise<void> {
-    // Docker archive = stop the container. Image + stopped container
-    // are preserved on the host until purge.
     if (!deployment.containerId) return; // already archived (no container) or never deployed
     try {
       await this.stop(deployment.containerId);
@@ -2140,7 +2121,7 @@ export class DockerRuntime implements RuntimeAdapter {
         // already removed
       }
     }
-    if (deployment.imageRef) {
+    if (deployment.imageRef && ownsBuiltImage(deployment.imageRef)) {
       try {
         await this.removeImage(deployment.imageRef);
       } catch {

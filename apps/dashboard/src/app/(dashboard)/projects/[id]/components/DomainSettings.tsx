@@ -9,6 +9,7 @@ import {
   Copy,
   ExternalLink,
   Globe,
+  Info,
   Link2,
   Loader2,
   Pencil,
@@ -86,6 +87,17 @@ interface DomainSummaryItem {
   externalIngress?: boolean;
   status: { label: string; tone: DomainTone };
   ssl: { label: string; tone: DomainTone };
+  /**
+   * Why this domain isn't working, verbatim from the server.
+   *
+   * `summarizeCertbotFailure` already maps a failed issuance to the REAL cause
+   * (DNS not resolving, :80 firewalled, a proxy answering 404) and
+   * `recordVerifyFailure` persists it on the row. It was already in the API
+   * payload and simply thrown away here, so a red "Error" pill was a dead end —
+   * the operator could see that something broke but never what. Present = the
+   * pills become pressable and open the diagnosis.
+   */
+  diagnosis?: { message: string | null; attempts: number };
 }
 
 function toEditablePublicEndpoint(endpoint: any): PublicEndpoint {
@@ -102,15 +114,34 @@ function toEditablePublicEndpoint(endpoint: any): PublicEndpoint {
   });
 }
 
+/**
+ * Editable drafts for the project's public endpoints.
+ *
+ * A LOADED-BUT-EMPTY `publicEndpoints` means "this project has no routes", and
+ * must stay empty. Seeding a `<slug>.<baseDomain>` placeholder there invented a
+ * domain that doesn't exist, which is how deleting the last route appeared to
+ * "auto-generate" one: the phantom rendered as a real card (Pending / Included
+ * by host, with no DB row behind it so it couldn't be removed), and — because it
+ * carried `domainType: "free"` — it also tripped the free-subdomain cloud gate on
+ * the next save, refusing to add ANY domain with "Connect Openship Cloud…".
+ *
+ * The seed only applies when endpoints haven't loaded yet (undefined), and only
+ * when a free managed subdomain is actually available (`freeAvailable`): on a
+ * self-hosted instance with no cloud connection, `*.opsh.io` can't route at all,
+ * so offering it as a default is never right.
+ */
 function createProjectEndpointDrafts(
   projectData: Record<string, any>,
   hasServer: boolean,
   runtimePort: string,
+  freeAvailable: boolean,
 ): PublicEndpoint[] {
+  if (Array.isArray(projectData.publicEndpoints)) {
+    return projectData.publicEndpoints.map((endpoint) => toEditablePublicEndpoint(endpoint));
+  }
+  if (!freeAvailable) return [];
   return ensurePublicEndpoints(
-    Array.isArray(projectData.publicEndpoints)
-      ? projectData.publicEndpoints.map((endpoint) => toEditablePublicEndpoint(endpoint))
-      : undefined,
+    undefined,
     hasServer
       ? {
           port: runtimePort,
@@ -203,6 +234,33 @@ function resolveDomainStatus(domain: any, t: Dictionary): { label: string; tone:
   }
 }
 
+/**
+ * Is there something to explain about this domain, and what?
+ *
+ * Only returned for a row that is actually in a bad/incomplete state — a healthy
+ * domain's pills stay plain text so a pressable pill always means "there's a
+ * reason in here". `message` may be null when the row is merely awaiting its
+ * first check (nothing has failed yet); the modal then explains the next step
+ * instead of a failure.
+ */
+function resolveDomainDiagnosis(
+  domain: any,
+): { message: string | null; attempts: number } | undefined {
+  if (!domain) return undefined;
+  const unhealthy =
+    domain.verified === false ||
+    domain.status === "pending" ||
+    domain.status === "failed" ||
+    domain.sslStatus === "error" ||
+    domain.sslStatus === "expired" ||
+    domain.sslStatus === "provisioning";
+  if (!unhealthy) return undefined;
+  return {
+    message: typeof domain.lastVerifyError === "string" ? domain.lastVerifyError : null,
+    attempts: typeof domain.verifyAttempts === "number" ? domain.verifyAttempts : 0,
+  };
+}
+
 function resolveDomainSsl(hostname: string, domain: any, baseDomain: string, t: Dictionary): { label: string; tone: DomainTone } {
   const s = t.projectSettings.domains.ssl;
   if (hostname.endsWith(`.${baseDomain}`)) {
@@ -253,7 +311,7 @@ export const DomainSettings = () => {
   // Free .<baseDomain> subdomains route through the Openship Cloud edge, so
   // choosing "free" without a cloud connection opens the connect-cloud modal
   // (requireCloud returns true immediately on SaaS / when already connected).
-  const { requireCloud } = useCloud();
+  const { requireCloud, connected: cloudConnected } = useCloud();
   // Awaitable: resolves true when connected (or after the user connects via the
   // modal), false on dismiss. Callers `await` it so a free route is only chosen/
   // saved once cloud is available. Single source: the `managed-project-domain`
@@ -360,11 +418,19 @@ export const DomainSettings = () => {
   // "Add route" form (services projects): a generic domain → port entry. The
   // port is matched to the service that owns it; that service is then exposed.
   const [showAddRoute, setShowAddRoute] = useState(false);
+  // A free *.<baseDomain> subdomain only routes through the Openship Cloud edge,
+  // so it's a usable default only on a cloud-connected (or SaaS) instance.
+  const freeDomainsAvailable = !selfHosted || cloudConnected;
+  const emptyAddRouteDraft = {
+    domainType: (freeDomainsAvailable ? "free" : "custom") as "free" | "custom",
+    domain: "",
+    port: "",
+  };
   const [addRouteDraft, setAddRouteDraft] = useState<{
     domainType: "free" | "custom";
     domain: string;
     port: string;
-  }>({ domainType: "free", domain: "", port: "" });
+  }>(emptyAddRouteDraft);
   const [addRouteError, setAddRouteError] = useState<string | null>(null);
   const [addRouteSaving, setAddRouteSaving] = useState(false);
   const [isSavingPublicEndpoints, setIsSavingPublicEndpoints] = useState(false);
@@ -404,14 +470,24 @@ export const DomainSettings = () => {
     (Array.isArray(projectData.publicEndpoints) && projectData.publicEndpoints.length > 0) ||
     services.length === 0;
   const draftPublicEndpoints = useMemo(
-    () => createProjectEndpointDrafts(projectData, hasProjectServer, projectRuntimePort),
-    [projectData, hasProjectServer, projectRuntimePort],
+    () =>
+      createProjectEndpointDrafts(
+        projectData,
+        hasProjectServer,
+        projectRuntimePort,
+        freeDomainsAvailable,
+      ),
+    [projectData, hasProjectServer, projectRuntimePort, freeDomainsAvailable],
   );
   const [publicEndpoints, setPublicEndpoints] = useState<PublicEndpoint[]>(draftPublicEndpoints);
   const [settingPrimaryId, setSettingPrimaryId] = useState<string | null>(null);
 
   const domainSummaries = useMemo<DomainSummaryItem[]>(() => {
-    const endpointSource = Array.isArray(projectData.publicEndpoints) && projectData.publicEndpoints.length > 0
+    // SERVER TRUTH ONLY. A loaded-but-empty list means "no routes" and must render
+    // as none — falling back to the local edit draft here is what displayed a
+    // phantom `<slug>.<baseDomain>` card after the last route was deleted. The
+    // draft is for the editor; this list describes what actually exists.
+    const endpointSource = Array.isArray(projectData.publicEndpoints)
       ? projectData.publicEndpoints
       : publicEndpoints;
     const domains = Array.isArray(domainsData.domains) ? domainsData.domains : [];
@@ -463,6 +539,7 @@ export const DomainSettings = () => {
           needsVerify,
           status: resolveDomainStatus(domain, t),
           ssl: resolveDomainSsl(hostname, domain, baseDomain, t),
+          diagnosis: resolveDomainDiagnosis(domain),
         };
       })
       .filter((domain): domain is DomainSummaryItem => domain !== null);
@@ -661,7 +738,7 @@ export const DomainSettings = () => {
     let cancelled = false;
     const timer = setTimeout(async () => {
       try {
-        const result = await domainsApi.previewRecords(trimmed);
+        const result = await domainsApi.previewRecords(trimmed, includeWww);
         if (cancelled) return;
         if (result?.data?.records) {
           setPreviewedRecords(result.data.records);
@@ -680,7 +757,10 @@ export const DomainSettings = () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [newDomain, newDomainType, selfHosted, showCustomDomainSection, baseDomain]);
+    // `includeWww` is a real dependency: toggling it changes WHICH records the
+    // user has to add, so the panel must re-fetch instead of showing the apex
+    // record alone while the toggle says www is included.
+  }, [newDomain, newDomainType, selfHosted, showCustomDomainSection, baseDomain, includeWww]);
 
   // Add a domain = add a ROUTE (the same model services use): pick free/custom,
   // the host, and the port (server) / path (static) it maps to. It lands in the
@@ -1380,7 +1460,7 @@ export const DomainSettings = () => {
           : { domain: domainValue.toLowerCase() }),
       });
       setShowAddRoute(false);
-      setAddRouteDraft({ domainType: "free", domain: "", port: "" });
+      setAddRouteDraft(emptyAddRouteDraft);
     } finally {
       setAddRouteSaving(false);
     }
@@ -2474,6 +2554,46 @@ function firstContainerPort(ports?: string[] | null): string {
   return (parts.length === 2 ? parts[1] : parts[0]).split("/")[0];
 }
 
+/**
+ * A status pill that becomes a BUTTON when there's a reason behind it.
+ *
+ * A red "Error" / amber "Pending" pill used to be a dead end: the server already
+ * knew the cause (certbot's mapped DNS/firewall/proxy diagnosis, persisted on the
+ * row) but the UI rendered the label and dropped it. A healthy pill stays plain
+ * text, so "this pill is clickable" reliably means "there's an explanation here".
+ */
+function DiagnosablePill({
+  tone,
+  label,
+  diagnosis,
+  open,
+  onToggle,
+  t,
+}: {
+  tone: DomainTone;
+  label: string;
+  diagnosis?: { message: string | null; attempts: number };
+  open: boolean;
+  onToggle: () => void;
+  t: Dictionary;
+}) {
+  if (!diagnosis) return <StatusPill tone={tone}>{label}</StatusPill>;
+  const hint = t.projectSettings.domains.diagnosis.pillHint;
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      title={hint}
+      aria-label={`${label} — ${hint}`}
+      aria-expanded={open}
+      className="inline-flex items-center gap-1 rounded-full transition-opacity hover:opacity-80 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+    >
+      <StatusPill tone={tone}>{label}</StatusPill>
+      <Info className="size-3.5 text-muted-foreground" />
+    </button>
+  );
+}
+
 function DomainOverviewCard({
   domain,
   menuActions = [],
@@ -2507,6 +2627,7 @@ function DomainOverviewCard({
   const { t } = useI18n();
   const d = t.projectSettings.domains;
   const canVerify = domain.needsVerify && !!domain.domainId;
+  const [diagnosisOpen, setDiagnosisOpen] = useState(false);
   const [recordsOpen, setRecordsOpen] = useState(false);
   const [records, setRecords] = useState<DnsRecord[] | null>(null);
   const [recordsLoading, setRecordsLoading] = useState(false);
@@ -2565,8 +2686,52 @@ function DomainOverviewCard({
         {/* No service behind the domain → nothing to be "mapped to". Rendering the
             row with an empty value reads as a half-loaded card. */}
         {domain.mappedLabel ? <InfoRow label={d.overview.mappedTo} value={domain.mappedLabel} /> : null}
-        <InfoRow label={d.overview.status} value={<StatusPill tone={domain.status.tone}>{domain.status.label}</StatusPill>} />
-        <InfoRow label={d.overview.ssl} value={<StatusPill tone={domain.ssl.tone}>{domain.ssl.label}</StatusPill>} />
+        <InfoRow
+          label={d.overview.status}
+          value={
+            <DiagnosablePill
+              tone={domain.status.tone}
+              label={domain.status.label}
+              diagnosis={domain.diagnosis}
+              open={diagnosisOpen}
+              onToggle={() => setDiagnosisOpen((v) => !v)}
+              t={t}
+            />
+          }
+        />
+        <InfoRow
+          label={d.overview.ssl}
+          value={
+            <DiagnosablePill
+              tone={domain.ssl.tone}
+              label={domain.ssl.label}
+              diagnosis={domain.diagnosis}
+              open={diagnosisOpen}
+              onToggle={() => setDiagnosisOpen((v) => !v)}
+              t={t}
+            />
+          }
+        />
+        {/* The actual reason, in place. Inline rather than a separate dialog so it
+            sits next to the pill that has the problem and stays open while the
+            operator fixes DNS and re-checks. */}
+        {diagnosisOpen && domain.diagnosis ? (
+          <div className="rounded-xl border border-danger/20 bg-danger-bg/40 p-3">
+            <p className="text-[12px] font-semibold text-foreground">
+              {d.diagnosis.title}
+            </p>
+            <p className="mt-1.5 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-muted-foreground">
+              {domain.diagnosis.message?.trim() || d.diagnosis.noneYet}
+            </p>
+            {domain.diagnosis.attempts > 0 ? (
+              <p className="mt-2 text-[11px] text-muted-foreground/80">
+                {interpolate(d.diagnosis.attempts, {
+                  count: String(domain.diagnosis.attempts),
+                })}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
 
         {portHint ? (
           <div className="flex items-start gap-2 rounded-xl border border-warning-border bg-warning-bg/40 px-3 py-2.5 text-[12px] text-warning">
