@@ -1430,8 +1430,17 @@ export async function startBuild(deploymentId: string) {
   // auto-triggers the build, but the existing main-deploy UI still POSTs
   // /:id/build right after to attach its SSE stream - we want that POST to
   // succeed (so SSE attaches to the running session) instead of 400'ing.
-  // Terminal states (ready/failed/cancelled) are also "do nothing, return ok".
-  if (["building", "deploying", "ready", "failed", "cancelled"].includes(dep.status)) {
+  // Terminal states (ready/failed/cancelled/action_required) are also "do
+  // nothing, return ok". `action_required` MUST be here: it is a settled failure
+  // whose artifact is already gone, so without it this would re-run the build on
+  // the existing row instead of no-op'ing, and the row's recorded blocker would
+  // be overwritten mid-flight. Resolving a blocker creates a NEW deployment
+  // (redeploy), it never restarts this one.
+  if (
+    ["building", "deploying", "ready", "failed", "cancelled", "action_required"].includes(
+      dep.status,
+    )
+  ) {
     return {
       success: true,
       deployment_id: dep.id,

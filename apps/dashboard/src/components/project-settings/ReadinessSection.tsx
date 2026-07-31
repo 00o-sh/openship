@@ -17,11 +17,11 @@ import React, { useState } from "react";
 import { Activity, ChevronDown, ChevronUp } from "lucide-react";
 import { Toggle } from "@/components/project-settings/ServerSideSwitch";
 import { useI18n } from "@/components/i18n-provider";
-import type { OpenshipHealthCheck } from "@repo/core";
+import type { OpenshipReadiness } from "@repo/core";
 
 interface Props {
-  value: OpenshipHealthCheck | null | undefined;
-  onChange: (next: OpenshipHealthCheck | undefined) => void;
+  value: OpenshipReadiness | null | undefined;
+  onChange: (next: OpenshipReadiness | undefined) => void;
   /** Render open on mount. Defaults to closed — see the module note. */
   defaultOpen?: boolean;
   disabled?: boolean;
@@ -37,7 +37,7 @@ interface Props {
 const DEFAULT_TIMEOUT_SECONDS = 45;
 const DEFAULT_STABILIZATION_SECONDS = 15;
 
-const HealthCheckSection: React.FC<Props> = ({
+const ReadinessSection: React.FC<Props> = ({
   value,
   onChange,
   defaultOpen = false,
@@ -57,8 +57,8 @@ const HealthCheckSection: React.FC<Props> = ({
    * turning both toggles off is indistinguishable from never having touched the
    * section. Without this an all-false object would persist and read as "configured".
    */
-  const patch = (next: Partial<OpenshipHealthCheck>) => {
-    const merged: OpenshipHealthCheck = { ...(value ?? {}), ...next };
+  const patch = (next: Partial<OpenshipReadiness>) => {
+    const merged: OpenshipReadiness = { ...(value ?? {}), ...next };
     if (merged.enabled !== true && merged.stabilization !== true) {
       onChange(undefined);
       return;
@@ -211,4 +211,4 @@ const HealthCheckSection: React.FC<Props> = ({
   );
 };
 
-export default React.memo(HealthCheckSection);
+export default React.memo(ReadinessSection);

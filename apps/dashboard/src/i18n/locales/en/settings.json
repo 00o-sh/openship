@@ -855,5 +855,30 @@
       "setTo": "Route strategy set to {mode}",
       "failed": "Failed to update route strategy"
     }
+  },
+  "edgeOrphans": {
+    "title": "Untracked edge routes",
+    "description": "Hostnames this machine still serves that Openship has no record of",
+    "scan": "Scan",
+    "scanning": "Scanning…",
+    "allClear": "Every hostname the edge serves is accounted for.",
+    "comparedTo": "Compared against {count} tracked hostnames.",
+    "unavailable": "Couldn't check the edge",
+    "explain": "Removing a project with \"Remove from Openship only\" deliberately leaves its route running. A leftover app route then returns 502 once its container is gone, but a leftover STATIC route keeps serving the old files with a 200 — even on a hostname since given to another project.",
+    "kindStatic": "Static files",
+    "kindProxy": "App route",
+    "staticWarning": "Still serving files. This answers requests today.",
+    "proxyWarning": "Points at an upstream that is probably gone.",
+    "servingFrom": "Serving from",
+    "proxyingTo": "Proxying to",
+    "alsoAnswers": "Also answers for",
+    "stopServing": "Stop serving",
+    "stopping": "Stopping…",
+    "stopped": "{hostname} is no longer served.",
+    "stopFailed": "Couldn't stop serving {hostname}",
+    "confirmTitle": "Stop serving {hostname}?",
+    "confirmBody": "This removes the edge configuration for this hostname only. Built files stay on disk, and nothing else on the server is touched. If a project is later deployed to this hostname it will create its own route.",
+    "confirmCta": "Stop serving",
+    "cancel": "Cancel"
   }
 }

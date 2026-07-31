@@ -15,7 +15,7 @@ import type {
   ProjectCompositeRoute,
   ReleaseSource,
   ProjectObjectStorage,
-  OpenshipHealthCheck,
+  OpenshipReadiness,
 } from "@repo/core";
 import { organization } from "./organization";
 import { service } from "./service";
@@ -250,9 +250,9 @@ export const project = pgTable(
      * NULL = off, which is the default for every project: an unconfigured deploy
      * does no post-start waiting at all. Only a project that explicitly opts in
      * here gets a probe that can delay or veto a deploy. Set from the wizard's
-     * Health section, seeded by `openship.json`'s `healthCheck`.
+     * Health section, seeded by `openship.json`'s `readiness`.
      */
-    healthCheck: jsonb("health_check").$type<OpenshipHealthCheck | null>(),
+    readiness: jsonb("readiness").$type<OpenshipReadiness | null>(),
 
     /* ── Resources (VM-native format) ───────────────────────────────────── */
     /** JSON: { cpuCores, memoryMb } */

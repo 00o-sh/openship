@@ -66,6 +66,7 @@
     "building": "En construction",
     "deploying": "Déploiement en cours",
     "partial": "Partiel",
+    "actionRequired": "Action requise",
     "rejected": "Rejeté",
     "verifying": "Vérification",
     "pending": "En attente"

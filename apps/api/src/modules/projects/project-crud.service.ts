@@ -107,6 +107,13 @@ function readDeployMeta(dep: Deployment | null | undefined): {
   };
 }
 
+// The attention predicates live in a dependency-free leaf module so the
+// pending-actions aggregator can share them without importing this file's graph.
+// Imported (this file calls one below) AND re-exported, because the
+// project.service barrel is the established import surface for callers.
+import { deploymentIsBlocked, deploymentRoutingUnsynced } from "./deployment-flags";
+export { deploymentIsBlocked, deploymentRoutingUnsynced };
+
 /** The live release's human version + state, surfaced on project cards so the
  *  UI can show "which v is live" and flag a partial deploy that is still
  *  awaiting the operator's keep/reject decision (`awaitingDecision`). Derived
@@ -128,7 +135,7 @@ function readActiveDeploymentSummary(dep: Deployment | null | undefined): {
     awaitingDecision: meta?.composeDeployment?.decision === "pending",
     // Live, but the free .opsh.io edge route didn't sync — surfaced as
     // "Action Required" with a Retry routing action (see routing/retry).
-    routingUnsynced: meta?.edgeUnsynced === true || typeof meta?.deployWarning === "string",
+    routingUnsynced: deploymentRoutingUnsynced(dep),
   };
 }
 
@@ -366,8 +373,8 @@ function buildProductionProjectInput(
     routeStrategy: data.routeStrategy ?? undefined,
     // Deploy-time readiness gate. Omitted → null → OFF: the deploy does no
     // post-start waiting. Only set when the wizard's Health section (or
-    // openship.json's `healthCheck`) opted in.
-    healthCheck: data.healthCheck ?? null,
+    // openship.json's `readiness`) opted in.
+    readiness: data.readiness ?? null,
     isApp: data.isApp ?? false,
     appTemplateId: data.appTemplateId ?? null,
     // Services / docker(-compose) projects can only run on the Docker runtime, so

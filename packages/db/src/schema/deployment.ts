@@ -58,15 +58,28 @@ export const deployment = pgTable("deployment", {
   /**
    * Build status.
    *
-   * Values: `queued | building | deploying | ready | failed | cancelled | partial_failure | rejected`.
+   * Values: `queued | building | deploying | ready | failed | cancelled |
+   * partial_failure | action_required | rejected` (plus `reconciling`, written
+   * by onReconciling).
    * `rejected` is terminal: the operator declined a finished (ready /
    * partial_failure) deploy; its runtime is torn down but the row + logs are
    * kept for history (see rejectDeployment).
    * `partial_failure` is a terminal success-with-asterisk used by the
    * smart per-service deploy path when one or more services failed
    * but the rest came up ready — the dashboard treats it as deployed.
+   * `action_required` is a FAILED deploy whose cause is classified and
+   * resolvable — today only `PORT_IN_USE` (see isBlockingErrorCode). Nothing
+   * deployed and the artifact is gone, exactly as for `failed`; the distinction
+   * is that we can name the blocker and offer a way forward, so the project
+   * reads "Action Required" instead of a dead end. Like `partial_failure` it is
+   * a DB-ONLY status: the SSE session still reports `failed`, so the build
+   * stream closes normally.
    * Free-text column (no DB check constraint) so callers can extend
    * without a migration; keep values lowercase + snake_case.
+   *
+   * Adding a value? `deployment-status.test.ts` enumerates the guard lists that
+   * must learn about it — a new status that misses one hangs a poll or renders
+   * as "Pending".
    */
   status: text("status").notNull().default("queued"),
   /** Image/snapshot reference produced by build */
@@ -105,6 +118,26 @@ export const deployment = pgTable("deployment", {
   envVars: jsonb("env_vars"),
   /** Error message if failed */
   errorMessage: text("error_message"),
+  /**
+   * Machine-readable failure cause — the `DeployError.code` (e.g. `PORT_IN_USE`,
+   * `GITHUB_TOKEN_REQUIRED`). Free text, like `status`, because codes are raised
+   * across packages/adapters and must be extendable without a migration.
+   *
+   * This is what makes a failure actionable AFTER the fact. It used to live only
+   * on the in-memory SSE session, so it vanished on eviction/restart and the
+   * durable row carried nothing but prose — see migration 0080.
+   */
+  errorCode: text("error_code"),
+  /**
+   * The `DeployError.details` bag verbatim — for `PORT_IN_USE`: `{ port, pid,
+   * command, rawCommand, systemdUnit, systemdDescription, deploymentId,
+   * isManagedDeployment }`. Process/port metadata only; never secrets.
+   *
+   * `isManagedDeployment` is the load-bearing one: it separates "a stale
+   * Openship deployment is holding the port, safe to free" from "something else
+   * on this box owns it, ask a human".
+   */
+  errorDetails: jsonb("error_details"),
 
   /* ── Smart per-service deploy snapshot ──────────────────────────────── */
   /**

@@ -795,7 +795,7 @@ export function useDeploymentBuild(
         routingConfig: config.routingConfig ?? undefined,
         // Deploy-time readiness gate. Omitted when the Health section was left
         // alone, which is the default — the backend then runs no post-start probe.
-        healthCheck: config.healthCheck ?? undefined,
+        readiness: config.readiness ?? undefined,
       });
 
       if (!projectData.success || !projectData.project_id) {

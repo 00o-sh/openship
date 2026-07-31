@@ -66,6 +66,7 @@
     "building": "构建中",
     "deploying": "部署中",
     "partial": "部分完成",
+    "actionRequired": "需要处理",
     "rejected": "已拒绝",
     "verifying": "验证中",
     "pending": "待处理"

@@ -66,6 +66,7 @@
     "building": "Building",
     "deploying": "Deploying",
     "partial": "Partial",
+    "actionRequired": "Action required",
     "rejected": "Rejected",
     "verifying": "Verifying",
     "pending": "Pending"

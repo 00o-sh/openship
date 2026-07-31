@@ -241,6 +241,7 @@ export async function getHome(c: Context) {
       ...enriched,
       latestDeploymentId: latest?.id ?? null,
       latestDeploymentStatus: latest?.status ?? null,
+      latestDeploymentBlocked: projectService.deploymentIsBlocked(latest),
       primaryDomain: primary?.hostname ?? null,
       serviceCount: services.length,
       hasMultipleServices: services.length > 1,
@@ -1813,6 +1814,22 @@ export async function getCommitStatus(c: Context) {
   return c.json({ data: status });
 }
 
+/**
+ * GET /projects/:id/pending-actions — everything waiting on a human for this
+ * project, each item carrying the call that resolves it.
+ *
+ * On-demand like the other attention reads (`/commit-status`, `/port-check`,
+ * `/routing/edge-status`), so the project list and detail reads pay nothing.
+ */
+export async function getPendingActions(c: Context) {
+  const ctx = getRequestContext(c);
+  const id = param(c, "id");
+  await permission.assert(ctx, { resourceType: "project", resourceId: id, action: "read" });
+  const { getProjectPendingActions } = await import("./pending-actions.service");
+  const actions = await getProjectPendingActions(id, ctx.organizationId);
+  return c.json({ data: { actions } });
+}
+
 // ─── Sleep mode ──────────────────────────────────────────────────────────────
 
 export async function setSleepMode(c: Context) {
@@ -1947,6 +1964,11 @@ export async function getInfo(c: Context) {
   await permission.assert(getRequestContext(c), { resourceType: "project", resourceId: id, action: "read" });
   const project = await projectService.getProject(id, organizationId);
   const environments = await projectService.listProjectEnvironments(id, organizationId);
+  // The LATEST deployment, for the blocked-deploy flag. `getProject` resolves the
+  // ACTIVE one, which by construction is never a blocked deploy — so without this
+  // the detail page's status pill couldn't show a blocker that the project list
+  // (which already fetches `latest`) does show. One query on a detail read.
+  const latestDeployment = await repos.deployment.findLatestByProject(id).catch(() => null);
   const hasServer = project.hasServer ?? project.productionMode === "host";
   const serviceRows = await repos.service.listByProject(id);
   const serviceCount = serviceRows.length;
@@ -2022,6 +2044,11 @@ export async function getInfo(c: Context) {
         serviceCount,
         hasMultipleServices: serviceCount > 1,
         projectType,
+        // Same two fields the project LIST provides, so `getProjectStatus` reads
+        // identically on the detail page and the cards.
+        latestDeploymentId: latestDeployment?.id ?? null,
+        latestDeploymentStatus: latestDeployment?.status ?? null,
+        latestDeploymentBlocked: projectService.deploymentIsBlocked(latestDeployment),
       },
       environments,
     },

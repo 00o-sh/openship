@@ -66,6 +66,7 @@
     "building": "قيد البناء",
     "deploying": "جارٍ النشر",
     "partial": "جزئية",
+    "actionRequired": "إجراء مطلوب",
     "rejected": "مرفوضة",
     "verifying": "قيد التحقق",
     "pending": "قيد الانتظار"

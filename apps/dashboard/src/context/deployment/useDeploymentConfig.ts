@@ -693,9 +693,9 @@ export function useDeploymentConfig() {
         // EXISTING project keeps its SAVED value so a config-save can't silently
         // clear a gate the operator turned on; a brand-new deploy honours what
         // openship.json declared. Neither present ⇒ undefined ⇒ off.
-        healthCheck: projectId
-          ? (project?.healthCheck ?? undefined)
-          : (response.healthCheck ?? undefined),
+        readiness: projectId
+          ? (project?.readiness ?? undefined)
+          : (response.readiness ?? undefined),
         modeSnapshots: undefined,
         // For an EXISTING project (projectId set — config edit or redeploy)
         // prefer the SAVED framework so a fresh re-detection can't silently

@@ -25,7 +25,7 @@ import {
   stat as fsStat,
 } from "node:fs/promises";
 import { execFile as cpExecFile } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { promisify } from "node:util";
 import { dirname, join } from "node:path";
 
@@ -716,7 +716,7 @@ export class NginxProvider implements RoutingProvider, SslProvider {
     assertValidDomain(route.domain);
     await this._mkdir(this.sitesDir);
 
-    const slug = this.domainSlug(route.domain);
+    const slug = await this.resolveSlug(route.domain);
     const configPath = join(this.sitesDir, `${slug}.conf`);
     if ("staticRoot" in route && route.staticRoot) {
       assertValidStaticRoot(route.staticRoot, { adopted: route.staticRootAdopted });
@@ -961,7 +961,7 @@ ${serveLocation}
    */
   async removeRoute(domain: string): Promise<void> {
     assertValidDomain(domain);
-    const slug = this.domainSlug(domain);
+    const slug = await this.resolveSlug(domain);
     const configPath = join(this.sitesDir, `${slug}.conf`);
     const statePath = this.routeStatePath(slug);
     const confSnapshot = await this._captureFile(configPath);
@@ -1053,7 +1053,7 @@ ${serveLocation}
     }
 
     // Rewrite the config with SSL now that certs exist
-    const slug = this.domainSlug(domain);
+    const slug = await this.resolveSlug(domain);
     const configPath = join(this.sitesDir, `${slug}.conf`);
 
     // Prefer the persisted RouteConfig sidecar so the re-register keeps every
@@ -1194,7 +1194,7 @@ ${serveLocation}
     // persisted RouteConfig sidecar so every location survives (same as
     // provisionCert); if there's no route yet, the next deploy's route plan
     // picks up tls:true from the manualSsl gate.
-    const slug = this.domainSlug(domain);
+    const slug = await this.resolveSlug(domain);
     try {
       const state = await this._readFile(this.routeStatePath(slug));
       const saved = JSON.parse(state) as RouteConfig;
@@ -1214,8 +1214,92 @@ ${serveLocation}
 
   // ── Helpers ──────────────────────────────────────────────────────────
 
+  /**
+   * Filename stem for a domain. NOT injective — see `resolveSlug`.
+   *
+   * Kept exactly as-is on purpose: it names every vhost file on every existing
+   * install, so changing it would rename the lot and leave the old names behind
+   * still serving. `resolveSlug` handles the collisions instead.
+   */
   private domainSlug(domain: string): string {
     return domain.replace(/[^a-zA-Z0-9-]/g, "-").replace(/-+/g, "-");
+  }
+
+  /** Deterministic per-domain disambiguator for a slug collision. */
+  private slugSuffix(domain: string): string {
+    return createHash("sha1").update(domain).digest("hex").slice(0, 8);
+  }
+
+  /** Every `server_name` token declared in a vhost body. */
+  private serverNamesIn(conf: string): string[] {
+    const names: string[] = [];
+    for (const m of conf.matchAll(/server_name\s+([^;]+);/g)) {
+      for (const tok of m[1]!.trim().split(/\s+/)) {
+        if (tok) names.push(tok.toLowerCase().replace(/\.$/, ""));
+      }
+    }
+    return names;
+  }
+
+  /**
+   * The slug THIS domain's files live under.
+   *
+   * `domainSlug` folds every non-alphanumeric to `-`, so a dot and a literal dash
+   * collapse together and two different, separately-claimable hostnames land on
+   * one filename:
+   *
+   *     staging.app.example.com  ->  staging-app-example-com
+   *     staging-app.example.com  ->  staging-app-example-com
+   *
+   * Both are ordinary hostnames and can belong to different projects — even
+   * different orgs, since one edge fronts the whole box. Whichever registered last
+   * silently overwrote the other's vhost, and the loser's traffic fell through to
+   * `default_server`: a silent outage of somebody else's domain. `removeRoute` on
+   * either one deleted the shared file and took out both.
+   *
+   * Resolution, in this order, and the order is the whole correctness argument:
+   *
+   *   1. A disambiguated file for this domain already exists → keep using it.
+   *      MUST come first. If the incumbent is later removed, step 3 would hand
+   *      this domain the now-free base name while its real conf stayed on disk
+   *      under the suffixed name — two files serving one hostname, which is the
+   *      exact orphan class this whole change exists to remove.
+   *   2. The base file exists and does NOT list this domain in its `server_name`
+   *      → it is someone else's. Take a suffixed name; the incumbent is untouched.
+   *   3. Otherwise the base name is ours (free, or already ours).
+   *
+   * Containment, not equality, in step 2 — and the reason is narrower than it
+   * looks. Everything WE write carries exactly one `server_name` (see the server
+   * blocks above), and a takeover fans out one `registerRoute` per hostname
+   * (`registerImportedSites`), so no Openship-managed conf ever lists two. The
+   * only file that can is one the operator placed in `sites-enabled` themselves.
+   *
+   * For that file, reusing it is the lesser evil, not a free win: we rewrite it
+   * with a single `server_name`, so a sibling hostname it also served stops being
+   * served. The alternative is worse — a second vhost answering a name the first
+   * one already claims makes OpenResty warn "conflicting server name" and silently
+   * keep the FIRST, so the route we were asked to create would not take effect at
+   * all. Losing the sibling is at least the outcome the caller asked for.
+   */
+  private async resolveSlug(domain: string): Promise<string> {
+    const base = this.domainSlug(domain);
+    const suffixed = `${base}-${this.slugSuffix(domain)}`;
+    const host = domain.toLowerCase().replace(/\.$/, "");
+
+    if (await this._exists(join(this.sitesDir, `${suffixed}.conf`)).catch(() => false)) {
+      return suffixed;
+    }
+
+    const basePath = join(this.sitesDir, `${base}.conf`);
+    if (await this._exists(basePath).catch(() => false)) {
+      const conf = await this._readFile(basePath).catch(() => "");
+      // Unreadable/empty → treat as ours rather than fragmenting on a read blip.
+      if (conf) {
+        const names = this.serverNamesIn(conf);
+        if (names.length > 0 && !names.includes(host)) return suffixed;
+      }
+    }
+    return base;
   }
 
   /**

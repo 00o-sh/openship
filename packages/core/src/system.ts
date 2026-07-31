@@ -65,12 +65,12 @@ export const SYSTEM = {
     STABILIZE_LOG_TAIL_LINES: 20,
     /**
      * Readiness-probe budget when a project OPTS IN to the health check. Only
-     * reached with `healthCheck.enabled` — an unconfigured deploy runs no probe
+     * reached with `readiness.enabled` — an unconfigured deploy runs no probe
      * at all, so this never sits on the default critical path.
      */
-    HEALTH_CHECK_TIMEOUT_MS: 45_000,
+    READINESS_TIMEOUT_MS: 45_000,
     /** Readiness-probe poll interval. */
-    HEALTH_CHECK_INTERVAL_MS: 1_000,
+    READINESS_INTERVAL_MS: 1_000,
   },
 
   // ── SSE / Build Streaming ────────────────────────────────────────────

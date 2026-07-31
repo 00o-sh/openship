@@ -27,8 +27,8 @@ import { useToast } from "@/context/ToastContext";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import { projectsApi } from "@/lib/api";
 import type { RouteStrategy } from "@/lib/api/settings";
-import type { OpenshipHealthCheck } from "@repo/core";
-import HealthCheckSection from "@/components/project-settings/HealthCheckSection";
+import type { OpenshipReadiness } from "@repo/core";
+import ReadinessSection from "@/components/project-settings/ReadinessSection";
 
 interface Props {
   onDeleteProject: (deleteApp?: boolean, wipeVolumes?: boolean, recordOnly?: boolean) => void;
@@ -249,9 +249,9 @@ export const AdvancedSettings = ({ onDeleteProject }: Props) => {
           iconTone="primary"
           collapsible
         >
-          <HealthCheckCard
+          <ReadinessCard
             projectId={projectData.id}
-            initial={(projectData?.healthCheck as OpenshipHealthCheck | null) ?? null}
+            initial={(projectData?.readiness as OpenshipReadiness | null) ?? null}
           />
         </SectionCard>
 
@@ -451,24 +451,24 @@ function MetricRow({ label, value }: { label: string; value: string }) {
 /* ── Health checks ────────────────────────────────────────────────── */
 
 /**
- * Persisting wrapper around the shared HealthCheckSection.
+ * Persisting wrapper around the shared ReadinessSection.
  *
  * Debounced because the section has free-text/number inputs — RoutingStrategyCard
  * can PATCH per click since it's a 3-way pick, but a timeout field would otherwise
  * fire a request per keystroke. Optimistic with a rollback on failure, matching
  * RoutingStrategyCard.
  */
-function HealthCheckCard({
+function ReadinessCard({
   projectId,
   initial,
 }: {
   projectId: string;
-  initial: OpenshipHealthCheck | null;
+  initial: OpenshipReadiness | null;
 }) {
   const { t } = useI18n();
   const { showToast } = useToast();
-  const [value, setValue] = useState<OpenshipHealthCheck | null>(initial);
-  const savedRef = React.useRef<OpenshipHealthCheck | null>(initial);
+  const [value, setValue] = useState<OpenshipReadiness | null>(initial);
+  const savedRef = React.useRef<OpenshipReadiness | null>(initial);
   const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const title = t.importProject.buildSettings.healthCheck.title;
 
@@ -479,14 +479,14 @@ function HealthCheckCard({
     [],
   );
 
-  function handleChange(next: OpenshipHealthCheck | undefined) {
+  function handleChange(next: OpenshipReadiness | undefined) {
     const resolved = next ?? null;
     setValue(resolved);
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(async () => {
       const previous = savedRef.current;
       try {
-        const res = await projectsApi.update(projectId, { healthCheck: resolved });
+        const res = await projectsApi.update(projectId, { readiness: resolved });
         if ((res as { success?: boolean })?.success === false) throw new Error("update failed");
         savedRef.current = resolved;
       } catch {
@@ -496,7 +496,7 @@ function HealthCheckCard({
     }, 700);
   }
 
-  return <HealthCheckSection value={value} onChange={handleChange} embedded />;
+  return <ReadinessSection value={value} onChange={handleChange} embedded />;
 }
 
 /* ── Transfer & Clone ─────────────────────────────────────────────── */

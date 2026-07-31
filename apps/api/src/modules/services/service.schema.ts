@@ -62,19 +62,54 @@ const HealthcheckSchema = Type.Object(
  */
 const AdvancedSchema = Type.Object(
   {
-    healthcheck: Type.Optional(HealthcheckSchema),
+    // Each key is nullable because `advanced` is MERGED on update, not replaced
+    // (see mergeAdvanced in service.service.ts): omitting a key means "leave it
+    // alone" so a partial caller can't wipe the rest of the blob, which makes an
+    // explicit `null` the way to say "remove this one".
+    healthcheck: Type.Optional(Type.Union([HealthcheckSchema, Type.Null()])),
+    /**
+     * Per-service DEPLOY-TIME readiness gate, overriding the project's for this
+     * service (mirrors OpenshipReadiness in @repo/core). Absent ⇒ inherit the
+     * project's; neither ⇒ off, which is the default.
+     *
+     * Not `healthcheck` above: that's the daemon-run Docker HEALTHCHECK (a custom
+     * command, on a loop, forever). This is the pipeline's one-shot "did it come
+     * up?" and the only one of the two that can fail a deploy.
+     */
+    readiness: Type.Optional(
+      Type.Union([
+        Type.Object(
+          {
+            enabled: Type.Optional(Type.Boolean()),
+            path: Type.Optional(Type.String({ maxLength: 2000 })),
+            port: Type.Optional(Type.Integer({ minimum: 1, maximum: 65535 })),
+            timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 600 })),
+            stabilization: Type.Optional(Type.Boolean()),
+            stabilizationSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 600 })),
+            onFailure: Type.Optional(
+              Type.Union([Type.Literal("warn"), Type.Literal("fail")]),
+            ),
+          },
+          { additionalProperties: false },
+        ),
+        Type.Null(),
+      ]),
+    ),
     /** Per-service cpu/memory caps (compose `mem_limit`/`cpus` or
      *  `deploy.resources.limits`). Overrides the project-wide config field by
      *  field; `0` = no limit. The real ceiling is the target machine's capacity,
      *  enforced at deploy time — these bounds are sanity rails. */
     resources: Type.Optional(
-      Type.Object(
-        {
-          cpuCores: Type.Optional(Type.Number({ minimum: 0, maximum: 1024 })),
-          memoryMb: Type.Optional(Type.Number({ minimum: 0, maximum: 4194304 })),
-        },
-        { additionalProperties: false },
-      ),
+      Type.Union([
+        Type.Object(
+          {
+            cpuCores: Type.Optional(Type.Number({ minimum: 0, maximum: 1024 })),
+            memoryMb: Type.Optional(Type.Number({ minimum: 0, maximum: 4194304 })),
+          },
+          { additionalProperties: false },
+        ),
+        Type.Null(),
+      ]),
     ),
   },
   { additionalProperties: false },

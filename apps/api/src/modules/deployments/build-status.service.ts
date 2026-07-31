@@ -240,10 +240,14 @@ export async function getBuildSessionStatus(deploymentId: string) {
     // A still-open decision prompt (edge 80/443 takeover, port conflict) so a
     // refresh re-shows the modal immediately, before the SSE stream replays it.
     pendingPrompt: memSession?.currentPrompt ?? null,
-    errorCode:
-      dep.errorMessage?.includes("PORT_IN_USE") || dep.errorMessage?.includes("EADDRINUSE")
-        ? "PORT_IN_USE"
-        : undefined,
+    // The persisted classification (migration 0080). This used to be re-derived
+    // as `errorMessage.includes("PORT_IN_USE") || includes("EADDRINUSE")`, which
+    // matched none of the coded messages — they all read "Port 3000 is already in
+    // use by …" — so it fired only for UNclassified failures whose raw process
+    // output happened to leak through, and missed every classified one. The code
+    // is now on the row, so a reload no longer loses it.
+    errorCode: dep.errorCode ?? undefined,
+    errorDetails: (dep.errorDetails as Record<string, unknown> | null) ?? undefined,
     projectType,
     ...composeData,
   };

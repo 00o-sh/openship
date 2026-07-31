@@ -165,9 +165,9 @@ describe("parseOpenshipConfig", () => {
     });
   });
 
-  describe("healthCheck", () => {
+  describe("readiness", () => {
     it("round-trips every field", () => {
-      const healthCheck = {
+      const readiness = {
         enabled: true,
         path: "/healthz",
         port: 8080,
@@ -176,23 +176,23 @@ describe("parseOpenshipConfig", () => {
         stabilizationSeconds: 30,
         onFailure: "fail" as const,
       };
-      const { config, errors, warnings } = parseOpenshipConfig({ healthCheck });
+      const { config, errors, warnings } = parseOpenshipConfig({ readiness });
       expect(errors).toEqual([]);
       expect(warnings).toEqual([]);
-      expect(config?.healthCheck).toEqual(healthCheck);
+      expect(config?.readiness).toEqual(readiness);
     });
 
     // The whole feature is opt-in, so "undeclared" has to stay distinguishable
     // from "declared off" all the way down to the persisted column.
     it("is absent (not undefined-valued) when undeclared", () => {
       const { config } = parseOpenshipConfig({ framework: "nextjs" });
-      expect(config && "healthCheck" in config).toBe(false);
+      expect(config && "readiness" in config).toBe(false);
     });
 
     it("accepts an empty object as a legal no-op", () => {
-      const { config, errors } = parseOpenshipConfig({ healthCheck: {} });
+      const { config, errors } = parseOpenshipConfig({ readiness: {} });
       expect(errors).toEqual([]);
-      expect(config?.healthCheck).toEqual({
+      expect(config?.readiness).toEqual({
         enabled: undefined,
         path: undefined,
         port: undefined,
@@ -204,33 +204,64 @@ describe("parseOpenshipConfig", () => {
     });
 
     it("rejects a non-object", () => {
-      const { errors } = parseOpenshipConfig({ healthCheck: true });
-      expect(errors).toEqual(["healthCheck: must be an object"]);
+      const { errors } = parseOpenshipConfig({ readiness: true });
+      expect(errors).toEqual(["readiness: must be an object"]);
     });
 
     it("rejects an unknown onFailure action", () => {
-      const { errors } = parseOpenshipConfig({ healthCheck: { onFailure: "destroy" } });
+      const { errors } = parseOpenshipConfig({ readiness: { onFailure: "destroy" } });
       expect(errors.length).toBeGreaterThan(0);
-      expect(errors.join(" ")).toContain("healthCheck.onFailure");
+      expect(errors.join(" ")).toContain("readiness.onFailure");
     });
 
     it("rejects out-of-range timeouts rather than silently clamping", () => {
       const { errors } = parseOpenshipConfig({
-        healthCheck: { timeoutSeconds: 0, stabilizationSeconds: 9999 },
+        readiness: { timeoutSeconds: 0, stabilizationSeconds: 9999 },
       });
-      expect(errors.join(" ")).toContain("healthCheck.timeoutSeconds");
-      expect(errors.join(" ")).toContain("healthCheck.stabilizationSeconds");
+      expect(errors.join(" ")).toContain("readiness.timeoutSeconds");
+      expect(errors.join(" ")).toContain("readiness.stabilizationSeconds");
+    });
+
+    it("parses a PER-SERVICE readiness gate alongside the docker healthcheck", () => {
+      const { config, errors } = parseOpenshipConfig({
+        readiness: { stabilization: true },
+        services: [
+          {
+            name: "api",
+            image: "x",
+            healthcheck: { test: "curl -f localhost/health" },
+            readiness: { enabled: true, path: "/ready", onFailure: "fail" },
+          },
+        ],
+      });
+      expect(errors).toEqual([]);
+      // Both coexist on one service: the daemon-run command AND the deploy gate.
+      expect(config?.services?.[0]?.healthcheck?.test).toBe("curl -f localhost/health");
+      expect(config?.services?.[0]?.readiness).toMatchObject({
+        enabled: true,
+        path: "/ready",
+        onFailure: "fail",
+      });
+      // The project-level one is independent of the per-service override.
+      expect(config?.readiness).toMatchObject({ stabilization: true });
+    });
+
+    it("validates a per-service readiness gate with the same rules", () => {
+      const { errors } = parseOpenshipConfig({
+        services: [{ name: "api", image: "x", readiness: { onFailure: "destroy" } }],
+      });
+      expect(errors.join(" ")).toContain("services[0].readiness.onFailure");
     });
 
     it("is not confused with a compose service's docker healthcheck", () => {
       // Different layers, similar names: `services[].healthcheck` is the Docker
-      // HEALTHCHECK directive; top-level `healthCheck` is Openship's deploy gate.
+      // HEALTHCHECK directive; top-level `readiness` is Openship's deploy gate.
       const { config, errors } = parseOpenshipConfig({
-        healthCheck: { enabled: true },
+        readiness: { enabled: true },
         services: [{ name: "db", image: "postgres:16", healthcheck: { test: "pg_isready" } }],
       });
       expect(errors).toEqual([]);
-      expect(config?.healthCheck?.enabled).toBe(true);
+      expect(config?.readiness?.enabled).toBe(true);
       expect(config?.services?.[0]?.healthcheck?.test).toBe("pg_isready");
     });
   });

@@ -237,6 +237,20 @@ r.patch("/:id/clone-token", { tag: "project:admin" }, cloudProjectProxy, ctrl.up
 /* ─── Git ──────────────────────────────────────────────────────────────── */
 r.get("/:id/git", { tag: "project:read", mcp: { description: "Get the project's linked git repository info." } }, cloudProjectProxy, ctrl.getGitInfo);
 r.get("/:id/commit-status", { tag: "project:read", mcp: { description: "Compare the deployed commit against the remote HEAD." } }, cloudProjectProxy, ctrl.getCommitStatus);
+
+/* ─── Pending actions (everything waiting on a human) ───────────────────── */
+r.get(
+  "/:id/pending-actions",
+  {
+    tag: "project:read",
+    mcp: {
+      description:
+        "What is waiting on a human for this project, and how to resolve each item. Covers a deploy blocked on a named cause (e.g. a port already in use), a deploy HELD right now on a decision (answer it with the build-respond tool — the exact action id and body are in the item's resolveWith, and `expiresAt` is when the deploy gives up), a partial-failure release awaiting keep/reject, unsynced routing, unverified domains, and failed/expired certificates. Each item carries `resolveWith`, an array of concrete {method, path, body} calls — use those rather than guessing. Call this after starting a deploy that seems stuck, and whenever a project reads as Action Required.",
+    },
+  },
+  cloudProjectProxy,
+  ctrl.getPendingActions,
+);
 r.post("/:id/git/link", { tag: "project:write", body: LinkRepoBody, mcp: { description: "Link a git repository to the project." } }, cloudProjectProxy, ctrl.linkRepo);
 r.get("/:id/branches", { tag: "project:read", mcp: { description: "List the linked repository's branches." } }, cloudProjectProxy, ctrl.listBranches);
 r.post("/:id/auto-deploy", { tag: "project:write", body: SetAutoDeployBody, mcp: { description: "Enable/disable auto-deploy on push." } }, cloudProjectProxy, ctrl.setAutoDeploy);
