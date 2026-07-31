@@ -56,6 +56,16 @@ export interface TunnelResponse {
 }
 
 /**
+ * Whether any component of a request head contains a bare CR or LF.  The
+ * request line and header lines below are assembled by hand, so a component
+ * carrying one would terminate its own line and inject arbitrary extra
+ * headers - or an entire second request - onto the tunnel.
+ */
+function hasCrlf(parts: string[]): boolean {
+  return parts.some((part) => /[\r\n]/.test(part));
+}
+
+/**
  * Whether a `Transfer-Encoding` header value applies the chunked coding.
  * Transfer-coding names are case-insensitive and the header carries the
  * applied codings as a comma-separated list, chunked always last.
@@ -106,8 +116,8 @@ function decodeChunkedBody(buf: Buffer): Buffer | null {
  * signal alongside Content-Length/chunked framing.
  *
  * Returns `null` on connection error, timeout, a response truncated before
- * its declared framing completed, or if the executor doesn't support
- * tunnelling.
+ * its declared framing completed, a method/path/header containing CR or LF,
+ * or if the executor doesn't support tunnelling.
  */
 export async function tunnelRequest(
   serverId: string,
@@ -121,6 +131,10 @@ export async function tunnelRequest(
     body,
     timeoutMs = 10_000,
   } = opts;
+
+  if (hasCrlf([method, path, ...Object.entries(headers).flat()])) {
+    return null;
+  }
 
   let tunnel: Duplex;
   try {
@@ -250,7 +264,8 @@ export interface TunnelStreamHandle {
  * ```
  *
  * Sends `Accept: text/event-stream` and `Connection: keep-alive` by default.
- * Returns `null` on connection error, timeout, or non-2xx status.
+ * Returns `null` on connection error, timeout, non-2xx status, or a
+ * path/header containing CR or LF.
  */
 export async function tunnelStream(
   serverId: string,
@@ -258,6 +273,10 @@ export async function tunnelStream(
   path: string,
   extraHeaders: Record<string, string> = {},
 ): Promise<TunnelStreamHandle | null> {
+  if (hasCrlf([path, ...Object.entries(extraHeaders).flat()])) {
+    return null;
+  }
+
   let tunnel: Duplex;
   try {
     tunnel = await tunnelConnect(serverId, "127.0.0.1", remotePort);

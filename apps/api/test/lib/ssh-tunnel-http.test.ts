@@ -185,3 +185,103 @@ describe("tunnelStream byte relay", () => {
     handle!.destroy();
   });
 });
+
+describe("tunnel request head injection", () => {
+  const CRLF_PATH = "/health\r\nX-Injected: yes\r\n\r\nGET /rules HTTP/1.1";
+
+  it("refuses a tunnelRequest path containing CRLF", async () => {
+    const tunnel = openTunnel();
+
+    expect(await tunnelRequest("srv_1", 9145, CRLF_PATH)).toBeNull();
+    expect(tunnel.sent).toBe("");
+  });
+
+  it("refuses a tunnelRequest header value containing CRLF", async () => {
+    const tunnel = openTunnel();
+
+    const result = await tunnelRequest("srv_1", 9145, "/health", {
+      headers: { "X-Trace": "abc\r\nX-Injected: yes" },
+    });
+
+    expect(result).toBeNull();
+    expect(tunnel.sent).toBe("");
+  });
+
+  it("refuses a tunnelRequest header name containing CRLF", async () => {
+    const tunnel = openTunnel();
+
+    const result = await tunnelRequest("srv_1", 9145, "/health", {
+      headers: { "X-Trace\r\nX-Injected": "yes" },
+    });
+
+    expect(result).toBeNull();
+    expect(tunnel.sent).toBe("");
+  });
+
+  it("refuses a tunnelRequest method containing CRLF", async () => {
+    const tunnel = openTunnel();
+
+    const result = await tunnelRequest("srv_1", 9145, "/health", {
+      method: "GET /rules HTTP/1.1\r\nHost: 127.0.0.1:9145\r\n\r\nGET",
+    });
+
+    expect(result).toBeNull();
+    expect(tunnel.sent).toBe("");
+  });
+
+  it("refuses a tunnelStream path containing CRLF", async () => {
+    const tunnel = openTunnel();
+
+    expect(await tunnelStream("srv_1", 9145, CRLF_PATH)).toBeNull();
+    expect(tunnel.sent).toBe("");
+  });
+
+  it("refuses a tunnelStream header containing CRLF", async () => {
+    const tunnel = openTunnel();
+
+    const result = await tunnelStream("srv_1", 9145, "/logs/stream", {
+      "X-Trace": "abc\r\nX-Injected: yes",
+    });
+
+    expect(result).toBeNull();
+    expect(tunnel.sent).toBe("");
+  });
+
+  it("sends a percent-encoded path and a plain header through unchanged", async () => {
+    const path = `/logs?domain=${encodeURIComponent("app.example.com\r\nX-Injected: yes")}`;
+
+    const tunnel = openTunnel();
+    const pending = tunnelRequest("srv_1", 9145, path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: '{"a":1}',
+    });
+    const sent = await awaitRequest(tunnel);
+    await reply(tunnel, 'HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n{"a":1}');
+
+    expect(await pending).toMatchObject({ statusCode: 200, body: '{"a":1}' });
+    expect(sent).toBe(
+      `POST ${path} HTTP/1.1\r\n` +
+        "Host: 127.0.0.1:9145\r\n" +
+        "Connection: close\r\n" +
+        "Content-Length: 7\r\n" +
+        "Content-Type: application/json\r\n" +
+        '\r\n{"a":1}',
+    );
+  });
+
+  it("sends a tunnelStream request head unchanged for a safe path", async () => {
+    const tunnel = openTunnel();
+    const pending = tunnelStream("srv_1", 9145, "/logs/stream?domain=app.example.com");
+    const sent = await awaitRequest(tunnel);
+    tunnel.destroy();
+    await pending;
+
+    expect(sent).toBe(
+      "GET /logs/stream?domain=app.example.com HTTP/1.1\r\n" +
+        "Host: 127.0.0.1:9145\r\n" +
+        "Accept: text/event-stream\r\n" +
+        "Connection: keep-alive\r\n\r\n",
+    );
+  });
+});
