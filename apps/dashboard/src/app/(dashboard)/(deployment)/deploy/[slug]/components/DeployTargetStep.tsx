@@ -23,6 +23,7 @@ import type { DeployTarget, BuildStrategy, CloneStrategy, RuntimeMode } from "@/
 import { createPersistedValue } from "@/lib/persisted-value";
 import { AddServerModal } from "./AddServerModal";
 import ServerRuntimePicker from "./ServerRuntimePicker";
+import { RollbackBackupPanel } from "./RollbackBackupPanel";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 
 // ─── Option card ─────────────────────────────────────────────────────────────
@@ -597,6 +598,10 @@ export function useSeedDeployTarget(targets: ResolvedTargets, enabled: boolean):
 // ─── Main step ───────────────────────────────────────────────────────────────
 
 interface DeployTargetStepProps {
+  /** Existing project this deploy edits, when there is one. Enables the rollback
+   *  + backup controls in the Advanced panel (there's nothing to persist to for a
+   *  project that hasn't been created yet). */
+  projectId?: string | null;
   targets: ResolvedTargets;
   onContinue: () => void;
   /**
@@ -920,7 +925,7 @@ const CloudPowerPicker: React.FC = () => {
     );
 };
 
-const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue, autoSkipAllowed = true }) => {
+const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue, autoSkipAllowed = true, projectId }) => {
   const { config, updateConfig } = useDeployment();
   const { requireCloud } = useCloud();
   const { selfHosted, deployMode } = usePlatform();
@@ -1759,6 +1764,10 @@ const DeployTargetStep: React.FC<DeployTargetStepProps> = ({ targets, onContinue
                       </div>
                     </div>
                   )}
+
+                  {/* Rollback window + backup summary for the chosen target. The
+                      same retention controls the project's Git settings show. */}
+                  <RollbackBackupPanel projectId={projectId} enabled={advancedOpen} />
 
                   {/* Clone location — docker/compose server deploys (sandboxed). */}
                   {showCloneStrategy && (

@@ -45,6 +45,14 @@ export const ComposePathField: React.FC = () => {
   const trimmed = value.trim();
   const isDirty = trimmed !== saved.trim();
 
+  // Compose is "active" when the wizard flipped to services (a compose was
+  // detected) or the operator pinned a path. Only then is this a prominent,
+  // detected card. Otherwise it's an opt-in affordance for a single-app/static
+  // repo whose compose lives off-root — demoted + honest copy (#332 UX). It must
+  // never CLAIM a detection that didn't happen.
+  const composeActive = deployment?.config?.projectType === "services" || !!saved;
+  const subtitle = saved || (composeActive ? cp.subtitle : cp.subtitleOptIn);
+
   const apply = async () => {
     if (pending || !isDirty) return;
     setPending(true);
@@ -55,19 +63,37 @@ export const ComposePathField: React.FC = () => {
   };
 
   return (
-    <div className="bg-card rounded-2xl border border-border/50">
+    <div
+      className={`rounded-2xl border border-border/50 ${
+        composeActive ? "bg-card" : "bg-muted/20"
+      }`}
+    >
       <button
         type="button"
         onClick={() => setOpen(!open)}
         className="w-full flex items-center justify-between px-5 py-4 text-start"
       >
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-info/10 flex items-center justify-center">
-            <Layers className="size-[18px] text-info" />
+          <div
+            className={`flex items-center justify-center rounded-xl ${
+              composeActive ? "w-9 h-9 bg-info/10" : "w-8 h-8 bg-muted/60"
+            }`}
+          >
+            <Layers
+              className={composeActive ? "size-[18px] text-info" : "size-4 text-muted-foreground"}
+            />
           </div>
           <div>
-            <p className="text-[15px] font-semibold text-foreground">{cp.title}</p>
-            <p className="text-sm text-muted-foreground">{saved || cp.subtitle}</p>
+            <p
+              className={
+                composeActive
+                  ? "text-[15px] font-semibold text-foreground"
+                  : "text-sm font-medium text-muted-foreground"
+              }
+            >
+              {cp.title}
+            </p>
+            <p className="text-sm text-muted-foreground">{subtitle}</p>
           </div>
         </div>
         {open ? (

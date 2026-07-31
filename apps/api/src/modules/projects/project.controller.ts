@@ -775,6 +775,16 @@ export async function getResources(c: Context) {
   return c.json({ data: resources });
 }
 
+/** GET /projects/:id/rollback-capacity — the retention window in force, the
+ *  measured snapshot size and the host's free disk, for the rollback label. */
+export async function getRollbackCapacity(c: Context) {
+  const id = param(c, "id");
+  await permission.assert(getRequestContext(c), { resourceType: "project", resourceId: id, action: "read" });
+  const { organizationId } = getRequestContext(c);
+  const { getRollbackCapacity: read } = await import("./rollback-capacity.service");
+  return c.json({ data: await read(id, organizationId) });
+}
+
 /** POST /projects/:id/port-check — live, on-demand port-reachability audit of
  *  the active deployment's container(s). Advisory (never throws on probe
  *  failure); powers the Domains tab's "port not reachable" hint. */

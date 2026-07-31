@@ -770,16 +770,13 @@ function toProjectInfo(
       const parsed = parseComposeFile(composeContent, { envFileContent: composeEnvContent });
       services = parsed.services;
     } catch (err) {
-      // A DECLARED path is an explicit instruction — surface the broken file
-      // instead of quietly deploying the directory as something else. Compose
-      // found by DETECTION keeps the lenient behaviour: it was a guess.
-      if (opts?.declaredCompose) {
-        throw new Error(
-          `Compose file at "${projectRoot.rootDirectory || "."}" could not be parsed: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
+      // Surface the broken file. Swallowing it returns a services project with
+      // ZERO services — the wizard then shows nothing to deploy and no reason
+      // why (issue #339). True whether the path was declared or detected: we
+      // only parse when compose IS this root's stack.
+      const detail = err instanceof Error && err.message ? err.message : "Unknown parser error";
+      const where = opts?.declaredCompose ? ` at "${projectRoot.rootDirectory || "."}"` : "";
+      throw new Error(`Could not parse the Docker Compose file${where}: ${detail}`, { cause: err });
     }
   }
 

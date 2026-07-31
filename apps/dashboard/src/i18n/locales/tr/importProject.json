@@ -54,7 +54,8 @@
       "description": "compose dosyasını kök dizin dışında tutan depolar için — dosyayı (deploy/stack.yml) veya onu içeren klasörü (deploy/docker-compose) girin. Depo yeniden taranır ve tanımlanan servisler dağıtılır.",
       "apply": "Tara",
       "scanning": "Taranıyor…",
-      "scanFailed": "Bu Compose yolu taranamadı."
+      "scanFailed": "Bu Compose yolu taranamadı.",
+      "subtitleOptIn": "Docker Compose ile mi dağıtıyorsunuz? Dosyayı belirtin."
     },
     "buildImageLabel": "Derleme İmajı",
     "buildImageDesc": "Bulut veya sunucu derlemeleri için derleyici konteyner imajı. Tespit edilen taban imajı yanlışsa değiştirin.",

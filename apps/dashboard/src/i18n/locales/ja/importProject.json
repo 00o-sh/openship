@@ -54,7 +54,8 @@
       "description": "compose をルート以外に置いているリポジトリ向け — ファイル（deploy/stack.yml）またはそれを含むフォルダ（deploy/docker-compose）を指定します。リポジトリを再スキャンし、宣言されたサービスをデプロイします。",
       "apply": "スキャン",
       "scanning": "スキャン中…",
-      "scanFailed": "その Compose パスをスキャンできませんでした。"
+      "scanFailed": "その Compose パスをスキャンできませんでした。",
+      "subtitleOptIn": "Docker Compose でデプロイしますか？ファイルを指定してください。"
     },
     "buildImageLabel": "ビルドイメージ",
     "buildImageDesc": "クラウドまたはサーバービルド用のビルダーコンテナイメージ。検出されたベースイメージが正しくない場合は上書きしてください。",

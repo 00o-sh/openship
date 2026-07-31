@@ -54,7 +54,8 @@
       "description": "Para repositórios que mantêm o compose fora da raiz — informe o arquivo (deploy/stack.yml) ou a pasta que o contém (deploy/docker-compose). O repositório é reanalisado e os serviços declarados são implantados.",
       "apply": "Analisar",
       "scanning": "Analisando…",
-      "scanFailed": "Não foi possível analisar esse caminho do Compose."
+      "scanFailed": "Não foi possível analisar esse caminho do Compose.",
+      "subtitleOptIn": "Implantar com Docker Compose? Aponte para o arquivo."
     },
     "buildImageLabel": "Imagem de Build",
     "buildImageDesc": "Imagem de container do compilador para builds em cloud ou servidor. Substitua-a quando a imagem base detectada estiver incorreta.",

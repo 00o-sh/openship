@@ -34,8 +34,10 @@ export interface DomainSslVerifyResult {
 
 export const domainsApi = {
   /** Get DNS records preview for a hostname (no domain creation needed). */
-  previewRecords: (hostname: string) =>
-    api.post<{ data: DomainDnsRecords }>(endpoints.domains.preview, { hostname }),
+  /** `includeWww` mirrors the Add-domain toggle so the panel shows the www
+   *  sibling's record too — the toggle claims a SECOND hostname. */
+  previewRecords: (hostname: string, includeWww = false) =>
+    api.post<{ data: DomainDnsRecords }>(endpoints.domains.preview, { hostname, includeWww }),
 
   /** Remove a domain/route (DELETE /domains/:id). Drops the route + its edge
    *  registration; the app/service keeps running. Used by the per-card ⋯ menu. */

@@ -453,18 +453,22 @@
       "title": "Geri alma stratejisi",
       "rebuild": "Yeniden derle (git)",
       "instant": "Anında (anlık görüntü - snapshot)",
-      "descRebuild": "Geri alma eski commit'i tekrar klonlar ve derler — daha ucuzdur ancak daha yavaştır ve o commit artık derlenmiyorsa başarısız olabilir.",
-      "descInstant": "Saniyeler içinde geri dönmek için her sürümün derleme çıktısını diskte saklar. Ek disk kullanır, geçmiş limitiyle sınırlıdır.",
+      "descRebuild": "Ek yapıt tutmaz. Geri alma, sunucuda kalan bir imajı yine kullanır; yoksa eski commit'i yeniden derler.",
+      "descInstant": "Ayrıca her sürümün çalışma zamanı yapıtını saklar, böylece geri yükleme hiç derleme yapmaz. Daha çok disk kullanır, geçmiş sınırıyla sınırlıdır.",
       "toggleAria": "Anlık görüntü saklamayı değiştir"
     },
     "rollbackHistory": {
       "title": "Geri alma geçmişi",
       "valueOne": "{count} sürüm",
       "valueOther": "{count} sürüm",
-      "descSnapshot": "Geri alma için kaç son sürümün derleme çıktısının saklanacağını belirler. Daha eski çıktılar disk alanı açmak için temizlenir.",
-      "descGit": "Yalnızca Anında (anlık görüntü) modu için geçerlidir — Git modu derleme çıktısı saklamaz.",
+      "descSnapshot": "Son sürümlerden kaçının geri yüklenebilir kaldığı. Daha eskiler disk için temizlenir.",
+      "descGit": "Stratejiden bağımsız korunur: son sürümlerin imajları saklanır, böylece imaj sunucuda olduğu sürece geri alma derlemeyi atlar.",
       "decreaseAria": "Geri alma geçmişini azalt",
-      "increaseAria": "Geri alma geçmişini artır"
+      "increaseAria": "Geri alma geçmişini artır",
+      "sizeEach": "her biri ~{size}",
+      "diskFree": "{size} boş",
+      "autoBadge": "otomatik boyutlandırıldı",
+      "manualBadge": "elle ayarlandı"
     },
     "commits": {
       "title": "Son commitler",
@@ -851,6 +855,12 @@
       "checking": "Kenar denetleniyor…",
       "recheck": "Yeniden denetle",
       "foreignProxyHint": "Başka bir proxy 80/443'ü kullanıyor"
+    },
+    "diagnosis": {
+      "title": "Bu neden çalışmıyor",
+      "noneYet": "Henüz bir kontrol çalıştırılmadı, bu yüzden gösterilecek bir sonuç yok. Gösterilen DNS kayıtlarını ekleyin, ardından Doğrula'yı çalıştırın.",
+      "attempts": "Şu ana kadar {count} başarısız deneme.",
+      "pillHint": "Nedenini göster"
     }
   }
 }

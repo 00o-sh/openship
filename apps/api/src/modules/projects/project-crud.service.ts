@@ -15,12 +15,12 @@ import {
   isReleaseProvider,
   isBehind,
   GITHUB_REPO,
+  normalizeRollbackWindow,
   type ReleaseSource,
   type UpdatableIdentity,
 } from "@repo/core";
 import type { ResourceConfig } from "@repo/adapters";
 import { encodeResources } from "../../lib/resources";
-import { normalizeRollbackWindow } from "../../lib/release-retention";
 import { resolveLatestVersion, resolveLatestReleaseTag, readApiVersion } from "../../lib/release-resolver";
 import { resolveLatestImageDigest } from "../../lib/image-registry";
 import { env } from "../../config";

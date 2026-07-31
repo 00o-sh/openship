@@ -302,7 +302,7 @@ export default function MailWizardPage() {
                 <h3 className="text-sm font-semibold text-foreground">{w.destinationTitle}</h3>
                 <p className="mt-0.5 text-xs text-muted-foreground">{w.destinationHint}</p>
                 <div className="mt-4">
-                  <AppDestinationPicker value={destination} onChange={setDestination} allowLocal />
+                  <AppDestinationPicker value={destination} onChange={setDestination} />
                 </div>
               </div>
 

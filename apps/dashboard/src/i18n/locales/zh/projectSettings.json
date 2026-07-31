@@ -347,18 +347,22 @@
       "title": "回滚策略",
       "rebuild": "重新构建（git）",
       "instant": "即时（快照）",
-      "descRebuild": "回滚会重新克隆并重新构建旧提交——成本更低，但速度较慢，且如果该提交无法再构建则可能失败。",
-      "descInstant": "在磁盘上保留每个版本的构建产物，可在几秒内完成回滚。会占用额外磁盘空间，并受历史记录上限限制。",
+      "descRebuild": "不额外保留产物。若主机上仍有保留镜像，回滚仍会复用；否则重新构建旧提交。",
+      "descInstant": "同时保留每个版本的运行时产物，使恢复无需重新构建。占用更多磁盘，受历史上限约束。",
       "toggleAria": "切换快照保留"
     },
     "rollbackHistory": {
       "title": "回滚历史",
       "valueOne": "{count} 个版本",
       "valueOther": "{count} 个版本",
-      "descSnapshot": "保留多少个最近版本的构建产物以供回滚。较旧的版本会被清理以回收磁盘空间。",
-      "descGit": "仅适用于即时（快照）模式——Git 模式不保留任何可保留的产物。",
+      "descSnapshot": "保持可恢复的近期版本数量。更早的版本会被清理以回收磁盘。",
+      "descGit": "无论策略如何都会保留：近期版本的镜像会被保留，只要镜像还在主机上，回滚就能跳过构建。",
       "decreaseAria": "减少回滚历史",
-      "increaseAria": "增加回滚历史"
+      "increaseAria": "增加回滚历史",
+      "sizeEach": "每个约 {size}",
+      "diskFree": "剩余 {size}",
+      "autoBadge": "自动计算",
+      "manualBadge": "手动设置"
     },
     "commits": {
       "title": "最近的提交",
@@ -702,6 +706,12 @@
       "checking": "正在检查边缘…",
       "recheck": "重新检查",
       "foreignProxyHint": "另一个代理占用了 80/443"
+    },
+    "diagnosis": {
+      "title": "为什么无法正常工作",
+      "noneYet": "尚未执行任何检查，因此没有可显示的结果。请添加此域名所需的 DNS 记录，然后运行“验证”。",
+      "attempts": "目前已失败 {count} 次。",
+      "pillHint": "查看原因"
     }
   }
 }

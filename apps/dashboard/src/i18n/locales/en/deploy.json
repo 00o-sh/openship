@@ -49,7 +49,8 @@
     "comingSoon": "Coming soon",
     "deployAction": "Deploy",
     "cancel": "Cancel",
-    "loadingRecords": "Loading DNS records…"
+    "loadingRecords": "Loading DNS records…",
+    "serverIpPlaceholder": "your server’s public IP"
   },
   "buildSummary": {
     "title": "Deploy Summary",
@@ -194,7 +195,15 @@
       "apiHostServerDesc": "Clone on Openship, then upload.",
       "serverLabel": "On the server",
       "serverDesc": "Clone on the server. No upload."
-    }
+    },
+    "rollbackTitle": "Rollback & backups",
+    "rollbackHint": "How many past versions stay restorable on this server, and what gets backed up before a deploy.",
+    "rollbackFirstDeploy": "Editable in the project's settings once this project has deployed once.",
+    "backupSummaryNone": "No backup policy yet",
+    "backupSummaryConfigured": "{count} backup policy(ies) · pre-deploy: {preDeploy}",
+    "backupManage": "Manage backups",
+    "on": "on",
+    "off": "off"
   },
   "summary": {
     "buildAndDeploy": "Build & deploy:",

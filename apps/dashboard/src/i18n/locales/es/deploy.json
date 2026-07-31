@@ -49,7 +49,8 @@
     "comingSoon": "Próximamente",
     "deployAction": "Desplegar",
     "cancel": "Cancelar",
-    "loadingRecords": "Cargando registros DNS…"
+    "loadingRecords": "Cargando registros DNS…",
+    "serverIpPlaceholder": "la IP pública de tu servidor"
   },
   "buildSummary": {
     "title": "Resumen del despliegue",
@@ -194,7 +195,15 @@
       "apiHostServerDesc": "Clona en el host de Openship y luego sube. Funciona en cualquier lugar.",
       "serverLabel": "En el servidor",
       "serverDesc": "Clona en el servidor, sin subida. Ideal para repositorios grandes."
-    }
+    },
+    "rollbackTitle": "Reversión y copias de seguridad",
+    "rollbackHint": "Cuántas versiones anteriores siguen restaurables en este servidor y qué se respalda antes de un despliegue.",
+    "rollbackFirstDeploy": "Editable en los ajustes del proyecto tras el primer despliegue.",
+    "backupSummaryNone": "Aún sin política de copias",
+    "backupSummaryConfigured": "{count} política(s) de copia · pre-despliegue: {preDeploy}",
+    "backupManage": "Gestionar copias",
+    "on": "activado",
+    "off": "desactivado"
   },
   "summary": {
     "buildAndDeploy": "Compilar y desplegar:",

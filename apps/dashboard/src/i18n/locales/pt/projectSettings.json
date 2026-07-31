@@ -347,18 +347,22 @@
       "title": "Estratégia de reversão",
       "rebuild": "Recompilar (git)",
       "instant": "Instantâneo (snapshot)",
-      "descRebuild": "A reversão volta a clonar e recompila o commit antigo — mais barato, mas mais lento e pode falhar se esse commit já não compilar.",
-      "descInstant": "Mantém o artefacto de compilação de cada versão em disco para reverter em segundos. Usa disco adicional, limitado pelo limite de histórico.",
+      "descRebuild": "Não guarda artefatos extra. Um rollback ainda reutiliza uma imagem retida, se houver, e recompila o commit antigo caso contrário.",
+      "descInstant": "Também mantém o artefato de runtime de cada versão para que uma restauração nunca reconstrua. Usa mais disco, limitado pelo histórico.",
       "toggleAria": "Alternar retenção de snapshots"
     },
     "rollbackHistory": {
       "title": "Histórico de reversão",
       "valueOne": "{count} versão",
       "valueOther": "{count} versões",
-      "descSnapshot": "Quantas versões recentes mantêm o seu artefacto de compilação para reversão. As mais antigas são limpas para recuperar espaço em disco.",
-      "descGit": "Aplica-se apenas ao modo Instantâneo (snapshot) — o modo Git não mantém artefactos para reter.",
+      "descSnapshot": "Quantas versões recentes continuam restauráveis. As mais antigas são removidas para liberar disco.",
+      "descGit": "Mantido em qualquer estratégia: imagens de versões recentes são retidas, então um rollback pode dispensar o build enquanto uma estiver no host.",
       "decreaseAria": "Diminuir o histórico de reversão",
-      "increaseAria": "Aumentar o histórico de reversão"
+      "increaseAria": "Aumentar o histórico de reversão",
+      "sizeEach": "~{size} cada",
+      "diskFree": "{size} livres",
+      "autoBadge": "dimensionado automaticamente",
+      "manualBadge": "definido manualmente"
     },
     "commits": {
       "title": "Commits recentes",
@@ -702,6 +706,12 @@
       "checking": "Verificando edge…",
       "recheck": "Verificar novamente",
       "foreignProxyHint": "Outro proxy ocupa 80/443"
+    },
+    "diagnosis": {
+      "title": "Por que isso não está funcionando",
+      "noneYet": "Nenhuma verificação foi executada ainda, portanto não há resultado. Adicione os registros DNS exibidos e depois clique em Verificar.",
+      "attempts": "{count} tentativa(s) com falha até agora.",
+      "pillHint": "Ver o motivo"
     }
   }
 }

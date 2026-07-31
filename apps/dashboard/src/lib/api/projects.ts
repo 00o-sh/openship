@@ -7,6 +7,22 @@ import { endpoints } from "./endpoints";
 /*  Projects API                                                      */
 /* ------------------------------------------------------------------ */
 
+/** Rollback retention as the API reports it. `source` says where `window` came
+ *  from: an explicit operator override, the disk-sized auto value measured at the
+ *  last deploy, or the instance default when nothing has been measured yet. */
+export interface RollbackCapacityUI {
+  window: number;
+  source: "explicit" | "auto" | "instance-default";
+  explicit: number | null;
+  snapshotSizeBytes: number | null;
+  measuredAt: string | null;
+  diskFreeBytes: number | null;
+  diskTotalBytes: number | null;
+  maxWindow: number;
+  diskBudgetFraction: number;
+  strategy: string;
+}
+
 /** Build + runtime options accepted by POST /:id/options (updateOptions). All
  *  optional — only the fields sent are written. Mirrors the backend allowlist. */
 export interface ProjectOptionsBody {
@@ -472,6 +488,13 @@ export const projectsApi = {
   /** Read resources + the target machine's probed capacity (the ceiling for a
    *  custom value) + whether this target requires an explicit limit (cloud). */
   getResources: (id: string | number) => api.get<any>(endpoints.projects.resources(id)),
+
+  /** Rollback retention: the window in force (explicit or disk-sized), the
+   *  measured per-release size, and the deploy host's free disk. Everything is
+   *  read from values measured at the last deploy plus a cached probe, so this
+   *  is cheap enough to call whenever the retention control is shown. */
+  getRollbackCapacity: (id: string | number) =>
+    api.get<{ data: RollbackCapacityUI }>(endpoints.projects.rollbackCapacity(id)),
 
   /** Set resources (POST - tier-based) */
   setResources: (id: string | number, resources: Record<string, any>) =>

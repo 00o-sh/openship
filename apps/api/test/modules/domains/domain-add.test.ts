@@ -28,9 +28,15 @@ vi.mock("../../../src/lib/controller-helpers", async (importOriginal) => {
   };
 });
 
-vi.mock("../../../src/lib/server-target", () => ({
-  resolveProjectServerHost: vi.fn().mockResolvedValue("203.0.113.10"),
-}));
+vi.mock("../../../src/lib/server-target", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../src/lib/server-target")>();
+  return {
+    ...actual,
+    resolveProjectServerHost: vi.fn().mockResolvedValue("203.0.113.10"),
+    // Never reach the public-IP echo endpoints from a unit test.
+    resolveInstancePublicIp: vi.fn().mockResolvedValue(null),
+  };
+});
 
 vi.mock("../../../src/lib/domain-ssl", () => ({
   installDomainCert: vi.fn(),

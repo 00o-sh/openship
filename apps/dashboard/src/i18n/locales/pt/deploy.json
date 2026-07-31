@@ -49,7 +49,8 @@
     "comingSoon": "Em breve",
     "deployAction": "Implantar",
     "cancel": "Cancelar",
-    "loadingRecords": "Carregando registros DNS…"
+    "loadingRecords": "Carregando registros DNS…",
+    "serverIpPlaceholder": "o IP público do seu servidor"
   },
   "buildSummary": {
     "title": "Resumo da implantação",
@@ -194,7 +195,15 @@
       "apiHostServerDesc": "Clone no host do Openship e depois envie. Funciona em qualquer lugar.",
       "serverLabel": "No servidor",
       "serverDesc": "Clone no servidor — sem envio. Melhor para repositórios grandes."
-    }
+    },
+    "rollbackTitle": "Rollback e backups",
+    "rollbackHint": "Quantas versões anteriores continuam restauráveis neste servidor e o que é copiado antes de um deploy.",
+    "rollbackFirstDeploy": "Editável nas configurações do projeto após o primeiro deploy.",
+    "backupSummaryNone": "Sem política de backup ainda",
+    "backupSummaryConfigured": "{count} política(s) de backup · pré-deploy: {preDeploy}",
+    "backupManage": "Gerenciar backups",
+    "on": "ativo",
+    "off": "inativo"
   },
   "summary": {
     "buildAndDeploy": "Compilar e implantar:",

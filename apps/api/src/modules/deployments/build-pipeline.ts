@@ -75,6 +75,8 @@ import { auditPorts } from "./port-audit.service";
 import { verifyDeployedContainers } from "./stability-audit.service";
 import { auditStaticOutput, staticOutputTargets } from "./output-audit.service";
 import { createBuildConfig } from "./build-config";
+import { pinnedAppImage, pinnedStaticDir, snapshotNeedsGitSource } from "./pinned-artifacts";
+import { shouldRetainArtifact } from "./rollback/restore-plan";
 import { resolveClonePlan } from "./clone-plan";
 import { collapseTerminalLogs } from "./terminal-logs";
 import {
@@ -244,30 +246,25 @@ async function markDeploymentFailedFromOutside(deploymentId: string, error: unkn
 
 
 /**
- * Hand the previous-active deployment to the rollback orchestrator: it
- * archives the prior artifact (so snapshot rollback stays possible), sets
- * artifact_retained_at on both rows, and prunes beyond the rollback
- * window. Git-strategy deploys SKIP this — rollback re-clones at
- * commit_sha_before, so there's no artifact to archive. Best-effort: the
- * new deployment is already live, so a failure here only affects rollback
- * eligibility, never the deploy outcome.
+ * Hand the finished deployment to the rollback orchestrator: it retains the
+ * previous release (stopping a durable unit when the project keeps artifacts),
+ * marks both rows retained, prunes past the rollback window, and reclaims
+ * superseded images.
+ *
+ * Runs for EVERY successful deploy — the retention *preference* is read live
+ * from the project inside the orchestrator, not frozen onto the deployment. The
+ * old `rollbackStrategy === "git"` bail-out here is exactly what left
+ * `artifact_retained_at` null for every default project, which in turn made the
+ * dashboard's Rollback action permanently unavailable.
+ *
+ * Best-effort: the new deployment is already live, so a failure here can only
+ * affect restore bookkeeping, never the deploy outcome.
  */
 async function archivePreviousDeployment(
   dep: Deployment,
   project: Project,
   logger: BuildLogger,
 ): Promise<void> {
-  if (dep.rollbackStrategy === "git") {
-    logger.log(
-      "Skipping snapshot/artifact archive — rollback strategy is 'git' (rollback re-clones at commit_sha_before).",
-    );
-    // Archive is skipped, but old BUILT IMAGES must still be reclaimed — this is
-    // the one path that never reached onDeploymentReady's image reap, so
-    // git-strategy projects leaked every prior build. Best-effort; images:gc backstops.
-    const { reapProjectImagesSafe } = await import("./image-gc");
-    await reapProjectImagesSafe(project, (m) => logger.log(`${m}\n`, "warn"));
-    return;
-  }
   try {
     const { onDeploymentReady } = await import("./rollback");
     const finalDep = await repos.deployment.findById(dep.id);
@@ -279,10 +276,67 @@ async function archivePreviousDeployment(
     }
   } catch (err) {
     logger.log(
-      `Warning: failed to archive previous deployment for rollback: ${safeErrorMessage(err)}\n`,
+      `Warning: failed to record retention for rollback: ${safeErrorMessage(err)}\n`,
       "warn",
     );
   }
+}
+
+/**
+ * A build that isn't one: this release's artifact is already on the host, so
+ * hand the deploy step a BuildResult pointing straight at it.
+ *
+ * Two shapes, because "the artifact" differs by deploy kind:
+ *   - an IMAGE tag (server apps) — verified with the daemon.
+ *   - a release DIRECTORY (static sites, which have no image) — verified on the
+ *     host filesystem. The deploy step promotes those files again, exactly as it
+ *     promotes a freshly-extracted build.
+ *
+ * Returns null when nothing is pinned or the artifact has since been reclaimed,
+ * which is the caller's signal to build from source. A pin is a hint, never a
+ * promise — retention may have run between planning a restore and executing it.
+ */
+async function reuseRetainedArtifact(opts: {
+  snapshot: DeploymentConfigSnapshot;
+  runtime: { name: string };
+  buildSessionId: string;
+  targetExecutor?: CommandExecutor | null;
+  logger: BuildLogger;
+}): Promise<BuildResult | null> {
+  const { snapshot, runtime, buildSessionId, targetExecutor, logger } = opts;
+
+  const reuse = (artifactRef: string) => {
+    logger.step("build", "completed", `Reusing retained artifact ${artifactRef} — no rebuild needed`);
+    return {
+      sessionId: buildSessionId,
+      status: "deploying" as const,
+      imageRef: artifactRef,
+      durationMs: 0,
+      startCommand: snapshot.startCommand,
+    };
+  };
+  const gone = (artifactRef: string) => {
+    logger.log(
+      `Retained artifact ${artifactRef} is no longer on the host — rebuilding from source.\n`,
+      "warn",
+    );
+    return null;
+  };
+
+  const staticDir = pinnedStaticDir(snapshot);
+  if (staticDir) {
+    const exists = await (targetExecutor?.exists(staticDir) ?? Promise.resolve(false));
+    return exists ? reuse(staticDir) : gone(staticDir);
+  }
+
+  const image = pinnedAppImage(snapshot);
+  if (!image) return null;
+  // Only Docker's artifact is an image; any other runtime takes its normal path.
+  const present =
+    runtime instanceof DockerRuntime
+      ? await runtime.imageExistsLocally(image).catch(() => false)
+      : false;
+  return present ? reuse(image) : gone(image);
 }
 
 /**
@@ -608,11 +662,11 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
     // so the two can't disagree. One-click app installs (Convex, n8n, …) are
     // exactly this case: image services, hasBuild=false. This is what makes the
     // app-install and advanced-deploy paths converge on one behavior.
-    const enabledSvcs = (snapshot.composeServices ?? []).filter((s) => s.enabled !== false);
-    const needsGitSource =
-      enabledSvcs.length > 0
-        ? enabledSvcs.some((s) => s.kind === "monorepo" || !!s.build || !!s.dockerfile)
-        : snapshot.hasBuild !== false;
+    //
+    // A PINNED artifact (rollback restore / migration cutover) is git-free for
+    // the same reason: its image already exists, so nothing is cloned or built.
+    // snapshotNeedsGitSource owns both answers — see pinned-artifacts.ts.
+    const needsGitSource = snapshotNeedsGitSource(snapshot);
 
     const gitCred: Awaited<ReturnType<typeof resolveBuildGitToken>> = needsGitSource
       ? await resolveBuildGitToken({
@@ -828,36 +882,42 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
       );
     }
 
-    // Desktop git credential relay (fallback): the operator opted this server
-    // into forwarding and there's no App/PAT token. Open the relay (reverse
-    // tunnel + remote helper) right before the build so the clone fetches the
-    // gh identity on demand — nothing persisted on the build host — and tear it
-    // down in `finally` the moment the build (and its clone) finishes.
-    const deployRelay = await openRelayIfNeeded();
-    if (deployRelay) {
-      buildConfig.gitCredentialHelperPath = deployRelay.scriptPath;
-    }
-
-    let buildResult: Awaited<ReturnType<typeof runtime.build>>;
-    try {
-      // static-sandbox: build in a Docker sandbox, then extract the doc-root to a
-      // host dir the edge serves. Everything else (server apps, bare-built static
-      // on a Docker-less local box, cloud) builds normally.
-      if (deployRouting.buildMode === "static-sandbox") {
-        // buildMode is derived from runtime.name === "docker", so the cast is sound.
-        buildResult = await (runtime as DockerRuntime).buildStaticToHost(
-          buildConfig,
-          `${STATIC_RELEASE_BASE}/.builds/${buildSessionId}`,
-          logger,
-        );
-      } else {
-        buildResult = await runtime.build(buildConfig, logger);
+    const buildFromSource = async (): Promise<Awaited<ReturnType<typeof runtime.build>>> => {
+      // Desktop git credential relay (fallback): the operator opted this server
+      // into forwarding and there's no App/PAT token. Open the relay (reverse
+      // tunnel + remote helper) right before the build so the clone fetches the
+      // gh identity on demand — nothing persisted on the build host — and tear it
+      // down in `finally` the moment the build (and its clone) finishes.
+      const deployRelay = await openRelayIfNeeded();
+      if (deployRelay) {
+        buildConfig.gitCredentialHelperPath = deployRelay.scriptPath;
       }
-    } finally {
-      // Reverse tunnel + remote helper script torn down regardless of outcome —
-      // the credential is reachable only for the build's duration.
-      if (deployRelay) await deployRelay.close().catch(() => {});
-    }
+      try {
+        // static-sandbox: build in a Docker sandbox, then extract the doc-root to a
+        // host dir the edge serves. Everything else (server apps, bare-built static
+        // on a Docker-less local box, cloud) builds normally.
+        if (deployRouting.buildMode === "static-sandbox") {
+          // buildMode is derived from runtime.name === "docker", so the cast is sound.
+          return await (runtime as DockerRuntime).buildStaticToHost(
+            buildConfig,
+            `${STATIC_RELEASE_BASE}/.builds/${buildSessionId}`,
+            logger,
+          );
+        }
+        return await runtime.build(buildConfig, logger);
+      } finally {
+        // Reverse tunnel + remote helper script torn down regardless of outcome —
+        // the credential is reachable only for the build's duration.
+        if (deployRelay) await deployRelay.close().catch(() => {});
+      }
+    };
+
+    // A restore ships the retained artifact PINNED, so there's nothing to build,
+    // clone or relay a credential for (see reuseRetainedArtifact). A pin is a
+    // hint, never a guarantee — if the artifact is gone we build from source.
+    const buildResult =
+      (await reuseRetainedArtifact({ snapshot, runtime, buildSessionId, targetExecutor, logger })) ??
+      (await buildFromSource());
     provisioned.imageRef = buildResult.imageRef;
 
     if (buildResult.status === "cancelled") {
@@ -913,6 +973,7 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
+    if (process.env.OPENSHIP_DEBUG_PIPELINE) console.error("[pipeline]", err);
     logger.log(`Error: ${message}`, "error");
     await onFailure(ctx, message);
   }
@@ -1329,7 +1390,11 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
     slug: project.slug ?? project.id,
     publicEndpoints: routeState.publicEndpoints,
     outputDirectory: snapshot.outputDirectory,
-    productionPaths: snapshot.productionPaths.length ? snapshot.productionPaths : undefined,
+    // Optional chaining for the same reason as `volumes` below: a snapshot
+    // persisted before this field existed (or one that simply never set it) has
+    // none, and a redeploy/restore of that release must not crash on it. It did —
+    // `.length` on undefined — which made every such release un-restorable.
+    productionPaths: snapshot.productionPaths?.length ? snapshot.productionPaths : undefined,
     // `?? []` because a snapshot persisted before this field existed has none —
     // redeploying an old deployment must not crash on it.
     volumes: snapshot.volumes ?? [],
@@ -1470,13 +1535,18 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
     }
   }
 
-  // R1 gate: in overlap mode with SNAPSHOT strategy, let archivePreviousDeployment
-  // stop+RETAIN the old artifact (for rollback) instead of the pipeline stopping
-  // it — the old one keeps serving until the archive step (still zero-downtime).
-  // git strategy skips archive, so the pipeline stops the old one itself; bare
-  // (non-overlap) always stops first. previousContainerId stays accurate; the
-  // flag only controls whether the pipeline deactivates.
-  const deactivateOldInPipeline = !(canOverlap && dep.rollbackStrategy === "snapshot");
+  // R1 gate: when the runtime can overlap two versions AND this project keeps
+  // artifacts, leave stopping the old one to archivePreviousDeployment — it keeps
+  // serving until then (still zero-downtime) and gets stop-and-RETAIN rather than
+  // a plain stop. Otherwise the pipeline stops it itself; bare (non-overlap)
+  // always stops first. previousContainerId stays accurate either way; the flag
+  // only controls WHO deactivates.
+  //
+  // Reads the project's LIVE retention preference, not the frozen
+  // `deployment.rollback_strategy` — that column is history only, and keying
+  // behaviour off it is what made a retention change apply to nothing that
+  // already existed.
+  const deactivateOldInPipeline = !(canOverlap && shouldRetainArtifact(project));
 
   const deployResult = await runDeployPipeline(
     deployEnv,

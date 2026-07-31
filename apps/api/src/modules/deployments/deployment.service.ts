@@ -15,7 +15,7 @@ import { assertResourceInOrg } from "../../lib/controller-helpers";
 import { collectDeploymentManifest, executeCleanup } from "../projects/project-cleanup.service";
 import { assertGitHubRepoAccess } from "../github/github-access";
 import { maskDeploymentEnv } from "../../lib/secret-env";
-import { rollback, setPin } from "./rollback";
+import { rollback, setPin, resolveRestorePlan, planNeedsRepository } from "./rollback";
 
 /**
  * #336: present a deployment to a CLIENT — masks `meta.composeServices[].environment`.
@@ -191,6 +191,27 @@ export async function rollbackDeployment(
   await rollback(deploymentId);
   // Return the post-rollback deployment row (now with any updated container id).
   return (await repos.deployment.findById(dep.id)) ?? dep;
+}
+
+/**
+ * How a rollback to this deployment WOULD run — instant from the retained
+ * artifact, or a rebuild from its commit. Read-only.
+ *
+ * Serves the confirm dialog's copy and the controller's GitHub-access gate from
+ * the same resolution the executor uses, so the three can't disagree.
+ */
+export async function previewRestore(deploymentId: string, organizationId: string) {
+  const dep = await getDeployment(deploymentId, organizationId);
+  await assertNotControlPlaneDeployment(dep);
+  const { plan } = await resolveRestorePlan(deploymentId);
+  return {
+    mode: plan.mode,
+    /** True when the restore needs the repo (clone + token + GitHub access). */
+    needsRepository: planNeedsRepository(plan),
+    /** Services that will rebuild because their image is gone (empty = fully instant). */
+    rebuildServices: plan.mode === "redeploy-pinned" ? plan.rebuildServices : [],
+    ...(plan.mode === "ineligible" ? { code: plan.code, reason: plan.message } : {}),
+  };
 }
 
 export async function setDeploymentPin(

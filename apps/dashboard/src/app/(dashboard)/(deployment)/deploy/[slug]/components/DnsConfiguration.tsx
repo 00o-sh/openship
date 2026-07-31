@@ -76,6 +76,7 @@ const DnsConfiguration: React.FC<DnsConfigurationProps> = ({
                 value={record.value}
                 copied={copied === `${i}-value`}
                 onCopy={() => copyToClipboard(record.value, `${i}-value`)}
+                placeholder={record.type === "A" ? d.serverIpPlaceholder : undefined}
               />
             </div>
           </div>
@@ -108,11 +109,13 @@ function Field({
   value,
   copied,
   onCopy,
+  placeholder,
 }: {
   label: string;
   value: string;
   copied: boolean;
   onCopy: () => void;
+  placeholder?: string;
 }) {
   return (
     <div className="min-w-0">
@@ -121,7 +124,11 @@ function Field({
       </p>
       <div className="flex items-center gap-2 rounded-lg bg-muted/50 px-3 py-2">
         <code className="flex-1 truncate text-sm font-medium text-foreground">
-          {value || "—"}
+          {value || (
+            <span className="font-normal not-italic text-muted-foreground/60">
+              {placeholder ?? "—"}
+            </span>
+          )}
         </code>
         <button
           type="button"

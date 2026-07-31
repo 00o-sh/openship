@@ -43,6 +43,7 @@ import { getLatestCommit, getRepository } from "../github/github.service";
 import { assertGitHubRepoAccess } from "../github/github-access";
 import { firePreDeployBackups } from "../backups/triggers/pre-deploy";
 import { resolveSmartRoute } from "./smart-route";
+import { snapshotNeedsGitSource, withoutPinnedArtifacts } from "./pinned-artifacts";
 import { resolveProjectInfo } from "./prepare.service";
 import { getFolderSession } from "../projects/folder/session-store";
 import { hasMaskedValue, unmaskEnv } from "../../lib/secret-env";
@@ -213,11 +214,18 @@ export interface DeploymentConfigSnapshot {
    * same pipeline, discriminated by `kind`. See `DeployableService`.
    */
   composeServices?: DeployableService[];
-  /** ONE-TIME migration image handover: serviceName → an already-present image
-   *  ref. Set only on the migration's first deploy so mapped services deploy from
-   *  their transferred/running image (no build, no pull); a later Redeploy has no
-   *  handover and rebuilds/pulls natively. Consumed by buildComposeImages. */
+  /** PINNED ARTIFACTS: serviceName → an already-present image ref that deploys
+   *  verbatim (no build, no pull). Two producers: the migration cutover's
+   *  one-time handover, and a rollback restoring a past release's retained
+   *  images. A plain Redeploy strips them so it rebuilds natively. Read through
+   *  `pinned-artifacts.ts`, consumed by buildComposeImages. */
   handoverImages?: Record<string, string>;
+  /** Single-app twin of `handoverImages` — the whole release is this one image.
+   *  Set by a rollback restore; consumed by the single-app build phase. */
+  handoverAppImage?: string;
+  /** STATIC twin: a retained release DIRECTORY on the host to promote again
+   *  (static releases have no image). Set by a rollback restore. */
+  handoverStaticDir?: string;
   /** Summary of a compose deployment fan-out, when applicable. */
   composeDeployment?: {
     totalServices: number;
@@ -1357,13 +1365,12 @@ export async function redeployBuildSession(
   const currentComposeServices = projectServicesToDeployableServices(
     currentComposeRows.filter((s) => s.enabled),
   );
-  // Strip the migration image handover: it is a ONE-TIME cutover input on the
-  // migration's first deploy. Carrying it forward on a Redeploy would keep
-  // reusing the transferred/stale image and never reclone+rebuild (and 404 if
-  // that tag was pruned) — the migrated project must behave like a native repo
-  // project from the second deploy on. `meta.handoverImages` is intentionally
-  // dropped here (a real rollback restores its own artifact via its own meta).
-  const { handoverImages: _handoverImages, ...forwardedMeta } = meta;
+  // Strip PINNED ARTIFACTS: they are inputs to one specific deploy (a migration
+  // cutover, or a rollback restoring a retained release). Carrying them onto a
+  // Redeploy would keep re-deploying that stale image and never reclone+rebuild
+  // (and 404 once the tag is reclaimed) — a redeployed project must behave like
+  // a native repo project. A real rollback re-pins from its OWN target's meta.
+  const forwardedMeta = withoutPinnedArtifacts(meta);
   const refreshedMeta: DeploymentConfigSnapshot = {
     ...forwardedMeta,
     composeServices: currentComposeServices.length > 0 ? currentComposeServices : undefined,
@@ -1540,10 +1547,26 @@ export async function triggerDeployment(
   // Org-membership verified at the route boundary. No userId equality
   // check here — that would block team members.
 
+  // Refuse for MISSING SOURCE only when this deploy actually needs source.
+  //
   // A release/dist-source project has neither a git URL nor a stored localPath —
   // its dist dir is resolved per-deploy by applyReleaseSourceToSnapshot below.
+  // Two more kinds legitimately have neither: a registry-image-only stack (an
+  // adopted Docker migration, which builds nothing — the exemption preflight
+  // already makes), and a ROLLBACK replaying pinned artifacts. Both used to be
+  // refused here, before preflight could apply its own, smarter rule.
   if (!project.gitUrl && !project.localPath && !isReleaseProvider(project.gitProvider)) {
-    throw new ForbiddenError("Project has no git repository or local path configured");
+    const sourceless = data.reuseSnapshot
+      ? snapshotNeedsGitSource(data.reuseSnapshot.meta)
+      : snapshotNeedsGitSource(
+          { hasBuild: project.hasBuild ?? undefined },
+          projectServicesToDeployableServices(
+            (await listProjectComposeServices(project.id).catch(() => [])).filter((s) => s.enabled),
+          ),
+        );
+    if (sourceless) {
+      throw new ForbiddenError("Project has no git repository or local path configured");
+    }
   }
   // GitHub access gate (default-deny; webhook ctx is the org owner and
   // passes). Covers manual trigger / redeploy paths routed through here.
@@ -1671,8 +1694,12 @@ export async function triggerDeployment(
     commitSha = active.commitSha ?? commitSha;
     commitMessage = commitMessage ?? active.commitMessage ?? undefined;
   }
-  // Fetch HEAD only for a real (build) deploy — a refresh must never touch git.
-  if (!commitSha && !data.refresh) {
+  // Fetch HEAD only for a deploy that actually needs SOURCE. A refresh must
+  // never touch git; neither must a restore whose artifacts are all pinned (its
+  // release may predate any commit at all — a local-path or folder-upload
+  // project — and reaching for GitHub there would fail a rollback that has
+  // everything it needs on disk).
+  if (!commitSha && !data.refresh && snapshotNeedsGitSource(snapshot)) {
     const head = await resolveLatestCommitInfo(ctx, project, branch);
     commitSha = head.commitSha;
     commitMessage = commitMessage ?? head.commitMessage;

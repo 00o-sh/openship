@@ -49,7 +49,8 @@
     "comingSoon": "Demnächst verfügbar",
     "deployAction": "Deployen",
     "cancel": "Abbrechen",
-    "loadingRecords": "DNS-Einträge werden geladen…"
+    "loadingRecords": "DNS-Einträge werden geladen…",
+    "serverIpPlaceholder": "die öffentliche IP deines Servers"
   },
   "buildSummary": {
     "title": "Deploy-Zusammenfassung",
@@ -194,7 +195,15 @@
       "apiHostServerDesc": "Auf dem Openship-Host klonen, dann hochladen. Funktioniert überall.",
       "serverLabel": "Auf dem Server",
       "serverDesc": "Auf dem Server klonen – kein Upload. Am besten für große Repos."
-    }
+    },
+    "rollbackTitle": "Rollback & Backups",
+    "rollbackHint": "Wie viele frühere Versionen auf diesem Server wiederherstellbar bleiben und was vor einem Deploy gesichert wird.",
+    "rollbackFirstDeploy": "Nach dem ersten Deploy in den Projekteinstellungen bearbeitbar.",
+    "backupSummaryNone": "Noch keine Backup-Regel",
+    "backupSummaryConfigured": "{count} Backup-Regel(n) · vor Deploy: {preDeploy}",
+    "backupManage": "Backups verwalten",
+    "on": "ein",
+    "off": "aus"
   },
   "summary": {
     "buildAndDeploy": "Bauen & deployen:",

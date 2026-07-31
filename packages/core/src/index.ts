@@ -12,6 +12,7 @@ export * from "./service-routing";
 export * from "./service-status";
 export * from "./runtime-config";
 export * from "./resources";
+export * from "./rollback-window";
 export * from "./workspaces";
 export * from "./connectivity";
 export * from "./cloud-capability";

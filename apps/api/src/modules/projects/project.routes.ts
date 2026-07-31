@@ -254,6 +254,18 @@ r.get("/:id/webhook-deliveries", { tag: "project:read", mcp: { description: "Lis
 
 /* ─── Resources ────────────────────────────────────────────────────────── */
 r.get("/:id/resources", { tag: "project:read", mcp: { description: "Get the project's CPU/RAM/disk resource config." } }, cloudProjectProxy, ctrl.getResources);
+r.get(
+  "/:id/rollback-capacity",
+  {
+    tag: "project:read",
+    mcp: {
+      description:
+        "Get the rollback retention window in force (explicit or disk-sized), the measured per-release size, and the deploy host's free disk.",
+    },
+  },
+  cloudProjectProxy,
+  ctrl.getRollbackCapacity,
+);
 r.patch(
   "/:id/resources",
   {

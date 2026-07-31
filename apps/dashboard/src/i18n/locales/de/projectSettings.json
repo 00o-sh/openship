@@ -354,18 +354,22 @@
       "title": "Rollback-Strategie",
       "rebuild": "Neubau (Git)",
       "instant": "Sofort (Snapshot)",
-      "descRebuild": "Rollback klont und baut den alten Commit neu — günstiger, aber langsamer und kann fehlschlagen, wenn dieser Commit nicht mehr baubar ist.",
-      "descInstant": "Behält das Build-Artefakt jeder Version auf der Festplatte für ein Rollback in Sekunden. Verbraucht zusätzlichen Speicherplatz, begrenzt durch das Verlaufslimit.",
+      "descRebuild": "Bewahrt keine zusätzlichen Artefakte auf. Ein Rollback nutzt weiterhin ein noch vorhandenes Image und baut andernfalls den alten Commit neu.",
+      "descInstant": "Behält zusätzlich das Laufzeit-Artefakt jeder Version, damit eine Wiederherstellung nie neu bauen muss. Braucht mehr Speicher, begrenzt durch das History-Limit.",
       "toggleAria": "Snapshot-Aufbewahrung umschalten"
     },
     "rollbackHistory": {
       "title": "Rollback-Verlauf",
       "valueOne": "{count} Version",
       "valueOther": "{count} Versionen",
-      "descSnapshot": "Wie viele der letzten Versionen ihr Build-Artefakt für ein Rollback behalten. Ältere werden aufgeräumt, um Speicherplatz freizugeben.",
-      "descGit": "Gilt nur für den Modus „Sofort“ (Snapshot) — der Git-Modus behält keine Artefakte zur Aufbewahrung.",
+      "descSnapshot": "Wie viele der letzten Versionen wiederherstellbar bleiben. Ältere werden entfernt, um Speicher freizugeben.",
+      "descGit": "Unabhängig von der Strategie: Images der letzten Versionen bleiben erhalten, damit ein Rollback den Build überspringen kann, solange eines noch auf dem Host liegt.",
       "decreaseAria": "Rollback-Verlauf verringern",
-      "increaseAria": "Rollback-Verlauf erhöhen"
+      "increaseAria": "Rollback-Verlauf erhöhen",
+      "sizeEach": "~{size} pro Version",
+      "diskFree": "{size} frei",
+      "autoBadge": "automatisch bemessen",
+      "manualBadge": "manuell gesetzt"
     },
     "commits": {
       "title": "Letzte Commits",
@@ -709,6 +713,12 @@
       "checking": "Edge wird geprüft…",
       "recheck": "Erneut prüfen",
       "foreignProxyHint": "Ein anderer Proxy belegt 80/443"
+    },
+    "diagnosis": {
+      "title": "Warum das nicht funktioniert",
+      "noneYet": "Es wurde noch keine Prüfung ausgeführt, daher gibt es kein Ergebnis. Fügen Sie die angezeigten DNS-Einträge hinzu und führen Sie dann „Verifizieren“ aus.",
+      "attempts": "Bisher {count} fehlgeschlagene Versuche.",
+      "pillHint": "Grund anzeigen"
     }
   }
 }

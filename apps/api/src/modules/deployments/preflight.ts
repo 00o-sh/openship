@@ -30,6 +30,7 @@ import { cloudClient } from "../../lib/cloud/client";
 import { isCloudConnectedForOrg } from "../../lib/cloud/session";
 import { runCloudPreflight, type CloudPreflightData } from "../../lib/cloud-preflight";
 import { isStaticService, type DeployableService } from "../../lib/deployable-service";
+import { isFullyPinned, snapshotNeedsGitSource } from "./pinned-artifacts";
 import { serviceKind } from "./compose/project-services";
 import { relayConfigEligible, resolveClonePlan } from "./clone-plan";
 import { hasLocalGitIdentity } from "../github/github.local-auth";
@@ -804,6 +805,24 @@ async function resolveCloudPreflight(
 function checkConfig(snapshot: DeploymentConfigSnapshot, opts?: PreflightOptions): PreflightCheck {
   const missing: string[] = [];
 
+  // A FULLY PINNED deploy (a rollback restoring a retained artifact, a migration
+  // cutover) builds nothing and clones nothing: it runs an artifact that was
+  // validated and built when it was created. Judging it by today's build-config
+  // rules would make every release created before a newly-added required field
+  // un-restorable — precisely when a rollback is needed. Only what a pinned
+  // deploy still consumes is checked: the port it publishes on.
+  if (isFullyPinned(snapshot, opts?.composeServices)) {
+    if (snapshot.hasServer && !snapshot.port) {
+      return {
+        id: "config",
+        label: "Build configuration",
+        status: "fail",
+        message: "Missing required fields: port",
+      };
+    }
+    return { id: "config", label: "Build configuration", status: "pass" };
+  }
+
   // A folder-upload deploy has no git and no host path — its source is the
   // pre-staged upload workspace (`sourceStaged`, set by requestBuildAccess).
   // That's a valid source, so it satisfies both the source and branch checks.
@@ -821,11 +840,9 @@ function checkConfig(snapshot: DeploymentConfigSnapshot, opts?: PreflightOptions
     // project-level `hasBuild` flag, which an adopted-Docker project may leave
     // unset on the snapshot even though nothing builds — the bug that made a
     // Docker migration fail preflight with "repository URL or local path".
-    const enabledServices = (opts.composeServices ?? []).filter((s) => s.enabled !== false);
-    const needsProjectSource =
-      enabledServices.length > 0
-        ? enabledServices.some((s) => s.kind === "monorepo" || !!s.build || !!s.dockerfile)
-        : snapshot.hasBuild !== false;
+    // Same rule the build pipeline and the commit resolver use — one definition
+    // (pin-aware, so a restored service with a retained image needs no source).
+    const needsProjectSource = snapshotNeedsGitSource(snapshot, opts.composeServices);
     const serviceMissing = needsProjectSource
       ? missing
       : missing.filter((m) => m !== "repository URL or local path" && m !== "branch");

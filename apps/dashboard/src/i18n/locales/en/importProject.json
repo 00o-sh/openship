@@ -54,7 +54,8 @@
       "description": "For repos that keep compose outside the root — give the file (deploy/stack.yml) or the folder holding it (deploy/docker-compose). Re-scans the repo and deploys the services it declares.",
       "apply": "Scan",
       "scanning": "Scanning…",
-      "scanFailed": "Could not scan that compose path."
+      "scanFailed": "Could not scan that compose path.",
+      "subtitleOptIn": "Deploying with Docker Compose? Point to the file."
     },
     "buildImageLabel": "Build Image",
     "buildImageDesc": "Builder container image for cloud or server builds. Override it when the detected base image is wrong.",
