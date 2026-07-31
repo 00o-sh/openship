@@ -427,8 +427,9 @@ export function parseComposeEnvFile(content: string): Record<string, string> {
   const result: Record<string, string> = {};
   const literalKeys = new Set<string>();
 
-  for (const rawLine of content.replace(/^\uFEFF/, "").split(/\r?\n/)) {
-    let line = rawLine.trim();
+  const lines = content.replace(/^\uFEFF/, "").split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i].trim();
     if (!line || line.startsWith("#")) continue;
     if (line.startsWith("export ")) line = line.slice("export ".length).trimStart();
 
@@ -438,7 +439,14 @@ export function parseComposeEnvFile(content: string): Record<string, string> {
     const key = line.slice(0, eqIdx).trim();
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
 
-    const parsed = parseEnvValue(line.slice(eqIdx + 1));
+    let rawValue = line.slice(eqIdx + 1);
+    const continued = joinQuotedContinuation(rawValue, lines, i);
+    if (continued) {
+      rawValue = continued.value;
+      i = continued.endLine;
+    }
+
+    const parsed = parseEnvValue(rawValue);
     result[key] = parsed.value;
     if (parsed.expand) literalKeys.delete(key);
     else literalKeys.add(key);
@@ -450,6 +458,25 @@ export function parseComposeEnvFile(content: string): Record<string, string> {
   }
 
   return result;
+}
+
+function joinQuotedContinuation(
+  rawValue: string,
+  lines: string[],
+  start: number,
+): { value: string; endLine: number } | undefined {
+  const value = rawValue.trimStart();
+  const quote = value[0];
+  if (quote !== '"' && quote !== "'") return undefined;
+  if (findClosingQuote(value, quote) >= 0) return undefined;
+
+  let joined = value;
+  for (let i = start + 1; i < lines.length; i++) {
+    joined += `\n${lines[i]}`;
+    if (findClosingQuote(joined, quote) >= 0) return { value: joined, endLine: i };
+  }
+
+  return undefined;
 }
 
 function parseEnvValue(rawValue: string): { value: string; expand: boolean } {
