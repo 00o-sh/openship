@@ -73,6 +73,7 @@ import * as sessionManager from "./session-manager";
 import { onFailure, onSuccess, onCancelled, setDeploymentStatus, type LifecycleContext } from "./deployment-lifecycle";
 import { auditPorts } from "./port-audit.service";
 import { verifyDeployedContainers } from "./stability-audit.service";
+import { resolveHealthGate, runHealthGate, type ResolvedHealthGate } from "./health-gate";
 import { auditStaticOutput, staticOutputTargets } from "./output-audit.service";
 import { createBuildConfig } from "./build-config";
 import { pinnedAppImage, pinnedStaticDir, snapshotNeedsGitSource } from "./pinned-artifacts";
@@ -1082,9 +1083,16 @@ interface ServeStrategy {
   activate(config: DeployConfig, onLog: LogCallback): Promise<DeploymentResult>;
   /** File-serve → a filesystem `root`; running processes route via resolveTargetUrl. */
   resolveRoute?: (containerId: string, config: DeployConfig) => Promise<{ staticRoot: string }>;
-  /** Post-activate readiness gate; undefined when nothing listens. The caller
-   *  additionally only wires this for LOCAL targets (remote/cloud unreachable). */
-  healthCheck?: (containerId: string, config: DeployConfig) => Promise<void>;
+  /**
+   * Post-activate readiness probe; undefined when nothing listens (file-serve).
+   *
+   * REPORTS rather than throws: returns a failure detail, or null when the
+   * workload answered. The caller owns the verdict, because whether a failure
+   * warns or vetoes the deploy is the project's `healthCheck.onFailure` choice,
+   * not this strategy's. The caller also only runs this for LOCAL targets
+   * (a remote/cloud app's port isn't reachable from here).
+   */
+  healthCheck?: (containerId: string, config: DeployConfig) => Promise<string | null>;
 }
 
 /**
@@ -1098,43 +1106,83 @@ function buildDeployEnvironment(
     serve: ServeStrategy;
     previousRuntime: DeployPhaseInputs["runtime"];
     plannedDomains: ReturnType<typeof buildProjectRouteDomains>;
+    /** The project's opted-in readiness gate. `active: false` (the default) ⇒ no
+     *  gate is wired at all and the pipeline skips the step. */
+    healthGate: ResolvedHealthGate;
+    /** Sink for a failure the gate decided to WARN about rather than veto. The
+     *  caller folds these into the deploy's action-required warning. */
+    onHealthWarning: (detail: string) => void;
   },
 ): DeployEnvironment {
   const { runtime, system, targetExecutor, routeState, logger, effectiveTarget, project } = phase;
-  const { serve, previousRuntime, plannedDomains } = deps;
+  const { serve, previousRuntime, plannedDomains, healthGate, onHealthWarning } = deps;
 
   return {
     canOverlap: serve.canOverlap,
-    // Post-activate readiness gate, in two layers:
+    // Post-activate readiness gate — OPT-IN, and omitted entirely when the
+    // project didn't ask for one, so runDeployPipeline skips the step rather than
+    // calling a check that does nothing. That absence IS the default: a deploy
+    // reports ready as soon as the workload is up and routed. Listening state is
+    // still reported, by the advisory in-container `auditPorts` probe that runs
+    // after the deploy is live and cannot fail it.
+    //
+    // When a project does opt in, up to two layers run:
     //
     //  1. Stabilization — watch the container we just started and fail if it
     //     bounces or exits. Asked of the RUNTIME (docker inspect), so unlike the
-    //     TCP probe it works for remote/SSH targets too: those deploys used to
-    //     have no post-start verification at all, which is how a crash-looping
-    //     container could be reported `ready`.
-    //  2. TCP probe — local targets only; the app runs on this host, so a
+    //     TCP probe it works for remote/SSH targets too.
+    //  2. Readiness probe — local targets only; the app runs on this host, so a
     //     refused/timed-out connection genuinely means it never came up.
     //
-    // Throwing here fails the deploy before traffic is repointed, so the overlap
-    // path auto-reverts to the previous (untouched) deployment.
-    healthCheck: async (containerId, cfg) => {
-      // A path-shaped id is a static release DIR — files, not a process.
-      if (!containerId.includes("/")) {
-        const [unstable] = (
-          await verifyDeployedContainers(
-            runtime,
-            [{ serviceName: project.name || project.slug || "app", containerId }],
-            logger,
-          )
-        ).filter((finding) => !finding.verdict.ok);
-        if (unstable) throw new Error(unstable.detail);
-      }
-      if (effectiveTarget === "local") await serve.healthCheck?.(containerId, cfg);
-    },
-    reactivatePrevious:
-      previousRuntime.name === "bare"
-        ? (id: string) => (id.includes("/") ? Promise.resolve() : previousRuntime.start(id))
-        : undefined,
+    // `onFailure` decides what a failure means. "warn" (the default even when
+    // opted in) keeps the deploy ready and records an action-required warning;
+    // only "fail" throws, which vetoes the deploy before traffic is repointed and
+    // reverts to the previous deployment.
+    // Ordering + the warn-vs-fail decision live in runHealthGate (health-gate.ts),
+    // shared with the compose pipeline so the two can't drift. This is just the
+    // adapter that supplies the two effects.
+    healthCheck: !healthGate.active
+      ? undefined
+      : (containerId, cfg) =>
+          runHealthGate({
+            gate: healthGate,
+            // A path-shaped id is a static release DIR — files, not a process, so
+            // there is nothing to watch for a restart loop.
+            stabilize: containerId.includes("/")
+              ? undefined
+              : async (windowMs) => {
+                  const [unstable] = (
+                    await verifyDeployedContainers(
+                      runtime,
+                      [{ serviceName: project.name || project.slug || "app", containerId }],
+                      logger,
+                      { windowMs },
+                    )
+                  ).filter((finding) => !finding.verdict.ok);
+                  return unstable ? unstable.detail : null;
+                },
+            // Only local targets are dialable from here; a remote/cloud app's port
+            // isn't reachable from the orchestrator.
+            probe:
+              effectiveTarget === "local" && serve.healthCheck
+                ? () => serve.healthCheck!(containerId, cfg)
+                : undefined,
+            probeSkippedReason:
+              effectiveTarget === "local"
+                ? undefined
+                : `Health check: skipped — the readiness probe only runs for local targets ` +
+                  `(this deploy targets "${effectiveTarget}"). Stabilization covers remote targets.`,
+            onWarn: onHealthWarning,
+            log: (message, level) => logger.log(`${message}\n`, level ?? "info"),
+          }),
+    // Auto-revert for the stop-first (non-overlap) path. Wired for BOTH runtimes:
+    // Docker takes this path too whenever routeStrategy is loopback-port (the
+    // default), and while it was bare-only a failed gate left the old container
+    // force-removed with nothing to restore — the new one was reaped as well, so a
+    // failed readiness check took the app down entirely. `deactivate` now stops
+    // (retains) the previous container on this path, so there is something to start.
+    reactivatePrevious: (id: string) =>
+      id.includes("/") ? Promise.resolve() : previousRuntime.start(id),
     preflight: targetExecutor
       ? async (cfg, promptUser) => {
           if (system) {
@@ -1205,6 +1253,27 @@ function buildDeployEnvironment(
       }
       return previousRuntime.name === "bare" ? previousRuntime.stop(id) : previousRuntime.destroy(id);
     },
+    // The non-overlap pre-stop: free the port, but keep the old workload
+    // restorable until the new one proves out. STOP for both runtimes — Docker
+    // used to force-remove here, which is why a failed health gate could take the
+    // app down with nothing to revert to.
+    //
+    // A path-shaped id is a static release DIR: nothing is "running", so there is
+    // no port to free and nothing to stop. Leaving it in place is what makes it
+    // restorable; `deactivate` above still removes it on the overlap/success path.
+    deactivateRetaining: (id) =>
+      id.includes("/") ? Promise.resolve() : previousRuntime.stop(id),
+    // Discard the retained container after success. Container runtimes only: bare's
+    // stopped release is a DIRECTORY owned by the retention/rollback window, and
+    // destroying it here would delete a release that rollback still expects (bare
+    // already only ever stopped it, so "no retire" is its existing behaviour).
+    retireRetainedPrevious:
+      previousRuntime.name === "bare"
+        ? undefined
+        : (id: string) => (id.includes("/") ? Promise.resolve() : previousRuntime.destroy(id)),
+    // Release the port the failed deployment is holding so the revert can rebind
+    // it. Uses the CURRENT runtime (it started this container), not previousRuntime.
+    stopActivated: (id: string) => (id.includes("/") ? Promise.resolve() : runtime.stop(id)),
     resolveRoute: serve.resolveRoute,
     resolveTargetUrl: async (id, port) => {
       const strategy = resolveRouteStrategy(phase.project.routeStrategy);
@@ -1257,6 +1326,15 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
   // allocates a host port on the orchestrator (cloud routes via Oblien, not a
   // loopback port) — defense-in-depth against a cloud→host-exec slip.
   const routeStrategy = resolveRouteStrategy(project.routeStrategy);
+
+  // The project's OPT-IN readiness gate. Inactive unless the project configured
+  // one, and inactive is the default — so by default nothing waits on the app
+  // after start and nothing can veto a deploy whose workload came up. Listening
+  // state still gets reported by the advisory `auditPorts` probe further down.
+  const healthGate = resolveHealthGate(project.healthCheck);
+  // Failures the gate chose to WARN about (onFailure: "warn"), folded into the
+  // deploy's action-required warning alongside routing issues.
+  const healthWarnings: string[] = [];
 
   // How this deploy SERVES — the single object holding the static-file-serve vs
   // running-process divergence (restart/overlap, preflight, activate, route,
@@ -1314,8 +1392,10 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
         resolveRoute: undefined,
         healthCheck: async (containerId, cfg) => {
           let host = "127.0.0.1";
-          let port = cfg.port;
-          if (runtime.name !== "bare") {
+          // An explicit `healthCheck.port` overrides; otherwise probe the app port
+          // and let the container-runtime lookup below remap it to the published one.
+          let port = healthGate.probe.port ?? cfg.port;
+          if (runtime.name !== "bare" && healthGate.probe.port === undefined) {
             // Container runtime: prefer the published host port; fall back to the
             // container's bridge IP:port (reachable on the local daemon).
             try {
@@ -1330,14 +1410,31 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
               /* fall back to 127.0.0.1:cfg.port */
             }
           }
-          logger.log(`Health check: waiting for the app to accept connections on port ${cfg.port}…\n`);
-          const ready = await waitForReady(host, port, { timeoutMs: 45_000, intervalMs: 1_000 });
+          // Name the address actually dialed. Reporting `cfg.port` here sent
+          // operators to look at the app's own port (3000) when the probe had
+          // really been talking to the published host port, so a wrong-port or
+          // unreachable-address failure read as "my app is broken".
+          const target = `${host}:${port}${healthGate.probe.path ?? ""}`;
+          const seconds = Math.round(healthGate.probe.timeoutMs / 1000);
+          logger.log(
+            `Health check: waiting up to ${seconds}s for the app to answer at ${target}` +
+              `${healthGate.probe.path ? "" : " (TCP connect)"}…\n`,
+          );
+          const ready = await waitForReady(host, port, {
+            path: healthGate.probe.path,
+            timeoutMs: healthGate.probe.timeoutMs,
+            intervalMs: healthGate.probe.intervalMs,
+          });
           if (!ready) {
-            throw new Error(
-              `Health check failed: the app never accepted a connection on port ${cfg.port} within 45s — it likely crashed on startup (check the runtime logs).`,
+            return (
+              `The app never answered at ${target} within ${seconds}s` +
+              `${healthGate.probe.path ? " (or answered 500+)" : ""}. It may have crashed on ` +
+              `startup, may still be booting, or may be listening on a different port than ${cfg.port} ` +
+              `— check the runtime logs.`
             );
           }
-          logger.log(`Health check passed: the app is accepting connections.\n`);
+          logger.log(`Health check passed: the app answered at ${target}.\n`);
+          return null;
         },
       };
 
@@ -1503,6 +1600,8 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
     serve,
     previousRuntime,
     plannedDomains,
+    healthGate,
+    onHealthWarning: (detail) => healthWarnings.push(detail),
   });
 
   const deploySsl = plannedDomains.some((domain) => domain.provisionSsl)
@@ -1688,20 +1787,33 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
     metaPatch.edgeUnsynced = true;
   }
 
+  // An opted-in readiness check that failed with onFailure "warn": the deploy is
+  // live, and this says what didn't answer. Kept as its OWN key rather than folded
+  // into `deployWarning`, because any deployWarning makes the project read
+  // `routingUnsynced` and offer "Retry routing" — the wrong fix to suggest for an
+  // app that didn't answer on its port.
+  if (healthWarnings.length > 0) {
+    metaPatch.healthWarning = healthWarnings.join(" · ");
+  }
+
   // The warning belongs in the TRACE, not only on the SSE meta. It used to reach
   // the terminal solely because the dashboard wrote it client-side, so it was
   // absent from the persisted log — invisible on replay, in history, and to the
   // CLI. Emitting it here (matching the compose path's wording) makes the server
   // the single writer for every warning, so the client never has to add one.
-  if (typeof metaPatch.deployWarning === "string") {
-    logger.log(`Deployment completed with warnings: ${metaPatch.deployWarning}\n`, "warn");
+  const deployWarnings = [metaPatch.deployWarning, metaPatch.healthWarning].filter(
+    (warning): warning is string => typeof warning === "string" && warning.length > 0,
+  );
+  const warningMessage = deployWarnings.join(" · ");
+  if (warningMessage) {
+    logger.log(`Deployment completed with warnings: ${warningMessage}\n`, "warn");
   }
 
   await onSuccess(ctx, {
     containerId: deployResult.containerId!,
     url: deployResult.url,
     durationMs: buildResult.durationMs ?? 0,
-    ...(typeof metaPatch.deployWarning === "string" ? { warningMessage: metaPatch.deployWarning } : {}),
+    ...(warningMessage ? { warningMessage } : {}),
     ...(Object.keys(metaPatch).length > 0 ? { metaPatch } : {}),
   });
 

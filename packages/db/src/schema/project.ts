@@ -15,6 +15,7 @@ import type {
   ProjectCompositeRoute,
   ReleaseSource,
   ProjectObjectStorage,
+  OpenshipHealthCheck,
 } from "@repo/core";
 import { organization } from "./organization";
 import { service } from "./service";
@@ -241,6 +242,17 @@ export const project = pgTable(
      * is the one place credentials are kept. Null when nothing is bound.
      */
     objectStorage: jsonb("object_storage").$type<ProjectObjectStorage | null>(),
+
+    /**
+     * Deploy-time readiness gate (Openship's own, NOT the Docker HEALTHCHECK
+     * directive — that one lives per compose service in `service.advanced`).
+     *
+     * NULL = off, which is the default for every project: an unconfigured deploy
+     * does no post-start waiting at all. Only a project that explicitly opts in
+     * here gets a probe that can delay or veto a deploy. Set from the wizard's
+     * Health section, seeded by `openship.json`'s `healthCheck`.
+     */
+    healthCheck: jsonb("health_check").$type<OpenshipHealthCheck | null>(),
 
     /* ── Resources (VM-native format) ───────────────────────────────────── */
     /** JSON: { cpuCores, memoryMb } */

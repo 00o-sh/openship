@@ -34,6 +34,7 @@ import {
   type OpenshipEnv,
   type OpenshipService,
   type OpenshipResources,
+  type OpenshipHealthCheck,
   type OpenshipMonorepoApp,
   type ComposeAdvanced,
   resolveTierResources,
@@ -205,6 +206,12 @@ export interface ProjectInfo {
   publicEndpoints?: DeclaredPublicEndpoint[];
   /** Declared resource sizing (cloud tier or explicit cpu/mem/disk). */
   resources?: OpenshipResources;
+  /**
+   * Declared deploy-time readiness gate. SEEDS the wizard's Health section only —
+   * absent here means the wizard shows it off (the default), which is also what
+   * the pipeline does when the project has no `healthCheck`.
+   */
+  healthCheck?: OpenshipHealthCheck;
 }
 
 /** A `domains[]` entry normalized to the `CreateProjectBody.publicEndpoints` shape. */
@@ -387,6 +394,7 @@ function applyOpenshipOverlay(info: ProjectInfo, config: OpenshipConfig | undefi
     info.rootEnv = { ...(info.rootEnv ?? {}), ...envMapToRecord(config.env) };
   }
   if (config.resources) info.resources = config.resources;
+  if (config.healthCheck) info.healthCheck = config.healthCheck;
 
   // Declared compose services replace detection: the project IS a services
   // project. runtimeMode="docker" then falls out of buildProductionProjectInput's
@@ -447,6 +455,7 @@ export function projectInfoToScanResponse(result: ProjectInfo) {
     ...(result.runtimeMode && { runtimeMode: result.runtimeMode }),
     ...(result.publicEndpoints && { publicEndpoints: result.publicEndpoints }),
     ...(result.resources && { resources: result.resources }),
+    ...(result.healthCheck && { healthCheck: result.healthCheck }),
     ...(result.rootEnv && Object.keys(result.rootEnv).length > 0 && { rootEnv: maskEnv(result.rootEnv) }),
     ...(result.routing && { routing: result.routing }),
     ...(result.monorepoWorkspace && { monorepoWorkspace: result.monorepoWorkspace }),

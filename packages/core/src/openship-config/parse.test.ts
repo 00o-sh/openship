@@ -164,4 +164,74 @@ describe("parseOpenshipConfig", () => {
       expect(config && "composePath" in config).toBe(false);
     });
   });
+
+  describe("healthCheck", () => {
+    it("round-trips every field", () => {
+      const healthCheck = {
+        enabled: true,
+        path: "/healthz",
+        port: 8080,
+        timeoutSeconds: 90,
+        stabilization: true,
+        stabilizationSeconds: 30,
+        onFailure: "fail" as const,
+      };
+      const { config, errors, warnings } = parseOpenshipConfig({ healthCheck });
+      expect(errors).toEqual([]);
+      expect(warnings).toEqual([]);
+      expect(config?.healthCheck).toEqual(healthCheck);
+    });
+
+    // The whole feature is opt-in, so "undeclared" has to stay distinguishable
+    // from "declared off" all the way down to the persisted column.
+    it("is absent (not undefined-valued) when undeclared", () => {
+      const { config } = parseOpenshipConfig({ framework: "nextjs" });
+      expect(config && "healthCheck" in config).toBe(false);
+    });
+
+    it("accepts an empty object as a legal no-op", () => {
+      const { config, errors } = parseOpenshipConfig({ healthCheck: {} });
+      expect(errors).toEqual([]);
+      expect(config?.healthCheck).toEqual({
+        enabled: undefined,
+        path: undefined,
+        port: undefined,
+        timeoutSeconds: undefined,
+        stabilization: undefined,
+        stabilizationSeconds: undefined,
+        onFailure: undefined,
+      });
+    });
+
+    it("rejects a non-object", () => {
+      const { errors } = parseOpenshipConfig({ healthCheck: true });
+      expect(errors).toEqual(["healthCheck: must be an object"]);
+    });
+
+    it("rejects an unknown onFailure action", () => {
+      const { errors } = parseOpenshipConfig({ healthCheck: { onFailure: "destroy" } });
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors.join(" ")).toContain("healthCheck.onFailure");
+    });
+
+    it("rejects out-of-range timeouts rather than silently clamping", () => {
+      const { errors } = parseOpenshipConfig({
+        healthCheck: { timeoutSeconds: 0, stabilizationSeconds: 9999 },
+      });
+      expect(errors.join(" ")).toContain("healthCheck.timeoutSeconds");
+      expect(errors.join(" ")).toContain("healthCheck.stabilizationSeconds");
+    });
+
+    it("is not confused with a compose service's docker healthcheck", () => {
+      // Different layers, similar names: `services[].healthcheck` is the Docker
+      // HEALTHCHECK directive; top-level `healthCheck` is Openship's deploy gate.
+      const { config, errors } = parseOpenshipConfig({
+        healthCheck: { enabled: true },
+        services: [{ name: "db", image: "postgres:16", healthcheck: { test: "pg_isready" } }],
+      });
+      expect(errors).toEqual([]);
+      expect(config?.healthCheck?.enabled).toBe(true);
+      expect(config?.services?.[0]?.healthcheck?.test).toBe("pg_isready");
+    });
+  });
 });

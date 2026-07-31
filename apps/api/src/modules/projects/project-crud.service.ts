@@ -364,6 +364,10 @@ function buildProductionProjectInput(
     // Edge→app upstream addressing. Omitted → schema default "auto" (loopback-
     // port). The wizard seeds this from the user's route-strategy default.
     routeStrategy: data.routeStrategy ?? undefined,
+    // Deploy-time readiness gate. Omitted → null → OFF: the deploy does no
+    // post-start waiting. Only set when the wizard's Health section (or
+    // openship.json's `healthCheck`) opted in.
+    healthCheck: data.healthCheck ?? null,
     isApp: data.isApp ?? false,
     appTemplateId: data.appTemplateId ?? null,
     // Services / docker(-compose) projects can only run on the Docker runtime, so

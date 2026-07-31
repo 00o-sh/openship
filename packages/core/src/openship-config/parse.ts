@@ -12,6 +12,7 @@ import { ALL_PACKAGE_MANAGERS } from "../stacks";
 import type { RoutingConfig } from "../metadata/types";
 import {
   OPENSHIP_DOMAIN_TYPES,
+  OPENSHIP_HEALTH_CHECK_FAILURE_ACTIONS,
   OPENSHIP_PRODUCTION_MODES,
   OPENSHIP_RESOURCE_TIERS,
   OPENSHIP_RESTARTS,
@@ -19,6 +20,7 @@ import {
   type OpenshipConfig,
   type OpenshipDomain,
   type OpenshipEnv,
+  type OpenshipHealthCheck,
   type OpenshipHealthcheck,
   type OpenshipMonorepo,
   type OpenshipMonorepoApp,
@@ -47,6 +49,7 @@ const TOP_LEVEL_KEYS = new Set([
   "domains",
   "routes",
   "resources",
+  "healthCheck",
   "services",
   "monorepo",
 ]);
@@ -245,6 +248,32 @@ function parseResources(ctx: Ctx, v: unknown, path: string): OpenshipResources |
   return r;
 }
 
+/**
+ * The project-level deploy-time readiness gate. Not to be confused with
+ * `parseHealthcheck` below, which is the Docker-native per-service HEALTHCHECK.
+ *
+ * Every field is optional and every default is off, so `"healthCheck": {}` is a
+ * legal no-op. The second bounds are sanity rails, not policy: a gate that can
+ * hold a deploy open for an hour is a mistake worth catching in the config
+ * rather than at deploy time.
+ */
+function parseHealthCheck(ctx: Ctx, v: unknown, path: string): OpenshipHealthCheck | undefined {
+  if (v === undefined) return undefined;
+  if (!ctx.isObj(v)) {
+    ctx.err(path, "must be an object");
+    return undefined;
+  }
+  return {
+    enabled: ctx.bool(v.enabled, `${path}.enabled`),
+    path: ctx.str(v.path, `${path}.path`),
+    port: ctx.int(v.port, `${path}.port`, 1, 65535),
+    timeoutSeconds: ctx.int(v.timeoutSeconds, `${path}.timeoutSeconds`, 1, 600),
+    stabilization: ctx.bool(v.stabilization, `${path}.stabilization`),
+    stabilizationSeconds: ctx.int(v.stabilizationSeconds, `${path}.stabilizationSeconds`, 1, 600),
+    onFailure: ctx.enumOf(v.onFailure, `${path}.onFailure`, OPENSHIP_HEALTH_CHECK_FAILURE_ACTIONS),
+  };
+}
+
 function parseHealthcheck(ctx: Ctx, v: unknown, path: string): OpenshipHealthcheck | undefined {
   if (v === undefined) return undefined;
   if (!ctx.isObj(v)) {
@@ -407,6 +436,7 @@ export function parseOpenshipConfig(raw: unknown): ParseResult {
     domains: parseDomains(ctx, raw.domains, "domains"),
     routes: parseRoutes(ctx, raw.routes, "routes"),
     resources: parseResources(ctx, raw.resources, "resources"),
+    healthCheck: parseHealthCheck(ctx, raw.healthCheck, "healthCheck"),
     services: parseServices(ctx, raw.services, "services"),
     monorepo: parseMonorepo(ctx, raw.monorepo, "monorepo"),
   };
