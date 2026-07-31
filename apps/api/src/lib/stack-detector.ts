@@ -488,13 +488,22 @@ export function detectStack(
     }
   }
 
+  // A Dockerfile owns its own build — the runtime builds straight from it
+  // (requireRepositoryDockerfile), so nothing is synthesized around it.
+  // buildCommand/startCommand already come out empty via the registry defaults
+  // on the `docker` stack, but installCommand is derived from the package
+  // manager alone, which has no way to know that. A Dockerfile sub-app that
+  // also carries a package.json for workspace membership (the Railway-style
+  // monorepo layout) would otherwise be handed a bogus `npm i --force`.
+  const projectType = getProjectType(matched);
+
   const result: StackResult = {
     stack: matched,
-    projectType: getProjectType(matched),
+    projectType,
     category: stackDef.category,
     dependencies: deps,
     packageManager: pm,
-    installCommand: getInstallCommand(pm),
+    installCommand: projectType === "docker" ? "" : getInstallCommand(pm),
     buildCommand: getBuildCommand(pm, matched, packageJson, files),
     startCommand,
     buildImage: getBuildImage(matched, pm),
