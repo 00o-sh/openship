@@ -1235,7 +1235,7 @@ export async function serverLogStream(c: Context) {
 
       await new Promise<void>((resolve) => {
         conn.stream.on("data", (chunk: Buffer) => {
-          sseStream.write(chunk.toString()).catch(() => conn.destroy());
+          sseStream.write(chunk).catch(() => conn.destroy());
         });
         conn.stream.on("close", () => resolve());
         conn.stream.on("end", () => resolve());
