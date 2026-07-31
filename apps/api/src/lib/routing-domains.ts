@@ -115,9 +115,36 @@ export function resolveRouteDestination(
   input: { targetPath?: string | null; targetPort?: number | null },
   isStatic?: boolean,
 ): { targetPort?: number; targetPath?: string } | undefined {
-  if (input.targetPath) return { targetPath: input.targetPath };
+  // THE DEPLOYMENT'S SHAPE DECIDES, not the stored hint.
+  //
+  // `targetPath` and `targetPort` are meant to be mutually exclusive — "exactly
+  // one of port / targetPath must be set (proxy vs static)", enforced in
+  // routeDomainRowToPublicEndpoint. But `domain.targetPath` is a PERSISTED column,
+  // so a hostname that once served a static path keeps it forever, and a later
+  // port-based deploy of the same hostname sets `targetPort` alongside it without
+  // anything clearing the old value.
+  //
+  // This used to test `targetPath` FIRST and unconditionally, so in that state the
+  // stale path outranked the live port: the route plan said "serve files", the
+  // pipeline resolved a static doc root, and `registerRoute` wrote a STATIC vhost
+  // for a server app. The vhost overwrite was complete and correct — it just
+  // rebuilt the PREVIOUS project's shape, so redeploying a proxy app onto a
+  // hostname that once served static files brought the old static site back.
+  //
+  // Worse, it was self-perpetuating: the plan derived `targetPath` from the row,
+  // and the reconcile below then patched the row to match the plan, so
+  // `expected === existing` and the stale column could never be cleared. Deciding
+  // from `isStatic` breaks that loop — a non-static deploy now plans
+  // `targetPath: null`, which the reconcile finally writes back as a clear.
+  if (isStatic) {
+    // Serving FILES. A stored subpath only refines WHICH subdir of the release;
+    // absent, serve the release root (#345).
+    return { targetPath: input.targetPath || "/" };
+  }
+  // Serving a PORT. A `targetPath` left over from a previous static deployment of
+  // this hostname is not a destination — it is stale state, and ignoring it here
+  // is what lets the reconcile clear it.
   if (input.targetPort != null) return { targetPort: input.targetPort };
-  if (isStatic) return { targetPath: "/" }; // #345: static serves the release root
   return undefined;
 }
 

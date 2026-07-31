@@ -181,6 +181,11 @@ describe("buildProjectRouteDomains", () => {
       ],
       runtimeName: "bare",
       usesManagedRouting: true,
+      // A path target is only a destination on a STATIC deploy. The single
+      // production caller always states this (build-pipeline passes
+      // `isStaticFileServe`); omitting it here exercised a combination that
+      // cannot occur, and relied on a stale path outranking a live port.
+      isStatic: true,
     });
 
     expect(planned).toEqual([
@@ -328,10 +333,47 @@ describe("buildServiceRouteDomains — custom-domain SSL gate", () => {
 describe("resolveRouteDestination", () => {
   // Pins the caveats the dedup audit flagged as load-bearing when this ternary
   // was collapsed out of buildProjectRouteDomains' two loops.
-  it("prefers an explicit path over a port", () => {
-    expect(resolveRouteDestination({ targetPath: "/api", targetPort: 3000 })).toEqual({
+  it("prefers an explicit path over a port ON A STATIC DEPLOY", () => {
+    expect(resolveRouteDestination({ targetPath: "/api", targetPort: 3000 }, true)).toEqual({
       targetPath: "/api",
     });
+  });
+
+  /**
+   * THE REGRESSION THAT SHIPPED. `domain.targetPath` is persisted, so a hostname
+   * that once served a static subpath keeps it forever. When a port-based app was
+   * later deployed to that same hostname, the row carried BOTH — violating the
+   * "exactly one of port / targetPath" invariant — and this function used to test
+   * `targetPath` first and unconditionally, so the stale path won.
+   *
+   * The consequence was not a partial vhost: `registerRoute` overwrote the file
+   * completely and correctly, as STATIC. Redeploying a Next.js server app onto a
+   * hostname that had once served static files brought the OLD static site back,
+   * while the new container ran healthy and the deploy reported green.
+   *
+   * It was self-healing in the wrong direction too: the plan derived `targetPath`
+   * from the row and the reconcile wrote the plan back to the row, so
+   * `expected === existing` and the stale column could never be cleared.
+   */
+  it("ignores a stale path and uses the live port on a NON-static deploy", () => {
+    expect(resolveRouteDestination({ targetPath: "/api", targetPort: 3000 }, false)).toEqual({
+      targetPort: 3000,
+    });
+  });
+
+  it("treats an unstated deploy shape as non-static — a dropped route is visible, wrong content is not", () => {
+    // Production always states it. If a future caller forgets, failing toward "no
+    // destination" surfaces as an unrouted domain; failing toward the stored path
+    // would silently serve a previous project's files.
+    expect(resolveRouteDestination({ targetPath: "/api", targetPort: 3000 })).toEqual({
+      targetPort: 3000,
+    });
+  });
+
+  it("a non-static deploy with ONLY a stale path has no destination at all", () => {
+    // Nothing to proxy to and files are not what this deploy serves — better an
+    // unrouted domain the operator can see than the old static site coming back.
+    expect(resolveRouteDestination({ targetPath: "/docs" }, false)).toBeUndefined();
   });
 
   it("uses an explicit port when there is no path", () => {

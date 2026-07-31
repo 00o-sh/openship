@@ -10,6 +10,7 @@ import { ComposePathField } from "@/components/import-project/ComposePathField";
 import EnvironmentVariables from "@/components/import-project/EnvironmentVariables";
 import MonorepoApps from "@/components/import-project/MonorepoApps";
 import RoutingSection from "@/components/import-project/RoutingSection";
+import ReadinessSection from "@/components/project-settings/ReadinessSection";
 import Sidebar from "./components/Sidebar";
 import DeployTargetStep, { DeployTargetSummary, lastPickStore, useDesktopTargets, useSeedDeployTarget } from "./components/DeployTargetStep";
 // Clone-strategy gate moved from inline render to a preflight modal
@@ -337,6 +338,19 @@ const DeployRepository: React.FC = () => {
                 a path flips this to `services` — so the control has to survive that
                 flip to stay correctable. */}
             <ComposePathField />
+            {/* Readiness gate — deliberately OUTSIDE every type-specific section,
+                same reasoning as ComposePathField above. It's a project-level
+                setting that applies to whatever this deploy turns out to be: a
+                port/path probe for a server, a doc-root+index probe for a static
+                site, a restart-loop watch for containers. Nesting it in
+                BuildSettings hid it from docker, services and monorepo projects —
+                and from any static app, since that path gated on `hasServer`.
+                Compose services can still override it individually in the
+                service's own settings. Collapsed and off unless opened. */}
+            <ReadinessSection
+                value={config.readiness}
+                onChange={(next) => updateConfig({ readiness: next ?? null })}
+            />
             {!isServiceDeployment &&
                 !(isMonorepoFlow && config.serviceDeploymentMode !== "single") && (
                 <EnvironmentVariables collapsible />
