@@ -6,7 +6,6 @@ import {
   AlertTriangle,
   CheckCircle2,
   ChevronDown,
-  Copy,
   ExternalLink,
   Globe,
   Info,
@@ -32,6 +31,7 @@ import { usePlatform } from "@/context/PlatformContext";
 import { useCloud } from "@/context/CloudContext";
 import { resolveServiceHostnameLabel } from "@repo/core";
 import PublicEndpointsCard from "@/components/routing/PublicEndpointsCard";
+import DnsRecordCard from "@/components/domains/DnsRecordCard";
 import { RoutingSettingsCard } from "@/components/routing/RoutingSettingsCard";
 import { useEdgeModal, useVerifyModal } from "@/hooks/useSystemPrepareModal";
 import DropdownMenu, { type MenuAction } from "@/components/ui/DropdownMenu";
@@ -42,6 +42,10 @@ import {
   type PortCheckUI,
   type OutputCheckUI,
 } from "@/context/deployment/types";
+import {
+  resolvePublicEndpointHostname,
+  validatedPublicEndpointPayload,
+} from "@/lib/public-endpoint-payload";
 
 interface DnsRecord {
   type: "CNAME" | "A" | "TXT";
@@ -85,6 +89,11 @@ interface DomainSummaryItem {
    * still valid and stays offered.
    */
   externalIngress?: boolean;
+  /** Canonical redirect: this hostname answers a 30x to `redirectTo` instead of
+   *  serving. Shown on the card so a domain that deliberately serves nothing
+   *  doesn't read as broken. */
+  redirectTo?: string;
+  redirectStatus?: number;
   status: { label: string; tone: DomainTone };
   ssl: { label: string; tone: DomainTone };
   /**
@@ -111,6 +120,11 @@ function toEditablePublicEndpoint(endpoint: any): PublicEndpoint {
     domain: endpoint?.domain || "",
     customDomain: endpoint?.customDomain || "",
     domainType: endpoint?.domainType === "custom" ? "custom" : "free",
+    // Must round-trip: the endpoints list is authoritative on save, so dropping a
+    // redirect here would silently clear it on the next unrelated edit.
+    redirectTo: typeof endpoint?.redirectTo === "string" ? endpoint.redirectTo : undefined,
+    redirectStatus:
+      typeof endpoint?.redirectStatus === "number" ? endpoint.redirectStatus : undefined,
   });
 }
 
@@ -156,65 +170,11 @@ function createProjectEndpointDrafts(
   );
 }
 
-function buildPublicEndpointPayload(
-  endpoint: PublicEndpoint,
-  hasServer: boolean,
-): {
-  port?: number;
-  targetPath?: string;
-  domain?: string;
-  customDomain?: string;
-  domainType: "free" | "custom";
-} | null {
-  const domainType: "free" | "custom" = endpoint.domainType === "custom" ? "custom" : "free";
-  const freeDomain = endpoint.domain.trim().toLowerCase();
-  const customDomain = endpoint.customDomain.trim().toLowerCase();
+/** Shared with the deploy wizard's Domains step — see lib/public-endpoint-payload. */
+const buildPublicEndpointPayload = validatedPublicEndpointPayload;
 
-  if (domainType === "custom" && !customDomain) {
-    return null;
-  }
-
-  if (domainType === "free" && !freeDomain) {
-    return null;
-  }
-
-  if (hasServer) {
-    const port = Number(endpoint.port.trim());
-    if (!Number.isFinite(port) || port < 1 || port > 65535) {
-      return null;
-    }
-
-    return {
-      port,
-      domainType,
-      ...(domainType === "custom"
-        ? { customDomain }
-        : { domain: freeDomain }),
-    };
-  }
-
-  const targetPath = endpoint.targetPath.trim() || "/";
-  return {
-    targetPath,
-    domainType,
-    ...(domainType === "custom"
-      ? { customDomain }
-      : { domain: freeDomain }),
-  };
-}
-
-function resolveProjectEndpointHostname(endpoint: any, baseDomain: string): string {
-  if (typeof endpoint?.hostname === "string" && endpoint.hostname.trim()) {
-    return endpoint.hostname.trim().toLowerCase();
-  }
-
-  if (endpoint?.domainType === "custom") {
-    return endpoint?.customDomain?.trim().toLowerCase() || "";
-  }
-
-  const domain = endpoint?.domain?.trim().toLowerCase();
-  return domain ? `${domain}.${baseDomain}` : "";
-}
+/** Shared with the routing card so both resolve a hostname the same way. */
+const resolveProjectEndpointHostname = resolvePublicEndpointHostname;
 
 function resolveDomainStatus(domain: any, t: Dictionary): { label: string; tone: DomainTone } {
   const s = t.projectSettings.domains.status;
@@ -400,10 +360,13 @@ export const DomainSettings = () => {
   // records for. Populated on successful connectDomain so the panel's
   // bottom CTA can re-run verify against the exact row the user just
   // created (instead of guessing by hostname).
-  const [pendingVerifyDomain, setPendingVerifyDomain] = useState<{
-    id: string;
-    hostname: string;
-  } | null>(null);
+  // A LIST, not one row: "Include www" claims a SECOND hostname, and that sibling
+  // verifies + certs entirely on its own. Tracking only the apex meant the panel
+  // offered Verify for one of the two domains it had just created, and the other
+  // sat pending with no affordance at all.
+  const [pendingVerifyDomains, setPendingVerifyDomains] = useState<
+    Array<{ id: string; hostname: string }>
+  >([]);
   const [editingRouteServiceId, setEditingRouteServiceId] = useState<string | null>(null);
   const [routeSavingServiceId, setRouteSavingServiceId] = useState<string | null>(null);
   // Local draft for the "Edit route" modal — the card edits this in memory; the
@@ -540,6 +503,11 @@ export const DomainSettings = () => {
           status: resolveDomainStatus(domain, t),
           ssl: resolveDomainSsl(hostname, domain, baseDomain, t),
           diagnosis: resolveDomainDiagnosis(domain),
+          // Read from the persisted ROW: a redirecting host still verifies and
+          // certs like any other, so the card must say why it serves no content.
+          redirectTo: typeof domain?.redirectTo === "string" ? domain.redirectTo : undefined,
+          redirectStatus:
+            typeof domain?.redirectStatus === "number" ? domain.redirectStatus : undefined,
         };
       })
       .filter((domain): domain is DomainSummaryItem => domain !== null);
@@ -808,11 +776,18 @@ export const DomainSettings = () => {
           return;
         }
         if (result.records?.records) setDnsRecords(result.records.records);
-        setPendingVerifyDomain(
-          typeof result.domain?.id === "string"
-            ? { id: result.domain.id, hostname: host }
-            : null,
-        );
+        // Track EVERY row the connect created. `result.www` is the sibling's own
+        // row (its own verify, its own cert); `wwwError` means it couldn't be
+        // claimed at all — say so instead of leaving the toggle looking successful.
+        setPendingVerifyDomains([
+          ...(typeof result.domain?.id === "string"
+            ? [{ id: result.domain.id as string, hostname: host }]
+            : []),
+          ...(result.www?.id ? [{ id: result.www.id as string, hostname: result.www.hostname as string }] : []),
+        ]);
+        if (result.wwwError) {
+          showToast(result.wwwError, "error", t.projectSettings.domains.toast.addDomainFailedTitle);
+        }
       }
 
       const target = hasProjectServer
@@ -829,11 +804,17 @@ export const DomainSettings = () => {
       // connect call just minted would be removed by the save that follows it.
       // publicEndpoints is the source of truth for routing — the variant has to be
       // in it to survive, verify, and get a cert of its own.
+      //
+      // Same reason `redirectTo` is repeated here even though the connect call
+      // already set it on the row: an OMITTED redirect clears one, so leaving it out
+      // would wipe the 301 a request later and quietly serve the app on both hosts.
       const wwwEndpoint =
         isCustom && includeWww && !host.startsWith("www.")
           ? createPublicEndpoint({
               domainType: newDomainType,
               customDomain: `www.${host}`,
+              redirectTo: host,
+              redirectStatus: 301,
               ...target,
             })
           : null;
@@ -856,7 +837,7 @@ export const DomainSettings = () => {
       if (!isCustom) {
         setShowCustomDomainSection(false);
         setDnsRecords([]);
-        setPendingVerifyDomain(null);
+        setPendingVerifyDomains([]);
       }
     } catch (err) {
       console.error("Failed to add domain:", err);
@@ -1731,7 +1712,7 @@ export const DomainSettings = () => {
       setShowCustomDomainSection(false);
       setDnsRecords([]);
       setPreviewedRecords([]);
-      setPendingVerifyDomain(null);
+      setPendingVerifyDomains([]);
       setNewDomain("");
       setNewDomainType("custom");
       setNewDomainPort("");
@@ -1947,7 +1928,7 @@ export const DomainSettings = () => {
             >
               <div className="space-y-3">
                 {recordsToShow.map((record, index) => (
-                  <DnsRecordRow
+                  <DnsRecordCard
                     key={`${record.type}-${record.host}-${index}`}
                     record={record}
                     onCopy={handleCopy}
@@ -1961,20 +1942,24 @@ export const DomainSettings = () => {
                   : t.projectSettings.domains.dns.infoApply}
               </div>
 
-              {pendingVerifyDomain ? (
-                <div className="flex justify-end pt-1">
-                  <ActionButton
-                    label={
-                      verifyingDomainId === pendingVerifyDomain.id
-                        ? t.projectSettings.domains.dns.verifying
-                        : interpolate(t.projectSettings.domains.dns.verify, { hostname: pendingVerifyDomain.hostname })
-                    }
-                    icon={verifyingDomainId === pendingVerifyDomain.id ? Loader2 : RefreshCw}
-                    onClick={() =>
-                      startVerify(pendingVerifyDomain.id, pendingVerifyDomain.hostname)
-                    }
-                    disabled={verifyingDomainId === pendingVerifyDomain.id}
-                  />
+              {/* One button per hostname just created. With "Include www" that's
+                  two, because each verifies and gets its certificate on its own —
+                  and either can succeed while the other is still waiting on DNS. */}
+              {pendingVerifyDomains.length > 0 ? (
+                <div className="flex flex-wrap justify-end gap-2 pt-1">
+                  {pendingVerifyDomains.map((pending) => (
+                    <ActionButton
+                      key={pending.id}
+                      label={
+                        verifyingDomainId === pending.id
+                          ? t.projectSettings.domains.dns.verifying
+                          : interpolate(t.projectSettings.domains.dns.verify, { hostname: pending.hostname })
+                      }
+                      icon={verifyingDomainId === pending.id ? Loader2 : RefreshCw}
+                      onClick={() => startVerify(pending.id, pending.hostname)}
+                      disabled={verifyingDomainId === pending.id}
+                    />
+                  ))}
                 </div>
               ) : null}
             </SectionCard>
@@ -2077,6 +2062,10 @@ export const DomainSettings = () => {
                 runtimePort={publicEndpoints[0]?.port || projectRuntimePort}
                 onChange={(nextEndpoints) => setPublicEndpoints(nextEndpoints)}
                 allowRemoveAll
+                // Canonical redirects are rendered in the box's own vhost, so
+                // they're self-hosted only — a cloud-owned project's routing
+                // belongs to the managed edge (the API refuses it there too).
+                allowRedirects={selfHosted && !isCloudProject}
               />
             </div>
 
@@ -2683,9 +2672,20 @@ function DomainOverviewCard({
 
       <div className="space-y-4 px-5 py-4">
         <div className="break-all text-[15px] font-semibold text-foreground">{domain.hostname}</div>
-        {/* No service behind the domain → nothing to be "mapped to". Rendering the
-            row with an empty value reads as a half-loaded card. */}
-        {domain.mappedLabel ? <InfoRow label={d.overview.mappedTo} value={domain.mappedLabel} /> : null}
+        {/* A redirecting host serves no content, so "mapped to port 3000" would be
+            a lie — name the destination instead. It still shows its own status +
+            SSL rows below, because it still verifies and holds its own cert. */}
+        {domain.redirectTo ? (
+          <InfoRow
+            label={d.overview.redirect}
+            value={interpolate(d.overview.redirectValue, {
+              hostname: domain.redirectTo,
+              status: String(domain.redirectStatus ?? 301),
+            })}
+          />
+        ) : domain.mappedLabel ? (
+          <InfoRow label={d.overview.mappedTo} value={domain.mappedLabel} />
+        ) : null}
         <InfoRow
           label={d.overview.status}
           value={
@@ -2787,10 +2787,10 @@ function DomainOverviewCard({
                   </div>
                 ) : records && records.length > 0 ? (
                   records.map((record, i) => (
-                    <DnsRecordRow
+                    <DnsRecordCard
                       key={`${record.type}-${record.host}-${i}`}
                       record={record}
-                      onCopy={onCopy ?? (() => {})}
+                      onCopy={onCopy}
                     />
                   ))
                 ) : (
@@ -2804,43 +2804,3 @@ function DomainOverviewCard({
     </div>
   );
 }
-
-function DnsRecordRow({
-  record,
-  onCopy,
-}: {
-  record: DnsRecord;
-  onCopy: (text: string) => void | Promise<void>;
-}) {
-  const { t } = useI18n();
-  return (
-    <div className="rounded-xl border border-border/50 bg-muted/20 px-4 py-3">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground/70">
-            {record.type}
-          </div>
-          <div className="mt-1 text-[13px] font-medium text-foreground">{record.host}</div>
-          {record.name && record.name !== record.host ? (
-            <code className="mt-0.5 block break-all text-[11px] text-muted-foreground/70">
-              {record.name}
-            </code>
-          ) : null}
-          <code className="mt-2 block break-all text-[12px] text-muted-foreground">
-            {record.value || "-"}
-          </code>
-        </div>
-        {record.value ? (
-          <button
-            onClick={() => onCopy(record.value)}
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
-            title={t.projectSettings.domains.dns.copy}
-          >
-            <Copy className="size-3.5" />
-          </button>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-

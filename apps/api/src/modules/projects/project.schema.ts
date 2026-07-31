@@ -94,6 +94,16 @@ const PublicEndpointSchema = Type.Object({
   ),
   customDomain: Type.Optional(Type.String({ minLength: 1, maxLength: 255 })),
   domainType: Type.Optional(Type.Union([Type.Literal("free"), Type.Literal("custom")])),
+  /**
+   * Canonical redirect: this hostname answers a 30x to another hostname of the
+   * SAME project instead of serving. The target and the whole set are checked by
+   * lib/domain-redirect.ts (own-project only, no self-target, no loops) — this is
+   * only the shape gate.
+   */
+  redirectTo: Type.Optional(Type.String({ minLength: 1, maxLength: 255 })),
+  redirectStatus: Type.Optional(
+    Type.Union([Type.Literal(301), Type.Literal(302), Type.Literal(307), Type.Literal(308)]),
+  ),
 });
 
 /**

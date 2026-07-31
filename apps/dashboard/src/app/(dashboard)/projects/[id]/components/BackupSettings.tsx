@@ -250,6 +250,12 @@ export function BackupSettings(): React.JSX.Element {
         <RollbackRetentionCards
           strategy={rollbackStrategy}
           capacity={rollbackCapacity}
+          // Static projects retain built FILES, not images.
+          artifactKind={
+            projectData.hasServer === false && (servicesData.services?.length ?? 0) === 0
+              ? "files"
+              : "image"
+          }
           onToggleStrategy={toggleRollbackStrategy}
           onChangeWindow={changeRollbackWindow}
           togglingStrategy={togglingRollback}

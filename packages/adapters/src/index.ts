@@ -29,6 +29,7 @@ export type {
   RouteProxyLocation,
   RouteRedirect,
   RouteHeaderRule,
+  RouteHostRedirect,
   SslResult,
   ManualCert,
   SshConfig,

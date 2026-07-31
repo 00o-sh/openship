@@ -347,22 +347,29 @@
       "title": "Estrategia de reversión",
       "rebuild": "Reconstruir (git)",
       "instant": "Instantáneo (snapshot)",
-      "descRebuild": "No guarda artefactos extra. Una reversión aún reutiliza una imagen retenida si queda alguna en el host y, si no, recompila el commit antiguo.",
-      "descInstant": "Además conserva el artefacto de ejecución de cada versión para que una restauración nunca recompile. Usa más disco, limitado por el historial.",
-      "toggleAria": "Alternar retención de snapshots"
+      "descRebuild": "Reconstruye el commit anterior, salvo que su imagen siga en el host.",
+      "descInstant": "Guarda la imagen de cada versión, así una restauración nunca reconstruye. Usa más disco.",
+      "toggleAria": "Alternar retención de snapshots",
+      "keepNone": "Sin copias extra",
+      "keepCopies": "Una copia por versión",
+      "descRebuildFiles": "Reconstruye el commit anterior, salvo que sus archivos sigan en el host.",
+      "descInstantFiles": "Guarda los archivos de cada versión, así una restauración nunca reconstruye. Usa más disco."
     },
     "rollbackHistory": {
       "title": "Historial de reversiones",
       "valueOne": "{count} versión",
       "valueOther": "{count} versiones",
-      "descSnapshot": "Cuántas versiones recientes siguen restaurables. Las más antiguas se purgan para liberar disco.",
-      "descGit": "Se mantiene con cualquier estrategia: las imágenes de versiones recientes se conservan, así una reversión puede omitir la compilación si aún hay una en el host.",
+      "descSnapshot": "Las versiones antiguas se eliminan para liberar disco.",
+      "descGit": "Las imágenes recientes se conservan igualmente, así un rollback puede omitir la compilación.",
       "decreaseAria": "Reducir historial de reversiones",
       "increaseAria": "Aumentar historial de reversiones",
       "sizeEach": "~{size} cada una",
       "diskFree": "{size} libres",
       "autoBadge": "ajustado automáticamente",
-      "manualBadge": "definido manualmente"
+      "manualBadge": "definido manualmente",
+      "kindFiles": "archivos generados en disco",
+      "kindImages": "imágenes en el host",
+      "descGitFiles": "Los archivos de las versiones recientes se conservan igualmente, así un rollback puede omitir la compilación."
     },
     "commits": {
       "title": "Commits recientes",
@@ -614,12 +621,13 @@
       "infoPreview": "Añade estos registros primero: no cambian después de añadir el dominio, así que la propagación empieza ya. Después pulsa Añadir dominio para adjuntarlo y, por último, Verificar una vez que el DNS se resuelva.",
       "infoApply": "Los cambios de DNS pueden tardar hasta 48 horas en propagarse globalmente. Una vez que los registros se resuelvan, haz clic en Verificar abajo: comprobaremos el DNS, marcaremos el dominio como activo y aprovisionaremos SSL en segundo plano.",
       "verifying": "Verificando...",
-      "verify": "Verificar {hostname}",
-      "copy": "Copiar"
+      "verify": "Verificar {hostname}"
     },
     "overview": {
       "primary": "Principal",
       "mappedTo": "Asignado a",
+      "redirect": "Redirección",
+      "redirectValue": "{status} → {hostname}",
       "status": "Estado",
       "ssl": "SSL",
       "visit": "Visitar"

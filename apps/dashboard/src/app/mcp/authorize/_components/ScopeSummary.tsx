@@ -67,6 +67,8 @@ export function ScopeSummary({
       operatePickedProjects: m.dgOperatePickedProjects,
       viewPickedProjects: m.dgViewPickedProjects,
       readGithub: m.dgReadGithub,
+      readSource: m.dgReadSource,
+      notReadSource: m.dgNotReadSource,
       writeGithub: m.dgWriteGithub,
       servers: m.dgServers,
       backups: m.dgBackups,

@@ -293,7 +293,6 @@
       "successful": "部署成功",
       "deploying": "正在部署……"
     },
-    "viewDashboard": "查看仪表盘",
     "visitSite": "访问站点",
     "warningTitle": "部署已完成，但部分服务仍需处理。",
     "productionLogs": "生产日志",
@@ -335,7 +334,6 @@
     "running": "运行中",
     "buildingSuffix": "· {count} 个构建中",
     "failedSuffix": "· {count} 个失败",
-    "viewDashboard": "查看仪表盘",
     "decisionBannerTitle": "需要操作 —— 部分服务失败",
     "decisionBannerDefaultMsg": "本次部署完成时存在失败的服务。您可以保留它并稍后修复，或拒绝它以恢复到之前的版本。",
     "review": "审查",

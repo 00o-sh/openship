@@ -427,6 +427,7 @@ export type DigestKey =
   | "viewPickedProjects"
   | "readGithub"
   | "writeGithub"
+  | "readSource"
   | "servers"
   | "backups"
   | "everything"
@@ -436,6 +437,7 @@ export type DigestKey =
   | "notEnumerateProjects"
   | "notServers"
   | "notDelete"
+  | "notReadSource"
   | "noWrites";
 
 export interface CapabilityDigest {
@@ -474,6 +476,14 @@ export function capabilityDigest(selection: AccessSelection): CapabilityDigest {
   }
   if (github.length > 0) {
     can.push(writable(github) && !selection.readOnly ? "writeGithub" : "readGithub");
+    // A repo grant is DEPLOY-ONLY unless its scope names read paths, so "reads your
+    // GitHub repositories" alone is ambiguous about the thing people most want to
+    // know: can it see my source? State it either way rather than leaving it out.
+    if (github.some((g) => (g.scope?.read?.paths?.length ?? 0) > 0)) {
+      can.push("readSource");
+    } else {
+      cannot.push("notReadSource");
+    }
   }
   if (servers.length > 0) can.push("servers");
   if (backups.length > 0) can.push("backups");

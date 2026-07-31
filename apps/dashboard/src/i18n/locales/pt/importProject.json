@@ -293,7 +293,6 @@
       "successful": "Implantação Bem-sucedida",
       "deploying": "Implantando..."
     },
-    "viewDashboard": "Ver dashboard",
     "visitSite": "Visitar Site",
     "warningTitle": "A implantação foi concluída, mas alguns serviços ainda precisam de atenção.",
     "productionLogs": "Logs de Produção",
@@ -335,7 +334,6 @@
     "running": "em execução",
     "buildingSuffix": "· {count} compilando",
     "failedSuffix": "· {count} com falha",
-    "viewDashboard": "Ver Dashboard",
     "decisionBannerTitle": "Ação necessária — alguns serviços falharam",
     "decisionBannerDefaultMsg": "Esta implantação foi concluída com serviços que falharam. Mantenha-a e corrija-os depois, ou rejeite-a para restaurar a versão anterior.",
     "review": "Revisar",

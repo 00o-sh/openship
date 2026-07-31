@@ -1,10 +1,11 @@
 "use client";
 
 import React, { useCallback, useEffect, useId, useMemo, useState } from "react";
-import { Globe, Shield, Server, Eye, EyeOff, Link2, Hash } from "lucide-react";
+import { Globe, Shield, Server, Eye, EyeOff, Link2, Hash, CornerUpRight } from "lucide-react";
 import { domainsApi } from "@/lib/api";
 import { usePlatform } from "@/context/PlatformContext";
 import { useModal } from "@/context/ModalContext";
+import { CustomSelect } from "@/components/ui/CustomSelect";
 import DnsConfiguration from "@/app/(dashboard)/(deployment)/deploy/[slug]/components/DnsConfiguration";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import { normalizeSubdomain, normalizeSubdomainInput } from "@/utils/subdomain";
@@ -54,6 +55,20 @@ export interface RoutingSettingsCardProps {
    *  "Include www" switch, so a user typing `www.example.com` as their primary
    *  gets `example.com` + the toggle, not a conflicting duplicate route. */
   stripWww?: boolean;
+  /**
+   * Canonical redirect: serve a 30x to another of the project's hostnames instead
+   * of the app. Omit the whole prop to hide the control — the parent decides
+   * whether it applies (there's nothing to redirect to with one hostname, and
+   * Openship Cloud owns routing for cloud projects, so it's refused there).
+   *
+   * `targets` are the project's OTHER hostnames; picking "" means serve normally.
+   */
+  redirect?: {
+    to: string;
+    status: number;
+    targets: string[];
+    onChange: (next: { to: string; status: number }) => void | Promise<void>;
+  };
 }
 
 export function RoutingSettingsCard({
@@ -79,6 +94,7 @@ export function RoutingSettingsCard({
   portInline = false,
   hideTypeToggle = false,
   stripWww = false,
+  redirect,
 }: RoutingSettingsCardProps) {
   const { baseDomain } = usePlatform();
   const { t } = useI18n();
@@ -260,6 +276,45 @@ export function RoutingSettingsCard({
     </div>
   ) : null;
 
+  // Canonical-redirect row. A redirecting hostname serves nothing of its own — it
+  // answers a 30x to another hostname of the SAME project — so the target list is
+  // closed (never a free-text host, which would be an open redirect) and the
+  // status picker only appears once a target is chosen.
+  const redirectRow =
+    redirect && redirect.targets.length > 0 ? (
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="flex items-center gap-2">
+          <CornerUpRight className="size-3.5 text-muted-foreground" />
+          <span className="text-[13px] font-medium text-muted-foreground">{w.redirectTo}</span>
+        </div>
+        <div className="min-w-[190px] flex-1">
+          <CustomSelect
+            value={redirect.to}
+            onChange={(next) => void redirect.onChange({ to: next, status: redirect.status || 301 })}
+            options={[
+              { value: "", label: w.redirectServeApp },
+              ...redirect.targets.map((target) => ({
+                value: target,
+                label: interpolate(w.redirectToHost, { hostname: target }),
+              })),
+            ]}
+          />
+        </div>
+        {redirect.to ? (
+          <div className="w-[132px]">
+            <CustomSelect
+              value={String(redirect.status || 301)}
+              onChange={(next) => void redirect.onChange({ to: redirect.to, status: Number(next) })}
+              options={[
+                { value: "301", label: w.redirectPermanent },
+                { value: "302", label: w.redirectTemporary },
+              ]}
+            />
+          </div>
+        ) : null}
+      </div>
+    ) : null;
+
   return (
     <div className="space-y-3">
       {typeof exposed === "boolean" && onExposedChange && (
@@ -417,6 +472,8 @@ export function RoutingSettingsCard({
               )}
             </div>
           )}
+
+          {redirectRow}
 
           {!portInline && showsPortTarget && (
             <div className="flex items-center gap-3">

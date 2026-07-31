@@ -47,8 +47,6 @@
     "createProjectsTitle": "Neue Projekte erstellen",
     "createProjectsDesc": "Der Client kann Projekte erstellen und verwaltet die von ihm erstellten vollständig — einschließlich Löschen. Projekte, die er nicht selbst erstellt hat, sind für ihn nicht sichtbar.",
     "resourcesHeading": "Ressourcen",
-    "advancedShow": "Server, Mail und Backups anzeigen",
-    "advancedHide": "Server, Mail und Backups ausblenden",
     "advancedNote": "Diese schalten keine MCP-Tools frei, aber dieselbe Autorisierung kann sie trotzdem über die REST-API erreichen.",
     "summaryHeading": "Was dieser Client erhält",
     "summaryEmptyTitle": "Noch kein Zugriff erteilt",

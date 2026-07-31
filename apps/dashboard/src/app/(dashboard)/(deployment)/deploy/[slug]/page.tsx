@@ -377,6 +377,8 @@ const DeployRepository: React.FC = () => {
                                     hasServer={config.options.hasServer}
                                     runtimeMode={config.runtimeMode}
                                     isServices={usesServiceDeployment(config)}
+                                    rollbackWindow={config.rollbackWindow}
+                                    rollbackStrategy={config.rollbackStrategy}
                                     serverName={(() => {
                                         // Resolve the selected server by id; if id isn't set yet but
                                         // there's exactly one server, use it (covers the paint before

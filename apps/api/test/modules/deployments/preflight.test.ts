@@ -257,4 +257,39 @@ describe("runPreflightChecks", () => {
       ]),
     );
   });
+
+  it("does NOT flag a never-deployed docker sub-app as a dead row (its Dockerfile owns the build, so empty commands are correct)", async () => {
+    const result = await runPreflightChecks(
+      {
+        repoUrl: "https://github.com/acme/monorepo.git",
+        branch: "main",
+        hasBuild: true,
+        hasServer: true,
+        deployTarget: "server",
+        organizationId: "org-1",
+      } as any,
+      {
+        ctx: { userId: "user-1", organizationId: "org-1" } as any,
+        buildStrategy: "local",
+        multiService: true,
+        composeServices: [
+          {
+            kind: "monorepo",
+            name: "api",
+            framework: "docker",
+            rootDirectory: "apps/api",
+            enabled: true,
+            everDeployed: false,
+          },
+        ],
+      },
+    );
+
+    // A Dockerfile sub-app is legitimately command-less → pass, not a "dead row"
+    // warning and not a hard fail.
+    expect(result.ok).toBe(true);
+    const config = result.checks.find((c) => c.id === "config");
+    expect(config?.status).toBe("pass");
+    expect(config?.message ?? "").not.toContain("api");
+  });
 });

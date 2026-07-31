@@ -47,8 +47,6 @@
     "createProjectsTitle": "新しいプロジェクトの作成",
     "createProjectsDesc": "クライアントはプロジェクトを作成でき、自ら作成したものは削除を含めて完全に管理できます。自分が作成していないプロジェクトは参照できません。",
     "resourcesHeading": "リソース",
-    "advancedShow": "サーバー・メール・バックアップを表示",
-    "advancedHide": "サーバー・メール・バックアップを非表示",
     "advancedNote": "これらは MCP ツールを解放しませんが、同じ認可で REST API 経由でアクセスできます。",
     "summaryHeading": "このクライアントに付与される内容",
     "summaryEmptyTitle": "まだ何も付与されていません",

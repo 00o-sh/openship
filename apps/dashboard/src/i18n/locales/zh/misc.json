@@ -47,8 +47,6 @@
     "createProjectsTitle": "创建新项目",
     "createProjectsDesc": "该客户端可以创建项目，并完全管理它自己创建的项目——包括删除它们。它看不到并非由它创建的项目。",
     "resourcesHeading": "资源",
-    "advancedShow": "显示服务器、邮件和备份",
-    "advancedHide": "隐藏服务器、邮件和备份",
     "advancedNote": "这些不会解锁任何 MCP 工具，但同一份授权仍可通过 REST API 访问它们。",
     "summaryHeading": "此客户端将获得的权限",
     "summaryEmptyTitle": "尚未授予任何权限",

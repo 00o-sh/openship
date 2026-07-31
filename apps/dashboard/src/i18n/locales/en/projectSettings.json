@@ -477,22 +477,29 @@
       "title": "Rollback strategy",
       "rebuild": "Rebuild (git)",
       "instant": "Instant (snapshot)",
-      "descRebuild": "Holds no extra artifacts. A rollback still reuses a retained image when one is left on the host, and rebuilds the old commit otherwise.",
-      "descInstant": "Also keeps each version's runtime artifact so a restore never has to rebuild. Uses more disk, bounded by the history limit.",
-      "toggleAria": "Toggle snapshot retention"
+      "descRebuild": "Rebuilds the old commit, unless its image is still on the host.",
+      "descInstant": "Keeps every version's image, so a restore never rebuilds. Uses more disk.",
+      "toggleAria": "Toggle snapshot retention",
+      "keepNone": "Keep no extra copies",
+      "keepCopies": "Keep a copy per version",
+      "descRebuildFiles": "Rebuilds the old commit, unless its files are still on the host.",
+      "descInstantFiles": "Keeps every version's files, so a restore never rebuilds. Uses more disk."
     },
     "rollbackHistory": {
       "title": "Rollback history",
       "valueOne": "{count} version",
       "valueOther": "{count} versions",
-      "descSnapshot": "How many recent versions stay restorable. Older ones are pruned to reclaim disk.",
-      "descGit": "Kept regardless of strategy: images from recent versions are retained, so a rollback can skip the build when one is still on the host.",
+      "descSnapshot": "Older versions are pruned to reclaim disk.",
+      "descGit": "Recent images are retained either way, so a rollback can skip the build.",
       "decreaseAria": "Decrease rollback history",
       "increaseAria": "Increase rollback history",
       "sizeEach": "~{size} each",
       "diskFree": "{size} free",
       "autoBadge": "sized automatically",
-      "manualBadge": "set manually"
+      "manualBadge": "set manually",
+      "kindFiles": "built files on disk",
+      "kindImages": "images on the host",
+      "descGitFiles": "Recent versions' files are retained either way, so a rollback can skip the build."
     },
     "commits": {
       "title": "Recent Commits",
@@ -757,8 +764,7 @@
       "infoPreview": "Add these records first — they don't change after adding, so propagation starts now. Then press Add domain to attach it, and finally Verify once DNS resolves.",
       "infoApply": "DNS changes can take up to 48 hours to propagate globally. Once the records resolve, click Verify below — we'll check DNS, mark the domain active, and provision SSL in the background.",
       "verifying": "Verifying...",
-      "verify": "Verify {hostname}",
-      "copy": "Copy"
+      "verify": "Verify {hostname}"
     },
     "records": {
       "toggle": "DNS records",
@@ -781,6 +787,8 @@
     "overview": {
       "primary": "Primary",
       "mappedTo": "Mapped to",
+      "redirect": "Redirect",
+      "redirectValue": "{status} → {hostname}",
       "status": "Status",
       "ssl": "SSL",
       "visit": "Visit"

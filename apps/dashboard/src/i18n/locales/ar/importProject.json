@@ -296,7 +296,6 @@
       "successful": "تم النشر بنجاح",
       "deploying": "جارٍ النشر..."
     },
-    "viewDashboard": "عرض لوحة التحكم",
     "visitSite": "زيارة الموقع",
     "warningTitle": "انتهى النشر، لكن بعض الخدمات لا تزال تحتاج إلى انتباه.",
     "productionLogs": "سجلات الإنتاج",
@@ -338,7 +337,6 @@
     "running": "قيد التشغيل",
     "buildingSuffix": "· {count} قيد البناء",
     "failedSuffix": "· {count} فشل",
-    "viewDashboard": "عرض لوحة التحكم",
     "decisionBannerTitle": "إجراء مطلوب — فشلت بعض الخدمات",
     "decisionBannerDefaultMsg": "انتهى هذا النشر بخدمات فاشلة. احتفظ به وأصلحها لاحقًا، أو ارفضه لاستعادة الإصدار السابق.",
     "review": "مراجعة",

@@ -24,6 +24,14 @@ import type { RollbackCapacityUI } from "@/lib/api/projects";
 export interface RollbackRetentionCardsProps {
   /** Project retention preference: "snapshot" keeps artifacts, "git" rebuilds. */
   strategy: "git" | "snapshot";
+  /**
+   * What ONE retained version physically is on this project's host:
+   *   "image" — a container image (server apps, each compose service).
+   *   "files" — the built files of a static site. There is no image at all, so
+   *     copy that talks about images is simply wrong for these projects, and a
+   *     restore is a copy of a directory rather than a container start.
+   */
+  artifactKind?: "image" | "files";
   /** Live retention numbers from GET /projects/:id/rollback-capacity. */
   capacity: RollbackCapacityUI | null;
   onToggleStrategy?: () => void;
@@ -38,6 +46,7 @@ export interface RollbackRetentionCardsProps {
 export function RollbackRetentionCards({
   strategy,
   capacity,
+  artifactKind = "image",
   onToggleStrategy,
   onChangeWindow,
   togglingStrategy = false,
@@ -47,12 +56,16 @@ export function RollbackRetentionCards({
   const { t } = useI18n();
   const g = t.projectSettings.git;
   const isSnapshot = strategy === "snapshot";
+  const isFiles = artifactKind === "files";
   const windowVal = capacity?.window ?? 5;
   const maxWindow = capacity?.maxWindow ?? MAX_ROLLBACK_WINDOW;
   const canEdit = !readOnly && !!onChangeWindow;
 
-  /** "~1.8 GB each · 42 GB free · auto" — only the parts we actually measured. */
-  const measured: string[] = [];
+  /** "files on disk · ~1.8 GB each · 42 GB free · auto" — the artifact kind
+   *  always, then only the parts we actually measured. */
+  const measured: string[] = [
+    isFiles ? g.rollbackHistory.kindFiles : g.rollbackHistory.kindImages,
+  ];
   if (capacity?.snapshotSizeBytes) {
     measured.push(
       interpolate(g.rollbackHistory.sizeEach, { size: formatBytes(capacity.snapshotSizeBytes) }),
@@ -66,20 +79,31 @@ export function RollbackRetentionCards({
   if (capacity?.source === "auto") measured.push(g.rollbackHistory.autoBadge);
   if (capacity?.source === "explicit") measured.push(g.rollbackHistory.manualBadge);
 
-  const historyDescription = [
-    isSnapshot ? g.rollbackHistory.descSnapshot : g.rollbackHistory.descGit,
-    measured.join(" · "),
-  ]
-    .filter(Boolean)
-    .join(" — ");
+  // Description and MEASUREMENTS stay separate. Joining them with " — " produced
+  // one long paragraph that, in the deploy wizard's narrow two-column layout,
+  // wrapped into ~8 lines and blew out the card height. The numbers go in the
+  // card's footer slot instead, where they read as metadata.
+  const historyDescription = isSnapshot
+    ? g.rollbackHistory.descSnapshot
+    : isFiles
+      ? g.rollbackHistory.descGitFiles
+      : g.rollbackHistory.descGit;
 
   return (
     <div className="grid gap-3 sm:grid-cols-2">
       <InfoCard
         icon={RotateCcw}
         title={g.rollbackStrategy.title}
-        value={isSnapshot ? g.rollbackStrategy.instant : g.rollbackStrategy.rebuild}
-        description={isSnapshot ? g.rollbackStrategy.descInstant : g.rollbackStrategy.descRebuild}
+        value={isSnapshot ? g.rollbackStrategy.keepCopies : g.rollbackStrategy.keepNone}
+        description={
+          isSnapshot
+            ? isFiles
+              ? g.rollbackStrategy.descInstantFiles
+              : g.rollbackStrategy.descInstant
+            : isFiles
+              ? g.rollbackStrategy.descRebuildFiles
+              : g.rollbackStrategy.descRebuild
+        }
         action={
           readOnly || !onToggleStrategy ? undefined : (
             <button
@@ -112,6 +136,11 @@ export function RollbackRetentionCards({
           { count: String(windowVal) },
         )}
         description={historyDescription}
+        footer={
+          <p className="text-[11px] leading-relaxed text-muted-foreground/80">
+            {measured.join(" · ")}
+          </p>
+        }
         action={
           canEdit ? (
             <div className="flex items-center gap-1.5">

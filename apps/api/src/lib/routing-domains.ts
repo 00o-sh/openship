@@ -4,7 +4,8 @@ import { SYSTEM, ConflictError, resolveServiceHostnameLabel, normalizeCustomHost
 import { env } from "../config/env";
 import { serviceKind } from "./deployable-service";
 import { resolveServicePublicEndpoints } from "./public-endpoints";
-import { resolveSslPatch, sslIssueLockKey } from "./domain-ssl";
+import { acmeIssueLockKey, LOCAL_ACME_SCOPE, resolveSslPatch, sslIssueLockKey } from "./domain-ssl";
+import { resolveRouteRedirect } from "./domain-redirect";
 import { createProvisionLock } from "./provision-lock";
 import { generateToken } from "./domain-token";
 
@@ -37,6 +38,10 @@ export interface PlannedRouteDomain {
   isPrimary?: boolean;
   createIfMissing?: boolean;
   verified?: boolean;
+  /** Canonical redirect: serve a 30x to this hostname instead of the app. Kept as
+   *  the raw stored value; `resolveRouteRedirect` decides whether it's live. */
+  redirectTo?: string | null;
+  redirectStatus?: number | null;
 }
 
 export function getRoutingBaseDomain(): string {
@@ -103,6 +108,8 @@ export function buildProjectRouteDomains(opts: {
     domain?: string;
     customDomain?: string;
     domainType?: "free" | "custom";
+    redirectTo?: string | null;
+    redirectStatus?: number | null;
   }>;
   runtimeName: string;
   usesManagedRouting: boolean;
@@ -130,6 +137,8 @@ export function buildProjectRouteDomains(opts: {
       skipSsl?: boolean;
       isPrimary?: boolean;
       verified?: boolean;
+      redirectTo?: string | null;
+      redirectStatus?: number | null;
     },
   ) => {
     const normalized = hostname.trim().toLowerCase();
@@ -181,6 +190,10 @@ export function buildProjectRouteDomains(opts: {
       isPrimary: route.isPrimary ?? planned.length === 0,
       createIfMissing: true,
       verified: isVerified,
+      // Prefer the caller's value (the submitted endpoint) over the row, so a
+      // redirect set in the same save applies on this deploy rather than the next.
+      redirectTo: route.redirectTo ?? domainRow?.redirectTo ?? null,
+      redirectStatus: route.redirectStatus ?? domainRow?.redirectStatus ?? null,
     });
   };
 
@@ -206,7 +219,13 @@ export function buildProjectRouteDomains(opts: {
       // preflight.ts. The chosen route is primary for the first endpoint
       // (deploy URL, analytics, etc.).
       if (endpoint.domainType === "custom" && endpoint.customDomain) {
-        add(endpoint.customDomain, { domainType: "custom", destination, isPrimary: index === 0 });
+        add(endpoint.customDomain, {
+          domainType: "custom",
+          destination,
+          isPrimary: index === 0,
+          redirectTo: endpoint.redirectTo,
+          redirectStatus: endpoint.redirectStatus,
+        });
         continue;
       }
 
@@ -217,6 +236,8 @@ export function buildProjectRouteDomains(opts: {
           destination,
           skipSsl: true,
           isPrimary: index === 0,
+          redirectTo: endpoint.redirectTo,
+          redirectStatus: endpoint.redirectStatus,
         });
       }
     }
@@ -242,6 +263,8 @@ export function buildProjectRouteDomains(opts: {
           : undefined,
       isPrimary: domain.isPrimary,
       verified: domain.verified,
+      redirectTo: domain.redirectTo,
+      redirectStatus: domain.redirectStatus,
     });
   }
 
@@ -324,6 +347,11 @@ export function buildServiceRouteDomains(opts: {
       isPrimary: false,
       createIfMissing: true,
       verified: isVerified,
+      // A service-scoped hostname can carry a redirect too (its own www sibling),
+      // and it's stored on the same row — so read it from there rather than
+      // silently ignoring it for compose/service routes.
+      redirectTo: domainRow?.redirectTo ?? null,
+      redirectStatus: domainRow?.redirectStatus ?? null,
     });
   }
 
@@ -377,6 +405,9 @@ export function createTrackedSslProvider(
   ssl: SslProvider,
   domainByHostname: Map<string, Domain>,
   log?: (message: string) => void,
+  /** {@link acmeIssueLockKey} scope — the serving server's id. Defaults to the
+   *  local box, which is correct for a single-box install. */
+  lockScope: string = LOCAL_ACME_SCOPE,
 ): SslProvider {
   // Persist via the shared no-clobber resolver: a verified cert → "active"; a
   // genuinely missing cert → "provisioning"; a transient read failure leaves the
@@ -415,7 +446,13 @@ export function createTrackedSslProvider(
       let result: SslResult;
       let errorReason: string | null = null;
       try {
-        result = await ssl.provisionCert(host);
+        // Nested per-box lock: a deploy routing BOTH `example.com` and
+        // `www.example.com` issues two certificates in a row, and each certbot run
+        // binds the same standalone challenge port. Without this they can also
+        // collide with the pending-SSL sweep working on the other hostname.
+        result = await createProvisionLock(acmeIssueLockKey(lockScope)).run(() =>
+          ssl.provisionCert(host),
+        );
       } catch (err) {
         errorReason = safeErrorMessage(err);
         result = { domain: host, expiresAt: "", issuer: "", verified: false, reason: "missing" };
@@ -564,12 +601,20 @@ export async function ensureRouteDomainRecord(opts: {
 }
 
 export function toRoutedDomainInputs(domains: PlannedRouteDomain[]): RoutedDomainInput[] {
-  return domains.map((domain) => ({
-    hostname: domain.hostname,
-    tls: domain.tls,
-    provisionSsl: domain.provisionSsl,
-    terminatesTlsLocally: domain.terminatesTlsLocally,
-    targetPort: domain.targetPort,
-    targetPath: domain.targetPath,
-  }));
+  // A redirect is only registered when its target is one of the hostnames being
+  // routed right now — see resolveRouteRedirect for why a stale target must fall
+  // back to serving rather than sending every visitor to a dead host.
+  const live = domains.map((domain) => domain.hostname);
+  return domains.map((domain) => {
+    const redirect = resolveRouteRedirect(domain, live);
+    return {
+      hostname: domain.hostname,
+      tls: domain.tls,
+      provisionSsl: domain.provisionSsl,
+      terminatesTlsLocally: domain.terminatesTlsLocally,
+      targetPort: domain.targetPort,
+      targetPath: domain.targetPath,
+      ...(redirect ? { redirectHost: redirect } : {}),
+    };
+  });
 }

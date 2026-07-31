@@ -29,6 +29,27 @@ export function slugify(text: string): string {
 }
 
 /**
+ * Redirect codes a canonical host redirect may use, and the one it defaults to.
+ *
+ * Lives here because BOTH sides of the package boundary need the same list: the
+ * API validates an operator's choice against it (lib/domain-redirect.ts) and the
+ * edge renderer re-checks before interpolating it into a vhost
+ * (adapters/infra/nginx.ts — an out-of-range value there would emit `return 0`
+ * and make `openresty -t` reject the whole file). Two copies could drift into a
+ * status the API accepts and the edge refuses.
+ */
+export const REDIRECT_STATUSES = [301, 302, 307, 308] as const;
+export type RedirectStatus = (typeof REDIRECT_STATUSES)[number];
+export const DEFAULT_REDIRECT_STATUS: RedirectStatus = 301;
+
+/** Coerce to a usable redirect code, falling back to 301. */
+export function resolveRedirectStatus(status?: number | null): RedirectStatus {
+  return REDIRECT_STATUSES.includes(status as RedirectStatus)
+    ? (status as RedirectStatus)
+    : DEFAULT_REDIRECT_STATUS;
+}
+
+/**
  * Canonical stored form of a custom hostname: trimmed, lowercased, scheme
  * stripped, trailing slash removed. The SINGLE normalizer shared by service
  * route storage (@repo/db) and the domain service (@repo/api), so a hostname

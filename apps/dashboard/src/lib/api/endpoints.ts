@@ -199,6 +199,9 @@ export const endpoints = {
       `github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/clone-token`,
     repoBranches: (owner: string, repo: string) =>
       `github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches`,
+    /** Recursive path list, for the source-access path picker. */
+    repoTree: (owner: string, repo: string) =>
+      `github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tree`,
     status: "github/status",
     connect: "github/connect",
     connectRedirect: "github/connect/redirect",

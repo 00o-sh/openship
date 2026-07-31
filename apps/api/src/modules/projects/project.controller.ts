@@ -2065,6 +2065,12 @@ export async function connectDomain(c: Context) {
       success: true,
       domain: result.domain,
       records: result.records,
+      // `www.<apex>` is its OWN domain row — it verifies and certs separately, so
+      // the caller needs its id to offer Verify for it, and `wwwError` when the
+      // sibling couldn't be claimed at all. Reporting only the apex is what made
+      // "Include www" look like it worked when it hadn't.
+      ...(result.www ? { www: result.www } : {}),
+      ...(result.wwwError ? { wwwError: result.wwwError } : {}),
     });
   } catch (err) {
     if (err instanceof Error) {

@@ -385,6 +385,127 @@ describe("behind a TLS-terminating CDN", () => {
   });
 });
 
+// A canonical host redirect (`www.example.com` → `example.com`, or an old domain
+// → a new one). The redirecting host serves NO content of its own, but it is still
+// an ordinary domain: it needs its own certificate, and it still has to be able to
+// answer the ACME challenge that issues it.
+describe("canonical host redirect", () => {
+  const REDIRECT: RouteConfig = {
+    ...OURS,
+    domain: "www.example.com",
+    redirectHost: { target: "example.com", statusCode: 301 },
+  };
+  const wwwConf = (conf: (slug: string) => string | undefined) => conf("www-example-com")!;
+
+  test("replaces the upstream in BOTH the :80 and :443 blocks", async () => {
+    const { nginx, conf } = setup({ certDomains: ["www.example.com"] });
+    await nginx.registerRoute(REDIRECT);
+    const c = wwwConf(conf);
+    const http = c.slice(c.indexOf("listen 80;"), c.indexOf("listen 443 ssl;"));
+    const https = c.slice(c.indexOf("listen 443 ssl;"));
+    for (const block of [http, https]) {
+      expect(block).toContain("return 301 https://example.com$request_uri;");
+      expect(block).not.toContain("proxy_pass http://127.0.0.1:3009;");
+    }
+  });
+
+  test("goes STRAIGHT to the target from :80 — no bounce through our own https", async () => {
+    // The destination is a different host, so there's no Flexible-CDN loop to dodge
+    // and the conditional self-redirect would only cost an extra round trip.
+    const { nginx, conf } = setup({ certDomains: ["www.example.com"] });
+    await nginx.registerRoute(REDIRECT);
+    const http = wwwConf(conf).split("listen 443 ssl;")[0];
+    expect(http).not.toContain("return 301 https://$server_name$request_uri;");
+    expect(http).toContain("return 301 https://example.com$request_uri;");
+  });
+
+  test("$request_uri is preserved, so a deep link keeps its path AND query", async () => {
+    const { nginx, conf } = setup({ certDomains: ["www.example.com"] });
+    await nginx.registerRoute(REDIRECT);
+    expect(wwwConf(conf)).toContain("https://example.com$request_uri;");
+  });
+
+  test("KEEPS the ACME challenge location — it issues its own certificate", async () => {
+    // Without this the redirect would answer certbot's HTTP-01 with a 301 and the
+    // host could never get the cert its own `https://` redirect depends on.
+    const { nginx, conf } = setup({ certDomains: ["www.example.com"] });
+    await nginx.registerRoute(REDIRECT);
+    const c = wwwConf(conf);
+    expect(c).toContain("location /.well-known/acme-challenge/");
+    expect(c).toContain(`proxy_pass http://127.0.0.1:${ACME_HTTP01_PORT}`);
+  });
+
+  test("still gets a :443 listener before its real cert exists (bootstrap TLS)", async () => {
+    // Same reason as any other locally-terminated host: no listener means the origin
+    // refuses the handshake (Cloudflare 525) and issuance deadlocks.
+    const { nginx, conf } = setup();
+    await nginx.registerRoute(REDIRECT);
+    expect(wwwConf(conf)).toContain("listen 443 ssl;");
+  });
+
+  test("honours the other redirect codes, and falls back to 301 for a non-redirect", async () => {
+    for (const [status, expected] of [[302, 302], [308, 308], [200, 301]] as const) {
+      const { nginx, conf } = setup({ certDomains: ["www.example.com"] });
+      await nginx.registerRoute({
+        ...REDIRECT,
+        redirectHost: { target: "example.com", statusCode: status },
+      });
+      expect(wwwConf(conf)).toContain(`return ${expected} https://example.com$request_uri;`);
+    }
+  });
+
+  test("DROPS path locations, header rules and the webhook proxy", async () => {
+    // A host where some paths redirect and others proxy is a split-brain vhost, and
+    // a 30x would lose a webhook delivery's POST body.
+    const { nginx, conf } = setup({ certDomains: ["www.example.com"] });
+    await nginx.registerRoute({
+      ...REDIRECT,
+      proxyLocations: [{ pathPrefix: "/api/", targetUrl: "http://127.0.0.1:4001" }],
+      redirects: [{ path: "/old", exact: true, statusCode: 302, destination: "/new" }],
+      headerRules: [{ path: "/", headers: [{ key: "X-Frame-Options", value: "DENY" }] }],
+      webhookProxy: "http://127.0.0.1:4000/api/webhooks/",
+    });
+    const c = wwwConf(conf);
+    expect(c).not.toContain("location /api/");
+    expect(c).not.toContain("location = /old");
+    expect(c).not.toContain("X-Frame-Options");
+    expect(c).not.toContain("/_openship/hooks/");
+  });
+
+  test("REFUSES an injection-shaped target instead of interpolating it", async () => {
+    // The target lands in the emitted config, so it gets the same validation the
+    // route's own domain does — an API-side check is not the last line of defence.
+    const { nginx } = setup();
+    await expect(
+      nginx.registerRoute({
+        ...OURS,
+        domain: "www.example.com",
+        redirectHost: { target: "example.com;\n return 301 http://evil.test", statusCode: 301 },
+      }),
+    ).rejects.toThrow();
+  });
+
+  test("survives cert re-registration — the route sidecar carries the redirect", async () => {
+    // provisionCert re-registers from the persisted RouteConfig to add the TLS
+    // block; a redirect dropped there would silently start serving the app again.
+    const { nginx, conf, files } = setup();
+    await nginx.registerRoute(REDIRECT);
+    const sidecar = [...files.entries()].find(([p]) => p.includes("www-example-com") && p.endsWith(".json"));
+    expect(sidecar).toBeDefined();
+    expect(JSON.parse(sidecar![1]).redirectHost).toEqual({
+      target: "example.com",
+      statusCode: 301,
+    });
+    // Re-register the way provisionCert does, now WITH a cert on disk.
+    const saved = JSON.parse(sidecar![1]) as RouteConfig;
+    const withCert = setup({ certDomains: ["www.example.com"] });
+    await withCert.nginx.registerRoute({ ...saved, domain: "www.example.com", tls: true });
+    const reissued = wwwConf(withCert.conf);
+    expect(reissued).toContain("listen 443 ssl;");
+    expect(reissued).toContain("return 301 https://example.com$request_uri;");
+  });
+});
+
 // Security: an HTTPS request whose SNI matches no vhost must NOT fall through to
 // the first-loaded 443 server block (cross-serving another app's cert+backend).
 // The default catch-all owns `443 ssl default_server` and rejects unknown SNI.
