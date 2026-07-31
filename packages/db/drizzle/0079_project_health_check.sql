@@ -1,0 +1,16 @@
+-- Deploy-time readiness gate, per project.
+--
+-- This is Openship's OWN post-start gate (the pipeline waits for the app to
+-- answer before calling a deploy ready), not the Docker HEALTHCHECK directive —
+-- that one is per compose service and already lives in `service.advanced`.
+--
+-- Nullable with NO default, and no backfill: NULL means "off", so every existing
+-- project moves to the new off-by-default behaviour. Previously the 15s
+-- stabilization watch and the 45s TCP probe were hardcoded on every deploy and
+-- could fail (and then force-remove) a container that was running fine. Opting
+-- in is now explicit.
+--
+-- Shape (all fields optional, all defaults off) — see OpenshipHealthCheck:
+--   { enabled, path, port, timeoutSeconds,
+--     stabilization, stabilizationSeconds, onFailure: "warn" | "fail" }
+ALTER TABLE "project" ADD COLUMN IF NOT EXISTS "health_check" jsonb;

@@ -1,6 +1,6 @@
 import { api } from "./client";
 import type { PrepareComposeService, PrepareProjectResponse } from "./deploy";
-import type { RoutingConfig, RouteRuleSpec } from "@repo/core";
+import type { RoutingConfig, RouteRuleSpec, OpenshipHealthCheck } from "@repo/core";
 import { endpoints } from "./endpoints";
 
 /* ------------------------------------------------------------------ */
@@ -204,6 +204,11 @@ export const projectsApi = {
     };
     /** Routing config parsed from the repo's vercel.json (opaque passthrough). */
     routingConfig?: RoutingConfig | null;
+    /**
+     * Deploy-time readiness gate. Omitted/null = OFF (the default) — the deploy
+     * does no post-start waiting. Opaque passthrough to the project column.
+     */
+    healthCheck?: OpenshipHealthCheck | null;
   }) => api.post<any>(endpoints.projects.ensure, body),
 
   /** List local projects only */

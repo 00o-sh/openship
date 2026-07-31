@@ -195,6 +195,26 @@ const RoutingRuleSchema = Type.Object({
   source: Type.String({ maxLength: 2000 }),
   destination: Type.String({ maxLength: 2000 }),
 });
+
+/**
+ * Openship's deploy-time readiness gate — mirrors `OpenshipHealthCheck` in
+ * @repo/core, which is what `openship.json` declares and what the pipeline
+ * reads. NOT the Docker HEALTHCHECK directive (that one is per compose service,
+ * under `service.advanced.healthcheck`).
+ *
+ * Every field optional, every default off: an absent/`{}` value means the deploy
+ * does no post-start waiting at all. Bounds mirror the core parser so the wizard,
+ * `openship.json`, and MCP can't disagree about what's accepted.
+ */
+const HealthCheckSchema = Type.Object({
+  enabled: Type.Optional(Type.Boolean()),
+  path: Type.Optional(Type.String({ maxLength: 2000 })),
+  port: Type.Optional(Type.Number({ minimum: 1, maximum: 65535 })),
+  timeoutSeconds: Type.Optional(Type.Number({ minimum: 1, maximum: 600 })),
+  stabilization: Type.Optional(Type.Boolean()),
+  stabilizationSeconds: Type.Optional(Type.Number({ minimum: 1, maximum: 600 })),
+  onFailure: Type.Optional(Type.Union([Type.Literal("warn"), Type.Literal("fail")])),
+});
 const RoutingConfigSchema = Type.Object({
   rewrites: Type.Optional(Type.Array(RoutingRuleSchema, { maxItems: 200 })),
   redirects: Type.Optional(
@@ -350,6 +370,15 @@ export const CreateProjectBody = Type.Object({
       Type.Literal("container-ip"),
     ]),
   ),
+  /**
+   * Deploy-time readiness gate. Omitted/null = OFF, which is the default for
+   * every project — the deploy reports ready as soon as the workload is up and
+   * routed, and the advisory in-container port probe (`meta.portCheck`,
+   * re-runnable via POST /projects/:id/port-check) reports listening state
+   * without being able to fail a deploy. Pass an object to opt in; pass null to
+   * clear it. See HealthCheckSchema.
+   */
+  healthCheck: Type.Optional(Type.Union([Type.Null(), HealthCheckSchema])),
   /**
    * Apps-catalog marker. Set by the Create-App instantiator when a project is
    * installed from the Apps catalog (Convex, WordPress, webmail, …). Moves the

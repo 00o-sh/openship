@@ -67,6 +67,64 @@ export interface OpenshipHealthcheck {
   disable?: boolean;
 }
 
+/**
+ * Openship's own DEPLOY-TIME readiness gate — distinct from
+ * `services[].healthcheck` above, which is the Docker-native `HEALTHCHECK`
+ * directive baked into a compose service and run by the daemon.  This one runs
+ * in the deploy pipeline, between "the container started" and "the deployment is
+ * ready", and is the only one that can hold up (or veto) a deploy.
+ *
+ * EVERYTHING HERE IS OFF BY DEFAULT.  Omit the block — or omit the whole
+ * `healthCheck` field — and a deploy does no post-start waiting whatsoever:
+ * activate → route → ready.  That default is deliberate. The pipeline already
+ * runs an *advisory* in-container port probe after the deploy is live
+ * (`auditPorts`, surfaced as `meta.portCheck` and re-runnable on demand via
+ * `POST /projects/:id/port-check`), so "is my app actually listening?" is
+ * answered without a gate that can delay or fail a working deploy.
+ *
+ * Turn these on when you want the deploy itself to refuse to go green — e.g. a
+ * release pipeline that must not advance on a broken build.
+ */
+export interface OpenshipHealthCheck {
+  /**
+   * Probe the app's port after start and wait for it to answer. `false`/absent
+   * ⇒ no probe is issued at all (the default).
+   */
+  enabled?: boolean;
+  /**
+   * Require an HTTP GET to this path to answer below 500. Omit to accept a bare
+   * TCP connection, which also passes for non-HTTP services.
+   */
+  path?: string;
+  /** Port to probe. Defaults to the app's own port. */
+  port?: number;
+  /** How long to wait for the app to answer. Default 45. */
+  timeoutSeconds?: number;
+  /**
+   * Watch the container for a restart loop before reporting ready. Independent
+   * of `enabled` — this reads the runtime (so it also covers remote/SSH
+   * targets) rather than dialing a port. `false`/absent ⇒ not watched.
+   */
+  stabilization?: boolean;
+  /** How long to watch for a restart loop. Default 15. */
+  stabilizationSeconds?: number;
+  /**
+   * What a failed check does.
+   *   "warn" (default) — the deploy stays `ready` and carries an
+   *                      action-required warning. Never destroys anything.
+   *   "fail"           — the deploy fails and reverts to the previous
+   *                      deployment, which keeps serving.
+   */
+  onFailure?: OpenshipHealthCheckFailureAction;
+}
+
+export type OpenshipHealthCheckFailureAction = "warn" | "fail";
+
+export const OPENSHIP_HEALTH_CHECK_FAILURE_ACTIONS: readonly OpenshipHealthCheckFailureAction[] = [
+  "warn",
+  "fail",
+];
+
 export interface OpenshipService {
   name: string;
   image?: string;
@@ -157,6 +215,8 @@ export interface OpenshipConfig {
   routes?: RoutingConfig;
   // ── Resources ──
   resources?: OpenshipResources;
+  // ── Deploy-time readiness gate (all off by default) ──
+  healthCheck?: OpenshipHealthCheck;
   // ── Services (compose) ──
   services?: OpenshipService[];
   // ── Monorepo ──

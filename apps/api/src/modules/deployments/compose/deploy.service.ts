@@ -63,6 +63,7 @@ import {
   verifyDeployedContainers,
   type StabilityTarget,
 } from "../stability-audit.service";
+import { resolveHealthGate } from "../health-gate";
 import type { PortCheckResult } from "../../../lib/deployment-runtime";
 import { resolveServicePort } from "./domain-helpers";
 import { buildCompositeRegistration, buildDomainFanoutRegistrations } from "./composite-route";
@@ -1506,27 +1507,44 @@ export async function deployComposeServices(
   // service inline as it was created would fail the deploy for a stack that
   // converges seconds later. Watching them together, after the stack is whole,
   // separates "bouncing hard" from "waited, then settled".
+  // Gated on the project's opt-in health check, exactly like the single-app path
+  // (resolveHealthGate is the one place that policy lives, so the two pipelines
+  // can't drift). Default is OFF: the stack reports what docker reported, and each
+  // service's own Docker HEALTHCHECK — authored per service in
+  // `advanced.healthcheck` — keeps running regardless, since the daemon owns it.
+  const healthGate = resolveHealthGate(project.healthCheck);
   const stabilityWarnings: string[] = [];
-  if (stabilityTargets.length > 0) {
-    const findings = await verifyDeployedContainers(runtime, stabilityTargets, logger);
+  if (stabilityTargets.length > 0 && healthGate.stabilization.enabled) {
+    const findings = await verifyDeployedContainers(runtime, stabilityTargets, logger, {
+      windowMs: healthGate.stabilization.windowMs,
+    });
     for (const finding of findings) {
       if (finding.verdict.ok && finding.verdict.warning) {
         stabilityWarnings.push(`${finding.target.serviceName}: ${finding.verdict.warning}`);
       }
     }
-    // Rows + SSE are the audit's business; this loop only reconciles the
-    // in-memory result set the summary below is computed from.
-    const demoted = await recordUnstableServices({ deploymentId: dep.id, findings, logger });
-    for (const result of results) {
-      const finding = result.serviceId ? demoted.get(result.serviceId) : undefined;
-      if (!finding || result.status === "failed") continue;
-      result.status = "failed";
-      // `detail` (headline + log tail), not the headline alone: when every
-      // service crash-loops this becomes the DEPLOYMENT's errorMessage, and the
-      // whole point is that it answers "why" without an SSH session.
-      result.error = finding.detail;
-      successful = Math.max(0, successful - 1);
-      unavailableServiceNames.add(finding.target.serviceName);
+    if (healthGate.onFailure === "fail") {
+      // Rows + SSE are the audit's business; this loop only reconciles the
+      // in-memory result set the summary below is computed from.
+      const demoted = await recordUnstableServices({ deploymentId: dep.id, findings, logger });
+      for (const result of results) {
+        const finding = result.serviceId ? demoted.get(result.serviceId) : undefined;
+        if (!finding || result.status === "failed") continue;
+        result.status = "failed";
+        // `detail` (headline + log tail), not the headline alone: when every
+        // service crash-loops this becomes the DEPLOYMENT's errorMessage, and the
+        // whole point is that it answers "why" without an SSH session.
+        result.error = finding.detail;
+        successful = Math.max(0, successful - 1);
+        unavailableServiceNames.add(finding.target.serviceName);
+      }
+    } else {
+      // "warn": say what didn't hold, but leave the service's deploy result alone
+      // so the stack stays up. Same rule as the single-app path — opting into the
+      // watch to get the signal must not also opt into a veto.
+      for (const finding of findings.filter((f) => !f.verdict.ok)) {
+        stabilityWarnings.push(`${finding.target.serviceName}: ${finding.verdict.reason}`);
+      }
     }
   }
 
