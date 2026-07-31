@@ -197,7 +197,7 @@ const RoutingRuleSchema = Type.Object({
 });
 
 /**
- * Openship's deploy-time readiness gate — mirrors `OpenshipHealthCheck` in
+ * Openship's deploy-time readiness gate — mirrors `OpenshipReadiness` in
  * @repo/core, which is what `openship.json` declares and what the pipeline
  * reads. NOT the Docker HEALTHCHECK directive (that one is per compose service,
  * under `service.advanced.healthcheck`).
@@ -206,7 +206,7 @@ const RoutingRuleSchema = Type.Object({
  * does no post-start waiting at all. Bounds mirror the core parser so the wizard,
  * `openship.json`, and MCP can't disagree about what's accepted.
  */
-const HealthCheckSchema = Type.Object({
+const ReadinessSchema = Type.Object({
   enabled: Type.Optional(Type.Boolean()),
   path: Type.Optional(Type.String({ maxLength: 2000 })),
   port: Type.Optional(Type.Number({ minimum: 1, maximum: 65535 })),
@@ -376,9 +376,9 @@ export const CreateProjectBody = Type.Object({
    * routed, and the advisory in-container port probe (`meta.portCheck`,
    * re-runnable via POST /projects/:id/port-check) reports listening state
    * without being able to fail a deploy. Pass an object to opt in; pass null to
-   * clear it. See HealthCheckSchema.
+   * clear it. See ReadinessSchema.
    */
-  healthCheck: Type.Optional(Type.Union([Type.Null(), HealthCheckSchema])),
+  readiness: Type.Optional(Type.Union([Type.Null(), ReadinessSchema])),
   /**
    * Apps-catalog marker. Set by the Create-App instantiator when a project is
    * installed from the Apps catalog (Convex, WordPress, webmail, …). Moves the

@@ -310,6 +310,23 @@ export async function containerUsage(c: Context) {
   return c.json({ data: usage });
 }
 
+/**
+ * GET /deployments/:id/pending — what this specific deploy is waiting on.
+ *
+ * Same builders as the project-scoped view (see pending-actions.service), so the
+ * two can't describe one condition differently. This is the one to poll while
+ * watching a deploy: a held prompt appears here with its deadline and the exact
+ * body that answers it.
+ */
+export async function pendingActions(c: Context) {
+  const ctx = getRequestContext(c);
+  const id = param(c, "id");
+  await permission.assert(getRequestContext(c), { resourceType: "deployment", resourceId: id, action: "read" });
+  const { getDeploymentPendingActions } = await import("../projects/pending-actions.service");
+  const actions = await getDeploymentPendingActions(id, ctx.organizationId);
+  return c.json({ data: { actions } });
+}
+
 export async function buildRespond(c: Context) {
   const ctx = getRequestContext(c);
   const id = param(c, "id");

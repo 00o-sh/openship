@@ -1,6 +1,6 @@
 import { api } from "./client";
 import { endpoints } from "./endpoints";
-import type { StackId, ComposeAdvanced, RoutingConfig, OpenshipResourceTier, OpenshipHealthCheck } from "@repo/core";
+import type { StackId, ComposeAdvanced, RoutingConfig, OpenshipResourceTier, OpenshipReadiness } from "@repo/core";
 import type { CloudResourceTier, CloudResourceCustom, PublicEndpoint, PortCheckUI, OutputCheckUI } from "@/context/deployment/types";
 
 /** How a rollback to a given deployment would run — see the API's restore plan. */
@@ -152,7 +152,7 @@ export interface PrepareProjectResponse extends PrepareAppConfig {
    * Declared readiness gate. Seeds the wizard's Health section; absent (the
    * common case) leaves it off, which is also what the pipeline does.
    */
-  healthCheck?: OpenshipHealthCheck;
+  readiness?: OpenshipReadiness;
   error?: string;
   current_status?: string;
   exists?: boolean;

@@ -67,14 +67,14 @@ export interface DeploymentMeta {
   portCheckSkipped?: (number | string)[];
   /**
    * An OPT-IN readiness check that failed while the project's
-   * `healthCheck.onFailure` was "warn" — the deploy is live and `ready`, and this
+   * `readiness.onFailure` was "warn" — the deploy is live and `ready`, and this
    * records what didn't answer.
    *
    * Deliberately NOT merged into `deployWarning`: any `deployWarning` makes the
    * project read `routingUnsynced` (see enrichProject), which offers "Retry
    * routing" — the wrong affordance for an app that didn't answer on its port.
    */
-  healthWarning?: string;
+  readinessWarning?: string;
   /**
    * Advisory post-deploy static-output probe — the file-side twin of `portCheck`,
    * one entry per routed path. Point-in-time; never gates the deploy. An entry

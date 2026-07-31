@@ -50,7 +50,16 @@ export async function add(c: Context) {
       isPrimary: result.domain.isPrimary,
     },
   });
-  return c.json({ data: result.domain, records: result.records }, 201);
+  return c.json(
+    {
+      data: result.domain,
+      records: result.records,
+      ...(result.preexistingEdgeSite
+        ? { preexistingEdgeSite: result.preexistingEdgeSite }
+        : {}),
+    },
+    201,
+  );
 }
 
 /** GET /domains/:id — one domain's verify + SSL state. */

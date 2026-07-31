@@ -22,6 +22,7 @@ export const endpoints = {
     outputCheck: (id: string | number) => `projects/${id}/output-check`,
     toggle: (id: string | number, action: "enable" | "disable") => `projects/${id}/${action}`,
     retryRouting: (id: string | number) => `projects/${id}/routing/retry`,
+    pendingActions: (id: string | number) => `projects/${id}/pending-actions`,
     edgeStatus: (id: string | number) => `projects/${id}/routing/edge-status`,
     clearCache: (id: string | number) => `projects/${id}/clear-cache`,
     clearBuild: (id: string | number) => `projects/${id}/clear-build`,
@@ -254,6 +255,9 @@ export const endpoints = {
   system: {
     browse: "system/browse",
     settings: "system/settings",
+    /** Vhosts the local edge serves that Openship no longer tracks. */
+    edgeUntracked: "system/edge/untracked",
+    edgeUntrackedRemove: "system/edge/untracked/remove",
     emailSettings: "system/settings/email",
     emailSettingsTest: "system/settings/email/test",
     onboarding: "system/onboarding",

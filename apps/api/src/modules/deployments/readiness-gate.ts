@@ -1,5 +1,5 @@
 /**
- * The deploy-time readiness gate, resolved from a project's `healthCheck`.
+ * The deploy-time readiness gate, resolved from a project's `readiness`.
  *
  * OFF IS THE DEFAULT, and that is the whole point of this module. Both post-start
  * checks used to be hardcoded on every deploy — a 15s stabilization watch plus a
@@ -8,7 +8,7 @@
  * on the critical path to reach a verdict that could delete a working app.
  *
  * What replaced it: nothing, unless the project asks. A deploy with no
- * `healthCheck` runs neither check and reports ready as soon as the workload is up
+ * `readiness` runs neither check and reports ready as soon as the workload is up
  * and routed. "Is my app actually listening?" is still answered — by the ADVISORY
  * in-container probe the pipeline already runs after the deploy is live
  * (`auditPorts` → `meta.portCheck`, re-runnable via POST /projects/:id/port-check),
@@ -21,9 +21,9 @@
  */
 
 import { SYSTEM } from "@repo/core";
-import type { OpenshipHealthCheck, OpenshipHealthCheckFailureAction } from "@repo/core";
+import type { OpenshipReadiness, OpenshipReadinessFailureAction } from "@repo/core";
 
-export interface ResolvedHealthGate {
+export interface ResolvedReadinessGate {
   /** TCP/HTTP readiness probe against the app's port. */
   probe: {
     enabled: boolean;
@@ -40,7 +40,7 @@ export interface ResolvedHealthGate {
     windowMs: number;
   };
   /** What a failed check does. */
-  onFailure: OpenshipHealthCheckFailureAction;
+  onFailure: OpenshipReadinessFailureAction;
   /** True when at least one check is enabled — i.e. the pipeline needs a gate at all. */
   active: boolean;
 }
@@ -53,15 +53,15 @@ function secondsToMs(seconds: number | undefined, fallbackMs: number): number {
 }
 
 /**
- * Resolve a project's stored `healthCheck` into the effective gate.
+ * Resolve a project's stored `readiness` into the effective gate.
  *
  * Null/undefined/`{}` all resolve to inactive — `active: false` is what makes the
- * pipeline pass `healthCheck: undefined` to runDeployPipeline and skip the step
+ * pipeline pass `readiness: undefined` to runDeployPipeline and skip the step
  * outright, rather than invoking a no-op check.
  */
-export function resolveHealthGate(
-  config: OpenshipHealthCheck | null | undefined,
-): ResolvedHealthGate {
+export function resolveReadinessGate(
+  config: OpenshipReadiness | null | undefined,
+): ResolvedReadinessGate {
   const probeEnabled = config?.enabled === true;
   const stabilizationEnabled = config?.stabilization === true;
   return {
@@ -69,8 +69,8 @@ export function resolveHealthGate(
       enabled: probeEnabled,
       path: config?.path?.trim() || undefined,
       port: typeof config?.port === "number" && config.port > 0 ? config.port : undefined,
-      timeoutMs: secondsToMs(config?.timeoutSeconds, SYSTEM.DEPLOYMENTS.HEALTH_CHECK_TIMEOUT_MS),
-      intervalMs: SYSTEM.DEPLOYMENTS.HEALTH_CHECK_INTERVAL_MS,
+      timeoutMs: secondsToMs(config?.timeoutSeconds, SYSTEM.DEPLOYMENTS.READINESS_TIMEOUT_MS),
+      intervalMs: SYSTEM.DEPLOYMENTS.READINESS_INTERVAL_MS,
     },
     stabilization: {
       enabled: stabilizationEnabled,
@@ -99,8 +99,8 @@ export function resolveHealthGate(
  * deployment. Otherwise it reports through `onWarn` and returns normally, leaving
  * the deploy live.
  */
-export async function runHealthGate(opts: {
-  gate: ResolvedHealthGate;
+export async function runReadinessGate(opts: {
+  gate: ResolvedReadinessGate;
   /** Watch the workload for a restart loop; failure detail or null. Omit when there's nothing to watch. */
   stabilize?: (windowMs: number) => Promise<string | null>;
   /** Dial the workload; failure detail or null. Omit when it isn't reachable from here. */

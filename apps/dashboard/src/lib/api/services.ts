@@ -1,8 +1,8 @@
 import { api } from "./client";
 import { endpoints } from "./endpoints";
-import type { ComposeAdvanced } from "@repo/core";
+import type { ComposeAdvanced, ComposeAdvancedPatch } from "@repo/core";
 
-export type { ComposeAdvanced, ComposeHealthcheck } from "@repo/core";
+export type { ComposeAdvanced, ComposeAdvancedPatch, ComposeHealthcheck, OpenshipReadiness } from "@repo/core";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -179,7 +179,7 @@ export type ServiceInput = {
   volumes?: string[];
   command?: string;
   restart?: string;
-  advanced?: ComposeAdvanced;
+  advanced?: ComposeAdvancedPatch;
   exposed?: boolean;
   exposedPort?: string;
   domain?: string;

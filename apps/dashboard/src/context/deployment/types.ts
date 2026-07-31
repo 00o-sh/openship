@@ -1,7 +1,7 @@
 import type { Terminal } from "@xterm/xterm";
 import type { FrameworkId, EnvironmentVariable } from "@/components/import-project/types";
 import type { PrepareComposeService, PrepareSingleAppCandidate } from "@/lib/api/deploy";
-import { getBuildImage, STACKS, type ProjectType, type BuildStrategy, type DeployTarget, type RuntimeMode, type StackId, type RoutingConfig, type OpenshipHealthCheck, type ResourceTier as CoreResourceTier } from "@repo/core";
+import { getBuildImage, STACKS, type ProjectType, type BuildStrategy, type DeployTarget, type RuntimeMode, type StackId, type RoutingConfig, type OpenshipReadiness, type ResourceTier as CoreResourceTier } from "@repo/core";
 import type { BuildLog } from "@/utils/deploymentPhaseDetector";
 import { randomUUID } from "@/lib/random-uuid";
 
@@ -323,7 +323,7 @@ export interface DeploymentConfig {
    * default: the deploy reports ready as soon as the workload is up and routed,
    * and nothing post-start can delay or veto it.
    */
-  healthCheck?: OpenshipHealthCheck | null;
+  readiness?: OpenshipReadiness | null;
   /**
    * Resource tier picked for Openship Cloud deploys. Self-hosted servers
    * inherit the host's capacity, so this field is meaningless for them

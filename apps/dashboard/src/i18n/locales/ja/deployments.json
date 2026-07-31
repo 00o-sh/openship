@@ -66,6 +66,7 @@
     "building": "ビルド中",
     "deploying": "デプロイ中",
     "partial": "一部完了",
+    "actionRequired": "対応が必要",
     "rejected": "却下",
     "verifying": "検証中",
     "pending": "保留中"

@@ -298,7 +298,12 @@ export default function AppInstallPage() {
             setLiveUrl(null);
           }
           setPhase("done");
-        } else if (["failed", "cancelled", "partial_failure", "rejected"].includes(status)) {
+        } else if (
+          // Every SETTLED status. `action_required` is a failure we can name
+          // (e.g. the port was taken) — still an error for this wizard, and
+          // omitting it would leave the install polling at 2s forever.
+          ["failed", "cancelled", "partial_failure", "action_required", "rejected"].includes(status)
+        ) {
           setErrorMsg(s.failureMessage || w.installFailed);
           setPhase("error");
         }

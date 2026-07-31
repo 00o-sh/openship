@@ -3,7 +3,7 @@
  */
 
 import { normalizeRoutingFields, repos, composeSpecDiff, type Project, type Service, type ServicePublicEndpoint } from "@repo/db";
-import { ForbiddenError, getProjectType, isValidCustomHostname, ValidationError, withTimeout, type ServiceContainerState, type StackId } from "@repo/core";
+import { ForbiddenError, getProjectType, isValidCustomHostname, ValidationError, withTimeout, type ComposeAdvanced, type ServiceContainerState, type StackId } from "@repo/core";
 import {
   BuildLogger,
   DockerRuntime,
@@ -129,6 +129,35 @@ function normalizeRoutingPatch(input: Parameters<typeof normalizeRoutingFields>[
  * treat the sentinel as "keep stored" (see secret-env.ts). The drift diff's
  * `environment` from/to are masked too so the reconcile UI can't leak them.
  */
+/**
+ * Merge an incoming `advanced` patch onto what's stored, so a caller that mentions
+ * one key can't erase the others.
+ *
+ * Semantics, mirroring how a JSON-merge patch behaves:
+ *   key absent  → leave the stored value alone
+ *   key = null  → remove it
+ *   key present → replace that key outright (shallow — see the call site)
+ *
+ * Exported for tests: this is the only thing standing between a partial PATCH and
+ * a silently-wiped readiness gate.
+ */
+export function mergeAdvanced(
+  stored: ComposeAdvanced | null | undefined,
+  incoming: unknown,
+): ComposeAdvanced {
+  const base: ComposeAdvanced = { ...(stored ?? {}) };
+  // A non-object (or explicit null) `advanced` means "clear it" — the one way to
+  // reset the whole blob, kept because that used to be the only behaviour.
+  if (incoming === null || typeof incoming !== "object" || Array.isArray(incoming)) {
+    return incoming === undefined ? base : {};
+  }
+  for (const [key, value] of Object.entries(incoming as Record<string, unknown>)) {
+    if (value === null) delete (base as Record<string, unknown>)[key];
+    else if (value !== undefined) (base as Record<string, unknown>)[key] = value;
+  }
+  return base;
+}
+
 function withDrift(svc: Service) {
   return {
     ...maskServiceEnv(svc),
@@ -381,7 +410,10 @@ export async function createService(
     command: trimOrNull(data.command),
     commandArgv: data.commandArgv ?? null, // #332
     restart: data.restart ?? "unless-stopped",
-    advanced: data.advanced ?? {},
+    // Through mergeAdvanced even on CREATE: there is nothing to preserve, but it
+    // strips the `null`-means-remove sentinels the update path accepts, so a
+    // caller can send one payload shape to both.
+    advanced: mergeAdvanced(null, data.advanced),
     ...routing,
     enabled: data.enabled ?? true,
     sortOrder: data.sortOrder ?? services.length,
@@ -435,6 +467,22 @@ export async function updateService(
       patch.environment,
       svc.environment as Record<string, string> | null,
     );
+  }
+
+  // `advanced` is ONE blob holding independent, separately-owned keys —
+  // `healthcheck` (edited in the service form), `readiness` (the deploy gate),
+  // `files` (written by an app template at install), `resources` (per-service
+  // caps). Writing `data.advanced` straight through replaced the whole thing, so
+  // any partial caller silently dropped every key it didn't mention. That is not
+  // hypothetical: this route is MCP-exposed, so an agent setting a healthcheck
+  // would erase the readiness gate — quietly changing whether deploys can fail —
+  // along with an app template's generated config files.
+  //
+  // Same shape of fix as `environment` above: merge against what's stored, and
+  // make removal explicit. Shallow by design — the keys are independent, and a
+  // deep merge would make a partially-specified healthcheck inherit stale fields.
+  if ("advanced" in patch) {
+    patch.advanced = mergeAdvanced(svc.advanced as ComposeAdvanced | null, patch.advanced);
   }
 
   if ("name" in patch && typeof patch.name === "string") {

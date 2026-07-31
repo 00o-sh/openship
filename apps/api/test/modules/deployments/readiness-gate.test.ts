@@ -1,18 +1,18 @@
 import { describe, it, expect } from "vitest";
 import { SYSTEM } from "@repo/core";
-import { resolveHealthGate, runHealthGate } from "../../../src/modules/deployments/health-gate";
+import { resolveReadinessGate, runReadinessGate } from "../../../src/modules/deployments/readiness-gate";
 
 /**
  * `active: false` is the load-bearing assertion in this file. build-pipeline reads
- * it to decide whether to hand runDeployPipeline a healthCheck AT ALL, and the
+ * it to decide whether to hand runDeployPipeline a readiness AT ALL, and the
  * pipeline skips the step entirely when there isn't one. If any of these started
  * resolving to active, every deploy would go back to waiting up to a minute after
  * start for a verdict that can veto (and previously destroy) a working container.
  */
-describe("resolveHealthGate — off unless asked", () => {
+describe("resolveReadinessGate — off unless asked", () => {
   it("is inactive for null, undefined, and an empty object", () => {
     for (const value of [null, undefined, {}]) {
-      const gate = resolveHealthGate(value);
+      const gate = resolveReadinessGate(value);
       expect(gate.active).toBe(false);
       expect(gate.probe.enabled).toBe(false);
       expect(gate.stabilization.enabled).toBe(false);
@@ -20,59 +20,59 @@ describe("resolveHealthGate — off unless asked", () => {
   });
 
   it("treats explicit false the same as absent", () => {
-    const gate = resolveHealthGate({ enabled: false, stabilization: false });
+    const gate = resolveReadinessGate({ enabled: false, stabilization: false });
     expect(gate.active).toBe(false);
   });
 
   // A config that carries tuning but never turns anything on is still off — the
   // knobs must not imply consent.
   it("stays inactive when only timings are declared", () => {
-    const gate = resolveHealthGate({ timeoutSeconds: 90, stabilizationSeconds: 30, path: "/healthz" });
+    const gate = resolveReadinessGate({ timeoutSeconds: 90, stabilizationSeconds: 30, path: "/healthz" });
     expect(gate.active).toBe(false);
   });
 
   it("goes active on the probe alone", () => {
-    const gate = resolveHealthGate({ enabled: true });
+    const gate = resolveReadinessGate({ enabled: true });
     expect(gate.active).toBe(true);
     expect(gate.probe.enabled).toBe(true);
     expect(gate.stabilization.enabled).toBe(false);
   });
 
   it("goes active on stabilization alone", () => {
-    const gate = resolveHealthGate({ stabilization: true });
+    const gate = resolveReadinessGate({ stabilization: true });
     expect(gate.active).toBe(true);
     expect(gate.probe.enabled).toBe(false);
     expect(gate.stabilization.enabled).toBe(true);
   });
 });
 
-describe("resolveHealthGate — failure action", () => {
+describe("resolveReadinessGate — failure action", () => {
   // Opting into a probe to get the log line must not opt you into a veto.
   it("defaults to warn even when a check is enabled", () => {
-    expect(resolveHealthGate({ enabled: true }).onFailure).toBe("warn");
-    expect(resolveHealthGate({ stabilization: true }).onFailure).toBe("warn");
+    expect(resolveReadinessGate({ enabled: true }).onFailure).toBe("warn");
+    expect(resolveReadinessGate({ stabilization: true }).onFailure).toBe("warn");
   });
 
   it("honours an explicit fail", () => {
-    expect(resolveHealthGate({ enabled: true, onFailure: "fail" }).onFailure).toBe("fail");
+    expect(resolveReadinessGate({ enabled: true, onFailure: "fail" }).onFailure).toBe("fail");
   });
 
   it("falls back to warn for an unrecognised action", () => {
-    const gate = resolveHealthGate({ enabled: true, onFailure: "explode" as never });
+    const gate = resolveReadinessGate({ enabled: true, onFailure: "explode" as never });
     expect(gate.onFailure).toBe("warn");
   });
 });
 
-describe("resolveHealthGate — timings", () => {
+describe("resolveReadinessGate — timings", () => {
   it("falls back to the SYSTEM defaults", () => {
-    const gate = resolveHealthGate({ enabled: true, stabilization: true });
-    expect(gate.probe.timeoutMs).toBe(SYSTEM.DEPLOYMENTS.HEALTH_CHECK_TIMEOUT_MS);
-    expect(gate.probe.intervalMs).toBe(SYSTEM.DEPLOYMENTS.HEALTH_CHECK_INTERVAL_MS);
+    const gate = resolveReadinessGate({ enabled: true, stabilization: true });
+    expect(gate.probe.timeoutMs).toBe(SYSTEM.DEPLOYMENTS.READINESS_TIMEOUT_MS);
+    expect(gate.probe.intervalMs).toBe(SYSTEM.DEPLOYMENTS.READINESS_INTERVAL_MS);
     expect(gate.stabilization.windowMs).toBe(SYSTEM.DEPLOYMENTS.STABILIZE_WINDOW_MS);
   });
 
   it("converts declared seconds to ms", () => {
-    const gate = resolveHealthGate({
+    const gate = resolveReadinessGate({
       enabled: true,
       stabilization: true,
       timeoutSeconds: 90,
@@ -86,21 +86,21 @@ describe("resolveHealthGate — timings", () => {
   // which reads as "the app is broken". Fall back rather than honour it.
   it("ignores non-positive and non-finite timings", () => {
     for (const bad of [0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
-      const gate = resolveHealthGate({
+      const gate = resolveReadinessGate({
         enabled: true,
         stabilization: true,
         timeoutSeconds: bad,
         stabilizationSeconds: bad,
       });
-      expect(gate.probe.timeoutMs).toBe(SYSTEM.DEPLOYMENTS.HEALTH_CHECK_TIMEOUT_MS);
+      expect(gate.probe.timeoutMs).toBe(SYSTEM.DEPLOYMENTS.READINESS_TIMEOUT_MS);
       expect(gate.stabilization.windowMs).toBe(SYSTEM.DEPLOYMENTS.STABILIZE_WINDOW_MS);
     }
   });
 });
 
-describe("resolveHealthGate — probe target", () => {
+describe("resolveReadinessGate — probe target", () => {
   it("keeps an explicit path and port", () => {
-    const gate = resolveHealthGate({ enabled: true, path: "/healthz", port: 8080 });
+    const gate = resolveReadinessGate({ enabled: true, path: "/healthz", port: 8080 });
     expect(gate.probe.path).toBe("/healthz");
     expect(gate.probe.port).toBe(8080);
   });
@@ -109,31 +109,78 @@ describe("resolveHealthGate — probe target", () => {
   // host port; an empty-string path must not become a "" path that changes the
   // probe from TCP-accept to HTTP.
   it("normalises a blank path and an unset port to undefined", () => {
-    const gate = resolveHealthGate({ enabled: true, path: "   " });
+    const gate = resolveReadinessGate({ enabled: true, path: "   " });
     expect(gate.probe.path).toBeUndefined();
     expect(gate.probe.port).toBeUndefined();
   });
 
   it("rejects a non-positive port rather than probing port 0", () => {
-    expect(resolveHealthGate({ enabled: true, port: 0 }).probe.port).toBeUndefined();
-    expect(resolveHealthGate({ enabled: true, port: -1 }).probe.port).toBeUndefined();
+    expect(resolveReadinessGate({ enabled: true, port: 0 }).probe.port).toBeUndefined();
+    expect(resolveReadinessGate({ enabled: true, port: -1 }).probe.port).toBeUndefined();
   });
 });
 
 /**
- * runHealthGate decides whether a deploy lives or dies, so each case here pins one
+ * Per-service precedence for compose stacks. The compose pipeline resolves
+ * `service.advanced.readiness ?? project.readiness` per service, so these pin the
+ * ?? semantics that expression depends on — in particular that a service opting IN
+ * doesn't leak to its peers, and a service declaring `{}` doesn't inherit.
+ */
+describe("resolveReadinessGate — per-service override precedence", () => {
+  const effective = (
+    serviceLevel: Parameters<typeof resolveReadinessGate>[0],
+    projectLevel: Parameters<typeof resolveReadinessGate>[0],
+  ) => resolveReadinessGate(serviceLevel ?? projectLevel);
+
+  it("inherits the project's gate when the service declares none", () => {
+    const gate = effective(undefined, { stabilization: true, onFailure: "fail" });
+    expect(gate.active).toBe(true);
+    expect(gate.stabilization.enabled).toBe(true);
+    expect(gate.onFailure).toBe("fail");
+  });
+
+  it("a service's own gate REPLACES the project's, it does not merge", () => {
+    // Service asks only for the probe; the project's stabilization must not leak in,
+    // or "just probe this one service" would silently also watch it for restarts.
+    const gate = effective({ enabled: true }, { stabilization: true, onFailure: "fail" });
+    expect(gate.probe.enabled).toBe(true);
+    expect(gate.stabilization.enabled).toBe(false);
+    expect(gate.onFailure).toBe("warn");
+  });
+
+  it("a service declaring an empty object opts OUT of the project's gate", () => {
+    // `{}` is present, so ?? keeps it — an explicit "nothing for me".
+    const gate = effective({}, { stabilization: true, onFailure: "fail" });
+    expect(gate.active).toBe(false);
+  });
+
+  it("is off when neither level declares anything", () => {
+    expect(effective(undefined, undefined).active).toBe(false);
+    expect(effective(undefined, null).active).toBe(false);
+  });
+
+  it("one service can veto while another only warns", () => {
+    const vetoing = effective({ stabilization: true, onFailure: "fail" }, null);
+    const warning = effective({ stabilization: true }, null);
+    expect(vetoing.onFailure).toBe("fail");
+    expect(warning.onFailure).toBe("warn");
+  });
+});
+
+/**
+ * runReadinessGate decides whether a deploy lives or dies, so each case here pins one
  * decision: was a check even run, and did its failure warn or veto. A throw is what
  * runDeployPipeline turns into a failed deploy + a revert.
  */
-describe("runHealthGate", () => {
+describe("runReadinessGate", () => {
   /** Collect what the gate did, so each test asserts one thing about it. */
-  function harness(over: Partial<Parameters<typeof runHealthGate>[0]> = {}) {
+  function harness(over: Partial<Parameters<typeof runReadinessGate>[0]> = {}) {
     const calls: string[] = [];
     const warnings: string[] = [];
     const logs: string[] = [];
-    const run = (gateInput: Parameters<typeof resolveHealthGate>[0]) =>
-      runHealthGate({
-        gate: resolveHealthGate(gateInput),
+    const run = (gateInput: Parameters<typeof resolveReadinessGate>[0]) =>
+      runReadinessGate({
+        gate: resolveReadinessGate(gateInput),
         stabilize: async () => {
           calls.push("stabilize");
           return null;
@@ -209,8 +256,8 @@ describe("runHealthGate", () => {
   // timeout to a verdict that's already decided.
   it("skips the probe once stabilization has failed", async () => {
     const calls: string[] = [];
-    await runHealthGate({
-      gate: resolveHealthGate({ enabled: true, stabilization: true }),
+    await runReadinessGate({
+      gate: resolveReadinessGate({ enabled: true, stabilization: true }),
       stabilize: async () => {
         calls.push("stabilize");
         return "did not stay up: crash loop";
@@ -227,8 +274,8 @@ describe("runHealthGate", () => {
 
   it("reports both failures when stabilization passes but the probe fails", async () => {
     const warnings: string[] = [];
-    await runHealthGate({
-      gate: resolveHealthGate({ enabled: true, stabilization: true }),
+    await runReadinessGate({
+      gate: resolveReadinessGate({ enabled: true, stabilization: true }),
       stabilize: async () => null,
       probe: async () => "never answered",
       onWarn: (d) => warnings.push(d),
@@ -242,8 +289,8 @@ describe("runHealthGate", () => {
   it("logs the reason when an enabled probe can't run here, and does not fail", async () => {
     const logs: string[] = [];
     await expect(
-      runHealthGate({
-        gate: resolveHealthGate({ enabled: true }),
+      runReadinessGate({
+        gate: resolveReadinessGate({ enabled: true }),
         probe: undefined,
         probeSkippedReason: "skipped — the readiness probe only runs for local targets",
         onWarn: () => {},
@@ -257,8 +304,8 @@ describe("runHealthGate", () => {
     // Static file-serve: a release DIRECTORY, no process to sample.
     const warnings: string[] = [];
     await expect(
-      runHealthGate({
-        gate: resolveHealthGate({ stabilization: true, onFailure: "fail" }),
+      runReadinessGate({
+        gate: resolveReadinessGate({ stabilization: true, onFailure: "fail" }),
         stabilize: undefined,
         onWarn: (d) => warnings.push(d),
         log: () => {},

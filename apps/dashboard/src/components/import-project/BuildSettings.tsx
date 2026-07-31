@@ -3,7 +3,7 @@
 import React, { useState } from "react";
 import { Terminal, FolderOutput, Package, Play, Hash, Settings2, ChevronDown, ChevronUp, Pencil, Hammer, BoxSelect, ShieldCheck } from "lucide-react";
 import { Toggle } from "@/components/project-settings/ServerSideSwitch";
-import HealthCheckSection from "@/components/project-settings/HealthCheckSection";
+import ReadinessSection from "@/components/project-settings/ReadinessSection";
 import { useOptionalDeployment } from "@/context/DeploymentContext";
 import { usePlatform } from "@/context/PlatformContext";
 import { getPublicEndpointHosts, getRecommendedSingleAppBuildImage, type PublicEndpoint } from "@/context/deployment/types";
@@ -522,9 +522,9 @@ const BuildSettings: React.FC<BuildSettingsProps> = ({
                     Only meaningful for a long-running server; a static site has no
                     port to probe. */}
                 {hasServer && (
-                  <HealthCheckSection
-                    value={config?.healthCheck}
-                    onChange={(next) => updateConfig?.({ healthCheck: next ?? null })}
+                  <ReadinessSection
+                    value={config?.readiness}
+                    onChange={(next) => updateConfig?.({ readiness: next ?? null })}
                   />
                 )}
               </div>

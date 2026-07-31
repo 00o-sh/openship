@@ -1,11 +1,45 @@
 import { api } from "./client";
 import type { PrepareComposeService, PrepareProjectResponse } from "./deploy";
-import type { RoutingConfig, RouteRuleSpec, OpenshipHealthCheck } from "@repo/core";
+import type { RoutingConfig, RouteRuleSpec, OpenshipReadiness } from "@repo/core";
 import { endpoints } from "./endpoints";
 
 /* ------------------------------------------------------------------ */
 /*  Projects API                                                      */
 /* ------------------------------------------------------------------ */
+
+/**
+ * One thing waiting on a human. Mirrors `PendingAction` in the API's
+ * pending-actions.service — the item carries its own resolutions, so the UI
+ * renders buttons from data instead of hard-coding which call fixes what.
+ */
+export interface PendingActionResolution {
+  label: string;
+  destructive?: boolean;
+  method: "POST" | "DELETE";
+  /** Concrete, params already substituted (e.g. /api/deployments/dep_1/redeploy). */
+  path: string;
+  body?: Record<string, unknown>;
+}
+
+export interface PendingAction {
+  id: string;
+  kind:
+    | "deploy_blocked"
+    | "prompt"
+    | "partial_decision"
+    | "routing_unsynced"
+    | "domain_unverified"
+    | "ssl_error"
+    | "port_advisory";
+  /** `advisory` items are hints, never escalated to blockers. */
+  severity: "action_required" | "advisory";
+  title: string;
+  message: string;
+  details?: Record<string, unknown>;
+  /** Only on `prompt` — when the held deploy gives up and aborts. */
+  expiresAt?: string;
+  resolveWith: PendingActionResolution[];
+}
 
 /** Rollback retention as the API reports it. `source` says where `window` came
  *  from: an explicit operator override, the disk-sized auto value measured at the
@@ -208,7 +242,7 @@ export const projectsApi = {
      * Deploy-time readiness gate. Omitted/null = OFF (the default) — the deploy
      * does no post-start waiting. Opaque passthrough to the project column.
      */
-    healthCheck?: OpenshipHealthCheck | null;
+    readiness?: OpenshipReadiness | null;
   }) => api.post<any>(endpoints.projects.ensure, body),
 
   /** List local projects only */
@@ -416,6 +450,17 @@ export const projectsApi = {
    *  when it still can't sync; clears the routing warning on success. */
   retryRouting: (id: string | number) =>
     api.post<{ ok: boolean; warning?: string; error?: string }>(endpoints.projects.retryRouting(id)),
+
+  /**
+   * Everything waiting on a human for this project — a blocked deploy, a deploy
+   * held on a decision, a keep/reject, unsynced routing, unverified domains,
+   * broken certs, plus port advisories. Each item carries `resolveWith`: the
+   * concrete calls that resolve it.
+   *
+   * On-demand (not on the project read), same as getCommitStatus / checkPorts.
+   */
+  getPendingActions: (id: string | number) =>
+    api.get<{ data: { actions: PendingAction[] } }>(endpoints.projects.pendingActions(id)),
 
   /** Clear CDN / proxy cache */
   clearCache: (id: string | number) => api.post<any>(endpoints.projects.clearCache(id)),

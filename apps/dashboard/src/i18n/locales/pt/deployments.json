@@ -66,6 +66,7 @@
     "building": "A construir",
     "deploying": "A implantar",
     "partial": "Parcial",
+    "actionRequired": "Ação necessária",
     "rejected": "Rejeitada",
     "verifying": "A verificar",
     "pending": "Pendente"

@@ -65,6 +65,29 @@ export function normalizeCustomHostname(raw: string): string {
 }
 
 /**
+ * Comparison form of a hostname READ BACK from serving config — an nginx
+ * `server_name`, a DNS answer, a cert SAN.
+ *
+ * Trim + lowercase + drop the FQDN root dot, and nothing else. `example.com.` is
+ * legal in `server_name` and in DNS, so anything comparing live config against
+ * stored rows must fold that away or it silently fails to match its own domain.
+ *
+ * Deliberately NOT built on {@link normalizeCustomHostname}, even though it looks
+ * like a superset: that one also strips `https://` and trailing slashes, which
+ * would make `isApexDomain` (below) start accepting scheme-prefixed input it
+ * previously rejected. This is byte-for-byte the expression `isApexDomain` already
+ * open-coded, so extracting it changes no behavior anywhere — it just stops the
+ * edge-orphan sweep from being a third copy.
+ *
+ * The split from `normalizeCustomHostname` is real, not incidental: that one
+ * normalizes USER INPUT (where a trailing dot is rejected by
+ * {@link isValidCustomHostname}); this one normalizes MACHINE OUTPUT.
+ */
+export function normalizeServedHostname(raw: string): string {
+  return raw.trim().toLowerCase().replace(/\.$/, "");
+}
+
+/**
  * The `www.` sibling of a hostname, or null when there isn't one to claim
  * because the hostname already IS a www host.
  *
@@ -150,7 +173,7 @@ const MULTI_PART_TLDS = new Set([
  * one label otherwise. Input should already be normalized (see normalizeCustomHostname).
  */
 export function isApexDomain(host: string): boolean {
-  const h = host.trim().toLowerCase().replace(/\.$/, "");
+  const h = normalizeServedHostname(host);
   if (!isValidCustomHostname(h)) return false;
   const labels = h.split(".");
   const lastTwo = labels.slice(-2).join(".");

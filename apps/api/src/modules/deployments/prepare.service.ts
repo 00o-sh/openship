@@ -34,7 +34,7 @@ import {
   type OpenshipEnv,
   type OpenshipService,
   type OpenshipResources,
-  type OpenshipHealthCheck,
+  type OpenshipReadiness,
   type OpenshipMonorepoApp,
   type ComposeAdvanced,
   resolveTierResources,
@@ -209,9 +209,9 @@ export interface ProjectInfo {
   /**
    * Declared deploy-time readiness gate. SEEDS the wizard's Health section only —
    * absent here means the wizard shows it off (the default), which is also what
-   * the pipeline does when the project has no `healthCheck`.
+   * the pipeline does when the project has no `readiness`.
    */
-  healthCheck?: OpenshipHealthCheck;
+  readiness?: OpenshipReadiness;
 }
 
 /** A `domains[]` entry normalized to the `CreateProjectBody.publicEndpoints` shape. */
@@ -332,6 +332,7 @@ function openshipServicesToCompose(services: OpenshipService[]): ComposeService[
         // (and vice versa).
         const advanced: ComposeAdvanced = {};
         if (s.healthcheck) advanced.healthcheck = s.healthcheck;
+        if (s.readiness) advanced.readiness = s.readiness;
         const res = toAdvancedResources(s.resources);
         if (res) advanced.resources = res;
         return Object.keys(advanced).length > 0 ? { advanced } : {};
@@ -394,7 +395,7 @@ function applyOpenshipOverlay(info: ProjectInfo, config: OpenshipConfig | undefi
     info.rootEnv = { ...(info.rootEnv ?? {}), ...envMapToRecord(config.env) };
   }
   if (config.resources) info.resources = config.resources;
-  if (config.healthCheck) info.healthCheck = config.healthCheck;
+  if (config.readiness) info.readiness = config.readiness;
 
   // Declared compose services replace detection: the project IS a services
   // project. runtimeMode="docker" then falls out of buildProductionProjectInput's
@@ -455,7 +456,7 @@ export function projectInfoToScanResponse(result: ProjectInfo) {
     ...(result.runtimeMode && { runtimeMode: result.runtimeMode }),
     ...(result.publicEndpoints && { publicEndpoints: result.publicEndpoints }),
     ...(result.resources && { resources: result.resources }),
-    ...(result.healthCheck && { healthCheck: result.healthCheck }),
+    ...(result.readiness && { readiness: result.readiness }),
     ...(result.rootEnv && Object.keys(result.rootEnv).length > 0 && { rootEnv: maskEnv(result.rootEnv) }),
     ...(result.routing && { routing: result.routing }),
     ...(result.monorepoWorkspace && { monorepoWorkspace: result.monorepoWorkspace }),

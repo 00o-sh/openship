@@ -30,6 +30,7 @@ import { resolveRecords } from "../../lib/dns-resolver";
 import { resolveProjectServerHost, resolveLocalServerHost, resolveInstancePublicIp, isLoopbackHost } from "../../lib/server-target";
 import { reconcileProjectRoutes } from "../../lib/route-apply.service";
 import { generateToken } from "../../lib/domain-token";
+import { untrackedSiteFor } from "../../lib/edge-orphans.service";
 import { publicEndpointHostname, resolveServicePublicEndpoints } from "../../lib/public-endpoints";
 import { sshManager } from "../../lib/ssh-manager";
 import type { DeploymentMeta } from "../../lib/deployment-runtime";
@@ -202,6 +203,25 @@ export async function addDomain(
     return { domain, records, ...resaveWww };
   }
 
+  /**
+   * Is the edge ALREADY serving this hostname from a vhost Openship lost track of?
+   *
+   * The DB conflict check above is the only gate on claiming a hostname, and it
+   * only knows about `domain` rows. Edge config lives on the host and outlives
+   * those rows by design — record-only delete keeps the vhost serving on purpose —
+   * so a hostname can be free in the DB while something is still answering on it.
+   *
+   * ADVISORY, never a block. Re-claiming a hostname whose forgotten vhost is still
+   * up is the normal recovery flow, and the next deploy rewrites that vhost
+   * wholesale (`registerRoute` replaces the whole file, and static-vs-proxy is an
+   * exclusive choice inside it). What was missing is being TOLD: if the deploy's
+   * route apply then fails — routing is best-effort, deliberately — the old site
+   * keeps serving under the new owner's hostname with nothing anywhere saying so.
+   * A static leftover is the bad case: it answers 200 with the previous project's
+   * files rather than 502ing like a dead upstream would.
+   */
+  const preexisting = await untrackedSiteFor(hostname);
+
   const token = generateToken(hostname);
 
   const domain = await repos.domain.create({
@@ -246,7 +266,14 @@ export async function addDomain(
     ctx.organizationId,
     !!data.includeWww,
   );
-  return { domain, records, ...www };
+  return {
+    domain,
+    records,
+    ...www,
+    // Only present when there IS something to say, so callers can spread it and
+    // clients can treat its absence as "nothing was already serving this".
+    ...(preexisting ? { preexistingEdgeSite: preexisting } : {}),
+  };
 }
 
 /**

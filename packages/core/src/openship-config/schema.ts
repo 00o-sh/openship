@@ -14,6 +14,7 @@
 
 import type { StackId } from "../stacks";
 import type { RoutingConfig } from "../metadata/types";
+import type { OpenshipReadiness } from "../types";
 
 export type OpenshipRuntime = "bare" | "docker";
 export type OpenshipProductionMode = "host" | "static" | "standalone";
@@ -68,62 +69,13 @@ export interface OpenshipHealthcheck {
 }
 
 /**
- * Openship's own DEPLOY-TIME readiness gate — distinct from
- * `services[].healthcheck` above, which is the Docker-native `HEALTHCHECK`
- * directive baked into a compose service and run by the daemon.  This one runs
- * in the deploy pipeline, between "the container started" and "the deployment is
- * ready", and is the only one that can hold up (or veto) a deploy.
- *
- * EVERYTHING HERE IS OFF BY DEFAULT.  Omit the block — or omit the whole
- * `healthCheck` field — and a deploy does no post-start waiting whatsoever:
- * activate → route → ready.  That default is deliberate. The pipeline already
- * runs an *advisory* in-container port probe after the deploy is live
- * (`auditPorts`, surfaced as `meta.portCheck` and re-runnable on demand via
- * `POST /projects/:id/port-check`), so "is my app actually listening?" is
- * answered without a gate that can delay or fail a working deploy.
- *
- * Turn these on when you want the deploy itself to refuse to go green — e.g. a
- * release pipeline that must not advance on a broken build.
+ * The deploy-time readiness gate lives in ../types alongside ComposeHealthcheck,
+ * because a compose SERVICE can carry one too (`service.advanced.readiness`) and
+ * both surfaces must reference one definition. Re-exported here so `openship.json`
+ * authoring types stay importable from one place.
  */
-export interface OpenshipHealthCheck {
-  /**
-   * Probe the app's port after start and wait for it to answer. `false`/absent
-   * ⇒ no probe is issued at all (the default).
-   */
-  enabled?: boolean;
-  /**
-   * Require an HTTP GET to this path to answer below 500. Omit to accept a bare
-   * TCP connection, which also passes for non-HTTP services.
-   */
-  path?: string;
-  /** Port to probe. Defaults to the app's own port. */
-  port?: number;
-  /** How long to wait for the app to answer. Default 45. */
-  timeoutSeconds?: number;
-  /**
-   * Watch the container for a restart loop before reporting ready. Independent
-   * of `enabled` — this reads the runtime (so it also covers remote/SSH
-   * targets) rather than dialing a port. `false`/absent ⇒ not watched.
-   */
-  stabilization?: boolean;
-  /** How long to watch for a restart loop. Default 15. */
-  stabilizationSeconds?: number;
-  /**
-   * What a failed check does.
-   *   "warn" (default) — the deploy stays `ready` and carries an
-   *                      action-required warning. Never destroys anything.
-   *   "fail"           — the deploy fails and reverts to the previous
-   *                      deployment, which keeps serving.
-   */
-  onFailure?: OpenshipHealthCheckFailureAction;
-}
-
-export type OpenshipHealthCheckFailureAction = "warn" | "fail";
-
-export const OPENSHIP_HEALTH_CHECK_FAILURE_ACTIONS: readonly OpenshipHealthCheckFailureAction[] = [
-  "warn",
-  "fail",
-];
+export type { OpenshipReadiness, OpenshipReadinessFailureAction } from "../types";
+export { OPENSHIP_READINESS_FAILURE_ACTIONS } from "../types";
 
 export interface OpenshipService {
   name: string;
@@ -140,6 +92,15 @@ export interface OpenshipService {
   exposedPort?: string;
   domain?: string;
   healthcheck?: OpenshipHealthcheck;
+  /**
+   * Per-service DEPLOY-TIME readiness gate, overriding the top-level `readiness`
+   * for this service. Absent ⇒ inherit the project's; neither ⇒ off.
+   *
+   * Not the same field as `healthcheck` above: that's the Docker HEALTHCHECK the
+   * daemon runs on a loop, this is the pipeline's one-shot "did it come up?" and
+   * the only one that can fail a deploy.
+   */
+  readiness?: OpenshipReadiness;
   /** Per-service cpu/memory caps, overriding the top-level `resources` field by
    *  field. Parity with compose `mem_limit` / `deploy.resources.limits`, which
    *  the compose parser now honors. `0` = no limit. */
@@ -216,7 +177,7 @@ export interface OpenshipConfig {
   // ── Resources ──
   resources?: OpenshipResources;
   // ── Deploy-time readiness gate (all off by default) ──
-  healthCheck?: OpenshipHealthCheck;
+  readiness?: OpenshipReadiness;
   // ── Services (compose) ──
   services?: OpenshipService[];
   // ── Monorepo ──

@@ -63,7 +63,7 @@ import {
   verifyDeployedContainers,
   type StabilityTarget,
 } from "../stability-audit.service";
-import { resolveHealthGate } from "../health-gate";
+import { resolveReadinessGate, type ResolvedReadinessGate } from "../readiness-gate";
 import type { PortCheckResult } from "../../../lib/deployment-runtime";
 import { resolveServicePort } from "./domain-helpers";
 import { buildCompositeRegistration, buildDomainFanoutRegistrations } from "./composite-route";
@@ -196,6 +196,17 @@ function hostPublishedPorts(service: Service): number[] {
  * unique and self-describing.
  */
 const APP_CONFIG_HOST_ROOT = process.env.OPENSHIP_APP_CONFIG_DIR || "/var/lib/openship/app-config";
+
+/**
+ * Wall-clock ceiling for the whole advisory port audit of a stack.
+ *
+ * The audit is always-on (it's the source of the dashboard's "is that the right
+ * port?" hint), so unlike the opt-in readiness gate it can't be turned off — which
+ * means it must be bounded. Mirrors `PORT_CHECK_BUDGET_MS` in
+ * projects/port-check.service.ts, which bounds the same probe for the same reason:
+ * past the budget, degrade to no hint, never to a stalled deploy.
+ */
+const PORT_AUDIT_BUDGET_MS = 8000;
 
 function appConfigHostPath(projectId: string, serviceName: string, containerPath: string): string {
   const safeSvc = serviceName.replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -688,10 +699,21 @@ export async function deployComposeServices(
 
   const results: ComposeDeployResult["services"] = [];
   const portChecks: PortCheckResult[] = [];
+  /** Exposed services to port-probe, collected in the deploy loop and run together
+   *  after it (see the concurrent audit below). */
+  const portAuditTargets: Array<{
+    containerId: string;
+    port: number;
+    serviceId?: string;
+    serviceName: string;
+  }> = [];
   // Containers THIS deploy created, watched for stability once the whole stack
   // is up. Carried-forward and static services are deliberately absent: a
   // pre-existing container's health isn't this deploy's verdict to give.
   const stabilityTargets: StabilityTarget[] = [];
+  /** serviceId → its EFFECTIVE readiness gate (own `advanced.readiness`, else the
+   *  project's). Filled as each service starts; read by the watch below. */
+  const readinessByServiceId = new Map<string, ResolvedReadinessGate>();
   // Per-domain routing failures across all services (domains are optional —
   // never fatal). Aggregated into the deployment's routing action-required signal.
   const composeRouteWarnings: string[] = [];
@@ -1320,6 +1342,15 @@ export async function deployComposeServices(
           containerId: result.containerId,
           startedAtMs: Date.now(),
         });
+        // Effective gate for THIS service: its own `advanced.readiness` when it
+        // declares one, else the project's. Captured here because `svc.advanced` is
+        // in hand; the watch itself runs after the whole stack is up.
+        readinessByServiceId.set(
+          svc.id,
+          resolveReadinessGate(
+            (svc.advanced as ComposeAdvanced | null)?.readiness ?? project.readiness,
+          ),
+        );
       }
 
       // Broadcast per-service "running" status to SSE subscribers
@@ -1338,12 +1369,18 @@ export async function deployComposeServices(
       });
 
       // Advisory: confirm an exposed service is actually listening on its public
-      // port, probed from inside its container/workspace. Never throws; only
-      // exposed services with a resolvable public port are probed + recorded.
+      // port. Only COLLECTED here — the probes run together after the loop, since
+      // each one can wait up to PORT_AUDIT_TIMEOUT_MS for a port that will never
+      // come up, and probing them one-at-a-time inside the loop made a stack of N
+      // wrong-port services cost N × that window on the deploy's critical path.
       const auditPort = resolveServicePublicPort(svc);
       if (auditPort !== undefined && result.containerId) {
-        const [pc] = await auditPorts(runtime, result.containerId, [auditPort], logger);
-        if (pc) portChecks.push({ ...pc, serviceId: svc.id, serviceName: svc.name });
+        portAuditTargets.push({
+          containerId: result.containerId,
+          port: auditPort,
+          serviceId: svc.id,
+          serviceName: svc.name,
+        });
       }
 
       // Reclaim the image this service just moved off — UNLESS it's still in the
@@ -1489,6 +1526,40 @@ export async function deployComposeServices(
     }
   }
 
+  // ── Advisory port audit, all services at once ──────────────────────────────
+  // Concurrent + budget-capped, because this is the one post-start wait that is
+  // NOT opt-in: it's how the dashboard learns to offer "is that the right port?",
+  // so it stays on by default — but it must not be able to dominate a deploy.
+  // Sequentially inside the loop, a stack whose services never bind cost one full
+  // probe window EACH; concurrently the whole audit costs one window, and the
+  // budget caps even that. Every probe is guaranteed non-throwing (auditPorts
+  // resolves to `checked:false` rather than rejecting), so the only thing the race
+  // can lose is the hint itself — never the deploy.
+  if (portAuditTargets.length > 0) {
+    const probes = Promise.all(
+      portAuditTargets.map(async (target) => {
+        const [pc] = await auditPorts(runtime, target.containerId, [target.port], logger);
+        return pc
+          ? { ...pc, serviceId: target.serviceId, serviceName: target.serviceName }
+          : null;
+      }),
+    );
+    const audited = await Promise.race([
+      probes,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), PORT_AUDIT_BUDGET_MS)),
+    ]);
+    if (audited) {
+      for (const pc of audited) if (pc) portChecks.push(pc);
+    } else {
+      logger.log(
+        `Port check: skipped the "is that the right port?" hint for ` +
+          `${portAuditTargets.length} service(s) — the probes didn't finish within ` +
+          `${Math.round(PORT_AUDIT_BUDGET_MS / 1000)}s. The deploy is unaffected.\n`,
+        "warn",
+      );
+    }
+  }
+
   // ── Cross-project service links (internal / shared-network mode) ────────────
   // Attach this consumer's containers to each internally-linked source app's
   // `openship-<slug>` network so injected internal hosts resolve (see the shared
@@ -1507,26 +1578,55 @@ export async function deployComposeServices(
   // service inline as it was created would fail the deploy for a stack that
   // converges seconds later. Watching them together, after the stack is whole,
   // separates "bouncing hard" from "waited, then settled".
-  // Gated on the project's opt-in health check, exactly like the single-app path
-  // (resolveHealthGate is the one place that policy lives, so the two pipelines
-  // can't drift). Default is OFF: the stack reports what docker reported, and each
-  // service's own Docker HEALTHCHECK — authored per service in
-  // `advanced.healthcheck` — keeps running regardless, since the daemon owns it.
-  const healthGate = resolveHealthGate(project.healthCheck);
+  // Gated on the opt-in readiness gate, PER SERVICE: a service's own
+  // `advanced.readiness` wins, else the project's. resolveReadinessGate is the one
+  // place that policy lives, so this and the single-app path can't drift. Default
+  // is OFF — the stack reports what docker reported, while each service's own
+  // Docker HEALTHCHECK (`advanced.healthcheck`) keeps running regardless, since
+  // the daemon owns that one and it never gates a deploy.
+  const watched = stabilityTargets.filter(
+    (t) => t.serviceId && readinessByServiceId.get(t.serviceId)?.stabilization.enabled,
+  );
   const stabilityWarnings: string[] = [];
-  if (stabilityTargets.length > 0 && healthGate.stabilization.enabled) {
-    const findings = await verifyDeployedContainers(runtime, stabilityTargets, logger, {
-      windowMs: healthGate.stabilization.windowMs,
-    });
+  if (watched.length > 0) {
+    // One wall-clock window covers every container (verifyDeployedContainers
+    // watches them concurrently), so take the longest any watched service asked
+    // for rather than running the audit once per distinct window.
+    const windowMs = Math.max(
+      ...watched.map((t) => readinessByServiceId.get(t.serviceId!)!.stabilization.windowMs),
+    );
+    const findings = await verifyDeployedContainers(runtime, watched, logger, { windowMs });
     for (const finding of findings) {
       if (finding.verdict.ok && finding.verdict.warning) {
         stabilityWarnings.push(`${finding.target.serviceName}: ${finding.verdict.warning}`);
       }
     }
-    if (healthGate.onFailure === "fail") {
+
+    // Failure action is per service too: one service may veto the deploy while
+    // another only warns.
+    const vetoing = findings.filter(
+      (f) =>
+        !f.verdict.ok &&
+        f.target.serviceId &&
+        readinessByServiceId.get(f.target.serviceId)?.onFailure === "fail",
+    );
+    for (const finding of findings.filter(
+      (f) => !f.verdict.ok && !vetoing.includes(f),
+    )) {
+      // "warn": say what didn't hold, but leave the service's deploy result alone
+      // so the stack stays up. Opting into the watch to get the signal must not
+      // also opt into a veto.
+      stabilityWarnings.push(`${finding.target.serviceName}: ${finding.verdict.reason}`);
+    }
+
+    if (vetoing.length > 0) {
       // Rows + SSE are the audit's business; this loop only reconciles the
       // in-memory result set the summary below is computed from.
-      const demoted = await recordUnstableServices({ deploymentId: dep.id, findings, logger });
+      const demoted = await recordUnstableServices({
+        deploymentId: dep.id,
+        findings: vetoing,
+        logger,
+      });
       for (const result of results) {
         const finding = result.serviceId ? demoted.get(result.serviceId) : undefined;
         if (!finding || result.status === "failed") continue;
@@ -1537,13 +1637,6 @@ export async function deployComposeServices(
         result.error = finding.detail;
         successful = Math.max(0, successful - 1);
         unavailableServiceNames.add(finding.target.serviceName);
-      }
-    } else {
-      // "warn": say what didn't hold, but leave the service's deploy result alone
-      // so the stack stays up. Same rule as the single-app path — opting into the
-      // watch to get the signal must not also opt into a veto.
-      for (const finding of findings.filter((f) => !f.verdict.ok)) {
-        stabilityWarnings.push(`${finding.target.serviceName}: ${finding.verdict.reason}`);
       }
     }
   }

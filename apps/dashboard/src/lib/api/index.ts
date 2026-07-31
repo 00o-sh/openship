@@ -59,6 +59,7 @@ export type { ImageCatalogEntry, ListImagesResponse } from "./images";
 export { aiApi } from "./ai";
 export { sandboxApi } from "./sandbox";
 export { systemApi } from "./system";
+export type { EdgeOrphanScan, UntrackedEdgeSite } from "./system";
 export { migrationApi } from "./migration";
 export { dockerMigrationApi } from "./server-migration";
 export type {

@@ -49,6 +49,16 @@ export interface PromptPayload {
   message: string;
   actions: Array<{ id: string; label: string; variant?: string }>;
   details?: Record<string, unknown>;
+  /**
+   * ISO deadline after which the hold gives up and the pipeline aborts.
+   *
+   * Stamped by whoever HOLDS the prompt (the session manager owns the timeout),
+   * not by the code that raises it — so it is absent on the raising side and
+   * present by the time a client sees it. A human watching a modal doesn't need
+   * this; an API client that has to poll to notice the prompt at all does, or it
+   * cannot tell "still waiting" from "I have 12 seconds left".
+   */
+  expiresAt?: string;
 }
 
 export type PromptUserFn = (prompt: PromptPayload) => Promise<string>;

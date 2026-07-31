@@ -66,6 +66,7 @@
     "building": "Derleniyor",
     "deploying": "Dağıtılıyor",
     "partial": "Kısmi",
+    "actionRequired": "İşlem gerekiyor",
     "rejected": "Reddedildi",
     "verifying": "Doğrulanıyor",
     "pending": "Beklemede"

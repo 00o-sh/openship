@@ -49,6 +49,20 @@ export function createDomainRepo(db: Database) {
     },
 
     /**
+     * Every hostname Openship tracks, instance-wide.
+     *
+     * Deliberately NOT org-scoped: the only caller is the edge-orphan sweep,
+     * which asks "does the box serve a vhost nobody has a record of". One edge
+     * fronts every org on the box, so scoping this to one org would report
+     * another org's live domains as orphans. Hostnames only (no rows), used
+     * purely as a set-membership check.
+     */
+    async listAllHostnames(): Promise<string[]> {
+      const rows = await db.query.domain.findMany({ columns: { hostname: true } });
+      return rows.map((r) => r.hostname);
+    },
+
+    /**
      * Return every domain row for a project.
      *
      * Most callers (routing-domain resolution, build pipeline, project
