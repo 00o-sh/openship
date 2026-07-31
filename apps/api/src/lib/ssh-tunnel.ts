@@ -56,6 +56,19 @@ export interface TunnelResponse {
 }
 
 /**
+ * Whether a `Transfer-Encoding` header value applies the chunked coding.
+ * Transfer-coding names are case-insensitive and the header carries the
+ * applied codings as a comma-separated list, chunked always last.
+ */
+function isChunkedEncoding(value: string | string[] | undefined): boolean {
+  if (typeof value !== "string") return false;
+  return value
+    .toLowerCase()
+    .split(",")
+    .some((coding) => coding.trim() === "chunked");
+}
+
+/**
  * Parse a chunked-transfer-encoded body out of an accumulated buffer.
  * Returns the decoded body, or `null` if the buffer doesn't yet contain a
  * complete terminating chunk (0-length chunk + trailing CRLF).
@@ -165,7 +178,7 @@ export async function tunnelRequest(
       const contentLength = parsedHeaders["content-length"]
         ? parseInt(parsedHeaders["content-length"] as string, 10)
         : null;
-      const isChunked = parsedHeaders["transfer-encoding"] === "chunked";
+      const isChunked = isChunkedEncoding(parsedHeaders["transfer-encoding"]);
 
       if (isChunked) {
         const decoded = decodeChunkedBody(bodyBytes);
