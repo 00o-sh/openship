@@ -16,7 +16,7 @@
  * never go stale the way a capability digest can when a route is retagged.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Plus, X, AlertTriangle, Check, ChevronDown, Search } from "lucide-react";
 import type { SourceAccessScope } from "@repo/core";
 import { permissionsApi, type Permission } from "@/lib/api";
@@ -92,24 +92,81 @@ function RepoCombobox({
   value,
   onChange,
   copy,
+  labelId,
 }: {
   repos: string[];
   value: string | null;
   onChange: (repo: string) => void;
   copy: Record<string, string>;
+  labelId?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const rootRef = useRef<HTMLDivElement>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+
+  const close = () => {
+    setOpen(false);
+    setQuery("");
+  };
+
+  /**
+   * Dismissal is bound to the document rather than drawn as a click-away overlay.
+   * The overlay this replaces was `fixed inset-0` INSIDE the popover's own subtree,
+   * which made it a descendant of the surrounding <label> — and since <button> is a
+   * labelable element, label activation re-fired every dismissing click onto the
+   * toggle, reopening the menu in the same tick it closed. The label is gone now,
+   * but a listener can't be re-parented into that trap by a future wrapper, and it
+   * also gets Escape and tab-away for free.
+   *
+   * Capture phase so a row's own click can't be swallowed first; Escape stops
+   * propagating so it closes only this menu and not the dialog around it.
+   */
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: Event) => {
+      if (!rootRef.current?.contains(e.target as Node)) close();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        // Focus the toggle BEFORE closing, while the search input still exists:
+        // otherwise focus falls to <body> and a keyboard user restarts the tab
+        // order. Moving it inside the root also keeps onBlur from double-closing.
+        toggleRef.current?.focus();
+        close();
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [open]);
 
   const matches = query.trim()
     ? repos.filter((r) => r.toLowerCase().includes(query.trim().toLowerCase()))
     : repos;
 
   return (
-    <div className="relative">
+    <div
+      ref={rootRef}
+      className="relative"
+      // Keyboard exit: tabbing past the last row leaves the menu behind otherwise.
+      // A null relatedTarget (focus dropped to the body) is left alone, so a click
+      // on the popover's own chrome doesn't close it out from under the pointer.
+      onBlur={(e) => {
+        if (e.relatedTarget && !e.currentTarget.contains(e.relatedTarget as Node)) close();
+      }}
+    >
       <button
+        ref={toggleRef}
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => (open ? close() : setOpen(true))}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-labelledby={labelId}
         className="flex items-center gap-1.5 rounded-lg bg-background px-2.5 py-1.5 font-mono text-[13px] text-foreground ring-1 ring-inset ring-border/60 transition-colors hover:ring-border"
       >
         {value ?? "—"}
@@ -118,8 +175,6 @@ function RepoCombobox({
 
       {open && (
         <>
-          {/* Click-away. Inside the modal, so no portal needed. */}
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
           <div className="absolute end-0 z-20 mt-1 w-64 overflow-hidden rounded-lg bg-card shadow-lg ring-1 ring-border/60">
             <div className="relative border-b border-border/50">
               <Search className="pointer-events-none absolute start-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/60" />
@@ -131,20 +186,19 @@ function RepoCombobox({
                 className="w-full bg-transparent py-2 pe-2.5 ps-8 text-[13px] text-foreground placeholder:text-muted-foreground/60 focus:outline-none"
               />
             </div>
-            <ul className="max-h-56 overflow-y-auto p-1">
+            <ul role="listbox" className="max-h-56 overflow-y-auto p-1">
               {matches.length === 0 ? (
                 <li className="px-2 py-3 text-center text-[13px] text-muted-foreground">
                   {copy.noRepoMatch}
                 </li>
               ) : (
                 matches.map((r) => (
-                  <li key={r}>
+                  <li key={r} role="option" aria-selected={r === value}>
                     <button
                       type="button"
                       onClick={() => {
                         onChange(r);
-                        setOpen(false);
-                        setQuery("");
+                        close();
                       }}
                       className={`flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 font-mono text-[13px] transition-colors hover:bg-muted/60 ${
                         r === value ? "text-foreground" : "text-muted-foreground"
@@ -334,6 +388,7 @@ export function SourceAccessModal({
 }: SourceAccessModalProps) {
   const { t } = useI18n();
   const copy = t.widgets.permissions.sourceAccess as unknown as Record<string, string>;
+  const browseLabelId = useId();
 
   // Seeded from the prop on the FIRST render, not in an effect: an effect would
   // paint "Deploy only" once before correcting itself, which for a security control
@@ -469,15 +524,19 @@ export function SourceAccessModal({
               <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
                 <p className="text-[13px] text-muted-foreground">{copy.appliesToEveryRepo}</p>
                 {repoChoices && repoChoices.length > 0 && (
-                  <label className="flex items-center gap-2 text-[13px] text-muted-foreground">
-                    {copy.browseIn}
+                  // Not a <label>: it would adopt the combobox's toggle as its labeled
+                  // control (a <button> is labelable) and forward stray clicks to it.
+                  // aria-labelledby carries the association instead.
+                  <div className="flex items-center gap-2 text-[13px] text-muted-foreground">
+                    <span id={browseLabelId}>{copy.browseIn}</span>
                     <RepoCombobox
                       repos={repoChoices}
                       value={browseRepo}
                       onChange={setBrowseRepo}
                       copy={copy}
+                      labelId={browseLabelId}
                     />
-                  </label>
+                  </div>
                 )}
               </div>
             )}

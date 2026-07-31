@@ -7,13 +7,19 @@
  * confirm-server-access.ts for the same component/logic split).
  *
  * ── The one rule that shapes this file ───────────────────────────────────────
- * Sending ZERO grants to POST /api/tokens/mcp-authorize means FULL access: the
- * binding is recorded unscoped and the client acts with the consenting user's own
- * role (token.controller.ts:219-220). So "I trimmed my scope to nothing" and "I
- * deliberately want no limits" are the SAME wire payload, and the UI is the only
- * thing that can tell them apart. Hence: the chosen template is stored, never
- * inferred from `grants.length`; `wireGrants` returns [] only for a template whose
- * card says so in words; and `authorizeBlockedReason` stops the other case dead.
+ * An UNSCOPED binding lets the client act with the consenting user's own role, so
+ * "I trimmed my scope to nothing" and "I deliberately want no limits" must never
+ * be confusable. They used to be the SAME wire payload — zero grants meant full
+ * access — leaving the UI as the only thing that could tell them apart. The server
+ * now requires `fullAccess: true` to mint an unscoped binding and rejects an empty
+ * grant list without it (token.controller.ts resolveScopeIntent), so the two
+ * intents are distinct on the wire and the dangerous one fails closed.
+ *
+ * The UI still carries the intent rather than deriving it: the chosen template is
+ * stored, never inferred from `grants.length`; `wireGrants` returns [] only for a
+ * template whose card says so in words; `isUnscopedTemplate` is what the consent
+ * page sends as `fullAccess`; and `authorizeBlockedReason` stops the other case
+ * dead before submit. Belt and braces, now with a server-side brace.
  *
  * ── What the server will and won't accept (apps/api) ─────────────────────────
  *   - {project,"*"} must be EXACTLY ["create"] — token.schema.ts

@@ -376,6 +376,10 @@ export async function finalizeComposeDeploy(opts: {
         const warningMessage =
           (composeDeployment.warningMessage as string | undefined) ||
           "Some services failed — see service deployments for details.";
+        // Trace it here too: this was SSE-meta-only, so the partial-failure reason
+        // never made it into the persisted log (see the edge-warning note in
+        // executeServerDeploy — same fix, same reason).
+        logger.log(`Deployment completed with warnings: ${warningMessage}\n`, "warn");
         await setDeploymentStatus(dep.id, "partial_failure", {
           extra: { meta: { ...meta, composeDeployment } },
           sse: {
@@ -1428,6 +1432,7 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
     publicEndpoints: routeState.publicEndpoints,
     runtimeName: runtime.name,
     usesManagedRouting,
+    isStatic: isStaticFileServe,
   });
   // Domains to prune after a successful deploy: project-level rows that
   // no longer back a current public endpoint AND aren't among the routes
@@ -1681,6 +1686,15 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
       `Retry from the Domains tab: ${routeIssues.join("; ")}`;
     metaPatch.deployWarning = metaPatch.deployWarning ? `${metaPatch.deployWarning} · ${msg}` : msg;
     metaPatch.edgeUnsynced = true;
+  }
+
+  // The warning belongs in the TRACE, not only on the SSE meta. It used to reach
+  // the terminal solely because the dashboard wrote it client-side, so it was
+  // absent from the persisted log — invisible on replay, in history, and to the
+  // CLI. Emitting it here (matching the compose path's wording) makes the server
+  // the single writer for every warning, so the client never has to add one.
+  if (typeof metaPatch.deployWarning === "string") {
+    logger.log(`Deployment completed with warnings: ${metaPatch.deployWarning}\n`, "warn");
   }
 
   await onSuccess(ctx, {

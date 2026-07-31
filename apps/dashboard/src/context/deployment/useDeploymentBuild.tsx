@@ -329,11 +329,12 @@ export function useDeploymentBuild(
     // view re-reads fresh (clears the "New commit"/"Action Required" banners).
     if (data?.project_id) invalidateProjectCaches(data.project_id);
 
-    if (warningMessage) {
-      const textEncoder = new TextEncoder();
-      writeToTerminal(textEncoder.encode(`\r\n\x1b[33m Deployment completed with warnings: ${warningMessage}\x1b[0m\r\n`));
-    }
-  }, [writeToTerminal]);
+    // No terminal write: every warning path now logs `Deployment completed with
+    // warnings: …` server-side (compose deploy.service, the edge/route rollup in
+    // executeServerDeploy, and the compose partial-failure rollup), so writing it
+    // here as well double-printed it for compose and left it out of the persisted
+    // log for the others. One writer — the server. Same rule as the failure path.
+  }, []);
 
   const handleFailureMessage = useCallback(
     (message?: string, errorCode?: string, errorDetails?: Record<string, unknown>) => {
@@ -359,11 +360,19 @@ export function useDeploymentBuild(
         errorDetails: errorDetails || null,
       }));
 
-      const textEncoder = new TextEncoder();
-      writeToTerminal(textEncoder.encode(`\r\n\x1b[31m Deployment Failed: ${errorMessage}\x1b[0m\r\n`));
+      // The TRACE is written server-side and only server-side: the pipeline logs
+      // `Error: <msg>` (build-pipeline catch) or `Deployment failed before build
+      // started: <msg>` (markDeploymentFailedFromOutside) before this ever fires,
+      // and both persist into the build session. Writing the message here too put
+      // it in the terminal TWICE — live (log event, then this) and on replay
+      // (hydrated buildLogs, then this). `onFailure` in deployment-lifecycle
+      // appends no log of its own, so the server line is the single emission.
+      //
+      // The toast is a DIFFERENT surface, not the trace, so it stays: state drives
+      // the failure banner, the toast notifies, the terminal keeps the one line.
       showToast(errorMessage, "error", "Deployment Failed");
     },
-    [showToast, writeToTerminal],
+    [showToast],
   );
 
   const handleProgressUpdate = useCallback((currentStep: number, progress: number) => {

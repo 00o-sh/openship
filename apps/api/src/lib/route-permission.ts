@@ -24,7 +24,7 @@
 
 import type { Context, Next, MiddlewareHandler } from "hono";
 import type { TSchema } from "@sinclair/typebox";
-import { NotFoundError } from "@repo/core";
+import { NotFoundError, normalizeRepoPath } from "@repo/core";
 import { permission, ORG_SINGLETON_RESOURCES, type CheckedResourceType } from "./permission";
 import { getRequestContext } from "./request-context";
 import type { Permission as Action } from "@repo/db";
@@ -518,7 +518,23 @@ export function requirePermission(spec: PermissionSpec): MiddlewareHandler {
       if (spec.source) {
         // `?file=` on the single-file route, `?path=` on the tree route; absent
         // means the repo root, which is what /files with no path lists.
-        const path = c.req.query("file") ?? c.req.query("path") ?? "";
+        const rawPath = c.req.query("file") ?? c.req.query("path") ?? "";
+
+        // Normalise HERE, once, and publish the result — so the string we
+        // authorise is byte-identical to the one the handler goes on to fetch.
+        // Handlers used to re-read the raw query param, which meant the check and
+        // the read operated on different strings ("src/./a.ts" was authorised as
+        // "src/a.ts"). They resolve to the same object today, so this was not
+        // exploitable — but "check one string, use another" is one refactor of
+        // normalizeRepoPath away from being a real bypass, and it costs nothing
+        // to make them the same value.
+        //
+        // null ⇒ traversal / NUL / backslash / over-length: refuse, never resolve.
+        const path = normalizeRepoPath(rawPath);
+        if (path === null) {
+          throw new NotFoundError("github", `${ghTarget.key}/${rawPath}`);
+        }
+
         const { ok, readPaths } = await checkSourceTier(
           getRequestContext(c),
           { owner: ghTarget.owner, repo: ghTarget.repo },
@@ -531,8 +547,10 @@ export function requirePermission(spec: PermissionSpec): MiddlewareHandler {
           throw new NotFoundError("github", path ? `${ghTarget.key}/${path}` : ghTarget.key);
         }
         // Hand the allow-list to the handler so a tree listing can filter its
-        // entries without resolving the grant a second time.
+        // entries without resolving the grant a second time, and the authorised
+        // path so it never re-derives one.
         c.set("sourceReadPaths", readPaths);
+        c.set("sourcePath", path);
       }
 
       leafId = ghTarget.key;

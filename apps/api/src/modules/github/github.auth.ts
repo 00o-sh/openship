@@ -832,18 +832,26 @@ export async function getGitHubConnectionState(
   let cliAvailable = false;
   let cliLogin: string | undefined;
   let cliAvatar: string | undefined;
+  // HOW it was connected, and — when a credential is stored but GitHub refused
+  // it — why. Both come from the single probe now; `method` used to need a
+  // second call here, which the other two callers of the probe simply didn't
+  // make, so the dashboard labelled every identity "gh CLI".
   let cliMethod: "host-cli" | "device" | "token" | undefined;
+  let cliProblem: "rejected" | "unreachable" | undefined;
+  let cliCheckedAt: string | undefined;
   if (onSelfHosted) {
     // Dynamic import: gh probed ONLY when self-hosted; never loaded on the SaaS.
-    const { getLocalGhStatus, getGitIdentityMethod } = await import("./github.local-auth");
+    const { getLocalGhStatus } = await import("./github.local-auth");
     const localStatus = await getLocalGhStatus();
+    cliCheckedAt = localStatus.checkedAt;
     if (localStatus.available) {
       cliAvailable = true;
       cliLogin = localStatus.login;
       cliAvatar = localStatus.avatar_url;
-      // HOW it was connected. The UI labelled every identity "gh CLI", so a
-      // pasted PAT or a browser sign-in was reported as a gh-CLI connection.
-      cliMethod = (await getGitIdentityMethod().catch(() => null)) ?? "host-cli";
+      cliMethod = localStatus.method;
+    } else {
+      cliMethod = localStatus.method ?? undefined;
+      cliProblem = localStatus.problem;
     }
   }
 
@@ -867,6 +875,8 @@ export async function getGitHubConnectionState(
         login: cliLogin,
         avatarUrl: cliAvatar,
         method: cliMethod,
+        problem: cliProblem,
+        checkedAt: cliCheckedAt,
       },
     },
     primary,

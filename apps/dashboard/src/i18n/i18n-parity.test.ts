@@ -22,7 +22,16 @@ const MISSING_BASELINE: Record<string, number> = {
   projectSettings: 1058,
   jobs: 876,
   migration: 1237,
-  settings: 888,
+  // +64: the GitHub card's credential-health strings — 8 English-first keys for
+  // "GitHub rejected the stored {method}" vs "couldn't reach GitHub to check it",
+  // the manage-on-GitHub links, and the note that Disconnect does NOT revoke the
+  // credential at GitHub. Same reasoning as permissions.sourceAccess below:
+  // deliberately NOT machine-translated, because these decide whether an operator
+  // believes a leaked token is dead, and whether they go revoke a credential that
+  // was only unreachable. They fall back to English via deepMerge, so the UI is
+  // correct everywhere — as is the rest of this card's block, which is also still
+  // English-only in the other 8 locales.
+  settings: 952,
   emailsAdmin: 628,
   // +360: permissions.sourceAccess — 45 keys for the source access modal and its
   // repository path tree,

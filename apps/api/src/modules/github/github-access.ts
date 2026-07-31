@@ -262,30 +262,14 @@ export async function resolveSourceAccess(
   }
 }
 
-/** May the caller read this exact file's content? */
-export async function canReadRepoPath(
-  ctx: RequestContext,
-  target: GitHubAccessTarget,
-  path: string,
-): Promise<boolean> {
-  const { readPaths } = await resolveSourceAccess(ctx, target);
-  return matchesAny(path, readPaths);
-}
-
-/**
- * May the caller write this exact path?
- *
- * No write endpoints exist yet — this is the gate they will land behind, kept in
- * lockstep with the picker so the toggle is never decorative.
+/*
+ * There were per-path `canReadRepoPath` / `canWriteRepoPath` helpers here. They had
+ * no production callers — every real check goes through `checkSourceTier` below,
+ * which the route middleware calls — so they were a second implementation of the
+ * same rule that only tests exercised, free to drift from the enforced one while
+ * looking authoritative. `checkSourceTier` is the single authority; a per-path
+ * check is `checkSourceTier(ctx, target, "content" | "write", path)`.
  */
-export async function canWriteRepoPath(
-  ctx: RequestContext,
-  target: GitHubAccessTarget,
-  path: string,
-): Promise<boolean> {
-  const { writePaths } = await resolveSourceAccess(ctx, target);
-  return matchesAny(path, writePaths);
-}
 
 /**
  * May the caller LIST this directory, and which of its entries may they see?
