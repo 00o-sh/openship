@@ -56,6 +56,29 @@ export interface TunnelResponse {
 }
 
 /**
+ * Whether any component of a request head contains a bare CR or LF.  The
+ * request line and header lines below are assembled by hand, so a component
+ * carrying one would terminate its own line and inject arbitrary extra
+ * headers - or an entire second request - onto the tunnel.
+ */
+function hasCrlf(parts: string[]): boolean {
+  return parts.some((part) => /[\r\n]/.test(part));
+}
+
+/**
+ * Whether a `Transfer-Encoding` header value applies the chunked coding.
+ * Transfer-coding names are case-insensitive and the header carries the
+ * applied codings as a comma-separated list, chunked always last.
+ */
+function isChunkedEncoding(value: string | string[] | undefined): boolean {
+  if (typeof value !== "string") return false;
+  return value
+    .toLowerCase()
+    .split(",")
+    .some((coding) => coding.trim() === "chunked");
+}
+
+/**
  * Parse a chunked-transfer-encoded body out of an accumulated buffer.
  * Returns the decoded body, or `null` if the buffer doesn't yet contain a
  * complete terminating chunk (0-length chunk + trailing CRLF).
@@ -92,8 +115,9 @@ function decodeChunkedBody(buf: Buffer): Buffer | null {
  * once the response is flushed — the simplest unambiguous end-of-body
  * signal alongside Content-Length/chunked framing.
  *
- * Returns `null` on connection error, timeout, or if the executor
- * doesn't support tunnelling.
+ * Returns `null` on connection error, timeout, a response truncated before
+ * its declared framing completed, a method/path/header containing CR or LF,
+ * or if the executor doesn't support tunnelling.
  */
 export async function tunnelRequest(
   serverId: string,
@@ -107,6 +131,10 @@ export async function tunnelRequest(
     body,
     timeoutMs = 10_000,
   } = opts;
+
+  if (hasCrlf([method, path, ...Object.entries(headers).flat()])) {
+    return null;
+  }
 
   let tunnel: Duplex;
   try {
@@ -142,6 +170,8 @@ export async function tunnelRequest(
     let headerEnd = -1;
     let statusCode = 0;
     let parsedHeaders: http.IncomingHttpHeaders = {};
+    let contentLength: number | null = null;
+    let isChunked = false;
 
     tunnel.on("data", (chunk: Buffer) => {
       buffer = Buffer.concat([buffer, chunk]);
@@ -159,13 +189,13 @@ export async function tunnelRequest(
             parsedHeaders[line.slice(0, colon).trim().toLowerCase()] = line.slice(colon + 1).trim();
           }
         }
+        contentLength = parsedHeaders["content-length"]
+          ? parseInt(parsedHeaders["content-length"] as string, 10)
+          : null;
+        isChunked = isChunkedEncoding(parsedHeaders["transfer-encoding"]);
       }
 
       const bodyBytes = buffer.slice(headerEnd + 4);
-      const contentLength = parsedHeaders["content-length"]
-        ? parseInt(parsedHeaders["content-length"] as string, 10)
-        : null;
-      const isChunked = parsedHeaders["transfer-encoding"] === "chunked";
 
       if (isChunked) {
         const decoded = decodeChunkedBody(bodyBytes);
@@ -188,10 +218,11 @@ export async function tunnelRequest(
     tunnel.on("error", () => finish(null));
     tunnel.on("close", () => {
       if (settled) return;
-      // Connection closed before/without a recognized length framing —
-      // treat whatever body we've buffered as the complete response (the
-      // "Connection: close" no-content-length case).
-      if (headerEnd !== -1) {
+      // Only a response with no length framing at all is terminated by the
+      // close itself ("Connection: close" with no Content-Length) — any other
+      // framing would already have resolved above, so reaching here means the
+      // remote hung up mid-response.
+      if (headerEnd !== -1 && !isChunked && contentLength === null) {
         finish({
           statusCode,
           headers: parsedHeaders,
@@ -233,7 +264,8 @@ export interface TunnelStreamHandle {
  * ```
  *
  * Sends `Accept: text/event-stream` and `Connection: keep-alive` by default.
- * Returns `null` on connection error, timeout, or non-2xx status.
+ * Returns `null` on connection error, timeout, non-2xx status, or a
+ * path/header containing CR or LF.
  */
 export async function tunnelStream(
   serverId: string,
@@ -241,6 +273,10 @@ export async function tunnelStream(
   path: string,
   extraHeaders: Record<string, string> = {},
 ): Promise<TunnelStreamHandle | null> {
+  if (hasCrlf([path, ...Object.entries(extraHeaders).flat()])) {
+    return null;
+  }
+
   let tunnel: Duplex;
   try {
     tunnel = await tunnelConnect(serverId, "127.0.0.1", remotePort);
@@ -262,28 +298,27 @@ export async function tunnelStream(
 
   // Wait for response headers, then hand the stream back
   return new Promise<TunnelStreamHandle | null>((resolve) => {
-    let buffer = "";
+    let buffer = Buffer.alloc(0);
     const timeout = setTimeout(() => {
       tunnel.destroy();
       resolve(null);
     }, 10_000);
 
     const onData = (chunk: Buffer) => {
-      buffer += chunk.toString();
+      buffer = Buffer.concat([buffer, chunk]);
       const headerEnd = buffer.indexOf("\r\n\r\n");
       if (headerEnd === -1) return;
 
       clearTimeout(timeout);
       tunnel.removeListener("data", onData);
 
-      // Parse status line
-      const statusLine = buffer.slice(0, buffer.indexOf("\r\n"));
+      // Parse status line and headers
+      const rawHead = buffer.slice(0, headerEnd).toString();
+      const [statusLine, ...rawHeaderLines] = rawHead.split("\r\n");
       const statusCode = parseInt(statusLine.split(" ")[1] ?? "0", 10);
 
-      // Parse headers
-      const rawHeaders = buffer.slice(buffer.indexOf("\r\n") + 2, headerEnd);
       const headers: Record<string, string> = {};
-      for (const line of rawHeaders.split("\r\n")) {
+      for (const line of rawHeaderLines) {
         const colon = line.indexOf(":");
         if (colon > 0) {
           headers[line.slice(0, colon).trim().toLowerCase()] =
@@ -300,7 +335,7 @@ export async function tunnelStream(
       // Re-emit leftover body bytes so the caller sees them
       const body = buffer.slice(headerEnd + 4);
       if (body.length > 0) {
-        process.nextTick(() => tunnel.emit("data", Buffer.from(body)));
+        process.nextTick(() => tunnel.emit("data", body));
       }
 
       resolve({
