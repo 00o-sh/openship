@@ -71,10 +71,10 @@ export default function DnsRecordCard({
   return (
     <div className="overflow-hidden rounded-xl border border-border/50 bg-muted/20">
       <div className="flex items-start gap-2.5 px-4 pt-3.5">
-        <span className="mt-px shrink-0 rounded-md bg-foreground px-2 py-0.5 text-[11px] font-bold tracking-wide text-background">
+        <span className="mt-px shrink-0 rounded-md bg-foreground px-2 py-0.5 text-xs font-bold tracking-wide text-background">
           {record.type}
         </span>
-        <p className="text-[12px] leading-relaxed text-muted-foreground">{purpose}</p>
+        <p className="text-sm leading-relaxed text-muted-foreground">{purpose}</p>
       </div>
 
       <div className="space-y-1 px-4 py-3">
@@ -86,9 +86,9 @@ export default function DnsRecordCard({
           onCopy={() => copy(record.host, "host")}
           secondary={
             isApex ? (
-              <span className="text-[11px] text-muted-foreground/70">{r.apexHint}</span>
+              <span className="text-xs text-muted-foreground/70">{r.apexHint}</span>
             ) : fqdn ? (
-              <span className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground/70">
+              <span className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground/70">
                 {r.fullName}
                 <button
                   type="button"
@@ -119,7 +119,7 @@ export default function DnsRecordCard({
       </div>
 
       {record.type === "A" ? (
-        <p className="border-t border-border/40 px-4 py-2.5 text-[11px] leading-relaxed text-muted-foreground/80">
+        <p className="border-t border-border/40 px-4 py-2.5 text-xs leading-relaxed text-muted-foreground/80">
           {r.proxyNote}
         </p>
       ) : null}
@@ -151,7 +151,7 @@ function FieldRow({
   const { t } = useI18n();
   return (
     <div className="grid grid-cols-[64px_minmax(0,1fr)] items-start gap-2">
-      <span className="pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+      <span className="pt-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground/70">
         {label}
       </span>
       <div className="min-w-0">
@@ -161,7 +161,7 @@ function FieldRow({
           }`}
         >
           <code
-            className={`min-w-0 flex-1 text-[12.5px] ${
+            className={`min-w-0 flex-1 text-sm ${
               muted ? "text-muted-foreground" : "font-medium text-foreground"
             } ${wrap ? "break-all" : "truncate"}`}
           >
