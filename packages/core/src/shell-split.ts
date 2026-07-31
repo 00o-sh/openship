@@ -17,6 +17,7 @@
 export function shellSplitWords(value: string): string[] {
   const words: string[] = [];
   let current = "";
+  let quoted = false;
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
@@ -27,22 +28,25 @@ export function shellSplitWords(value: string): string[] {
       escaped = false;
       continue;
     }
-    if (char === "\\") {
+    if (char === "\\" && !inSingle) {
       escaped = true;
       continue;
     }
     if (char === "'" && !inDouble) {
       inSingle = !inSingle;
+      quoted = true;
       continue;
     }
     if (char === '"' && !inSingle) {
       inDouble = !inDouble;
+      quoted = true;
       continue;
     }
     if (/\s/.test(char) && !inSingle && !inDouble) {
-      if (current) {
+      if (current || quoted) {
         words.push(current);
         current = "";
+        quoted = false;
       }
       continue;
     }
@@ -50,7 +54,7 @@ export function shellSplitWords(value: string): string[] {
   }
 
   if (escaped) current += "\\";
-  if (current) words.push(current);
+  if (current || quoted) words.push(current);
   return words;
 }
 

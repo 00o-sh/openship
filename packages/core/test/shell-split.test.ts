@@ -12,6 +12,23 @@ describe("shellSplitWords", () => {
   it("honors backslash escapes", () => {
     expect(shellSplitWords("a\\ b c")).toEqual(["a b", "c"]);
   });
+  it("keeps backslashes literal inside single quotes", () => {
+    expect(shellSplitWords(`awk '{ gsub(/\\r/, ""); print }' /data/in`)).toEqual([
+      "awk",
+      `{ gsub(/\\r/, ""); print }`,
+      "/data/in",
+    ]);
+    expect(shellSplitWords(`grep -E '\\d+' file.txt`)).toEqual(["grep", "-E", "\\d+", "file.txt"]);
+  });
+  it("keeps an empty quoted word as an empty argument", () => {
+    expect(shellSplitWords(`node app.js --base-href ""`)).toEqual([
+      "node",
+      "app.js",
+      "--base-href",
+      "",
+    ]);
+    expect(shellSplitWords("echo '' end")).toEqual(["echo", "", "end"]);
+  });
   it("empty / whitespace-only → []", () => {
     expect(shellSplitWords("")).toEqual([]);
     expect(shellSplitWords("   ")).toEqual([]);
