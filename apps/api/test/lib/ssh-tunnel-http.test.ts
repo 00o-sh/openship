@@ -87,3 +87,45 @@ describe("tunnelRequest chunked framing", () => {
     expect(await pending).toMatchObject({ statusCode: 200, body: '{"a":1}' });
   });
 });
+
+describe("tunnelRequest truncated responses", () => {
+  it("fails a chunked body cut before the terminating chunk", async () => {
+    const tunnel = openTunnel();
+    const pending = tunnelRequest("srv_1", 9145, "/health");
+    await reply(tunnel, 'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\n{"a":1}\r\n');
+
+    expect(await pending).toBeNull();
+  });
+
+  it("fails a response that delivers fewer bytes than Content-Length", async () => {
+    const tunnel = openTunnel();
+    const pending = tunnelRequest("srv_1", 9145, "/health");
+    await reply(tunnel, 'HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n{"a":1}');
+
+    expect(await pending).toBeNull();
+  });
+
+  it("fails a connection that closes before the response head is complete", async () => {
+    const tunnel = openTunnel();
+    const pending = tunnelRequest("srv_1", 9145, "/health");
+    await reply(tunnel, "HTTP/1.1 200 OK\r\nContent-Len");
+
+    expect(await pending).toBeNull();
+  });
+
+  it("returns the body of a complete chunked response", async () => {
+    const tunnel = openTunnel();
+    const pending = tunnelRequest("srv_1", 9145, "/health");
+    await reply(tunnel, `HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n${CHUNKED_BODY}`);
+
+    expect(await pending).toMatchObject({ statusCode: 200, body: '{"a":1}' });
+  });
+
+  it("returns the buffered body when the response has no length framing", async () => {
+    const tunnel = openTunnel();
+    const pending = tunnelRequest("srv_1", 9145, "/health");
+    await reply(tunnel, 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{"a":1}');
+
+    expect(await pending).toMatchObject({ statusCode: 200, body: '{"a":1}' });
+  });
+});

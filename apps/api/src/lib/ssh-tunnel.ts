@@ -105,8 +105,9 @@ function decodeChunkedBody(buf: Buffer): Buffer | null {
  * once the response is flushed — the simplest unambiguous end-of-body
  * signal alongside Content-Length/chunked framing.
  *
- * Returns `null` on connection error, timeout, or if the executor
- * doesn't support tunnelling.
+ * Returns `null` on connection error, timeout, a response truncated before
+ * its declared framing completed, or if the executor doesn't support
+ * tunnelling.
  */
 export async function tunnelRequest(
   serverId: string,
@@ -155,6 +156,8 @@ export async function tunnelRequest(
     let headerEnd = -1;
     let statusCode = 0;
     let parsedHeaders: http.IncomingHttpHeaders = {};
+    let contentLength: number | null = null;
+    let isChunked = false;
 
     tunnel.on("data", (chunk: Buffer) => {
       buffer = Buffer.concat([buffer, chunk]);
@@ -172,13 +175,13 @@ export async function tunnelRequest(
             parsedHeaders[line.slice(0, colon).trim().toLowerCase()] = line.slice(colon + 1).trim();
           }
         }
+        contentLength = parsedHeaders["content-length"]
+          ? parseInt(parsedHeaders["content-length"] as string, 10)
+          : null;
+        isChunked = isChunkedEncoding(parsedHeaders["transfer-encoding"]);
       }
 
       const bodyBytes = buffer.slice(headerEnd + 4);
-      const contentLength = parsedHeaders["content-length"]
-        ? parseInt(parsedHeaders["content-length"] as string, 10)
-        : null;
-      const isChunked = isChunkedEncoding(parsedHeaders["transfer-encoding"]);
 
       if (isChunked) {
         const decoded = decodeChunkedBody(bodyBytes);
@@ -201,10 +204,11 @@ export async function tunnelRequest(
     tunnel.on("error", () => finish(null));
     tunnel.on("close", () => {
       if (settled) return;
-      // Connection closed before/without a recognized length framing —
-      // treat whatever body we've buffered as the complete response (the
-      // "Connection: close" no-content-length case).
-      if (headerEnd !== -1) {
+      // Only a response with no length framing at all is terminated by the
+      // close itself ("Connection: close" with no Content-Length) — any other
+      // framing would already have resolved above, so reaching here means the
+      // remote hung up mid-response.
+      if (headerEnd !== -1 && !isChunked && contentLength === null) {
         finish({
           statusCode,
           headers: parsedHeaders,
