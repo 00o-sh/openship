@@ -337,24 +337,23 @@ const DeployRepository: React.FC = () => {
                 file lives in a subfolder scans as an app/docker project, and applying
                 a path flips this to `services` — so the control has to survive that
                 flip to stay correctable. */}
-            <ComposePathField />
-            {/* Readiness gate — deliberately OUTSIDE every type-specific section,
-                same reasoning as ComposePathField above. It's a project-level
-                setting that applies to whatever this deploy turns out to be: a
-                port/path probe for a server, a doc-root+index probe for a static
-                site, a restart-loop watch for containers. Nesting it in
-                BuildSettings hid it from docker, services and monorepo projects —
-                and from any static app, since that path gated on `hasServer`.
-                Compose services can still override it individually in the
-                service's own settings. Collapsed and off unless opened. */}
-            <ReadinessSection
-                value={config.readiness}
-                onChange={(next) => updateConfig({ readiness: next ?? null })}
-            />
             {!isServiceDeployment &&
                 !(isMonorepoFlow && config.serviceDeploymentMode !== "single") && (
                 <EnvironmentVariables collapsible />
             )}
+            {/* Both of these sit AFTER env and outside every type-specific section:
+                they're project-level opt-ins that apply to whatever this deploy
+                turns out to be, and a control nested in the app/docker section
+                would vanish the moment applying a compose path flipped the wizard
+                to `services`. Readiness covers a port/path probe for a server, a
+                doc-root+index probe for a static site, and a restart-loop watch for
+                containers; compose services can override it individually in the
+                service's own settings. Both collapsed and off unless opened. */}
+            <ComposePathField />
+            <ReadinessSection
+                value={config.readiness}
+                onChange={(next) => updateConfig({ readiness: next ?? null })}
+            />
             <ProjectName />
             {(config.projectType === "app" || isMonorepoFlow) && <RoutingSection />}
         </>
