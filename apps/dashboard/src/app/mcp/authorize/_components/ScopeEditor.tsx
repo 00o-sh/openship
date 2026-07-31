@@ -15,8 +15,7 @@
  *      suppressed for the same reason.
  */
 
-import { useState } from "react";
-import { ChevronDown, ChevronRight, PlusCircle } from "lucide-react";
+import { PlusCircle } from "lucide-react";
 import { ResourcePicker } from "@/components/permissions/ResourcePicker";
 import { Switch } from "@/components/ui/Switch";
 import {
@@ -51,7 +50,6 @@ export function ScopeEditor({
 }) {
   const { t } = useI18n();
   const m = t.misc.mcpAuthorize;
-  const [showAdvanced, setShowAdvanced] = useState(false);
 
   // read/write/admin shown as the three named levels. This is the ONLY place a
   // level is set — the summary rail states it, it doesn't edit it.
@@ -60,15 +58,29 @@ export function ScopeEditor({
     manage: m.levelManage,
     full: m.levelFull,
   };
+  // Each level gets a tooltip: "Deploy & manage" vs "Full control" is not
+  // self-evident, and the difference is whether the client can DELETE.
+  const levelHint: Record<AccessLevel, string> = {
+    view: m.levelViewHint,
+    manage: m.levelManageHint,
+    full: m.levelFullHint,
+  };
   const levels: LevelsConfig = {
-    options: ACCESS_LEVELS.map((id) => ({ id, label: levelLabel[id] })),
+    options: ACCESS_LEVELS.map((id) => ({ id, label: levelLabel[id], title: levelHint[id] })),
     resolve: (permissions) => levelOf(permissions),
     toPermissions: (id) => [...LEVEL_PERMISSIONS[id as AccessLevel]],
   };
 
-  const primary = availableTypes.filter((tp) => !ADVANCED_TYPES.has(tp));
-  const advanced = availableTypes.filter((tp) => ADVANCED_TYPES.has(tp));
-  const types = showAdvanced ? [...primary, ...advanced] : primary;
+  // Every grantable type is a tab. Hiding servers/mail/backups behind a disclosure
+  // cost a click and taught nothing — the tab strip already says what exists, and
+  // an empty tab is a perfectly clear "nothing here".
+  const types = availableTypes;
+
+  // The REST caveat is shown when it's actually TRUE of the selection rather than
+  // whenever the disclosure happened to be open: granting one of these unlocks no
+  // MCP tool, but the same bearer still reaches it over REST — which matters once
+  // you've granted one, not while you're browsing tabs.
+  const hasAdvancedGrant = selection.grants.some((g) => ADVANCED_TYPES.has(g.resourceType));
 
   return (
     <div className="rounded-2xl bg-card p-5">
@@ -122,25 +134,8 @@ export function ScopeEditor({
         disabled={disabled}
       />
 
-      {advanced.length > 0 && (
-        <div className="mt-3">
-          <button
-            type="button"
-            onClick={() => setShowAdvanced((v) => !v)}
-            disabled={disabled}
-            className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
-          >
-            {showAdvanced ? (
-              <ChevronDown className="size-3.5" />
-            ) : (
-              <ChevronRight className="size-3.5 rtl:rotate-180" />
-            )}
-            {showAdvanced ? m.advancedHide : m.advancedShow}
-          </button>
-          {showAdvanced && (
-            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{m.advancedNote}</p>
-          )}
-        </div>
+      {hasAdvancedGrant && (
+        <p className="mt-3 text-sm leading-relaxed text-muted-foreground">{m.advancedNote}</p>
       )}
     </div>
   );

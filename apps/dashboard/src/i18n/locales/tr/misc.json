@@ -47,8 +47,6 @@
     "createProjectsTitle": "Yeni projeler oluşturma",
     "createProjectsDesc": "İstemci proje oluşturabilir ve oluşturduğu projeleri silme dahil tam olarak yönetir. Kendisinin oluşturmadığı projeleri göremez.",
     "resourcesHeading": "Kaynaklar",
-    "advancedShow": "Sunucuları, e-postayı ve yedekleri göster",
-    "advancedHide": "Sunucuları, e-postayı ve yedekleri gizle",
     "advancedNote": "Bunlar hiçbir MCP aracını açmaz, ancak aynı yetkilendirme REST API üzerinden bunlara erişebilir.",
     "summaryHeading": "Bu istemcinin alacağı erişim",
     "summaryEmptyTitle": "Henüz hiçbir yetki verilmedi",

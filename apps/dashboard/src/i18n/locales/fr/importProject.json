@@ -296,7 +296,6 @@
       "successful": "Déploiement réussi",
       "deploying": "Déploiement..."
     },
-    "viewDashboard": "Voir le tableau de bord",
     "visitSite": "Visiter le site",
     "warningTitle": "Le déploiement est terminé, mais certains services nécessitent encore votre attention.",
     "productionLogs": "Journaux de production",
@@ -351,7 +350,6 @@
     "running": "en cours d'exécution",
     "buildingSuffix": "· {count} en compilation",
     "failedSuffix": "· {count} échoué(s)",
-    "viewDashboard": "Voir le tableau de bord",
     "decisionBannerTitle": "Action requise — certains services ont échoué",
     "decisionBannerDefaultMsg": "Ce déploiement s'est terminé avec des services en échec. Conservez-le et corrigez-les plus tard, ou rejetez-le pour restaurer la version précédente.",
     "review": "Examiner",

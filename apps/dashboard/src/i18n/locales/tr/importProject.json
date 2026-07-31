@@ -309,7 +309,6 @@
       "successful": "Dağıtım Başarılı",
       "deploying": "Dağıtılıyor..."
     },
-    "viewDashboard": "Paneli görüntüle",
     "visitSite": "Siteyi Ziyaret Et",
     "warningTitle": "Dağıtım tamamlandı ancak bazı servisler hâlâ müdahale gerektiriyor.",
     "productionLogs": "Canlı ortam günlükleri",
@@ -351,7 +350,6 @@
     "running": "çalışıyor",
     "buildingSuffix": "· {count} derleniyor",
     "failedSuffix": "· {count} başarısız",
-    "viewDashboard": "Paneli Görüntüle",
     "decisionBannerTitle": "İşlem gerekiyor — bazı servisler başarısız oldu",
     "decisionBannerDefaultMsg": "Bu dağıtım bazı servisler başarısız olarak tamamlandı. Dağıtımı koruyup başarısız servisleri daha sonra düzeltebilir veya önceki sürümü geri yüklemek için dağıtımı reddedebilirsiniz.",
     "review": "İncele",

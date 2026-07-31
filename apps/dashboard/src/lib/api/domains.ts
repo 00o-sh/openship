@@ -32,7 +32,27 @@ export interface DomainSslVerifyResult {
   verified: boolean;
 }
 
+/** One domain row's verify + SSL state (GET /domains/:id). */
+export interface DomainState {
+  id: string;
+  hostname: string;
+  verified: boolean;
+  status: string;
+  sslStatus?: string | null;
+  sslExpiresAt?: string | null;
+  lastVerifyError?: string | null;
+  redirectTo?: string | null;
+  redirectStatus?: number | null;
+}
+
 export const domainsApi = {
+  /**
+   * Read one domain's current verify/SSL state. The recovery read for a flow
+   * whose live stream dropped before reporting: the operation itself finished
+   * server-side, so the UI asks what happened rather than guessing.
+   */
+  get: (domainId: string) => api.get<{ data: DomainState }>(endpoints.domains.byId(domainId)),
+
   /** Get DNS records preview for a hostname (no domain creation needed). */
   /** `includeWww` mirrors the Add-domain toggle so the panel shows the www
    *  sibling's record too — the toggle claims a SECOND hostname. */

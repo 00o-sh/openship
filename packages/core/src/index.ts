@@ -9,6 +9,7 @@ export * from "./system";
 export * from "./utils";
 export * from "./errors";
 export * from "./service-routing";
+export * from "./source-access";
 export * from "./service-status";
 export * from "./runtime-config";
 export * from "./resources";

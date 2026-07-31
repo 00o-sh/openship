@@ -53,6 +53,15 @@ export async function add(c: Context) {
   return c.json({ data: result.domain, records: result.records }, 201);
 }
 
+/** GET /domains/:id — one domain's verify + SSL state. */
+export async function get(c: Context) {
+  const ctx = getRequestContext(c);
+  const id = param(c, "id");
+  await permission.assert(ctx, { resourceType: "domain", resourceId: id, action: "read" });
+  const domain = await domainService.getDomain(ctx, id);
+  return c.json({ data: domain });
+}
+
 export async function remove(c: Context) {
   const ctx = getRequestContext(c);
   const id = param(c, "id");

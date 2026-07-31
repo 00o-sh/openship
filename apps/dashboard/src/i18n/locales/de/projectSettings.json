@@ -354,22 +354,29 @@
       "title": "Rollback-Strategie",
       "rebuild": "Neubau (Git)",
       "instant": "Sofort (Snapshot)",
-      "descRebuild": "Bewahrt keine zusätzlichen Artefakte auf. Ein Rollback nutzt weiterhin ein noch vorhandenes Image und baut andernfalls den alten Commit neu.",
-      "descInstant": "Behält zusätzlich das Laufzeit-Artefakt jeder Version, damit eine Wiederherstellung nie neu bauen muss. Braucht mehr Speicher, begrenzt durch das History-Limit.",
-      "toggleAria": "Snapshot-Aufbewahrung umschalten"
+      "descRebuild": "Baut den alten Commit neu, sofern dessen Image nicht noch auf dem Host liegt.",
+      "descInstant": "Behält das Image jeder Version, sodass eine Wiederherstellung nie neu baut. Braucht mehr Speicher.",
+      "toggleAria": "Snapshot-Aufbewahrung umschalten",
+      "keepNone": "Keine Extra-Kopien",
+      "keepCopies": "Eine Kopie pro Version",
+      "descRebuildFiles": "Baut den alten Commit neu, sofern dessen Dateien nicht noch auf dem Host liegen.",
+      "descInstantFiles": "Behält die Dateien jeder Version, sodass eine Wiederherstellung nie neu baut. Braucht mehr Speicher."
     },
     "rollbackHistory": {
       "title": "Rollback-Verlauf",
       "valueOne": "{count} Version",
       "valueOther": "{count} Versionen",
-      "descSnapshot": "Wie viele der letzten Versionen wiederherstellbar bleiben. Ältere werden entfernt, um Speicher freizugeben.",
-      "descGit": "Unabhängig von der Strategie: Images der letzten Versionen bleiben erhalten, damit ein Rollback den Build überspringen kann, solange eines noch auf dem Host liegt.",
+      "descSnapshot": "Ältere Versionen werden entfernt, um Speicher freizugeben.",
+      "descGit": "Aktuelle Images bleiben ohnehin erhalten, sodass ein Rollback den Build überspringen kann.",
       "decreaseAria": "Rollback-Verlauf verringern",
       "increaseAria": "Rollback-Verlauf erhöhen",
       "sizeEach": "~{size} pro Version",
       "diskFree": "{size} frei",
       "autoBadge": "automatisch bemessen",
-      "manualBadge": "manuell gesetzt"
+      "manualBadge": "manuell gesetzt",
+      "kindFiles": "gebaute Dateien auf der Platte",
+      "kindImages": "Images auf dem Host",
+      "descGitFiles": "Die Dateien aktueller Versionen bleiben ohnehin erhalten, sodass ein Rollback den Build überspringen kann."
     },
     "commits": {
       "title": "Letzte Commits",
@@ -621,12 +628,13 @@
       "infoPreview": "Fügen Sie diese Einträge zuerst hinzu — sie ändern sich nach dem Hinzufügen nicht, sodass die Propagierung jetzt beginnt. Drücken Sie dann „Domain hinzufügen“, um sie anzuhängen, und schließlich „Verifizieren“, sobald das DNS auflöst.",
       "infoApply": "DNS-Änderungen können bis zu 48 Stunden dauern, um sich global zu propagieren. Sobald die Einträge auflösen, klicken Sie unten auf „Verifizieren“ — wir prüfen das DNS, markieren die Domain als aktiv und stellen SSL im Hintergrund bereit.",
       "verifying": "Wird verifiziert...",
-      "verify": "{hostname} verifizieren",
-      "copy": "Kopieren"
+      "verify": "{hostname} verifizieren"
     },
     "overview": {
       "primary": "Primär",
       "mappedTo": "Zugeordnet zu",
+      "redirect": "Weiterleitung",
+      "redirectValue": "{status} → {hostname}",
       "status": "Status",
       "ssl": "SSL",
       "visit": "Besuchen"

@@ -16,7 +16,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, ChevronDown, ChevronRight, Loader2, Search } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Loader2, Search, SlidersHorizontal } from "lucide-react";
 import {
   permissionsApi,
   RESOURCE_TYPE_LABELS,
@@ -30,6 +30,9 @@ import { useToast } from "@/context/ToastContext";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import { LevelSwitch, type LevelOption } from "./LevelSwitch";
 import { ResourceAvatar } from "./ResourceAvatar";
+import { Modal } from "@/components/ui/Modal";
+import { SourceAccessModal } from "./SourceAccessModal";
+import type { SourceAccessScope } from "@repo/core";
 
 // Re-export for existing importers (TeamTab et al.) — canonical defs live in @/lib/api.
 export type { Permission, PickerGrant, ResourceType } from "@/lib/api";
@@ -84,11 +87,20 @@ function writeGrant(
   resourceType: ResourceType,
   resourceId: string,
   perms: Permission[],
+  /** Explicit source scope. Omit to CARRY FORWARD whatever the grant already had. */
+  scope?: SourceAccessScope | null,
 ): PickerGrant[] {
+  const prev = findGrantIn(value, resourceType, resourceId);
   const next = value.filter(
     (g) => !(g.resourceType === resourceType && g.resourceId === resourceId),
   );
-  if (perms.length > 0) next.push({ resourceType, resourceId, permissions: perms });
+  if (perms.length > 0) {
+    // Preserving the scope matters: this function rebuilds the grant from scratch,
+    // so without it, toggling a permission chip would silently wipe a carefully
+    // chosen path restriction (or re-open a repo the owner had narrowed).
+    const carried = scope === undefined ? prev?.scope : (scope ?? undefined);
+    next.push({ resourceType, resourceId, permissions: perms, ...(carried ? { scope: carried } : {}) });
+  }
   return next;
 }
 
@@ -435,7 +447,11 @@ function GrantControl({
         value={levels.resolve(perms)}
         disabled={disabled}
         onChange={(id) => onSet(levels.toPermissions(id))}
-        size="sm"
+        // Default (md) on purpose — no `size="sm"`. This sits directly beside
+        // SourceAccessButton on the same row, and `sm` made the two read as
+        // different scales (10px with tighter padding, vs 11px), which looks like a
+        // bug rather than a hierarchy. The two controls are peers: one picks the
+        // verb, the other the surface. They share one size.
       />
     );
   }
@@ -548,6 +564,62 @@ function Checkbox({
 }
 
 // ── GitHub org → repo tree ────────────────────────────────────────────────────
+/**
+ * Entry point to the source-access modal, on both the org row and the repo row.
+ *
+ * The label doubles as state: deploy-only is the DEFAULT, so a neutral "configure"
+ * affordance would make the safe default look identical to an unconfigured one.
+ * Saying which tier is active is the whole point — an operator scanning the list
+ * needs to see at a glance which repos can be read.
+ */
+function SourceAccessButton({
+  label,
+  active,
+  title,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  title: string;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  // IS a LevelSwitch with one segment, rather than a pill that copies its look.
+  // Reproducing the classes by hand is how the two controls drifted apart in the
+  // first place (10px vs 11px, different padding) — delegating means there is one
+  // definition of a row control's size, and they cannot diverge again.
+  //
+  // `value` is the segment id when active and "" when not, so the inactive segment
+  // renders in LevelSwitch's own unselected style.
+  // The icon is what makes this read as a CONTROL. As a bare word it looked like a
+  // static state label next to the real switch — nothing suggested it opened
+  // anything, so the whole feature was invisible. Sliders + a tooltip naming the
+  // action fix that without breaking the shared shell.
+  return (
+    <LevelSwitch
+      options={[
+        {
+          id: SOURCE_SEGMENT,
+          title,
+          label: (
+            <span className="inline-flex items-center gap-1">
+              <SlidersHorizontal className="size-3 shrink-0" />
+              {label}
+            </span>
+          ),
+        },
+      ]}
+      value={active ? SOURCE_SEGMENT : ""}
+      disabled={disabled}
+      onChange={onClick}
+    />
+  );
+}
+
+/** Segment id for the single-option source-access switch. */
+const SOURCE_SEGMENT = "source";
+
 function GitHubTree({
   value,
   onChange,
@@ -566,6 +638,22 @@ function GitHubTree({
   const { showToast } = useToast();
   const { t } = useI18n();
   const w = t.widgets.permissions.resourcePicker;
+  const sa = t.widgets.permissions.sourceAccess;
+  /**
+   * What the source-access modal is editing, or null when it's shut.
+   *
+   * Both widths are valid targets: an org-wide grant can carry a scope ("read
+   * `src/**` in every repo under this account") exactly as a single repo can, and
+   * `resolveSourceAccess` resolves whichever grant is most specific. This has to
+   * cover the org row, because the default consent template grants ORG-level
+   * access — with a whole-org grant active the repo rows collapse to "covered by
+   * the org-wide grant", so a repo-only entry point would be unreachable.
+   */
+  const [sourceTarget, setSourceTarget] = useState<{
+    type: "github_installation" | "github_repository";
+    id: string;
+    label: string;
+  } | null>(null);
   const [orgs, setOrgs] = useState<CatalogEntry[]>([]);
   const [loadingOrgs, setLoadingOrgs] = useState(true);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -664,6 +752,7 @@ function GitHubTree({
   }
 
   return (
+    <>
     <div className="rounded-xl border border-border/50 overflow-hidden max-h-[380px] overflow-y-auto divide-y divide-border/30">
       {orgs.map((org) => {
         const login = org.id;
@@ -707,6 +796,21 @@ function GitHubTree({
                     </span>
                   </p>
                 </div>
+                {wholeOrg && (
+                  <SourceAccessButton
+                    label={grant?.scope ? sa.tierContent : sa.tierDeploy}
+                    active={!!grant?.scope}
+                    title={sa.buttonHint}
+                    disabled={disabled}
+                    onClick={() =>
+                      setSourceTarget({
+                        type: "github_installation",
+                        id: login,
+                        label: org.label,
+                      })
+                    }
+                  />
+                )}
                 {wholeOrg && (
                   <GrantControl
                     levels={levels}
@@ -787,6 +891,21 @@ function GitHubTree({
                               </p>
                             </div>
                             {checked && (
+                              <SourceAccessButton
+                                label={rg?.scope ? sa.tierContent : sa.tierDeploy}
+                                active={!!rg?.scope}
+                                title={sa.buttonHint}
+                                disabled={disabled}
+                                onClick={() =>
+                                  setSourceTarget({
+                                    type: "github_repository",
+                                    id: repo.id,
+                                    label: repo.label,
+                                  })
+                                }
+                              />
+                            )}
+                            {checked && (
                               <GrantControl
                                 levels={levels}
                                 perms={rg?.permissions ?? []}
@@ -819,5 +938,54 @@ function GitHubTree({
         );
       })}
     </div>
+
+    {/* Source access is its own dedicated surface rather than more chips on the
+        row: it carries three tiers, two path lists and a summary, and it is the
+        difference between "may deploy this repo" and "may read its source". */}
+    {sourceTarget && (() => {
+      const current = findGrantIn(value, sourceTarget.type, sourceTarget.id);
+      return (
+        <Modal
+          isOpen
+          onClose={() => setSourceTarget(null)}
+          // Wide, and `overflow="hidden"` so the TREE scrolls inside its column
+          // rather than the whole panel growing until the footer leaves the screen.
+          // Same shape as the app's other browse-and-choose modals.
+          // Size is driven by the panel's own content, not fixed here: only
+          // SourceAccessModal knows the tier, and it animates its width when you
+          // move from Deploy only (narrow, no columns) into a browse tier (wide,
+          // two columns). Passing a width here would freeze it at one of the two.
+          width="auto"
+          maxWidth="95vw"
+          maxHeight="86vh"
+          overflow="hidden"
+          showCloseButton={false}
+        >
+          <SourceAccessModal
+            open
+            onClose={() => setSourceTarget(null)}
+            targetLabel={sourceTarget.label}
+            wholeAccount={sourceTarget.type === "github_installation"}
+            permissions={current?.permissions ?? []}
+            scope={current?.scope}
+            onApply={(scope) =>
+              onChange(
+                writeGrant(
+                  value,
+                  sourceTarget.type,
+                  sourceTarget.id,
+                  // Keep the verb exactly as it was — this modal edits the SURFACE
+                  // only. Falling back to defaultPermissions would quietly widen a
+                  // target the owner had set to read-only.
+                  current?.permissions ?? defaultPermissions,
+                  scope ?? null,
+                ),
+              )
+            }
+          />
+        </Modal>
+      );
+    })()}
+    </>
   );
 }

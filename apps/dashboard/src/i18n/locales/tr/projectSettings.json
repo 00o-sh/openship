@@ -453,22 +453,29 @@
       "title": "Geri alma stratejisi",
       "rebuild": "Yeniden derle (git)",
       "instant": "Anında (anlık görüntü - snapshot)",
-      "descRebuild": "Ek yapıt tutmaz. Geri alma, sunucuda kalan bir imajı yine kullanır; yoksa eski commit'i yeniden derler.",
-      "descInstant": "Ayrıca her sürümün çalışma zamanı yapıtını saklar, böylece geri yükleme hiç derleme yapmaz. Daha çok disk kullanır, geçmiş sınırıyla sınırlıdır.",
-      "toggleAria": "Anlık görüntü saklamayı değiştir"
+      "descRebuild": "Görüntüsü hâlâ makinede değilse eski commit'i yeniden derler.",
+      "descInstant": "Her sürümün görüntüsünü saklar, böylece geri yükleme asla yeniden derlemez. Daha fazla disk kullanır.",
+      "toggleAria": "Anlık görüntü saklamayı değiştir",
+      "keepNone": "Ek kopya tutulmaz",
+      "keepCopies": "Sürüm başına bir kopya",
+      "descRebuildFiles": "Dosyaları hâlâ makinede değilse eski commit'i yeniden derler.",
+      "descInstantFiles": "Her sürümün dosyalarını saklar, böylece geri yükleme asla yeniden derlemez. Daha fazla disk kullanır."
     },
     "rollbackHistory": {
       "title": "Geri alma geçmişi",
       "valueOne": "{count} sürüm",
       "valueOther": "{count} sürüm",
-      "descSnapshot": "Son sürümlerden kaçının geri yüklenebilir kaldığı. Daha eskiler disk için temizlenir.",
-      "descGit": "Stratejiden bağımsız korunur: son sürümlerin imajları saklanır, böylece imaj sunucuda olduğu sürece geri alma derlemeyi atlar.",
+      "descSnapshot": "Disk alanı kazanmak için eski sürümler temizlenir.",
+      "descGit": "Son görüntüler her durumda saklanır, böylece geri alma derlemeyi atlayabilir.",
       "decreaseAria": "Geri alma geçmişini azalt",
       "increaseAria": "Geri alma geçmişini artır",
       "sizeEach": "her biri ~{size}",
       "diskFree": "{size} boş",
       "autoBadge": "otomatik boyutlandırıldı",
-      "manualBadge": "elle ayarlandı"
+      "manualBadge": "elle ayarlandı",
+      "kindFiles": "diskteki üretilmiş dosyalar",
+      "kindImages": "sunucudaki imajlar",
+      "descGitFiles": "Son sürümlerin dosyaları her durumda saklanır, böylece geri alma derlemeyi atlayabilir."
     },
     "commits": {
       "title": "Son commitler",
@@ -728,8 +735,7 @@
       "infoPreview": "Önce bu kayıtları ekleyin — eklendikten sonra değişmezler, böylece yayılma şimdi başlar. Ardından bağlamak için Alan adı ekle'ye basın ve son olarak DNS çözümlendiğinde Doğrula'ya tıklayın.",
       "infoApply": "DNS değişikliklerinin küresel olarak yayılması 48 saati bulabilir. Kayıtlar çözümlendiğinde aşağıdan Doğrula'ya tıklayın — DNS'i kontrol edeceğiz, alan adını etkinleştireceğiz ve arka planda SSL sağlayacağız.",
       "verifying": "Doğrulanıyor...",
-      "verify": "{hostname} adresini doğrula",
-      "copy": "Kopyala"
+      "verify": "{hostname} adresini doğrula"
     },
     "records": {
       "toggle": "DNS kayıtları",
@@ -752,6 +758,8 @@
     "overview": {
       "primary": "Birincil",
       "mappedTo": "Eşleştiği yer:",
+      "redirect": "Yönlendirme",
+      "redirectValue": "{status} → {hostname}",
       "status": "Durum",
       "ssl": "SSL",
       "visit": "Aç"

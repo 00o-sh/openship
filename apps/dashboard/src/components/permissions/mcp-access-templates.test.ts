@@ -571,3 +571,86 @@ describe("small helpers", () => {
     ]);
   });
 });
+
+/**
+ * Source access rides on PickerGrant, so it has to survive the consent screen's
+ * grant pipeline: ResourcePicker hands its value back through mergePickerGrants,
+ * and wireGrants decides what actually goes on the wire. A filter that rebuilt
+ * grants instead of passing them through would silently drop the scope — the
+ * operator would pick "read only src/**", authorise, and mint a metadata-only
+ * token (or, if the default ever flipped, a wide-open one).
+ */
+describe("source access survives the consent pipeline", () => {
+  const scoped = {
+    resourceType: "github_repository" as const,
+    resourceId: "hydralerne/charts",
+    permissions: ["read" as const],
+    scope: { v: 1 as const, read: { paths: ["src/**"] } },
+  };
+
+  it("pickerGrants keeps the scope (it only holds back the project wildcard)", () => {
+    expect(pickerGrants([PROJECT_CREATE_GRANT, scoped])).toEqual([scoped]);
+  });
+
+  it("mergePickerGrants passes the scope through untouched", () => {
+    const merged = mergePickerGrants([PROJECT_CREATE_GRANT], [scoped]);
+    expect(merged).toContainEqual(scoped);
+    expect(merged.find((g) => g.resourceId === "hydralerne/charts")?.scope?.read?.paths).toEqual([
+      "src/**",
+    ]);
+  });
+
+  it("wireGrants sends the scope", () => {
+    const wired = wireGrants({ template: "custom", grants: [scoped], readOnly: false });
+    expect(wired).toEqual([scoped]);
+  });
+
+  it("a zero-permission grant is still dropped, scope or not", () => {
+    const empty = { ...scoped, permissions: [] };
+    expect(wireGrants({ template: "custom", grants: [empty], readOnly: false })).toEqual([]);
+  });
+});
+
+/**
+ * "Can it read my source?" is the question a repo grant raises and the digest used
+ * to leave unanswered — it said "reads your GitHub repositories", which is true of a
+ * deploy-only grant that can read no file at all. Stated explicitly either way now.
+ */
+describe("the digest answers the file-contents question", () => {
+  const repo = (scope?: { v: 1; read?: { paths: string[] } }) => ({
+    template: "custom" as const,
+    readOnly: false,
+    grants: [
+      {
+        resourceType: "github_repository" as const,
+        resourceId: "hydralerne/charts",
+        permissions: ["read" as const],
+        ...(scope ? { scope } : {}),
+      },
+    ],
+  });
+
+  it("says it CANNOT read contents when the grant is deploy-only", () => {
+    const d = capabilityDigest(repo());
+    expect(d.cannot).toContain("notReadSource");
+    expect(d.can).not.toContain("readSource");
+  });
+
+  it("says it CAN read contents once paths are scoped", () => {
+    const d = capabilityDigest(repo({ v: 1, read: { paths: ["src/**"] } }));
+    expect(d.can).toContain("readSource");
+    expect(d.cannot).not.toContain("notReadSource");
+  });
+
+  it("an empty path list is not content access", () => {
+    // A scope carrying no readable path grants nothing, so it must not claim to.
+    const d = capabilityDigest(repo({ v: 1, read: { paths: [] } }));
+    expect(d.cannot).toContain("notReadSource");
+  });
+
+  it("says nothing either way when there is no github grant at all", () => {
+    const d = capabilityDigest({ template: "custom", readOnly: false, grants: [] });
+    expect(d.can).not.toContain("readSource");
+    expect(d.cannot).not.toContain("notReadSource");
+  });
+});

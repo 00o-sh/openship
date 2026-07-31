@@ -293,7 +293,6 @@
       "successful": "Bereitstellung erfolgreich",
       "deploying": "Wird bereitgestellt..."
     },
-    "viewDashboard": "Dashboard anzeigen",
     "visitSite": "Website besuchen",
     "warningTitle": "Bereitstellung abgeschlossen, aber einige Services benötigen noch Aufmerksamkeit.",
     "productionLogs": "Produktionsprotokolle",
@@ -335,7 +334,6 @@
     "running": "laufend",
     "buildingSuffix": "· {count} werden gebaut",
     "failedSuffix": "· {count} fehlgeschlagen",
-    "viewDashboard": "Dashboard anzeigen",
     "decisionBannerTitle": "Aktion erforderlich – einige Services sind fehlgeschlagen",
     "decisionBannerDefaultMsg": "Diese Bereitstellung wurde mit fehlgeschlagenen Services abgeschlossen. Behalte sie und behebe sie später, oder verwirf sie, um die vorherige Version wiederherzustellen.",
     "review": "Prüfen",

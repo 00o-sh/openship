@@ -293,7 +293,6 @@
       "successful": "Despliegue exitoso",
       "deploying": "Desplegando..."
     },
-    "viewDashboard": "Ver panel",
     "visitSite": "Visitar el sitio",
     "warningTitle": "El despliegue finalizó, pero algunos servicios aún necesitan atención.",
     "productionLogs": "Registros de producción",
@@ -335,7 +334,6 @@
     "running": "en ejecución",
     "buildingSuffix": "· {count} compilando",
     "failedSuffix": "· {count} fallidos",
-    "viewDashboard": "Ver panel",
     "decisionBannerTitle": "Acción requerida: algunos servicios fallaron",
     "decisionBannerDefaultMsg": "Este despliegue finalizó con servicios fallidos. Consérvalo y corrígelos más tarde, o recházalo para restaurar la versión anterior.",
     "review": "Revisar",

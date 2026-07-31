@@ -354,22 +354,29 @@
       "title": "Stratégie de restauration",
       "rebuild": "Reconstruction (git)",
       "instant": "Instantanée (snapshot)",
-      "descRebuild": "Ne conserve aucun artefact supplémentaire. Une restauration réutilise encore une image conservée si elle existe, sinon elle reconstruit l'ancien commit.",
-      "descInstant": "Conserve aussi l'artefact d'exécution de chaque version pour qu'une restauration ne reconstruise jamais. Consomme plus de disque, borné par la limite d'historique.",
-      "toggleAria": "Basculer la rétention des snapshots"
+      "descRebuild": "Reconstruit l'ancien commit, sauf si son image est encore sur le serveur.",
+      "descInstant": "Conserve l'image de chaque version, donc une restauration ne reconstruit jamais. Utilise plus de disque.",
+      "toggleAria": "Basculer la rétention des snapshots",
+      "keepNone": "Aucune copie supplémentaire",
+      "keepCopies": "Une copie par version",
+      "descRebuildFiles": "Reconstruit l'ancien commit, sauf si ses fichiers sont encore sur le serveur.",
+      "descInstantFiles": "Conserve les fichiers de chaque version, donc une restauration ne reconstruit jamais. Utilise plus de disque."
     },
     "rollbackHistory": {
       "title": "Historique de restauration",
       "valueOne": "{count} version",
       "valueOther": "{count} versions",
-      "descSnapshot": "Combien de versions récentes restent restaurables. Les plus anciennes sont supprimées pour libérer de l'espace.",
-      "descGit": "Conservé quelle que soit la stratégie : les images des versions récentes sont gardées, donc une restauration peut éviter la reconstruction si l'une est encore présente.",
+      "descSnapshot": "Les versions plus anciennes sont supprimées pour libérer de l'espace.",
+      "descGit": "Les images récentes sont conservées de toute façon, donc un rollback peut éviter la compilation.",
       "decreaseAria": "Diminuer l'historique de restauration",
       "increaseAria": "Augmenter l'historique de restauration",
       "sizeEach": "~{size} chacune",
       "diskFree": "{size} libres",
       "autoBadge": "dimensionné automatiquement",
-      "manualBadge": "défini manuellement"
+      "manualBadge": "défini manuellement",
+      "kindFiles": "fichiers générés sur le disque",
+      "kindImages": "images sur l'hôte",
+      "descGitFiles": "Les fichiers des versions récentes sont conservés de toute façon, donc un rollback peut éviter la compilation."
     },
     "commits": {
       "title": "Commits récents",
@@ -629,12 +636,13 @@
       "infoPreview": "Ajoutez d'abord ces enregistrements — ils ne changent pas après l'ajout, donc la propagation commence maintenant. Appuyez ensuite sur Ajouter un domaine pour l'attacher, puis enfin sur Vérifier une fois que le DNS est résolu.",
       "infoApply": "Les changements DNS peuvent prendre jusqu'à 48 heures pour se propager à l'échelle mondiale. Une fois les enregistrements résolus, cliquez sur Vérifier ci-dessous — nous vérifierons le DNS, marquerons le domaine comme actif et provisionnerons le SSL en arrière-plan.",
       "verifying": "Vérification...",
-      "verify": "Vérifier {hostname}",
-      "copy": "Copier"
+      "verify": "Vérifier {hostname}"
     },
     "overview": {
       "primary": "Principal",
       "mappedTo": "Associé à",
+      "redirect": "Redirection",
+      "redirectValue": "{status} → {hostname}",
       "status": "Statut",
       "ssl": "SSL",
       "visit": "Visiter"

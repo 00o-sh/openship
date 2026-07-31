@@ -145,6 +145,11 @@ export interface PublicEndpoint {
   domain: string;
   customDomain: string;
   domainType: "free" | "custom";
+  /** Canonical redirect: answer a 30x to this hostname (another of the project's
+   *  own) instead of serving the app here. Undefined = serves the app. */
+  redirectTo?: string;
+  /** 301 (default) | 302. Only meaningful alongside `redirectTo`. */
+  redirectStatus?: number;
 }
 
 // ─── Per-service deployment status (live from SSE or loaded from DB) ─────────
@@ -259,6 +264,14 @@ export interface DeploymentConfig {
   buildStrategy: BuildStrategy;
   /** Where the app deploys to: "local" (this machine), "server" (remote SSH), or "cloud" (Oblien) */
   deployTarget: DeployTarget;
+  /**
+   * Rollback retention, chosen in the wizard's target panel. Only used for a
+   * project that doesn't exist yet — once it does, the panel edits the project
+   * row directly (there's no reason to stage a change we can persist now).
+   * `rollbackWindow: null` = size it from the target's free disk.
+   */
+  rollbackWindow?: number | null;
+  rollbackStrategy?: "git" | "snapshot";
   /** Which server to deploy to when deployTarget === "server" */
   serverId?: string;
   /**
@@ -450,6 +463,8 @@ export function createPublicEndpoint(
     domain: overrides.domain ?? "",
     customDomain: overrides.customDomain ?? "",
     domainType: overrides.domainType ?? "free",
+    ...(overrides.redirectTo ? { redirectTo: overrides.redirectTo } : {}),
+    ...(overrides.redirectStatus ? { redirectStatus: overrides.redirectStatus } : {}),
   };
 }
 

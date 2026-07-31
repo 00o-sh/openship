@@ -157,6 +157,10 @@ function hasSavedProjectPort(project: PersistedProject) {
     : false;
 }
 
+// Reading a SAVED project's endpoints into the wizard. Every routing field has to
+// survive the trip: the deploy sends this list back, and an omitted redirect CLEARS
+// the stored one — so dropping it here would make a redeploy quietly turn a
+// redirecting domain back into one that serves the app.
 function mapStoredPublicEndpoints(project: PersistedProject) {
   return project?.publicEndpoints?.map((endpoint: {
     port?: number;
@@ -164,12 +168,16 @@ function mapStoredPublicEndpoints(project: PersistedProject) {
     domain?: string;
     customDomain?: string;
     domainType?: "free" | "custom";
+    redirectTo?: string;
+    redirectStatus?: number;
   }) => createPublicEndpoint({
     port: endpoint.port ? String(endpoint.port) : "",
     targetPath: endpoint.targetPath || "",
     domain: endpoint.domain || "",
     customDomain: endpoint.customDomain || "",
     domainType: endpoint.domainType || "free",
+    redirectTo: endpoint.redirectTo || undefined,
+    redirectStatus: endpoint.redirectStatus || undefined,
   }));
 }
 

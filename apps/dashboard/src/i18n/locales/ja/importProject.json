@@ -293,7 +293,6 @@
       "successful": "デプロイに成功しました",
       "deploying": "デプロイ中..."
     },
-    "viewDashboard": "ダッシュボードを表示",
     "visitSite": "サイトを開く",
     "warningTitle": "デプロイは完了しましたが、一部のサービスに対応が必要です。",
     "productionLogs": "本番ログ",
@@ -335,7 +334,6 @@
     "running": "稼働中",
     "buildingSuffix": "· {count} 件ビルド中",
     "failedSuffix": "· {count} 件失敗",
-    "viewDashboard": "ダッシュボードを表示",
     "decisionBannerTitle": "対応が必要です — 一部のサービスが失敗しました",
     "decisionBannerDefaultMsg": "このデプロイは失敗したサービスがある状態で完了しました。このまま保持して後で修正するか、拒否して以前のバージョンを復元してください。",
     "review": "確認",

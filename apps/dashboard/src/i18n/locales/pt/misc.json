@@ -47,8 +47,6 @@
     "createProjectsTitle": "Criar novos projetos",
     "createProjectsDesc": "O cliente pode criar projetos e gerencia integralmente os que ele cria — inclusive excluí-los. Ele não consegue ver projetos que não criou.",
     "resourcesHeading": "Recursos",
-    "advancedShow": "Mostrar servidores, e-mail e backups",
-    "advancedHide": "Ocultar servidores, e-mail e backups",
     "advancedNote": "Isso não libera nenhuma ferramenta MCP, mas a mesma autorização ainda pode alcançá-los pela API REST.",
     "summaryHeading": "O que este cliente vai receber",
     "summaryEmptyTitle": "Nada concedido ainda",

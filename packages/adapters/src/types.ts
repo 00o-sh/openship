@@ -429,6 +429,21 @@ export interface RouteHeaderRule {
   headers: { key: string; value: string }[];
 }
 
+/**
+ * Canonical host redirect: this vhost answers `statusCode` → `https://<target>`
+ * plus the original path and query, instead of serving anything.
+ *
+ * Distinct from {@link RouteRedirect}, which is a per-PATH rule inside a serving
+ * vhost. This replaces the whole route: the classic `www.example.com` →
+ * `example.com` (or the reverse), and old-domain → new-domain moves.
+ */
+export interface RouteHostRedirect {
+  /** Hostname to redirect to. Validated as a domain before it's emitted. */
+  target: string;
+  /** 301 | 302 | 307 | 308. */
+  statusCode: number;
+}
+
 interface BaseRouteConfig {
   /** External domain (e.g. "my-app.example.com") */
   domain: string;
@@ -465,6 +480,16 @@ interface BaseRouteConfig {
   proxyLocations?: RouteProxyLocation[];
   /** Redirect rules (vercel.json `redirects`) → `return <code> <dest>` locations. */
   redirects?: RouteRedirect[];
+  /**
+   * Serve a canonical redirect to another host INSTEAD of this route's content.
+   *
+   * Overrides the primary target and every path-scoped location: a host that
+   * redirects has no content of its own, so honouring `proxyLocations` /
+   * `redirects` / `headerRules` / `webhookProxy` alongside it would mean some
+   * paths redirect and others don't. It still needs its own certificate — a 301
+   * from `https://` only works if the TLS handshake succeeds first.
+   */
+  redirectHost?: RouteHostRedirect;
   /** Response-header rules (vercel.json `headers`) → `add_header`. */
   headerRules?: RouteHeaderRule[];
   /** Curated reverse-proxy tunables (client_max_body_size, proxy/body timeouts,

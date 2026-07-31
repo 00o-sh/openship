@@ -309,7 +309,6 @@
       "successful": "Deployment Successful",
       "deploying": "Deploying..."
     },
-    "viewDashboard": "View dashboard",
     "visitSite": "Visit Site",
     "warningTitle": "Deployment finished, but some services still need attention.",
     "productionLogs": "Production Logs",
@@ -351,7 +350,6 @@
     "running": "running",
     "buildingSuffix": "· {count} building",
     "failedSuffix": "· {count} failed",
-    "viewDashboard": "View Dashboard",
     "decisionBannerTitle": "Action required — some services failed",
     "decisionBannerDefaultMsg": "This deployment finished with failed services. Keep it and fix them later, or reject it to restore the previous version.",
     "review": "Review",

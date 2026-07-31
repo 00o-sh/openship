@@ -24,8 +24,17 @@ const MISSING_BASELINE: Record<string, number> = {
   migration: 1237,
   settings: 888,
   emailsAdmin: 628,
-  widgets: 138,
-  misc: 123,
+  // +360: permissions.sourceAccess — 45 keys for the source access modal and its
+  // repository path tree,
+  // still English in the other 8 locales (they fall back via deepMerge, so the UI
+  // is correct everywhere, just not localised). Deliberately NOT machine-translated:
+  // these strings drive a security decision — e.g. "a clone can't be limited to
+  // paths, so local builds won't work" — and a subtly wrong translation would
+  // mislead the operator choosing a grant. Lower this as they're translated.
+  widgets: 498,
+  // +40: mcpAuthorize gained 5 English-first keys — two digest lines that answer
+  // "can it read my source?" either way, and three level tooltips.
+  misc: 163,
   overview: 120,
   servers: 113,
   importProject: 81,

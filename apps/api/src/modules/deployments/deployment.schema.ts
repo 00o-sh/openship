@@ -40,6 +40,14 @@ const PublicEndpointInput = Type.Object({
   domain: Type.Optional(Type.String()),
   customDomain: Type.Optional(Type.String()),
   domainType: Type.Optional(Type.Union([Type.Literal("free"), Type.Literal("custom")])),
+  /** Canonical redirect to another hostname of the same project instead of serving
+   *  (validated by lib/domain-redirect.ts). Declared here because the deploy sends
+   *  the endpoint list back and an omitted redirect CLEARS the stored one — a
+   *  field the schema doesn't name is a field a deploy can silently drop. */
+  redirectTo: Type.Optional(Type.String()),
+  redirectStatus: Type.Optional(
+    Type.Union([Type.Literal(301), Type.Literal(302), Type.Literal(307), Type.Literal(308)]),
+  ),
 });
 
 /**

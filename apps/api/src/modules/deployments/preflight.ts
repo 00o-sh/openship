@@ -881,8 +881,14 @@ function checkConfig(snapshot: DeploymentConfigSnapshot, opts?: PreflightOptions
       // project indefinitely, with no route to recovery short of editing the
       // DB by hand. Warn instead: surface it so the operator can clean it up,
       // but let the rest of the project keep deploying.
+      //
+      // EXCEPT a `docker` sub-app: a Dockerfile owns its build, so having no
+      // install/build/start command is CORRECT there, not "dead" (see the
+      // `framework === "docker"` exempt below). Without this guard a valid,
+      // never-yet-deployed Dockerfile sub-app would be mislabeled a dead row
+      // on its very first deploy.
       const hasAnyCommand = !!(svc.installCommand || svc.buildCommand || svc.startCommand);
-      if (svc.everDeployed === false && !hasAnyCommand) {
+      if (svc.everDeployed === false && !hasAnyCommand && svc.framework !== "docker") {
         deadRowWarnings.push(
           `sub-app "${svc.name}" has never been deployed and has no install/build/start command — skipping (disable or configure it to silence this)`,
         );

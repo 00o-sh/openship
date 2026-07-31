@@ -1,5 +1,17 @@
 import { Type, type Static } from "@sinclair/typebox";
 
+/**
+ * Repo source access — the SURFACE a github grant reaches, where `permissions` is
+ * the VERB. Omit for the default: metadata only (deploy, branches, detect — no
+ * file contents). Patterns are validated + normalised server-side by
+ * `parseSourceAccessScope`; anything unmatchable is dropped rather than stored.
+ */
+const SourceScope = Type.Object({
+  v: Type.Literal(1),
+  read: Type.Optional(Type.Object({ paths: Type.Array(Type.String({ maxLength: 1024 })) })),
+  write: Type.Optional(Type.Object({ paths: Type.Array(Type.String({ maxLength: 1024 })) })),
+});
+
 const TokenGrant = Type.Object({
   resourceType: Type.String(),
   resourceId: Type.String(),
@@ -13,6 +25,7 @@ const TokenGrant = Type.Object({
       Type.Literal("create"),
     ]),
   ),
+  scope: Type.Optional(SourceScope),
 });
 
 export const CreateTokenBody = Type.Object({

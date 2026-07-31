@@ -19,7 +19,7 @@
       "announce": false,
       "affects": "<0.4.9",
       "title": "Update to Openship 0.4.9",
-      "message": "Openship 0.4.9 is available with fixes across MCP and custom domains. See the release notes — updating is recommended.",
+      "message": "Openship 0.4.9 rebuilds rollback so it restores a release properly — including compose stacks and static sites — and fixes releases that could not be redeployed at all. Updating is recommended.",
       "action": {
         "label": "Update now",
         "kind": "update"

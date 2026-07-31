@@ -32,7 +32,7 @@ import { dirname, join } from "node:path";
 import type { CommandExecutor, ManualCert, RouteConfig, SslResult } from "../types";
 import type { RoutingProvider, SslProvider } from "./types";
 import { LUA_LOGGER_PATH, RULES_GUARD_PATH, luaSourceAvailable, buildReloadCommand, detectOpenRestyPaths, ACME_HTTP01_PORT, ACME_CHALLENGE_LOCATION, type OpenRestyPaths } from "./openresty-lua";
-import { safeErrorMessage, sanitizeProxySettings, PROXY_GZIP_TYPES, type ProxySettings } from "@repo/core";
+import { safeErrorMessage, sanitizeProxySettings, resolveRedirectStatus, PROXY_GZIP_TYPES, type ProxySettings } from "@repo/core";
 import { sq } from "../system/local-shell";
 import { BOOTSTRAP_CERT_SEGMENT, validateCertFor } from "../system/proxy/cert-material";
 import { probeStaticOutput, type OutputProbeResult } from "../system/output-exists";
@@ -101,6 +101,24 @@ function renderProxyLocations(route: RouteConfig): string {
     }`;
     })
     .join("");
+}
+
+/**
+ * The `location /` body for a route that redirects to another host, or null when
+ * it serves normally.
+ *
+ * `assertValidDomain` runs on the TARGET, not just the route's own domain: the
+ * target is interpolated into the emitted config, so an unvalidated one would be
+ * a config-injection vector even though it reached us through a validating API.
+ * `resolveRedirectStatus` (shared with the API's validator, @repo/core) falls back
+ * to 301 rather than emitting `return 0` and making `openresty -t` reject the
+ * whole vhost.
+ */
+function renderHostRedirect(route: RouteConfig): string | null {
+  const redirect = route.redirectHost;
+  if (!redirect?.target) return null;
+  assertValidDomain(redirect.target);
+  return `return ${resolveRedirectStatus(redirect.statusCode)} https://${redirect.target}$request_uri;`;
 }
 
 /** Render vercel.json `redirects` as `return <code> <dest>` locations. */
@@ -705,7 +723,13 @@ export class NginxProvider implements RoutingProvider, SslProvider {
     } else {
       assertValidUpstream((route as { targetUrl: string }).targetUrl);
     }
-    const locationBody = "staticRoot" in route && route.staticRoot
+    // A canonical host redirect REPLACES the body — this host serves no content of
+    // its own, so the upstream/root is validated above (the destination is kept so
+    // dropping the redirect restores a serving route) but never emitted.
+    const hostRedirect = renderHostRedirect(route);
+    const locationBody = hostRedirect
+      ? hostRedirect
+      : "staticRoot" in route && route.staticRoot
       ? `root ${route.staticRoot};
         index index.html;
         try_files $uri $uri/ /index.html;`
@@ -715,16 +739,23 @@ export class NginxProvider implements RoutingProvider, SslProvider {
     // Composite single-domain: extra path-prefix proxy locations (e.g. /api/ →
     // backend) + vercel.json redirects, emitted BEFORE `location /` so nginx
     // longest-prefix / exact match routes them ahead of the primary target.
-    const extraLocations = `${renderRedirects(route)}${renderProxyLocations(route)}`;
+    // Suppressed for a redirecting host: a path that proxied while everything else
+    // redirected would be a split-brain vhost, and a webhook POST would lose its
+    // body to the 301. (ACME_CHALLENGE_LOCATION is emitted separately below and
+    // deliberately KEPT — a redirecting host still issues its own certificate.)
+    const extraLocations = hostRedirect
+      ? ""
+      : `${renderRedirects(route)}${renderProxyLocations(route)}`;
     // Global response headers (vercel.json `headers` with source "/(.*)").
-    const serverHeaders = renderServerHeaders(route);
+    const serverHeaders = hostRedirect ? "" : renderServerHeaders(route);
     // Curated reverse-proxy tunables (client_max_body_size, timeouts, gzip, …).
     // Server-scope so they cover `location /` + every extra location, and
     // override the server-wide http default for this vhost.
     const proxyOpts = renderProxyOptions(route.proxy);
 
-    // Optional: webhook proxy location for GitHub push delivery
-    const webhookLocation = route.webhookProxy
+    // Optional: webhook proxy location for GitHub push delivery. Never on a
+    // redirecting host — a 30x would drop the delivery's POST body.
+    const webhookLocation = route.webhookProxy && !hostRedirect
       ? `
     location /_openship/hooks/ {
         proxy_pass ${route.webhookProxy};
@@ -756,7 +787,14 @@ export class NginxProvider implements RoutingProvider, SslProvider {
     // :80, in which case serving is the only non-looping answer (FORWARD_VARS).
     // `return` inside `if` is one of the documented-safe uses of `if`; proxy_pass
     // stays outside it.
-    const redirectOrServeLocation = `    location / {
+    //
+    // A canonical redirect skips that dance and goes straight to the target from
+    // :80 as well: bouncing to our OWN https first would cost a second round trip
+    // to reach the same place, and there's no CDN loop to avoid because the
+    // destination is a DIFFERENT host.
+    const redirectOrServeLocation = hostRedirect
+      ? serveLocation
+      : `    location / {
         if ($openship_redirect_https) {
             return 301 https://$server_name$request_uri;
         }

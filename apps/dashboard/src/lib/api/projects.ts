@@ -145,6 +145,10 @@ export const projectsApi = {
   ensure: (body: {
     projectId?: string;
     name: string;
+    /** Rollback retention picked in the wizard before the project existed.
+     *  `null` window = size it from the deploy host's free disk. */
+    rollbackWindow?: number | null;
+    defaultRollbackStrategy?: "git" | "snapshot";
     slug?: string;
     gitOwner?: string;
     /** Source discriminator; "upload" for browser folder-upload projects. */

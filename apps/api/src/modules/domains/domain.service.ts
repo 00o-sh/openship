@@ -33,6 +33,11 @@ import { generateToken } from "../../lib/domain-token";
 import { publicEndpointHostname, resolveServicePublicEndpoints } from "../../lib/public-endpoints";
 import { sshManager } from "../../lib/ssh-manager";
 import type { DeploymentMeta } from "../../lib/deployment-runtime";
+import {
+  assertRedirectSupported,
+  assertRedirectTargets,
+  normalizeRedirect,
+} from "../../lib/domain-redirect";
 import type { TAddDomainBody } from "./domain.schema";
 import { edgeProxy, readEdgeFile, validateCertFor } from "@repo/adapters";
 import type { AdoptedCert, CloudRuntime, CommandExecutor, ManualCert } from "@repo/adapters";
@@ -43,6 +48,17 @@ export async function listDomains(ctx: RequestContext, projectId: string) {
   const project = await repos.project.findById(projectId);
   assertResourceInOrg(project, "Project", ctx.organizationId, projectId);
   return repos.domain.listByProject(projectId);
+}
+
+/**
+ * Read ONE domain's live verify + SSL state. The recovery read for any flow that
+ * lost its result mid-run — a verify whose SSE stream dropped before the terminal
+ * event still finished server-side, and this is how the UI learns that instead of
+ * telling the operator to go and look.
+ */
+export async function getDomain(ctx: RequestContext, domainId: string) {
+  const { domain } = await getDomainWithAuth(domainId, ctx.organizationId);
+  return domain;
 }
 
 // ─── Set primary ───────────────────────────────────────────────────────────────
@@ -68,7 +84,24 @@ export async function setPrimaryDomain(ctx: RequestContext, domainId: string) {
 
 // ─── Add ─────────────────────────────────────────────────────────────────────
 
-export async function addDomain(ctx: RequestContext, data: TAddDomainBody) {
+export async function addDomain(
+  ctx: RequestContext,
+  data: TAddDomainBody,
+  opts: {
+    /**
+     * Hostnames the caller has ALREADY established this project owns, unioned
+     * into the redirect-target set.
+     *
+     * For `addWwwSibling`, which creates `www.<apex>` redirecting to the apex it
+     * has just created/confirmed in the same call. Reading the apex back out of
+     * the DB to prove ownership we already hold would make the sibling's redirect
+     * depend on read-after-write visibility — and drop it silently when that
+     * doesn't hold. This does NOT loosen the wire gate: route callers pass
+     * nothing, so a client-supplied target is still checked against stored rows.
+     */
+    extraOwnedHostnames?: string[];
+  } = {},
+) {
   const project = await repos.project.findById(data.projectId);
   assertResourceInOrg(project, "Project", ctx.organizationId, data.projectId);
 
@@ -99,6 +132,24 @@ export async function addDomain(ctx: RequestContext, data: TAddDomainBody) {
     throw new ValidationError(`"${hostname}" is not a valid public hostname.`);
   }
 
+  // Redirect target: validated against THIS project's hostname set (plus the row
+  // being added), so a redirect can only ever point at a hostname the project
+  // already owns — never off-site, never at itself, never round a loop.
+  const redirect = normalizeRedirect(data);
+  if (redirect.redirectTo) {
+    assertRedirectSupported({ isCloudProject: !!project?.cloudWorkspaceId, hostname });
+    const peers = await repos.domain.listByProject(data.projectId).catch(() => []);
+    assertRedirectTargets([
+      ...peers
+        .filter((peer) => peer.hostname.toLowerCase() !== hostname)
+        .map((peer) => ({ hostname: peer.hostname, redirectTo: peer.redirectTo })),
+      ...(opts.extraOwnedHostnames ?? [])
+        .filter((owned) => normalizeCustomHostname(owned) !== hostname)
+        .map((owned) => ({ hostname: owned })),
+      { hostname, redirectTo: redirect.redirectTo },
+    ]);
+  }
+
   const existing = await repos.domain.findByHostname(hostname);
   if (existing) {
     if (existing.projectId !== data.projectId) {
@@ -117,6 +168,12 @@ export async function addDomain(ctx: RequestContext, data: TAddDomainBody) {
     ) {
       patch.externalIngress = data.externalIngress;
     }
+    // Only ever SET a redirect here; `redirectTo: undefined` (the common case —
+    // a plain re-save) must not clear one the operator configured separately.
+    if (redirect.redirectTo && existing.redirectTo !== redirect.redirectTo) {
+      patch.redirectTo = redirect.redirectTo;
+      patch.redirectStatus = redirect.redirectStatus;
+    }
 
     if (Object.keys(patch).length > 0) {
       await repos.domain.update(existing.id, patch);
@@ -126,11 +183,7 @@ export async function addDomain(ctx: RequestContext, data: TAddDomainBody) {
     }
     // Re-saving with the toggle on must be able to ADD the www row that a first
     // save (or an older build) never created.
-    if (data.includeWww) {
-      await addWwwSibling(ctx, data, hostname).catch((err) =>
-        console.warn(`[domains] www.${hostname} not added: ${safeErrorMessage(err)}`),
-      );
-    }
+    const resaveWww = data.includeWww ? await addWwwSibling(ctx, data, hostname) : null;
 
     const domain = {
       ...existing,
@@ -143,8 +196,10 @@ export async function addDomain(ctx: RequestContext, data: TAddDomainBody) {
       token,
       project,
       domain.externalIngress,
+      ctx.organizationId,
+      !!data.includeWww,
     );
-    return { domain, records };
+    return { domain, records, ...resaveWww };
   }
 
   const token = generateToken(hostname);
@@ -162,6 +217,8 @@ export async function addDomain(ctx: RequestContext, data: TAddDomainBody) {
     isPrimary: data.isPrimary ?? false,
     externalIngress: data.externalIngress ?? false,
     verificationToken: token,
+    redirectTo: redirect.redirectTo,
+    redirectStatus: redirect.redirectStatus,
   });
 
   if (data.isPrimary) {
@@ -169,33 +226,46 @@ export async function addDomain(ctx: RequestContext, data: TAddDomainBody) {
   }
 
   // "Include www" is a REQUEST FOR A SECOND HOSTNAME, so it has to exist as its own
-  // row: verification, DNS records, SSL and routing are all keyed per row, and
-  // `manageDomainSsl`'s www branch explicitly looks for `www.<host>` in the domain
-  // table. Without this the toggle set a flag nothing ever read (issue #289).
+  // row: verification, DNS records, SSL and routing are all keyed per row. Without
+  // this the toggle set a flag nothing ever read (issue #289).
   //
   // Best-effort: the apex is what the caller asked for and already succeeded. A www
   // that can't be claimed (already taken by another project, invalid) must not undo
   // it — the apex stays, and the operator can add www by hand.
-  if (data.includeWww) {
-    await addWwwSibling(ctx, data, hostname).catch((err) =>
-      console.warn(`[domains] www.${hostname} not added: ${safeErrorMessage(err)}`),
-    );
-  }
+  const www = data.includeWww ? await addWwwSibling(ctx, data, hostname) : null;
 
-  const records = await buildRecords(domain.hostname, token, project, domain.externalIngress);
-  return { domain, records };
+  // `includeWww` reaches buildRecords so the returned panel lists the SIBLING's
+  // record too. It didn't before, which is why "Include www" so often ended in a
+  // www that never resolved: the row and the route existed, but the operator was
+  // never told to add its DNS record, so its certificate could never be issued.
+  const records = await buildRecords(
+    domain.hostname,
+    token,
+    project,
+    domain.externalIngress,
+    ctx.organizationId,
+    !!data.includeWww,
+  );
+  return { domain, records, ...www };
 }
 
 /**
  * "Include www" asks for a SECOND routable hostname, not a flag on the apex row: the
- * edge binds one `server_name` per row, and `domain-ssl.ts`'s www branch resolves the
- * variant BY HOSTNAME — so it only exists once it has a row, which then verifies and
- * certs on its own.
+ * edge binds one `server_name` per row, so the variant only exists once it HAS a row,
+ * which then verifies and certs entirely on its own.
  *
  * Recurses through `addDomain` on purpose: hostname validation, the cross-project
  * conflict check and the interrupted-connect retry path all live there and must apply
  * to the variant too. Runs AFTER the apex so an apex conflict aborts before we mint a
  * sibling, and the apex keeps `isPrimary`.
+ *
+ * The sibling is created REDIRECTING to the apex (301). Two hostnames serving the
+ * same app is duplicate content; the toggle's intent is "cover www too", and the
+ * direction is editable per row afterwards (see domain-redirect.ts).
+ *
+ * Returns what happened so the caller can SURFACE it. A failure here used to be a
+ * `console.warn` the operator never saw: the toggle looked like it worked, and the
+ * missing sibling only showed up later as a www that never resolved.
  *
  * NOTE: the row alone is not enough — `syncProjectPublicRoutes` deletes project-level
  * rows the submitted endpoint list omits, so the caller must also include
@@ -205,15 +275,29 @@ async function addWwwSibling(
   ctx: RequestContext,
   data: TAddDomainBody,
   hostname: string,
-): Promise<void> {
+): Promise<{ www?: { id: string; hostname: string }; wwwError?: string }> {
   const www = wwwSiblingHostname(hostname);
-  if (!www) return;
-  await addDomain(ctx, {
-    projectId: data.projectId,
-    hostname: www,
-    isPrimary: false,
-    externalIngress: data.externalIngress,
-  });
+  if (!www) return {};
+  try {
+    const result = await addDomain(
+      ctx,
+      {
+        projectId: data.projectId,
+        hostname: www,
+        isPrimary: false,
+        externalIngress: data.externalIngress,
+        redirectTo: hostname,
+      },
+      // The apex was created/confirmed by the call we're inside — see
+      // `extraOwnedHostnames`.
+      { extraOwnedHostnames: [hostname] },
+    );
+    return { www: { id: result.domain.id, hostname: result.domain.hostname } };
+  } catch (err) {
+    const message = safeErrorMessage(err);
+    console.warn(`[domains] ${www} not added: ${message}`);
+    return { wwwError: `${www} couldn't be added: ${message}` };
+  }
 }
 
 /**

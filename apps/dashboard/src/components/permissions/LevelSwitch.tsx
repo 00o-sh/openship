@@ -1,4 +1,5 @@
 "use client";
+import type { ReactNode } from "react";
 
 /**
  * A segmented control for named, CUMULATIVE access levels — the legible face of
@@ -15,7 +16,9 @@
 
 export interface LevelOption {
   id: string;
-  label: string;
+  /** ReactNode so a segment can carry an icon — see SourceAccessButton, which
+   *  needs to look adjustable rather than like a static state label. */
+  label: ReactNode;
   /** Shown on hover — useful when `label` is abbreviated to fit. */
   title?: string;
 }
@@ -31,9 +34,17 @@ export function LevelSwitch({
   value: string;
   disabled?: boolean;
   onChange: (id: string) => void;
-  size?: "sm" | "md";
+  size?: "sm" | "md" | "lg";
 }) {
-  const pad = size === "sm" ? "px-2 py-[3px] text-[10px]" : "px-2.5 py-1 text-[11px]";
+  // `lg` exists for DIALOGS: SourceAccessModal runs at a dialog scale (text-sm
+  // body), where an 11px segment reads as undersized. Rows keep `md` so the picker
+  // is unchanged.
+  const pad =
+    size === "sm"
+      ? "px-2 py-[3px] text-[10px]"
+      : size === "lg"
+        ? "px-2.5 py-1.5 text-[13px]"
+        : "px-2.5 py-1 text-[11px]";
   return (
     <div className="inline-flex shrink-0 rounded-lg bg-muted/50 p-0.5 ring-1 ring-inset ring-border/50">
       {options.map((o) => {
@@ -46,8 +57,13 @@ export function LevelSwitch({
             disabled={disabled}
             aria-pressed={active}
             // Only when it actually adds something. A title identical to the
-            // visible label just parks a native tooltip over the control.
-            title={o.title && o.title !== o.label ? o.title : undefined}
+            // visible label just parks a native tooltip over the control. The
+            // string check is because `label` may now be a node.
+            title={
+              o.title && (typeof o.label !== "string" || o.title !== o.label)
+                ? o.title
+                : undefined
+            }
             className={`whitespace-nowrap rounded-md font-medium transition-colors disabled:opacity-50 ${pad} ${
               active
                 ? "bg-card text-foreground shadow-sm"
