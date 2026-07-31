@@ -484,19 +484,60 @@ function findClosingQuote(value: string, quote: '"' | "'"): number {
   return -1;
 }
 
+const BARE_VARIABLE_RE = /^[A-Za-z_][A-Za-z0-9_]*/;
+
+/**
+ * Reads the `${...}` expression opening at `start`, counting nested `${` so the
+ * matching close brace is found. Returns null when the expression is never closed.
+ */
+function readBracedExpression(
+  input: string,
+  start: number,
+): { expression: string; end: number } | null {
+  let depth = 1;
+  for (let i = start + 2; i < input.length; i++) {
+    if (input[i] === "$" && input[i + 1] === "{") {
+      depth++;
+      i++;
+    } else if (input[i] === "}" && --depth === 0) {
+      return { expression: input.slice(start + 2, i), end: i + 1 };
+    }
+  }
+  return null;
+}
+
 function interpolateComposeString(input: string, env: Record<string, string>): string {
   const escapedDollar = "\0COMPOSE_ESCAPED_DOLLAR\0";
   const protectedInput = input.replace(/\$\$/g, escapedDollar);
 
-  return protectedInput
-    .replace(
-      /\$(?:\{([^}]+)\}|([A-Za-z_][A-Za-z0-9_]*))/g,
-      (_match, braced: string | undefined, bare: string | undefined) =>
-        braced !== undefined
-          ? resolveInterpolationExpression(braced, env).value
-          : (env[bare!] ?? ""),
-    )
-    .replaceAll(escapedDollar, "$");
+  let out = "";
+  let cursor = 0;
+  while (cursor < protectedInput.length) {
+    const dollar = protectedInput.indexOf("$", cursor);
+    if (dollar < 0) break;
+    out += protectedInput.slice(cursor, dollar);
+    cursor = dollar + 1;
+
+    if (protectedInput[dollar + 1] === "{") {
+      const braced = readBracedExpression(protectedInput, dollar);
+      if (braced && braced.expression) {
+        out += resolveInterpolationExpression(braced.expression, env).value;
+        cursor = braced.end;
+        continue;
+      }
+    } else {
+      const bare = protectedInput.slice(dollar + 1).match(BARE_VARIABLE_RE);
+      if (bare) {
+        out += env[bare[0]] ?? "";
+        cursor = dollar + 1 + bare[0].length;
+        continue;
+      }
+    }
+
+    out += "$";
+  }
+
+  return (out + protectedInput.slice(cursor)).replaceAll(escapedDollar, "$");
 }
 
 function resolveComposeValue(
@@ -504,9 +545,9 @@ function resolveComposeValue(
   env: Record<string, string>,
 ): { value: string; meta?: ComposeEnvironmentMeta } {
   const trimmed = input.trim();
-  const directBraced = trimmed.match(/^\$\{([^}]+)\}$/s);
-  if (directBraced) {
-    const resolved = resolveInterpolationExpression(directBraced[1]!, env);
+  const directBraced = trimmed.startsWith("${") ? readBracedExpression(trimmed, 0) : null;
+  if (directBraced?.expression && directBraced.end === trimmed.length) {
+    const resolved = resolveInterpolationExpression(directBraced.expression, env);
     return {
       value: resolved.value,
       meta: {

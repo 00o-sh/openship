@@ -656,6 +656,67 @@ services:
   });
 });
 
+describe("parseComposeFile - nested interpolation expressions", () => {
+  const env = (expr: string) => `
+services:
+  app:
+    environment:
+      VAL: '${expr}'
+`;
+  const value = (expr: string, envFileContent = "") =>
+    parseComposeFile(env(expr), { envFileContent }).services[0]?.environment.VAL;
+
+  it("uses the variable when it is set, without leaking the nested closing brace", () => {
+    expect(value("${SET:-${OTHER}}", "SET=sv\nOTHER=ov\n")).toBe("sv");
+  });
+
+  it("resolves a nested default instead of emitting it literally", () => {
+    expect(value("${MISSING:-${OTHER}}", "OTHER=ov\n")).toBe("ov");
+    expect(value("${EMPTY:-${OTHER}}", "EMPTY=\nOTHER=ov\n")).toBe("ov");
+    expect(value("${MISSING-${OTHER}}", "OTHER=ov\n")).toBe("ov");
+    expect(value("${EMPTY-${OTHER}}", "EMPTY=\nOTHER=ov\n")).toBe("");
+  });
+
+  it("resolves a nested alternate for the :+ and + operators", () => {
+    expect(value("${SET:+${OTHER}}", "SET=sv\nOTHER=ov\n")).toBe("ov");
+    expect(value("${MISSING:+${OTHER}}", "OTHER=ov\n")).toBe("");
+  });
+
+  it("resolves defaults nested more than one level deep", () => {
+    expect(value("${A:-${B:-${C}}}", "C=cv\n")).toBe("cv");
+    expect(value("${A:-${B:-${C}}}", "B=bv\nC=cv\n")).toBe("bv");
+    expect(value("${A:-${B:-fallback}}")).toBe("fallback");
+  });
+
+  it("resolves nested expressions embedded in a larger string", () => {
+    expect(value("pre-${MISSING:-${OTHER}}-post", "OTHER=ov\n")).toBe("pre-ov-post");
+    expect(value("${A:-${X}}/${B:-${Y}}", "X=xv\nY=yv\n")).toBe("xv/yv");
+    expect(value("${MISSING:-${OTHER}/sub}", "OTHER=ov\n")).toBe("ov/sub");
+  });
+
+  it("treats a bare '{' in a default as a literal, not a nesting level", () => {
+    expect(value("${A:-{literal}}")).toBe("{literal}");
+    expect(value("${A:-x}y}")).toBe("xy}");
+    expect(value("${A:-}}")).toBe("}");
+  });
+
+  it("interpolates a nested variable inside a :? message", () => {
+    expect(() => parseComposeFile(env("${A:?need ${B}}"), { envFileContent: "B=bv\n" })).toThrow(
+      "need bv",
+    );
+  });
+
+  it("reports the outer variable in environmentMeta for a nested default", () => {
+    const parsed = parseComposeFile(env("${MISSING:-${OTHER}}"), { envFileContent: "OTHER=ov\n" });
+    expect(parsed.services[0]?.environmentMeta?.VAL).toMatchObject({
+      source: "default",
+      variable: "MISSING",
+      defaultValue: "ov",
+      resolvedValue: "ov",
+    });
+  });
+});
+
 // #333: an uploaded compose file's own limits were parsed nowhere and silently
 // dropped — a service asking for 4 GB got whatever the project was set to.
 describe("parseComposeFile — service resource limits", () => {
