@@ -24,6 +24,7 @@ import * as ctrl from "./service.controller";
 import {
   CreateServiceBody,
   SetServiceEnvVarsBody,
+  SyncServicesBody,
   UpdateServiceBody,
 } from "./service.schema";
 
@@ -64,7 +65,14 @@ r.get(
 );
 r.post(
   "/sync",
-  { tag: "project:service:write", collection: true, mcp: { description: "Sync services from the project's docker-compose file into the service table." } },
+  {
+    tag: "project:service:write",
+    collection: true,
+    body: SyncServicesBody,
+    mcp: {
+      description: "Sync services from the project's docker-compose file into the service table.",
+    },
+  },
   cloudProjectProxy,
   ctrl.syncFromCompose,
 );
