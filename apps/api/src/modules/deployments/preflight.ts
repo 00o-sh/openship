@@ -846,6 +846,7 @@ function checkConfig(snapshot: DeploymentConfigSnapshot, opts?: PreflightOptions
     // value here so the operator sees "sub-app X has no install command"
     // before resources are provisioned.
     const subAppFailures: string[] = [];
+    const deadRowWarnings: string[] = [];
     for (const svc of opts.composeServices ?? []) {
       if (svc.kind !== "monorepo") continue;
       // Disabled sub-apps never run; skip. `enabled === false` is the
@@ -853,6 +854,23 @@ function checkConfig(snapshot: DeploymentConfigSnapshot, opts?: PreflightOptions
       // sub-app get a public URL) and conflating them lets enabled-but-
       // not-exposed sub-apps slip past this check with no install command.
       if (svc.enabled === false) continue;
+      // Dead/orphaned row: a saved sub-app this project has NEVER once
+      // deployed (confirmed, not just "not this deploy" — see `everDeployed`),
+      // carrying no install/build/start command at all. Nothing distinguishes
+      // that from stray leftover config (a duplicate/abandoned row from an
+      // earlier import or a half-finished "add service" that was never
+      // followed through) — and unlike a genuinely misconfigured LIVE
+      // service, hard-failing it blocks every future deploy of the WHOLE
+      // project indefinitely, with no route to recovery short of editing the
+      // DB by hand. Warn instead: surface it so the operator can clean it up,
+      // but let the rest of the project keep deploying.
+      const hasAnyCommand = !!(svc.installCommand || svc.buildCommand || svc.startCommand);
+      if (svc.everDeployed === false && !hasAnyCommand) {
+        deadRowWarnings.push(
+          `sub-app "${svc.name}" has never been deployed and has no install/build/start command — skipping (disable or configure it to silence this)`,
+        );
+        continue;
+      }
       if (!svc.rootDirectory) {
         subAppFailures.push(`sub-app "${svc.name}" missing rootDirectory`);
         continue;
@@ -895,6 +913,14 @@ function checkConfig(snapshot: DeploymentConfigSnapshot, opts?: PreflightOptions
         label: "Service configuration",
         status: "fail",
         message: subAppFailures.join("; "),
+      };
+    }
+    if (deadRowWarnings.length > 0) {
+      return {
+        id: "config",
+        label: "Service configuration",
+        status: "warn",
+        message: deadRowWarnings.join("; "),
       };
     }
 

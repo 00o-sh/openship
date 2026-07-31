@@ -51,9 +51,13 @@ export async function listProjectMonorepoApps(projectId: string): Promise<Servic
  * installCommand on a compose row" bug would surface immediately instead of
  * being silently masked here.
  */
-export function projectServicesToDeployableServices(services: Service[]): DeployableService[] {
+export function projectServicesToDeployableServices(
+  services: Service[],
+  everDeployedByServiceId?: Map<string, boolean>,
+): DeployableService[] {
   return services.map((s): DeployableService => ({
     kind: serviceKind(s),
+    everDeployed: everDeployedByServiceId?.get(s.id),
     enabled: s.enabled,
     name: s.name,
     image: s.image ?? undefined,
@@ -89,7 +93,18 @@ export async function resolveProjectServicePreflightServices(
 ): Promise<DeployableService[]> {
   if (requestServices?.length) return requestServices;
   const services = await listProjectComposeServices(projectId);
-  return projectServicesToDeployableServices(services.filter((service) => service.enabled));
+  // One round trip for "has this service EVER produced a service_deployment
+  // row" — distinguishes a saved row nobody has ever deployed (eligible for
+  // the dead-row preflight carve-out) from a fresh row about to be deployed
+  // for the first time (still an unknown until it either succeeds or fails).
+  const latestByService = await repos.serviceDeployment.latestByProject(projectId);
+  const everDeployedByServiceId = new Map(
+    services.map((s) => [s.id, latestByService.has(s.id)]),
+  );
+  return projectServicesToDeployableServices(
+    services.filter((service) => service.enabled),
+    everDeployedByServiceId,
+  );
 }
 
 export async function shouldUseProjectServicePipeline(

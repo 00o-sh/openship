@@ -323,6 +323,16 @@ export async function adoptServerStack(opts: {
   /** Adopt in flat-docker mode — must match the scan the user selected from, or
    *  openship-labeled containers are treated as managed and none are found. */
   flatDocker?: boolean;
+  /** Restrict `serviceNames` resolution to ONE discovered group: the compose
+   *  project name, or `null` for the standalone (hand-run container) group.
+   *  Omit for the legacy server-wide match.
+   *
+   *  Service names are only unique WITHIN a compose project, so on a server
+   *  running several stacks a bare name like `app`/`db`/`redis` matches a
+   *  container in each of them. Unscoped, those extra matches are not dropped —
+   *  buildAdoptedServiceRows suffixes them (`app-2`, `redis-3`), silently
+   *  adopting another stack's containers into this project. */
+  composeProject?: string | null;
   /** Parsed repo compose services (name → spec). When present, adopted rows take
    *  their NATIVE build/image from the mapped repo service (Redeploy rebuilds),
    *  and the returned `handover` lets the first deploy reuse the running image. */
@@ -332,10 +342,23 @@ export async function adoptServerStack(opts: {
 
   const stack = await discoverServerStack(serverId, organizationId, undefined, { flatDocker });
   const selected = new Set(serviceNames);
+  // Resolve names within ONE group when the caller scoped the adopt — a bare
+  // service name is ambiguous across compose projects (see `composeProject`).
+  let pool = stack.services;
+  if (opts.composeProject !== undefined) {
+    const group = stack.groups.find((g) => g.project === opts.composeProject);
+    if (!group) {
+      const known = stack.groups.map((g) => g.project ?? "(standalone)").join(", ");
+      throw new Error(
+        `Compose project "${opts.composeProject ?? "(standalone)"}" was not found on the server. Found: ${known}.`,
+      );
+    }
+    pool = group.services;
+  }
   // Drop the edge proxy (traefik/nginx/… on 80/443): OpenResty replaces it, so
   // adopting it would just replay the 80/443 conflict. Defense-in-depth — the
   // wizard already marks it non-importable and the orchestrator filters it too.
-  const chosen = stack.services.filter((s) => selected.has(s.name) && !s.proxyKind);
+  const chosen = pool.filter((s) => selected.has(s.name) && !s.proxyKind);
   if (chosen.length === 0) {
     throw new Error("None of the selected services were found on the server.");
   }
