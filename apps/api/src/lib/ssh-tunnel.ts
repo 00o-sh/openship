@@ -279,28 +279,27 @@ export async function tunnelStream(
 
   // Wait for response headers, then hand the stream back
   return new Promise<TunnelStreamHandle | null>((resolve) => {
-    let buffer = "";
+    let buffer = Buffer.alloc(0);
     const timeout = setTimeout(() => {
       tunnel.destroy();
       resolve(null);
     }, 10_000);
 
     const onData = (chunk: Buffer) => {
-      buffer += chunk.toString();
+      buffer = Buffer.concat([buffer, chunk]);
       const headerEnd = buffer.indexOf("\r\n\r\n");
       if (headerEnd === -1) return;
 
       clearTimeout(timeout);
       tunnel.removeListener("data", onData);
 
-      // Parse status line
-      const statusLine = buffer.slice(0, buffer.indexOf("\r\n"));
+      // Parse status line and headers
+      const rawHead = buffer.slice(0, headerEnd).toString();
+      const [statusLine, ...rawHeaderLines] = rawHead.split("\r\n");
       const statusCode = parseInt(statusLine.split(" ")[1] ?? "0", 10);
 
-      // Parse headers
-      const rawHeaders = buffer.slice(buffer.indexOf("\r\n") + 2, headerEnd);
       const headers: Record<string, string> = {};
-      for (const line of rawHeaders.split("\r\n")) {
+      for (const line of rawHeaderLines) {
         const colon = line.indexOf(":");
         if (colon > 0) {
           headers[line.slice(0, colon).trim().toLowerCase()] =
@@ -317,7 +316,7 @@ export async function tunnelStream(
       // Re-emit leftover body bytes so the caller sees them
       const body = buffer.slice(headerEnd + 4);
       if (body.length > 0) {
-        process.nextTick(() => tunnel.emit("data", Buffer.from(body)));
+        process.nextTick(() => tunnel.emit("data", body));
       }
 
       resolve({

@@ -25,7 +25,7 @@ vi.mock("../../src/lib/ssh-manager", () => ({
   },
 }));
 
-import { tunnelRequest } from "../../src/lib/ssh-tunnel";
+import { tunnelRequest, tunnelStream } from "../../src/lib/ssh-tunnel";
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -127,5 +127,61 @@ describe("tunnelRequest truncated responses", () => {
     await reply(tunnel, 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{"a":1}');
 
     expect(await pending).toMatchObject({ statusCode: 200, body: '{"a":1}' });
+  });
+});
+
+const SSE_HEAD = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n";
+
+describe("tunnelStream byte relay", () => {
+  it("relays a multi-byte character split across the header boundary intact", async () => {
+    const frame = Buffer.from('data: {"city":"München"}\n\n', "utf8");
+    const cut = frame.indexOf(Buffer.from("ü", "utf8")) + 1;
+
+    const tunnel = openTunnel();
+    const pending = tunnelStream("srv_1", 9145, "/logs/stream");
+    await awaitRequest(tunnel);
+    tunnel.push(Buffer.concat([Buffer.from(SSE_HEAD), frame.subarray(0, cut)]));
+
+    const handle = await pending;
+    const relayed: Buffer[] = [];
+    handle!.stream.on("data", (c: Buffer) => relayed.push(Buffer.from(c)));
+    await tick();
+    tunnel.push(frame.subarray(cut));
+    await tick();
+    handle!.destroy();
+
+    expect(Buffer.concat(relayed).equals(frame)).toBe(true);
+  });
+
+  it("relays an ASCII leftover body after the headers unchanged", async () => {
+    const frame = 'event: request\ndata: {"n":1}\n\n';
+
+    const tunnel = openTunnel();
+    const pending = tunnelStream("srv_1", 9145, "/logs/stream");
+    await awaitRequest(tunnel);
+    tunnel.push(Buffer.from(SSE_HEAD + frame));
+
+    const handle = await pending;
+    const relayed: Buffer[] = [];
+    handle!.stream.on("data", (c: Buffer) => relayed.push(Buffer.from(c)));
+    await tick();
+    handle!.destroy();
+
+    expect(Buffer.concat(relayed).toString()).toBe(frame);
+  });
+
+  it("parses the status line and headers of the stream response", async () => {
+    const tunnel = openTunnel();
+    const pending = tunnelStream("srv_1", 9145, "/logs/stream");
+    await awaitRequest(tunnel);
+    tunnel.push(Buffer.from(SSE_HEAD));
+
+    const handle = await pending;
+
+    expect(handle).toMatchObject({
+      statusCode: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+    handle!.destroy();
   });
 });
