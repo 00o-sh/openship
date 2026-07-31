@@ -82,6 +82,60 @@ async function minterHasAccess(
   });
 }
 
+type GrantError = { status: 400 | 403; body: { error: string; code: string } };
+
+/**
+ * Scoped or unscoped — decided from EXPLICIT intent, never from `grants.length`.
+ *
+ * SHARED by both mint paths (PAT create + MCP authorize) so the rule cannot drift,
+ * for the same reason `validateGrants` is shared.
+ *
+ * The old rule was `scoped = grants.length > 0`, which meant an empty grant list
+ * minted an UNSCOPED binding acting with the minter's full role. That made two
+ * opposite intents indistinguishable on the wire, and it failed OPEN for the
+ * dangerous one: a caller that meant to scope a token but produced no usable
+ * grants — including one whose grants all had empty `permissions` arrays, since
+ * both callers filter those out before getting here — received full access. The
+ * only thing standing between that and a live token was the consent screen's
+ * client-side guard.
+ *
+ * Now: grants ⇒ scoped; no grants + `fullAccess: true` ⇒ unscoped; no grants and
+ * no flag ⇒ refused. Sending both is refused too — an ambiguous request is a
+ * caller bug, and guessing which half to honour is how this class of hole starts.
+ */
+export function resolveScopeIntent(opts: {
+  hasGrants: boolean;
+  fullAccess?: boolean;
+}): { scoped: boolean } | { error: GrantError } {
+  if (opts.hasGrants) {
+    if (opts.fullAccess === true) {
+      return {
+        error: {
+          status: 400,
+          body: {
+            error:
+              "Send either `grants` (a scoped token) or `fullAccess: true` (an unscoped one), not both.",
+            code: "AMBIGUOUS_TOKEN_SCOPE",
+          },
+        },
+      };
+    }
+    return { scoped: true };
+  }
+  if (opts.fullAccess === true) return { scoped: false };
+  return {
+    error: {
+      status: 400,
+      body: {
+        error:
+          "No grants were given. Send `grants` to scope this token, or `fullAccess: true` to " +
+          "deliberately mint one with your own full access.",
+        code: "TOKEN_SCOPE_REQUIRED",
+      },
+    },
+  };
+}
+
 /**
  * Validate a scoped token's requested grants before minting — SHARED by the PAT
  * create route and the MCP OAuth authorize path so both enforce identical rules
@@ -159,7 +213,12 @@ export async function create(c: Context) {
   // The "projects it creates" scope is just a grant like any other:
   // {project,"*",[create]} — no special-casing here.
   const grants = (body.grants ?? []).filter((g) => g.permissions.length > 0);
-  const wantScoped = grants.length > 0;
+  const intent = resolveScopeIntent({
+    hasGrants: grants.length > 0,
+    fullAccess: body.fullAccess,
+  });
+  if ("error" in intent) return c.json(intent.error.body, intent.error.status);
+  const wantScoped = intent.scoped;
   if (wantScoped) {
     const err = await validateGrants(ctx, grants);
     if (err) return c.json(err.body, err.status);
@@ -234,6 +293,9 @@ export async function authorizeMcpClient(c: Context) {
     clientId?: string;
     readOnly?: boolean;
     organizationId?: string;
+    /** Explicit "no limits" intent — required when `grants` is empty. See
+     *  resolveScopeIntent: an empty list no longer implies full access. */
+    fullAccess?: boolean;
     grants?: Array<{
       resourceType: string;
       resourceId: string;
@@ -264,7 +326,12 @@ export async function authorizeMcpClient(c: Context) {
   }
 
   const grants = (body.grants ?? []).filter((g) => g.permissions.length > 0);
-  const scoped = grants.length > 0;
+  const intent = resolveScopeIntent({
+    hasGrants: grants.length > 0,
+    fullAccess: body.fullAccess,
+  });
+  if ("error" in intent) return c.json(intent.error.body, intent.error.status);
+  const scoped = intent.scoped;
 
   const grantErr = await validateGrants(ctx, grants);
   if (grantErr) return c.json(grantErr.body, grantErr.status);

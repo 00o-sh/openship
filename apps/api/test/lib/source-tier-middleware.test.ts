@@ -151,3 +151,89 @@ describe("denial", () => {
     expect(checkSourceTier).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * AUTHORISE AND FETCH THE SAME STRING.
+ *
+ * The middleware normalises the requested path and publishes it as `sourcePath`;
+ * handlers read that instead of re-reading the raw query param. Previously the
+ * check ran on the normalised form while the handler fetched the raw one — the two
+ * resolve to the same object today, so it was not exploitable, but a rule checked
+ * against one string and applied to another is a bypass waiting for
+ * `normalizeRepoPath` to change.
+ */
+describe("the authorised path is the one the handler gets", () => {
+  /** Echoes `sourcePath` so we can assert on what crossed the seam. */
+  function appEchoingPath(spec: Parameters<typeof requirePermission>[0], path: string) {
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("ctx" as never, fakeCtx as never);
+      await next();
+    });
+    app.onError((err, c) =>
+      c.json(
+        { error: err.message, code: (err as { code?: string }).code },
+        ((err as { statusCode?: number }).statusCode ?? 500) as 404,
+      ),
+    );
+    app.get(path, requirePermission(spec), (c) =>
+      c.json({ sourcePath: c.get("sourcePath" as never) ?? null }),
+    );
+    return app;
+  }
+
+  const fileRoute = () =>
+    appEchoingPath({ tag: "github:read", source: "content" }, "/repos/:owner/:repo/file");
+
+  it("publishes the same normalised string the tier was checked against", async () => {
+    const res = await fileRoute().request("/repos/hydralerne/charts/file?file=src/./a.ts");
+    expect(res.status).toBe(200);
+    // Both sides see "src/a.ts" — never the raw "src/./a.ts".
+    expect(checkSourceTier).toHaveBeenCalledWith(
+      expect.anything(),
+      { owner: "hydralerne", repo: "charts" },
+      "content",
+      "src/a.ts",
+    );
+    expect(await res.json()).toEqual({ sourcePath: "src/a.ts" });
+  });
+
+  it("strips leading and doubled separators rather than passing them through", async () => {
+    const res = await fileRoute().request("/repos/hydralerne/charts/file?file=/src//a.ts");
+    expect(await res.json()).toEqual({ sourcePath: "src/a.ts" });
+  });
+
+  it.each([
+    ["traversal", "src/../../etc/passwd"],
+    ["bare traversal", ".."],
+    ["backslash", "src\\a.ts"],
+  ])("REFUSES %s without ever consulting the tier", async (_label, bad) => {
+    const res = await fileRoute().request(
+      `/repos/hydralerne/charts/file?file=${encodeURIComponent(bad)}`,
+    );
+    expect(res.status).toBe(404);
+    // Refused at normalisation: the grant is never even resolved.
+    expect(checkSourceTier).not.toHaveBeenCalled();
+  });
+
+  it("refuses percent-encoded traversal too (the query is decoded before we see it)", async () => {
+    const res = await fileRoute().request("/repos/hydralerne/charts/file?file=src%2F%2E%2E%2Fx");
+    expect(res.status).toBe(404);
+    expect(checkSourceTier).not.toHaveBeenCalled();
+  });
+
+  it("an absent path publishes the root, so /files with no path still lists it", async () => {
+    const app = appEchoingPath(
+      { tag: "github:list", source: "content-tree" },
+      "/repos/:owner/:repo/files",
+    );
+    const res = await app.request("/repos/hydralerne/charts/files");
+    expect(await res.json()).toEqual({ sourcePath: "" });
+  });
+
+  it("publishes nothing for a metadata route, so a handler cannot mistake it for authorised", async () => {
+    const app = appEchoingPath({ tag: "github:read" }, "/repos/:owner/:repo");
+    const res = await app.request("/repos/hydralerne/charts");
+    expect(await res.json()).toEqual({ sourcePath: null });
+  });
+});

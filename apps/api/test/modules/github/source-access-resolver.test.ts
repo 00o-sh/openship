@@ -29,8 +29,6 @@ vi.mock("@repo/db", () => ({
 
 import {
   resolveSourceAccess,
-  canReadRepoPath,
-  canWriteRepoPath,
   checkSourceTier,
   filterTreeEntries,
 } from "../../../src/modules/github/github-access";
@@ -57,6 +55,21 @@ const memberCtx = () =>
 const TARGET = { owner: "hydralerne", repo: "charts" };
 const RW = ["read", "write"];
 
+/**
+ * Per-path read/write checks, asked through `checkSourceTier` — the SAME gate
+ * requirePermission calls in production.
+ *
+ * These used to call `canReadRepoPath` / `canWriteRepoPath`, thin wrappers that no
+ * production code ever invoked. Testing them proved a parallel implementation of
+ * the rule rather than the enforced one, so the two could drift while this file
+ * stayed green. The wrappers are gone; these route the same assertions at the tier
+ * switch the middleware actually uses.
+ */
+const canRead = async (path: string) =>
+  (await checkSourceTier(scopedCtx(), TARGET, "content", path)).ok;
+const canWrite = async (path: string) =>
+  (await checkSourceTier(scopedCtx(), TARGET, "write", path)).ok;
+
 function grants(...gs: G[]) {
   listByToken.mockResolvedValue(gs as never);
   listByMember.mockResolvedValue(gs as never);
@@ -72,7 +85,7 @@ describe("the default is metadata-only", () => {
     grants({ resourceType: "github_repository", resourceId: "hydralerne/charts", permissions: RW });
     const access = await resolveSourceAccess(scopedCtx(), TARGET);
     expect(access).toEqual({ readPaths: [], writePaths: [] });
-    expect(await canReadRepoPath(scopedCtx(), TARGET, "package.json")).toBe(false);
+    expect(await canRead("package.json")).toBe(false);
   });
 
   it("no matching grant at all grants nothing", async () => {
@@ -108,8 +121,8 @@ describe("most-specific-wins across the three widths", () => {
     grants(broadInstallation, narrowRepo);
     const access = await resolveSourceAccess(scopedCtx(), TARGET);
     expect(access.readPaths).toEqual(["src/**"]);
-    expect(await canReadRepoPath(scopedCtx(), TARGET, "src/a.ts")).toBe(true);
-    expect(await canReadRepoPath(scopedCtx(), TARGET, "package.json")).toBe(false);
+    expect(await canRead("src/a.ts")).toBe(true);
+    expect(await canRead("package.json")).toBe(false);
   });
 
   it("a repo grant beats an all-github grant", async () => {
@@ -160,7 +173,7 @@ describe("the scope is the surface, the permissions are still the verb", () => {
     const access = await resolveSourceAccess(scopedCtx(), TARGET);
     expect(access.readPaths).toEqual(["src/**"]);
     expect(access.writePaths).toEqual([]);
-    expect(await canWriteRepoPath(scopedCtx(), TARGET, "src/a.ts")).toBe(false);
+    expect(await canWrite("src/a.ts")).toBe(false);
   });
 
   it("write paths on a write grant do authorise", async () => {
@@ -170,8 +183,8 @@ describe("the scope is the surface, the permissions are still the verb", () => {
       permissions: RW,
       scope: { v: 1, write: { paths: ["src/gen/**"] } },
     });
-    expect(await canWriteRepoPath(scopedCtx(), TARGET, "src/gen/x.ts")).toBe(true);
-    expect(await canWriteRepoPath(scopedCtx(), TARGET, "src/hand.ts")).toBe(false);
+    expect(await canWrite("src/gen/x.ts")).toBe(true);
+    expect(await canWrite("src/hand.ts")).toBe(false);
   });
 });
 

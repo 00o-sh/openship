@@ -851,11 +851,14 @@ export async function listFiles(c: Context) {
   const owner = param(c, "owner");
   const repo = param(c, "repo");
   const branch = c.req.query("branch");
-  const path = c.req.query("path");
+  // The NORMALISED path the middleware authorised (see getFile) — never the raw
+  // `?path=`, so the directory checked is the directory listed. "" is the repo
+  // root, which is what /files with no path lists.
+  const path = c.get("sourcePath") as string | undefined;
 
   const data = await githubService.listFiles(ctx, owner, repo, {
     branch: branch ?? undefined,
-    path: path ?? undefined,
+    path: path || undefined,
       });
 
   // Filter to what this caller's source scope permits. The route declares
@@ -936,7 +939,12 @@ export async function getFile(c: Context) {
   // `?file=`; an implicit fallback here would mean the check and the read could
   // disagree — a caller granted only `package.json` would be denied for the root
   // while the handler went on to serve package.json anyway.
-  const file = c.req.query("file");
+  //
+  // Read the NORMALISED path the middleware authorised, not the raw query param,
+  // so the string checked and the string fetched are the same one. Absent stash ⇒
+  // the tier gate did not run ⇒ refuse rather than fall back to the raw value
+  // (fail closed: a route mounted without `source` must not serve content here).
+  const file = c.get("sourcePath") as string | undefined;
   if (!file) {
     return c.json(
       { error: "Query parameter `file` is required", code: "FILE_PARAM_REQUIRED" },

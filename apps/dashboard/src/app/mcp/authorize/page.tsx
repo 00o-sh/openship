@@ -307,6 +307,12 @@ function McpAuthorizeInner() {
             readOnly: selection.readOnly,
             grants: wireGrants(selection),
             organizationId: orgId ?? undefined,
+            // State the intent the guard above just proved: only a template whose
+            // card says "no limits" in words may send an empty grant list. The
+            // server rejects an empty list without this, so a future UI bug that
+            // trims a scoped selection to nothing fails loudly instead of minting
+            // an unscoped binding.
+            fullAccess: isUnscopedTemplate(selection.template),
           });
         }
         const redirectURI = await postConsent(accept, consentCode);
