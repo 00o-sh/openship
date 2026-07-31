@@ -275,6 +275,42 @@ BAZ=qux
     expect(parseComposeEnvFile("\n\n   \n")).toEqual({});
   });
 
+  it("parses a quoted value that spans multiple lines", () => {
+    expect(
+      parseComposeEnvFile(
+        'JWT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nMIIBVgIBADANBgkq\n-----END PRIVATE KEY-----"\nNODE_ENV=production',
+      ),
+    ).toEqual({
+      JWT_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nMIIBVgIBADANBgkq\n-----END PRIVATE KEY-----",
+      NODE_ENV: "production",
+    });
+  });
+
+  it("does not treat a KEY=value line inside a quoted block as its own entry", () => {
+    expect(
+      parseComposeEnvFile(
+        'CERT="-----BEGIN CERTIFICATE-----\nKEY=notreallyakey\n-----END CERTIFICATE-----"',
+      ),
+    ).toEqual({
+      CERT: "-----BEGIN CERTIFICATE-----\nKEY=notreallyakey\n-----END CERTIFICATE-----",
+    });
+  });
+
+  it("interpolates inside a multi-line double-quoted value but not a single-quoted one", () => {
+    expect(parseComposeEnvFile("BASE=foo\nD=\"a\n${BASE}\nb\"\nS='a\n${BASE}\nb'")).toEqual({
+      BASE: "foo",
+      D: "a\nfoo\nb",
+      S: "a\n${BASE}\nb",
+    });
+  });
+
+  it("falls back to single-line parsing when a quote is never closed", () => {
+    expect(parseComposeEnvFile('BLOCK="never closed\nAFTER=ok')).toEqual({
+      BLOCK: "never closed",
+      AFTER: "ok",
+    });
+  });
+
   it("realistic project .env - database, secrets, runtime config", () => {
     const result = parseComposeEnvFile(`
 # Database
