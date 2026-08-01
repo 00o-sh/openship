@@ -779,15 +779,36 @@ export class NginxProvider implements RoutingProvider, SslProvider {
       : value;
   }
 
-  /** Keep EAB HMAC material out of argv/process listings and remove it after use. */
+  /**
+   * Keep EAB HMAC material out of argv/process listings and remove it after use.
+   *
+   * Same layout contract as runtime/git-ssh-material.ts (the repo's other
+   * ephemeral-secret-on-disk site): the material lives in its OWN 0700 directory
+   * with the file at 0600, the bytes never travel through a shell command line,
+   * and cleanup removes the directory as a unit. The 0700 parent goes first, so
+   * even the temp file _writeFile stages is born unreadable to other users.
+   */
   private async createEphemeralEabConfig(): Promise<string | null> {
     if (!this.acmeEabKid || !this.acmeEabHmacKey) return null;
-    const path = join(dirname(this.certDir), `.openship-eab-${randomBytes(12).toString("hex")}.ini`);
-    await this._writeFile(
-      path,
-      `eab-kid = ${this.acmeEabKid}\neab-hmac-key = ${this.acmeEabHmacKey}\n`,
-      0o600,
-    );
+    const dir = join(dirname(this.certDir), `.openship-eab-${randomBytes(12).toString("hex")}`);
+    const path = join(dir, "eab.ini");
+    if (this.executor) {
+      await this.executor.mkdir(dir);
+      await this._exec("chmod", ["700", dir]);
+    } else {
+      await fsMkdir(dir, { recursive: true, mode: 0o700 });
+    }
+    try {
+      await this._writeFile(
+        path,
+        `eab-kid = ${this.acmeEabKid}\neab-hmac-key = ${this.acmeEabHmacKey}\n`,
+        0o600,
+      );
+    } catch (err) {
+      // A partial write must not leave key material behind (git-ssh-material rule).
+      await this._rm(dir).catch(() => undefined);
+      throw err;
+    }
     return path;
   }
 
@@ -1166,7 +1187,9 @@ ${serveLocation}
       // Replace certbot's opaque opener with the real, actionable cause.
       throw new Error(summarizeCertbotFailure(this.redactAcmeSecrets(safeErrorMessage(err)), domain));
     } finally {
-      if (eabConfig) await this._rm(eabConfig).catch(() => undefined);
+      // Remove the whole 0700 directory, not just the ini — one unit, like
+      // git-ssh-material's cleanup.
+      if (eabConfig) await this._rm(dirname(eabConfig)).catch(() => undefined);
     }
 
     // Rewrite the config with SSL now that certs exist

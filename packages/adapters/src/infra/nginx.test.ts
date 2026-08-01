@@ -213,14 +213,19 @@ describe("NginxProvider config generation", () => {
     expect(certbot).not.toContain(hmac);
     const configPath = certbot?.match(/'--config' '([^']+)'/)?.[1];
     expect(configPath).toBeDefined();
-    // Perms are tightened on the TEMP file BEFORE the rename publishes it, so the
-    // secret is never on disk at the final path with default (0644) permissions.
-    const chmodIdx = calls.findIndex((c) => c.startsWith("chmod ") && c.includes(`${configPath}.tmp-`));
+    // git-ssh-material layout: the ini lives in its own 0700 directory (locked
+    // down BEFORE any secret bytes land, covering even the staged temp file),
+    // the file itself is chmod 600 before the rename publishes it, and cleanup
+    // removes the whole directory as a unit.
+    const secretDir = configPath!.replace(/\/eab\.ini$/, "");
+    expect(secretDir).toContain(".openship-eab-");
+    const dirChmodIdx = calls.findIndex((c) => c.startsWith("chmod ") && c.includes("'700'") && c.includes(secretDir));
+    const fileChmodIdx = calls.findIndex((c) => c.startsWith("chmod ") && c.includes("'600'") && c.includes(`${configPath}.tmp-`));
     const publishIdx = calls.findIndex((c) => c.startsWith("mv ") && c.includes(`'${configPath}'`));
-    expect(calls[chmodIdx]).toContain("'600'");
-    expect(chmodIdx).toBeGreaterThanOrEqual(0);
-    expect(publishIdx).toBeGreaterThan(chmodIdx);
-    expect(removed).toContain(configPath);
+    expect(dirChmodIdx).toBeGreaterThanOrEqual(0);
+    expect(fileChmodIdx).toBeGreaterThan(dirChmodIdx);
+    expect(publishIdx).toBeGreaterThan(fileChmodIdx);
+    expect(removed).toContain(secretDir);
   });
 
   test("rejects incomplete or malformed EAB configuration before issuance", () => {
