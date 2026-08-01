@@ -18,6 +18,7 @@
  *     being returned to the client.
  */
 
+import { TextDecoder } from 'node:util';
 import { simpleParser } from 'mailparser';
 import { sanitizeMailHtml } from './sanitize';
 import { withImap, type ImapAuth } from './imap';
@@ -592,26 +593,107 @@ const LIST_SNIPPET_MAX_CHARS = 140;
 interface LeafPartInfo {
   type: string;
   encoding: string;
+  charset: string | undefined;
 }
 
 /**
  * Descend into `childNodes[0]` (the MIME convention puts the "primary"
  * alternative first, e.g. multipart/alternative lists text/plain before
  * text/html) until we hit a non-multipart leaf. Returns both the leaf's
- * type/encoding (so we know how to decode the bytes BODY[TEXT] handed us)
- * and the nesting depth (so we know how many "boundary + part headers"
- * blocks precede the leaf's actual content in those raw bytes). Depth is
- * capped defensively - real messages are only ever a couple levels deep.
+ * type/encoding/charset (so we know how to decode the bytes BODY[TEXT]
+ * handed us) and the nesting depth (so we know how many "boundary + part
+ * headers" blocks precede the leaf's actual content in those raw bytes).
+ * Depth is capped defensively - real messages are only ever a couple
+ * levels deep.
  */
 function resolveLeafPart(struct: unknown, depth = 0): { leaf: LeafPartInfo | null; depth: number } {
   if (!struct || typeof struct !== 'object' || depth > 4) return { leaf: null, depth };
-  const s = struct as { type?: string; encoding?: string; childNodes?: unknown[] };
+  const s = struct as {
+    type?: string;
+    encoding?: string;
+    parameters?: Record<string, unknown>;
+    childNodes?: unknown[];
+  };
   if (typeof s.type !== 'string') return { leaf: null, depth };
   if (s.type.startsWith('multipart/')) {
     if (!Array.isArray(s.childNodes) || s.childNodes.length === 0) return { leaf: null, depth };
     return resolveLeafPart(s.childNodes[0], depth + 1);
   }
-  return { leaf: { type: s.type, encoding: (s.encoding ?? '7bit').toLowerCase() }, depth };
+  const charset = s.parameters?.charset;
+  return {
+    leaf: {
+      type: s.type,
+      encoding: (s.encoding ?? '7bit').toLowerCase(),
+      charset: typeof charset === 'string' ? charset.trim().toLowerCase() : undefined,
+    },
+    depth,
+  };
+}
+
+/**
+ * Charset labels routed to `Buffer.toString('utf8')` rather than to
+ * TextDecoder. The ASCII labels sit here because WHATWG resolves them to
+ * windows-1252, which mangles a part that declares ASCII but carries
+ * UTF-8 bytes.
+ */
+const UTF8_COMPATIBLE_CHARSETS = new Set(['utf-8', 'utf8', 'us-ascii', 'ascii']);
+
+/**
+ * Decode part bytes using the charset declared in the part's MIME
+ * parameters. Labels TextDecoder does not know throw, in which case we
+ * fall back to utf8.
+ */
+function decodeCharset(bytes: Buffer, charset: string | undefined): string {
+  if (!charset || UTF8_COMPATIBLE_CHARSETS.has(charset)) return bytes.toString('utf8');
+  try {
+    return new TextDecoder(charset).decode(bytes);
+  } catch {
+    return bytes.toString('utf8');
+  }
+}
+
+const HTML_ENTITIES: Record<string, string> = {
+  nbsp: ' ',
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  mdash: '—',
+  ndash: '–',
+  hellip: '…',
+  lsquo: '‘',
+  rsquo: '’',
+  ldquo: '“',
+  rdquo: '”',
+  bull: '•',
+  middot: '·',
+  copy: '©',
+  reg: '®',
+  trade: '™',
+  deg: '°',
+  euro: '€',
+  pound: '£',
+  yen: '¥',
+  laquo: '«',
+  raquo: '»',
+};
+
+/**
+ * Resolve HTML character references in a single left-to-right pass, so an
+ * already-escaped reference like `&amp;lt;` decodes to the literal text
+ * `&lt;` rather than to `<`. Anything that isn't a reference we recognise
+ * is left verbatim.
+ */
+function decodeHtmlEntities(text: string): string {
+  const reference = /&(#\d{1,7}|#x[0-9a-f]{1,6}|[a-z][a-z0-9]{1,31});/gi;
+  return text.replace(reference, (match, ref: string) => {
+    if (!ref.startsWith('#')) return HTML_ENTITIES[ref.toLowerCase()] ?? match;
+    const hex = ref[1] === 'x' || ref[1] === 'X';
+    const code = parseInt(hex ? ref.slice(2) : ref.slice(1), hex ? 16 : 10);
+    if (code <= 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return match;
+    return String.fromCodePoint(code);
+  });
 }
 
 /**
@@ -645,12 +727,19 @@ function decodeQuotedPrintableBytes(raw: Buffer): Buffer {
  * break the list - this always degrades to '' rather than throwing, and
  * the client falls back to the subject line when snippet is empty.
  */
-function extractListSnippet(bodyParts: Map<string, Buffer> | undefined, bodyStructure: unknown): string {
+export function extractListSnippet(
+  bodyParts: Map<string, Buffer> | undefined,
+  bodyStructure: unknown,
+): string {
   try {
     const raw = bodyParts?.get(LIST_SNIPPET_MAP_KEY);
     if (!raw || raw.length === 0) return '';
 
     const { leaf, depth } = resolveLeafPart(bodyStructure);
+    // BODY[TEXT] lands on whatever part comes first, and on S/MIME,
+    // PGP/MIME or attachment-first messages that part is binary - there is
+    // no snippet to be had from it.
+    if (leaf && !leaf.type.startsWith('text/')) return '';
 
     let bytes = raw;
     // BODY[TEXT] on a multipart message returns the raw MIME body -
@@ -688,24 +777,21 @@ function extractListSnippet(bodyParts: Map<string, Buffer> | undefined, bodyStru
           ? Buffer.from(bytes.toString('ascii').replace(/[^A-Za-z0-9+/=]/g, ''), 'base64')
           : bytes;
 
-    let text = decoded.toString('utf8').replace(/�+$/, ''); // drop a truncated trailing char
+    // drop a truncated trailing char
+    let text = decodeCharset(decoded, leaf?.charset).replace(/�+$/, '');
     if (leaf?.type === 'text/html' || /<[a-z][\s\S]*>/i.test(text)) {
-      text = text
-        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-        .replace(/<[^>]+>/g, ' ')
-        // The fetch window is byte-bounded, so an HTML message's markup
-        // commonly gets cut mid-tag (e.g. `<div style="margin-top`, no
-        // closing `>` yet) - the rule above needs a full `<...>` pair to
-        // match, so a dangling tag at the very end survives as literal
-        // text. Strip it too.
-        .replace(/<[^>]*$/, ' ')
-        .replace(/&nbsp;/gi, ' ')
-        .replace(/&amp;/gi, '&')
-        .replace(/&lt;/gi, '<')
-        .replace(/&gt;/gi, '>')
-        .replace(/&quot;/gi, '"')
-        .replace(/&#0*39;|&apos;/gi, "'");
+      text = decodeHtmlEntities(
+        text
+          .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+          .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+          .replace(/<[^>]+>/g, ' ')
+          // The fetch window is byte-bounded, so an HTML message's markup
+          // commonly gets cut mid-tag (e.g. `<div style="margin-top`, no
+          // closing `>` yet) - the rule above needs a full `<...>` pair to
+          // match, so a dangling tag at the very end survives as literal
+          // text. Strip it too.
+          .replace(/<[^>]*$/, ' '),
+      );
     }
     text = text.replace(/\s+/g, ' ').trim();
 
