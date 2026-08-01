@@ -23,7 +23,6 @@ import {
   readFile as fsReadFile,
   rename as fsRename,
   stat as fsStat,
-  chmod as fsChmod,
 } from "node:fs/promises";
 import { execFile as cpExecFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -269,6 +268,10 @@ export interface NginxProviderOptions {
 
 const DEFAULT_CERT_DIR = "/etc/letsencrypt/live";
 
+/** Certbot's implicit default when no `--server` is passed — what every lineage
+ * issued before alternate-CA support (or with no directory configured) records. */
+const LETSENCRYPT_PRODUCTION_DIRECTORY = "https://acme-v02.api.letsencrypt.org/directory";
+
 export type AcmeKeyType = NonNullable<NginxProviderOptions["acmeKeyType"]>;
 
 function assertValidAcmeOptions(opts: NginxProviderOptions): void {
@@ -474,7 +477,7 @@ export class NginxProvider implements RoutingProvider, SslProvider {
 
   // ── File operation helpers (dual-path: local or remote) ──────────────
 
-  private async _writeFile(path: string, content: string): Promise<void> {
+  private async _writeFile(path: string, content: string, mode?: number): Promise<void> {
     // Random suffix (not just pid+ms) so two same-ms writes to the same conf
     // can't collide on the temp path and defeat the atomic rename.
     const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`;
@@ -482,6 +485,12 @@ export class NginxProvider implements RoutingProvider, SslProvider {
     if (this.executor) {
       try {
         await this.executor.writeFile(tmpPath, content);
+        // Tighten perms on the TEMP file, before the rename publishes it — rename
+        // preserves the source's mode, so the final path never exists more open
+        // than requested. (executor.writeFile has no mode parameter.)
+        if (mode !== undefined) {
+          await this.executor.exec(`chmod ${sq(mode.toString(8))} ${sq(tmpPath)}`);
+        }
         // `rename` (a FILE op), not `exec("mv")`. On a container edge, commands run
         // INSIDE the container while file ops land on the HOST — so the mv renamed a
         // path the container can't see and failed with ENOENT on the file we had just
@@ -500,7 +509,9 @@ export class NginxProvider implements RoutingProvider, SslProvider {
     } else {
       await fsMkdir(dirname(path), { recursive: true });
       try {
-        await fsWriteFile(tmpPath, content, "utf-8");
+        // `mode` applies at creation, so the content is never on disk more open
+        // than requested (no chmod-after-write window).
+        await fsWriteFile(tmpPath, content, { encoding: "utf-8", mode });
         await fsRename(tmpPath, path);
       } catch (err) {
         await fsRm(tmpPath).catch(() => undefined);
@@ -736,20 +747,30 @@ export class NginxProvider implements RoutingProvider, SslProvider {
       ? [`REQUESTS_CA_BUNDLE=${this.acmeCaBundle}`, "certbot", ...args]
       : args;
     if (!onLog || !this.executor) {
-      const out = await this._exec(command, commandArgs);
+      let out: string;
+      try {
+        out = await this._exec(command, commandArgs);
+      } catch (err) {
+        // Redact HERE, not only in callers' catches — renewCert has none, and a
+        // new caller must not be able to leak the EAB key by forgetting one.
+        throw new Error(this.redactAcmeSecrets(safeErrorMessage(err)));
+      }
       const redacted = this.redactAcmeSecrets(out);
       if (redacted) onLog?.(redacted);
       return redacted;
     }
     const full = `${command} ${commandArgs.map(sq).join(" ")}`;
+    // Accumulate RAW output and redact the whole buffer at each use: per-chunk
+    // redaction alone misses a secret split across a chunk boundary.
     let output = "";
     const { code } = await this.executor.streamExec(full, (log) => {
-      const message = this.redactAcmeSecrets(log.message);
-      output += message;
-      onLog(message);
+      output += log.message;
+      onLog(this.redactAcmeSecrets(log.message));
     });
-    if (code !== 0) throw new Error(output.trim() || `certbot exited ${code}`);
-    return output;
+    if (code !== 0) {
+      throw new Error(this.redactAcmeSecrets(output).trim() || `certbot exited ${code}`);
+    }
+    return this.redactAcmeSecrets(output);
   }
 
   private redactAcmeSecrets(value: string): string {
@@ -765,14 +786,8 @@ export class NginxProvider implements RoutingProvider, SslProvider {
     await this._writeFile(
       path,
       `eab-kid = ${this.acmeEabKid}\neab-hmac-key = ${this.acmeEabHmacKey}\n`,
+      0o600,
     );
-    try {
-      if (this.executor) await this._exec("chmod", ["600", path]);
-      else await fsChmod(path, 0o600);
-    } catch (err) {
-      await this._rm(path).catch(() => undefined);
-      throw err;
-    }
     return path;
   }
 
@@ -1243,9 +1258,18 @@ ${serveLocation}
       return this.provisionCert(domain, { force: true });
     }
 
+    // A lineage issued by a DIFFERENT directory than the one now configured can't
+    // be renewed against the new CA — `renew` won't register the account the new
+    // server requires (or carry EAB). Reissue instead: certonly registers under
+    // the configured CA and rewrites the lineage, so this heals itself once.
+    if (!(await this.lineageServerMatches(domain))) {
+      return this.provisionCert(domain, { force: true });
+    }
+
+    // No `--server` here: the matched lineage's conf already records it, and the
+    // mismatch case above never reaches this call.
     await this._execCertbot([
       "renew", "--cert-name", domain,
-      ...(this.acmeDirectoryUrl ? ["--server", this.acmeDirectoryUrl] : []),
       ...acmeKeyArgs(this.acmeKeyType),
       "--non-interactive",
     ]);
@@ -1260,11 +1284,35 @@ ${serveLocation}
    * reads on every `renew`, so its presence is the authoritative answer — the cert
    * FILES existing is not (they can be adopted, or copied in by hand).
    */
-  private async hasCertbotLineage(domain: string): Promise<boolean> {
+  private renewalConfPath(domain: string): string {
     // Derived from certDir so a custom cert root (tests, container edge) stays
     // consistent: /etc/letsencrypt/live → /etc/letsencrypt/renewal.
-    const renewalPath = join(dirname(this.certDir), "renewal", `${domain}.conf`);
-    return this._exists(renewalPath);
+    return join(dirname(this.certDir), "renewal", `${domain}.conf`);
+  }
+
+  private async hasCertbotLineage(domain: string): Promise<boolean> {
+    return this._exists(this.renewalConfPath(domain));
+  }
+
+  /**
+   * Was this lineage issued by the CURRENTLY configured ACME directory? The
+   * renewal conf records the issuing `server`, and `certbot renew` only holds an
+   * account for THAT server — after the operator points at a different CA, renewing
+   * a pre-switch lineage would need an account registration `renew` cannot perform
+   * (and EAB material it is never given). An unreadable/unparsable conf answers
+   * `true` so the plain renew still runs and surfaces certbot's own error.
+   */
+  private async lineageServerMatches(domain: string): Promise<boolean> {
+    let conf: string;
+    try {
+      conf = await this._readFile(this.renewalConfPath(domain));
+    } catch {
+      return true;
+    }
+    const recorded = conf.match(/^\s*server\s*=\s*(\S+)\s*$/m)?.[1];
+    if (!recorded) return true;
+    const effective = this.acmeDirectoryUrl ?? LETSENCRYPT_PRODUCTION_DIRECTORY;
+    return recorded === effective;
   }
 
   /**

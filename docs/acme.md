@@ -21,6 +21,11 @@ command line or streamed logs. It writes the pair to a unique mode-`0600`
 Certbot configuration file for the issuance process and deletes that file when
 the process exits. Keep the source value in a protected environment/secret store.
 
+Because that file is passed with Certbot's `--config` flag, an operator-managed
+`/etc/letsencrypt/cli.ini` is ignored for EAB issuance runs. If you rely on
+custom `cli.ini` settings, express them through the `OPENSHIP_ACME_*` variables
+instead.
+
 Supported certificate key choices are `ec256`, `ec384`, `rsa2048`, and
 `rsa4096`. When omitted, Certbot's installed-version default is preserved.
 
@@ -73,6 +78,16 @@ services:
 Certbot uses `REQUESTS_CA_BUNDLE` for issuance and renewal. The bundle therefore
 needs to contain the private root plus any public roots needed by the ACME
 endpoint's chain.
+
+## Switching certificate authorities
+
+Certbot records the issuing directory per certificate, and a certificate issued
+by one CA cannot be renewed against another (the new CA requires its own
+account, and usually its own EAB credentials). When the configured directory
+differs from the one that issued a certificate, OpenShip reissues that
+certificate under the newly configured CA at its next renewal instead of
+renewing it — a one-time reissue per domain, after which normal renewal
+resumes. Existing certificates keep serving traffic until that happens.
 
 ## Current scope
 

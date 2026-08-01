@@ -414,6 +414,42 @@ const envSchema = z.object({
     .min(16 * 1024)
     .max(8 * 1024 * 1024)
     .default(512 * 1024),
+}).superRefine((cfg, ctx) => {
+  // Fail ACME misconfiguration HERE, at boot, with the variable named — not at
+  // the first deploy, where NginxProvider's constructor re-checks the same rules
+  // (that check stays: the adapter also serves non-env callers). Empty/whitespace
+  // values count as unset, matching resolveAcmeProviderOptions.
+  const kid = cfg.OPENSHIP_ACME_EAB_KID?.trim();
+  const hmac = cfg.OPENSHIP_ACME_EAB_HMAC_KEY?.trim();
+  const bundle = cfg.OPENSHIP_ACME_CA_BUNDLE?.trim();
+  if (!!kid !== !!hmac) {
+    ctx.addIssue({
+      code: "custom",
+      path: [kid ? "OPENSHIP_ACME_EAB_HMAC_KEY" : "OPENSHIP_ACME_EAB_KID"],
+      message: "OPENSHIP_ACME_EAB_KID and OPENSHIP_ACME_EAB_HMAC_KEY must be set together",
+    });
+  }
+  if (kid && (!/^[\x20-\x7E]+$/.test(kid) || kid.length > 512)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["OPENSHIP_ACME_EAB_KID"],
+      message: "must be printable ASCII (maximum 512 characters)",
+    });
+  }
+  if (hmac && !/^[A-Za-z0-9_-]+={0,2}$/.test(hmac)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["OPENSHIP_ACME_EAB_HMAC_KEY"],
+      message: "must be the base64url-encoded value supplied by the CA",
+    });
+  }
+  if (bundle && !bundle.startsWith("/")) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["OPENSHIP_ACME_CA_BUNDLE"],
+      message: "must be an absolute path in the Certbot environment",
+    });
+  }
 });
 
 type Env = z.infer<typeof envSchema>;

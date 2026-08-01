@@ -208,12 +208,18 @@ describe("NginxProvider config generation", () => {
     const secretWrite = writes.find((w) => w.path.includes(".openship-eab-"));
     expect(secretWrite?.content).toContain("eab-kid = kid-123");
     expect(secretWrite?.content).toContain(`eab-hmac-key = ${hmac}`);
-    const chmod = calls.find((c) => c.startsWith("chmod "));
-    expect(chmod).toContain("'600'");
-    const configPath = chmod?.match(/'([^']*\.ini)'/)?.[1];
     const certbot = calls.find((c) => c.startsWith("certbot "));
     expect(certbot).toContain("--config");
     expect(certbot).not.toContain(hmac);
+    const configPath = certbot?.match(/'--config' '([^']+)'/)?.[1];
+    expect(configPath).toBeDefined();
+    // Perms are tightened on the TEMP file BEFORE the rename publishes it, so the
+    // secret is never on disk at the final path with default (0644) permissions.
+    const chmodIdx = calls.findIndex((c) => c.startsWith("chmod ") && c.includes(`${configPath}.tmp-`));
+    const publishIdx = calls.findIndex((c) => c.startsWith("mv ") && c.includes(`'${configPath}'`));
+    expect(calls[chmodIdx]).toContain("'600'");
+    expect(chmodIdx).toBeGreaterThanOrEqual(0);
+    expect(publishIdx).toBeGreaterThan(chmodIdx);
     expect(removed).toContain(configPath);
   });
 
@@ -222,6 +228,65 @@ describe("NginxProvider config generation", () => {
     expect(() => setup({
       provider: { acmeEabKid: "kid", acmeEabHmacKey: "not standard base64/+" },
     })).toThrow(/base64url/i);
+  });
+
+  test("renewing a lineage issued by a DIFFERENT directory reissues under the configured CA", async () => {
+    const { nginx, files, calls } = setup({
+      certDomains: ["app.example.com"],
+      provider: { acmeDirectoryUrl: "https://acme.example.test/directory" },
+    });
+    // Pre-switch lineage: certbot's renewal conf records the OLD issuing server,
+    // which `renew` holds no account for after the operator changed CAs.
+    files.set(
+      "/etc/letsencrypt/renewal/app.example.com.conf",
+      "[renewalparams]\nserver = https://acme-v02.api.letsencrypt.org/directory\n",
+    );
+    await nginx.renewCert("app.example.com").catch(() => undefined);
+    const certonly = calls.find((c) => c.includes("certonly"));
+    expect(certonly).toContain("--force-renewal");
+    expect(certonly).toContain("--server");
+    expect(certonly).toContain("https://acme.example.test/directory");
+    expect(calls.find((c) => c.includes("'renew'"))).toBeUndefined();
+  });
+
+  test("renewing a lineage issued by the SAME directory renews plainly, without --server", async () => {
+    const { nginx, files, calls } = setup({
+      certDomains: ["app.example.com"],
+      provider: { acmeDirectoryUrl: "https://acme.example.test/directory" },
+    });
+    files.set(
+      "/etc/letsencrypt/renewal/app.example.com.conf",
+      "[renewalparams]\nserver = https://acme.example.test/directory\n",
+    );
+    await nginx.renewCert("app.example.com").catch(() => undefined);
+    const renew = calls.find((c) => c.startsWith("certbot ") && c.includes("'renew'"));
+    expect(renew).toContain("--cert-name");
+    expect(renew).not.toContain("--server");
+    expect(calls.find((c) => c.includes("certonly"))).toBeUndefined();
+  });
+
+  test("a renew failure never leaks the EAB HMAC in the thrown error", async () => {
+    const hmac = "c3VwZXItc2VjcmV0LWhtYWM";
+    const { nginx, files } = setup({
+      certDomains: ["app.example.com"],
+      provider: { acmeEabKid: "kid-123", acmeEabHmacKey: hmac },
+      certbotFailure: `CA rejected EAB key ${hmac}`,
+    });
+    // Matching lineage (no custom directory → certbot's Let's Encrypt default),
+    // so the PLAIN renew path runs — the one with no redacting catch of its own.
+    files.set(
+      "/etc/letsencrypt/renewal/app.example.com.conf",
+      "[renewalparams]\nserver = https://acme-v02.api.letsencrypt.org/directory\n",
+    );
+    let error: Error | undefined;
+    try {
+      await nginx.renewCert("app.example.com");
+    } catch (err) {
+      error = err as Error;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect(error?.message).not.toContain(hmac);
+    expect(error?.message).toContain("[REDACTED]");
   });
 
   test("webhook proxy adds the /_openship/hooks/ location", async () => {
