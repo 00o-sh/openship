@@ -23,6 +23,7 @@ import {
   readFile as fsReadFile,
   rename as fsRename,
   stat as fsStat,
+  chmod as fsChmod,
 } from "node:fs/promises";
 import { execFile as cpExecFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -225,6 +226,18 @@ export interface NginxProviderOptions {
    * ACME email for certbot certificate registration.
    */
   acmeEmail?: string;
+  /** Alternate ACME directory. Unset preserves Certbot's Let's Encrypt default. */
+  acmeDirectoryUrl?: string;
+  /** EAB key identifier. Must be supplied together with acmeEabHmacKey. */
+  acmeEabKid?: string;
+  /** Base64url-encoded EAB HMAC key. Written only to a short-lived 0600 file. */
+  acmeEabHmacKey?: string;
+  /** Certificate private-key algorithm/size. Unset preserves Certbot's default. */
+  acmeKeyType?: "ec256" | "ec384" | "rsa2048" | "rsa4096";
+  /** Trust bundle visible to the Certbot execution environment. */
+  acmeCaBundle?: string;
+  /** Whether to accept the selected CA's terms. Defaults to the historic true. */
+  acmeTosAgreed?: boolean;
   /**
    * Path to Let's Encrypt live certificate directory.
    * Default: /etc/letsencrypt/live
@@ -255,6 +268,44 @@ export interface NginxProviderOptions {
 }
 
 const DEFAULT_CERT_DIR = "/etc/letsencrypt/live";
+
+export type AcmeKeyType = NonNullable<NginxProviderOptions["acmeKeyType"]>;
+
+function assertValidAcmeOptions(opts: NginxProviderOptions): void {
+  if (!!opts.acmeEabKid !== !!opts.acmeEabHmacKey) {
+    throw new Error("ACME EAB requires both a key identifier and an HMAC key");
+  }
+  if (opts.acmeDirectoryUrl) {
+    let directory: URL;
+    try {
+      directory = new URL(opts.acmeDirectoryUrl);
+    } catch {
+      throw new Error("ACME directory must be a valid http(s) URL");
+    }
+    if (directory.protocol !== "https:" && directory.protocol !== "http:") {
+      throw new Error("ACME directory must use http or https");
+    }
+  }
+  if (opts.acmeEabKid && (!/^[\x20-\x7E]+$/.test(opts.acmeEabKid) || opts.acmeEabKid.length > 512)) {
+    throw new Error("ACME EAB key identifier must be printable ASCII (maximum 512 characters)");
+  }
+  if (opts.acmeEabHmacKey && !/^[A-Za-z0-9_-]+={0,2}$/.test(opts.acmeEabHmacKey)) {
+    throw new Error("ACME EAB HMAC key must be base64url encoded");
+  }
+  if (opts.acmeCaBundle && !opts.acmeCaBundle.startsWith("/")) {
+    throw new Error("ACME CA bundle must be an absolute path in the Certbot environment");
+  }
+}
+
+export function acmeKeyArgs(keyType?: AcmeKeyType): string[] {
+  switch (keyType) {
+    case "ec256": return ["--key-type", "ecdsa", "--elliptic-curve", "secp256r1"];
+    case "ec384": return ["--key-type", "ecdsa", "--elliptic-curve", "secp384r1"];
+    case "rsa2048": return ["--key-type", "rsa", "--rsa-key-size", "2048"];
+    case "rsa4096": return ["--key-type", "rsa", "--rsa-key-size", "4096"];
+    default: return [];
+  }
+}
 
 /** Only allow valid domain characters - prevents shell injection. */
 const DOMAIN_RE = /^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/;
@@ -392,6 +443,12 @@ interface FileSnapshot {
 export class NginxProvider implements RoutingProvider, SslProvider {
   private sitesDir: string;
   private readonly acmeEmail: string | undefined;
+  private readonly acmeDirectoryUrl: string | undefined;
+  private readonly acmeEabKid: string | undefined;
+  private readonly acmeEabHmacKey: string | undefined;
+  private readonly acmeKeyType: AcmeKeyType | undefined;
+  private readonly acmeCaBundle: string | undefined;
+  private readonly acmeTosAgreed: boolean;
   private readonly certDir: string;
   private readonly executor: CommandExecutor | null;
   private reloadCommand: string;
@@ -399,8 +456,15 @@ export class NginxProvider implements RoutingProvider, SslProvider {
   private readonly containerEdge: boolean;
 
   constructor(opts: NginxProviderOptions) {
+    assertValidAcmeOptions(opts);
     this.sitesDir = opts.paths.sitesDir;
     this.acmeEmail = opts.acmeEmail;
+    this.acmeDirectoryUrl = opts.acmeDirectoryUrl;
+    this.acmeEabKid = opts.acmeEabKid;
+    this.acmeEabHmacKey = opts.acmeEabHmacKey;
+    this.acmeKeyType = opts.acmeKeyType;
+    this.acmeCaBundle = opts.acmeCaBundle;
+    this.acmeTosAgreed = opts.acmeTosAgreed ?? true;
     this.certDir = opts.certDir ?? DEFAULT_CERT_DIR;
     this.executor = opts.executor ?? null;
     this.containerEdge = opts.containerEdge ?? false;
@@ -667,19 +731,49 @@ export class NginxProvider implements RoutingProvider, SslProvider {
    * still sees the real cause.
    */
   private async _execCertbot(args: string[], onLog?: (line: string) => void): Promise<string> {
+    const command = this.acmeCaBundle ? "env" : "certbot";
+    const commandArgs = this.acmeCaBundle
+      ? [`REQUESTS_CA_BUNDLE=${this.acmeCaBundle}`, "certbot", ...args]
+      : args;
     if (!onLog || !this.executor) {
-      const out = await this._exec("certbot", args);
-      if (out) onLog?.(out);
-      return out;
+      const out = await this._exec(command, commandArgs);
+      const redacted = this.redactAcmeSecrets(out);
+      if (redacted) onLog?.(redacted);
+      return redacted;
     }
-    const full = `certbot ${args.map(sq).join(" ")}`;
+    const full = `${command} ${commandArgs.map(sq).join(" ")}`;
     let output = "";
     const { code } = await this.executor.streamExec(full, (log) => {
-      output += log.message;
-      onLog(log.message);
+      const message = this.redactAcmeSecrets(log.message);
+      output += message;
+      onLog(message);
     });
     if (code !== 0) throw new Error(output.trim() || `certbot exited ${code}`);
     return output;
+  }
+
+  private redactAcmeSecrets(value: string): string {
+    return this.acmeEabHmacKey
+      ? value.split(this.acmeEabHmacKey).join("[REDACTED]")
+      : value;
+  }
+
+  /** Keep EAB HMAC material out of argv/process listings and remove it after use. */
+  private async createEphemeralEabConfig(): Promise<string | null> {
+    if (!this.acmeEabKid || !this.acmeEabHmacKey) return null;
+    const path = join(dirname(this.certDir), `.openship-eab-${randomBytes(12).toString("hex")}.ini`);
+    await this._writeFile(
+      path,
+      `eab-kid = ${this.acmeEabKid}\neab-hmac-key = ${this.acmeEabHmacKey}\n`,
+    );
+    try {
+      if (this.executor) await this._exec("chmod", ["600", path]);
+      else await fsChmod(path, 0o600);
+    } catch (err) {
+      await this._rm(path).catch(() => undefined);
+      throw err;
+    }
+    return path;
   }
 
   private async _captureFile(path: string): Promise<FileSnapshot> {
@@ -1024,6 +1118,7 @@ ${serveLocation}
       : ["--register-unsafely-without-email"];
 
     let certonlyOut = "";
+    const eabConfig = await this.createEphemeralEabConfig();
     try {
       // ACME via certbot's STANDALONE authenticator on a loopback alt-port; the
       // edge proxies /.well-known/acme-challenge/ → 127.0.0.1:<port> (see
@@ -1040,16 +1135,23 @@ ${serveLocation}
       // "missing", and a re-run just prints "not due for renewal" (exit 0). Pinning
       // the name makes the on-disk path deterministic and self-heals that state.
       certonlyOut = await this._execCertbot([
+        ...(eabConfig ? ["--config", eabConfig] : []),
         "certonly", "--standalone", "--http-01-port", String(ACME_HTTP01_PORT),
         "--cert-name", domain, "-d", domain,
-        ...emailArgs, "--agree-tos", "--non-interactive",
+        ...(this.acmeDirectoryUrl ? ["--server", this.acmeDirectoryUrl] : []),
+        ...acmeKeyArgs(this.acmeKeyType),
+        ...emailArgs,
+        ...(this.acmeTosAgreed ? ["--agree-tos"] : []),
+        "--non-interactive",
         // Forced reissue: certbot would otherwise print "not due for renewal"
         // (exit 0) when a lineage exists, leaving the stale cert in place.
         ...(opts?.force ? ["--force-renewal"] : []),
       ], opts?.onLog);
     } catch (err) {
       // Replace certbot's opaque opener with the real, actionable cause.
-      throw new Error(summarizeCertbotFailure(safeErrorMessage(err), domain));
+      throw new Error(summarizeCertbotFailure(this.redactAcmeSecrets(safeErrorMessage(err)), domain));
+    } finally {
+      if (eabConfig) await this._rm(eabConfig).catch(() => undefined);
     }
 
     // Rewrite the config with SSL now that certs exist
@@ -1141,7 +1243,12 @@ ${serveLocation}
       return this.provisionCert(domain, { force: true });
     }
 
-    await this._exec("certbot", ["renew", "--cert-name", domain, "--non-interactive"]);
+    await this._execCertbot([
+      "renew", "--cert-name", domain,
+      ...(this.acmeDirectoryUrl ? ["--server", this.acmeDirectoryUrl] : []),
+      ...acmeKeyArgs(this.acmeKeyType),
+      "--non-interactive",
+    ]);
     await this.reload();
 
     return this.readCertInfo(domain);

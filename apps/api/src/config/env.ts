@@ -123,8 +123,19 @@ const envSchema = z.object({
   OPENSHIP_MANAGED_EDGE: envBool("false"),
   /** Loopback dashboard port the managed edge proxies to (defaults 3001). */
   OPENSHIP_DASHBOARD_PORT: z.coerce.number().int().positive().catch(3001),
-  /** Let's Encrypt contact email for the managed edge (defaults to the admin). */
+  /** ACME account contact email (defaults to the admin during guided setup). */
   OPENSHIP_ACME_EMAIL: z.string().optional(),
+  /** Alternate ACME directory URL. Unset keeps Certbot's Let's Encrypt default. */
+  OPENSHIP_ACME_DIRECTORY_URL: z.string().url().optional(),
+  /** External Account Binding credentials (must be configured as a pair). */
+  OPENSHIP_ACME_EAB_KID: z.string().optional(),
+  OPENSHIP_ACME_EAB_HMAC_KEY: z.string().optional(),
+  /** Certificate private-key algorithm and size. */
+  OPENSHIP_ACME_KEY_TYPE: z.enum(["ec256", "ec384", "rsa2048", "rsa4096"]).optional(),
+  /** CA root bundle path as seen by the Certbot process. */
+  OPENSHIP_ACME_CA_BUNDLE: z.string().optional(),
+  /** Non-interactive issuance requires explicit terms acceptance; historic default is true. */
+  OPENSHIP_ACME_TOS_AGREED: envBool("true"),
   /**
    * How long a deploy may HOLD waiting for a user decision (port conflict, edge
    * 80/443 takeover) before it gives up and aborts. Milliseconds; default 5 min

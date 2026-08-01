@@ -61,6 +61,7 @@ import { resolveRuntimeResources, resolveBuildResources } from "../../lib/resour
 import { resolveBuildGitToken } from "../github/clone-auth";
 import { openDeployRelay } from "../../lib/git-forwarding";
 import { resolveOrgOwner } from "../../lib/org-actor";
+import { resolveAcmeProviderOptions } from "../../lib/acme-config";
 import {
   preCreateServiceDeployments,
   emitServiceCheckRun,
@@ -1227,7 +1228,7 @@ function buildDeployEnvironment(
                       onLog: systemLog,
                       promptUser: p,
                     }),
-                  { promptUser, onLog: systemLog },
+                  { promptUser, onLog: systemLog, nginx: resolveAcmeProviderOptions() },
                 );
                 if (edge.migrated && !edge.ok) {
                   // ensureEdge already rolled back to the previous proxy — we
