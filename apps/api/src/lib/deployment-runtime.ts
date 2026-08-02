@@ -17,6 +17,7 @@ import { platform } from "./controller-helpers";
 import { buildSshConfig, sshManager } from "./ssh-manager";
 import { createProvisionLock } from "./provision-lock";
 import { isLocalHostRow } from "./box-org";
+import { resolveAcmeProviderOptions } from "./acme-config";
 
 /**
  * The shape of `deployment.meta` JSONB. Snapshotted per-deploy —
@@ -361,6 +362,7 @@ export async function resolveTargetPlatform(
         runtime: runtimeMode,
         executor,
         docker: runtimeMode === "docker" ? { transport: "socket" as const } : undefined,
+        nginx: resolveAcmeProviderOptions(),
         provisionLock: createProvisionLock("provision:local"),
       });
     }
@@ -371,6 +373,7 @@ export async function resolveTargetPlatform(
       executor, // ← managed executor from pool
       ssh: ssh!,
       docker: runtimeMode === "docker" ? toDockerSshTransport(ssh!, executor) : undefined,
+      nginx: resolveAcmeProviderOptions(),
       // Serialize provisioning per target server, so concurrent deploys (across
       // projects / single-app + compose) never race apt/openresty/networks/state.
       provisionLock: createProvisionLock(`provision:server:${id}`),
@@ -385,6 +388,7 @@ export async function resolveTargetPlatform(
     docker: runtimeMode === "docker"
       ? { transport: "socket" as const }
       : undefined,
+    nginx: resolveAcmeProviderOptions(),
     provisionLock: createProvisionLock("provision:local"),
   });
 }
