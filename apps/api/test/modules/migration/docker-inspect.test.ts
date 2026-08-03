@@ -72,6 +72,28 @@ const REDIS: DockerContainerDetail = {
   composeService: undefined,
 };
 
+/** A Coolify-managed app. Coolify injects EVERY variable explicitly at run time
+ *  and its Nixpacks builds bake the same values into the image, so the runtime
+ *  env and the image defaults overlap almost completely (#394). */
+const COOLIFY_APP: DockerContainerDetail = {
+  id: "c4",
+  name: "app-kso4gc8",
+  image: "app-kso4gc8:latest",
+  imageId: "sha256:coolify",
+  state: "running",
+  env: ["PATH=/usr/bin", "NODE_ENV=production", "DATABASE_URL=postgres://db:5432/app"],
+  labels: {
+    "coolify.managed": "true",
+    "coolify.type": "application",
+    "coolify.applicationId": "7",
+  },
+  networks: ["coolify"],
+  mounts: [],
+  ports: [{ privatePort: 3000, publicPort: 8081, type: "tcp" }],
+  composeProject: undefined,
+  composeService: undefined,
+};
+
 const VOLUMES: DockerVolumeInfo[] = [
   { name: "myapp_pgdata", driver: "local", labels: {} },
   { name: "unused_vol", driver: "local", labels: {} },
@@ -160,5 +182,29 @@ describe("reconcileStack", () => {
     const db = withDefaults.services.find((s) => s.name === "db")!;
     // LANG is an image default (dropped), PATH is denylisted, POSTGRES_PASSWORD survives.
     expect(db.env).toEqual({ POSTGRES_PASSWORD: "secret" });
+  });
+
+  const coolify = reconcileStack({
+    serverId: "srv-1",
+    details: [COOLIFY_APP],
+    volumes: VOLUMES,
+    networks: NETWORKS,
+    declared: new Map(),
+    alreadyManaged: 0,
+    imageDefaults: new Map([["app-kso4gc8:latest", new Set(COOLIFY_APP.env)]]),
+  });
+
+  it("keeps a Coolify container's env even when it matches the image default", () => {
+    const app = coolify.services.find((s) => s.name === "app-kso4gc8")!;
+    // NODE_ENV and DATABASE_URL match the image default but are real config; PATH is denylisted.
+    expect(app.env).toEqual({
+      NODE_ENV: "production",
+      DATABASE_URL: "postgres://db:5432/app",
+    });
+  });
+
+  it("reports the Coolify variables Docker cannot expose", () => {
+    const app = coolify.services.find((s) => s.name === "app-kso4gc8")!;
+    expect(app.warnings.some((w) => w.includes("build-time"))).toBe(true);
   });
 });
