@@ -32,6 +32,37 @@ describe("resolveProjectInfo", () => {
     );
   });
 
+  it("interpolates required Compose variables from the configured deploy env", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "openship-prepare-"));
+    tempDirs.push(tempDir);
+
+    // #383: compose lives outside the repo root (#330) and declares a required
+    // variable. The user supplied it in the Openship deploy configuration, so
+    // the scan must interpolate it instead of reporting the file as unparseable.
+    await mkdir(join(tempDir, "deploy", "docker-compose"), { recursive: true });
+    await writeFile(
+      join(tempDir, "deploy", "docker-compose", "docker-compose.yaml"),
+      [
+        "services:",
+        "  db:",
+        "    image: postgres:16-alpine",
+        "    environment:",
+        "      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}",
+      ].join("\n"),
+    );
+
+    const info = await resolveProjectInfo({
+      source: "local",
+      path: tempDir,
+      composePath: "deploy/docker-compose",
+      env: { POSTGRES_PASSWORD: "s3cret" },
+    });
+
+    expect(info.services?.find((s) => s.name === "db")?.environment).toMatchObject({
+      POSTGRES_PASSWORD: "s3cret",
+    });
+  });
+
   it("reports invalid Compose YAML instead of returning no services", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "openship-prepare-"));
     tempDirs.push(tempDir);
