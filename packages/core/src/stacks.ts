@@ -286,6 +286,34 @@ export const STACKS = {
       deps: ["@remix-run/react", "@remix-run/node", "remix"],
     },
   },
+  "tanstack-start": {
+    name: "TanStack Start",
+    language: "typescript",
+    category: "fullstack",
+    outputDirectory: ".output",
+    defaultPort: 3000,
+    defaultBuildCommand: "vite build",
+    defaultStartCommand: "node .output/server/index.mjs",
+    // Nitro/Vinxi server bundle is self-contained under .output — same shape as Nuxt.
+    productionPaths: [".output"],
+    detection: {
+      // TanStack Start is Vite/Rsbuild-based; app.config.* is the older
+      // framework-specific marker, while current apps commonly ship vite.config.*
+      // or rsbuild.config.* plus the start package dep.
+      rootMarkers: [
+        "app.config.ts",
+        "app.config.js",
+        "app.config.mjs",
+        "vite.config.ts",
+        "vite.config.js",
+        "vite.config.mjs",
+        "rsbuild.config.ts",
+        "rsbuild.config.js",
+        "rsbuild.config.mjs",
+      ],
+      deps: ["@tanstack/react-start", "@tanstack/start"],
+    },
+  },
   astro: {
     name: "Astro",
     language: "typescript",
@@ -1145,6 +1173,7 @@ export const STACK_ICONS: Partial<Record<StackId, string>> = {
   nuxt:        `${DI}/nuxtjs/nuxtjs-original.svg`,
   sveltekit:   `${DI}/svelte/svelte-original.svg`,
   remix:       `${DI}/react/react-original.svg`,
+  "tanstack-start": `${DI}/react/react-original.svg`,
   astro:       `${DI}/astro/astro-original.svg`,
   vite:        `${DI}/vitejs/vitejs-original.svg`,
   angular:     `${DI}/angular/angular-original.svg`,
