@@ -838,7 +838,14 @@ function toProjectInfo(
     stack: stack.stack,
     projectType,
     category: stack.category,
-    packageManager: stack.packageManager,
+    // detectPackageManager()'s "unknown" fallback (no manifest anywhere in this
+    // root) is an internal sentinel, not a real package manager — PackageManagerEnum
+    // (project.schema.ts) never included it, so echoing it back verbatim here let
+    // the client round-trip it straight into project creation and 400 with
+    // "Expected union value" (issue #415). "npm" mirrors the client's own
+    // `|| "npm"` fallback default (DEFAULT_DEPLOYMENT_CONFIG) — same reasonable
+    // default, now applied where the value is actually produced.
+    packageManager: stack.packageManager === "unknown" ? "npm" : stack.packageManager,
     buildCommand: stack.buildCommand,
     installCommand: stack.installCommand,
     startCommand: stack.startCommand,
