@@ -63,6 +63,30 @@ describe("resolveProjectInfo", () => {
     });
   });
 
+  it("normalizes an undetected package manager to \"npm\" instead of the internal \"unknown\" sentinel (#415)", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "openship-prepare-"));
+    tempDirs.push(tempDir);
+
+    // A compose-only subfolder with no manifest anywhere (package.json, go.mod,
+    // requirements.txt, ...) — detectPackageManager() legitimately falls back to
+    // "unknown" here, but that's an internal sentinel PackageManagerEnum never
+    // accepted. Echoing it back verbatim let the dashboard round-trip it
+    // straight into project creation and 400 with "Expected union value".
+    await mkdir(join(tempDir, "infra", "9router"), { recursive: true });
+    await writeFile(
+      join(tempDir, "infra", "9router", "docker-compose.yml"),
+      ["services:", "  9router:", "    image: decolua/9router:latest"].join("\n"),
+    );
+
+    const info = await resolveProjectInfo({
+      source: "local",
+      path: tempDir,
+      composePath: "infra/9router",
+    });
+
+    expect(info.packageManager).toBe("npm");
+  });
+
   it("reports invalid Compose YAML instead of returning no services", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "openship-prepare-"));
     tempDirs.push(tempDir);
