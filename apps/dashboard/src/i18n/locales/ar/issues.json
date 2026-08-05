@@ -62,6 +62,14 @@
     "filteredTitle": "لا نتائج",
     "filteredBody": "لا توجد مشكلات مطابقة لهذا الفلتر."
   },
+  "summary": {
+    "title": "نظرة عامة",
+    "subtitle": "الحالة في لمحة",
+    "totalOpen": "مفتوحة",
+    "totalResolved": "تم حلها",
+    "bySeverity": "حسب الخطورة",
+    "byArea": "حسب المجال"
+  },
   "home": {
     "attentionTitle": "يحتاج انتباهك",
     "attentionSubtitle": "هناك خلل أو أمر ينتظر قرارك",

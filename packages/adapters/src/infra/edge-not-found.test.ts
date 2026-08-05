@@ -1,5 +1,11 @@
 import { describe, expect, test } from "vitest";
-import { EDGE_NOT_FOUND_HTML, EDGE_NOT_FOUND_LOCATION } from "./edge-not-found";
+import {
+  EDGE_NOT_FOUND_HTML,
+  EDGE_NOT_FOUND_LOCATION,
+  EDGE_UNROUTED_SENTINEL,
+} from "./edge-not-found";
+import { stripComments, extractBlocks } from "../system/proxy/import/parse-utils";
+import { edgeDefaultCatchAllConf } from "./openresty-lua";
 
 /**
  * The page is embedded in an nginx `return 404 '<body>'` on every install path, so
@@ -23,6 +29,42 @@ describe("edge not-found page", () => {
     // The baked conf re-indents shared blocks for `http {}`; a multi-line body would
     // pick that indentation up on the container path only.
     expect(EDGE_NOT_FOUND_HTML).not.toContain("\n");
+  });
+
+  test("contains no # — Openship's OWN config reader cuts lines at one", () => {
+    // nginx doesn't care; `stripComments` in the proxy importer did. A CSS `#fff` here
+    // truncated the line mid-page, taking ~40 closing braces with it, and since
+    // `_default.conf` sorts first in the edge scan's single `cat` the brace balance
+    // broke for the WHOLE file: every vhost after it was swallowed and the box scanned
+    // as zero sites — no domains in the migrate wizard, no certs carried at cutover.
+    // Nothing failed. It just found nothing. Use rgb() for colours.
+    expect(EDGE_NOT_FOUND_HTML).not.toContain("#");
+  });
+
+  test("keeps its braces balanced — the same reader counts them", () => {
+    // `extractBlocks` / `extractLocationProxies` find a block's end by counting braces
+    // and count the ones inside this string too (the CSS is full of them). A lone `{`
+    // in a text node would extend the "server block" to the end of the file.
+    const open = (EDGE_NOT_FOUND_HTML.match(/\{/g) ?? []).length;
+    const close = (EDGE_NOT_FOUND_HTML.match(/\}/g) ?? []).length;
+    expect(open).toBe(close);
+  });
+
+  test("survives a round trip through the reader that parses these files back", () => {
+    // The end-to-end version of the two above, against the real bytes: the bare edge's
+    // catch-all, through the importer's comment stripper, must still yield its two
+    // server blocks. This is the assertion whose absence let #431's fix take the
+    // migrate scan down with it.
+    const conf = edgeDefaultCatchAllConf({ certPath: "/c/fullchain.pem", keyPath: "/c/privkey.pem" });
+    expect(extractBlocks(stripComments(conf), "server")).toHaveLength(2);
+  });
+
+  test("carries the sentinel in the first 200 bytes", () => {
+    // So `curl -s https://host | head -c 200` says "our edge, unrouted host" rather
+    // than leaving an operator to guess whose 404 they are looking at. A support
+    // marker only — see the constant's docblock for why certbot can never see it.
+    expect(EDGE_NOT_FOUND_HTML.indexOf(EDGE_UNROUTED_SENTINEL)).toBeGreaterThan(-1);
+    expect(EDGE_NOT_FOUND_HTML.indexOf(EDGE_UNROUTED_SENTINEL)).toBeLessThan(200);
   });
 
   test("makes no external request", () => {

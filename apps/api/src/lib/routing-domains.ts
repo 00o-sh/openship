@@ -26,7 +26,8 @@ export interface PlannedRouteDomain {
    * cert until the real one lands). Broader than `provisionSsl`/`requiresSslTooling`:
    * it also covers a manual-SSL host whose cert hasn't been uploaded yet, and it
    * stays true after a failed issuance — both are states where a missing listener
-   * means the origin refuses the handshake and Cloudflare reports 525 (#308).
+   * sends HTTPS for a domain we DO route to the edge's 443 catch-all, which answers
+   * every unrouted name with a placeholder cert and a not-found page (#308, #431).
    */
   terminatesTlsLocally: boolean;
   isCloud: boolean;
@@ -85,8 +86,9 @@ export function resolveManagedHostname(hostname: string): { isManaged: boolean; 
  * For the callers that reach `registerRoute` WITHOUT going through the route
  * planner — route reconcile, compose single-domain composition, migration path
  * fan-out. They have to agree with the planner: a route registered without this
- * flag gets no :443 listener until its cert exists, and a routed domain with no
- * TLS listener refuses the handshake outright (Cloudflare reports 525, #308).
+ * flag gets no :443 listener until its cert exists, and a routed domain with no TLS
+ * listener is served by the edge's 443 catch-all instead — placeholder cert, branded
+ * not-found page, which looks like the domain was never deployed (#308, #431).
  */
 export function hostTerminatesTlsLocally(
   hostname: string,

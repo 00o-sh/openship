@@ -21,7 +21,8 @@ function deps(over: Partial<EdgePreflightDeps> = {}): EdgePreflightDeps {
     makeExecutor: () => ({}) as any,
     foreignProxyOnEdge: vi.fn(async () => ({ status: status(), blocked: true, owner: "nginx" })),
     importSites: vi.fn(async () => ({ sites: [tlsSite], warnings: [] })),
-    beginEdgeTakeover: vi.fn(async () => {}),
+    beginEdgeTakeover: vi.fn(async () => ({ freed: true, stillBound: [] })),
+    rollbackHostEdge: vi.fn(async () => true),
     recoverInterruptedTakeover: vi.fn(async () => {}),
     ourEdgeContainerRunning: vi.fn(async () => false),
     collectCerts: vi.fn(async () => ({ "a.com": { certPem: "CERT", keyPem: "KEY" } })),
@@ -94,6 +95,7 @@ describe("planAndApplyHostEdge", () => {
       }),
       beginEdgeTakeover: vi.fn(async () => {
         order.push("stop");
+        return { freed: true, stillBound: [] };
       }),
     });
     await planAndApplyHostEdge({}, d);
@@ -113,6 +115,7 @@ describe("planAndApplyHostEdge", () => {
       confirm: vi.fn(async () => "migrate"),
       beginEdgeTakeover: vi.fn(async () => {
         order.push("begin");
+        return { freed: true, stillBound: [] };
       }),
       importSites: vi.fn(async () => {
         order.push("import");
@@ -123,6 +126,20 @@ describe("planAndApplyHostEdge", () => {
     // beginEdgeTakeover journals then frees — the CLI must never call the raw
     // freeEdgeTargets, or a failed compose up leaves 80/443 dark with no record.
     expect(order).toEqual(["import", "begin"]);
+  });
+
+  // A stop that doesn't release the socket is the difference between "we took over"
+  // and "the edge will crash-loop on bind()". Proceeding here is what made every
+  // surface report success for a box that served nothing.
+  it("refuses to proceed — and hands the proxy back — when the ports never come free", async () => {
+    const d = deps({
+      confirm: vi.fn(async () => "takeover"),
+      beginEdgeTakeover: vi.fn(async () => ({ freed: false, stillBound: [80, 443] })),
+    });
+    const plan = await planAndApplyHostEdge({}, d);
+    expect(plan.proceed).toBe(false);
+    expect(plan.blockedBy).toContain("80 and 443");
+    expect(d.rollbackHostEdge).toHaveBeenCalledTimes(1);
   });
 
   it("restores an interrupted takeover BEFORE probing, and reports our edge health", async () => {

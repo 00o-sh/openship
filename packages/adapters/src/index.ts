@@ -163,8 +163,12 @@ export {
   EDGE_CHALLENGE_ROOT,
   EDGE_CHALLENGE_URL_PREFIX,
   EDGE_SHARED_DICTS,
+  OPENRESTY_DEFAULT_PATHS,
   deployLuaScripts,
   detectOpenRestyPaths,
+  edgeChallengeVhostConf,
+  edgeDefaultCatchAllConf,
+  edgeDefaultCertPaths,
   type OpenRestyPaths,
 } from "./infra/openresty-lua";
 export { bakedEdgeNginxConf } from "./infra/edge-baked-conf";
@@ -210,12 +214,15 @@ export {
   EDGE_CONTAINER_NAME,
   EdgeConflictError,
   EdgeMigrateRequested,
+  edgeCrashReason,
+  edgeIsBroken,
   freeEdgeTargets,
   invalidateEdgeContainer,
   ourEdgeContainerRunning,
   probeEdge,
   resolveOurEdgeContainer,
   stopTargetsForStatus,
+  type EdgeFreeResult,
 } from "./system/proxy/detect";
 export {
   containerEdgeProvider,
@@ -226,8 +233,10 @@ export {
   resolveEdgeImage,
   setDefaultEdgeImage,
   buildEdgeRunCommand,
+  verifyEdgeServing,
   type ContainerEdgeOptions,
   type ContainerEdgeResult,
+  type EdgeServingVerdict,
 } from "./system/proxy/ensure-container-edge";
 export {
   ensureContainerMail,

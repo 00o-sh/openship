@@ -16,7 +16,7 @@ const h = vi.hoisted(() => ({
   registerRoute: vi.fn(),
   provisionCert: vi.fn(),
   installCert: vi.fn(),
-  freeEdgeTargets: vi.fn(async () => {}),
+  freeEdgeTargets: vi.fn(async () => ({ freed: true, stillBound: [] as number[] })),
   resolveOurEdgeContainer: vi.fn(async () => null as string | null),
   containerEdgeProvider: vi.fn(),
 }));
@@ -84,7 +84,7 @@ const noop = () => {};
 
 beforeEach(() => {
   vi.clearAllMocks();
-  h.freeEdgeTargets.mockImplementation(async () => {});
+  h.freeEdgeTargets.mockImplementation(async () => ({ freed: true, stillBound: [] }));
   h.detectPaths.mockResolvedValue({});
   h.registerRoute.mockResolvedValue(undefined);
   h.provisionCert.mockResolvedValue({ verified: true });
@@ -131,6 +131,25 @@ describe("runEdgeTakeover", () => {
 
     expect(res.ok).toBe(false);
     expect(res.rolledBack).toBe(false);
+  });
+
+  // "I stopped its owner" is not ":80 is bindable" — something else may hold the
+  // socket (a second nginx, a stray container, a lingering worker). Installing anyway
+  // starts an edge that loses the race and crash-loops on
+  // `bind() … (98: Address already in use)` while `docker run` exits 0, so this would
+  // report a successful migration of a box serving nothing.
+  it("refuses to install — and restores the proxy — when the ports never come free", async () => {
+    h.freeEdgeTargets.mockImplementation(async () => ({ freed: false, stillBound: [80, 443] }));
+    const { executor, cmds } = makeExecutor();
+
+    const res = await runEdgeTakeover(executor, { status: STATUS, sites: SITES }, noop);
+
+    expect(res.ok).toBe(false);
+    expect(res.rolledBack).toBe(true);
+    expect(res.warnings.some((w) => w.includes("80 and 443"))).toBe(true);
+    expect(h.installContainerEdge).not.toHaveBeenCalled();
+    expect(h.registerRoute).not.toHaveBeenCalled();
+    expect(rolledBackNginx(cmds)).toBe(true);
   });
 
   it("rolls back when a post-install step throws (e.g. path detection)", async () => {

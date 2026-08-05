@@ -62,6 +62,14 @@
     "filteredTitle": "Sonuç yok",
     "filteredBody": "Bu filtreye uyan sorun yok."
   },
+  "summary": {
+    "title": "Genel bakış",
+    "subtitle": "Duruma bir bakış",
+    "totalOpen": "açık",
+    "totalResolved": "çözüldü",
+    "bySeverity": "Önem derecesine göre",
+    "byArea": "Alana göre"
+  },
   "home": {
     "attentionTitle": "İlgi bekliyor",
     "attentionSubtitle": "Bir şey bozuk ya da karar bekliyor",

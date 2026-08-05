@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { registerResolvedRoutes, type RoutedDomainInput } from "./route-registration";
+import { explainEdgeDown } from "../system/edge-exec-error";
 
 const logger = { log: vi.fn(), step: vi.fn() } as any;
 const routeTarget = { targetUrl: "http://127.0.0.1:12345" };
@@ -7,6 +8,16 @@ const domain = (hostname: string): RoutedDomainInput => ({ hostname, tls: false,
 
 const RESTARTING =
   "Error response from daemon: Container abc123 is restarting, wait until the container is running";
+
+// What the edge executor actually throws when the edge is crash-looping: the
+// enriched one-line explanation joined to the daemon's own "is restarting" line.
+// The daemon phrase riding along is exactly why isContainerRestartingError used to
+// false-positive on this and burn four pointless retries.
+const EDGE_DOWN_BLOB = `${explainEdgeDown({
+  container: "openship-edge",
+  status: "restarting",
+  reason: "[emerg] bind() to 0.0.0.0:80 failed (98: Address in use)",
+})}\n${RESTARTING}`;
 
 describe("registerResolvedRoutes — transient container-restart handling", () => {
   beforeEach(() => {
@@ -79,6 +90,34 @@ describe("registerResolvedRoutes — transient container-restart handling", () =
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("nginx reload failed");
     expect(routing.registerRoute).toHaveBeenCalledTimes(1); // no wasted retries on a real failure
+  });
+
+  // Bug: a crash-looping EDGE was mislabeled "target container is still starting up"
+  // and retried 4× — wrong on both counts. The edge never self-heals by our waiting,
+  // and for a static app (no container of its own) the message is nonsensical.
+  it("does NOT retry when the EDGE is down — records it on the first attempt", async () => {
+    const routing = {
+      registerRoute: vi.fn(async () => {
+        throw new Error(EDGE_DOWN_BLOB);
+      }),
+    } as any;
+
+    const warnings = await registerResolvedRoutes(
+      logger,
+      routing,
+      undefined,
+      [domain("chartsv.opsh.io")],
+      routeTarget,
+    );
+
+    expect(routing.registerRoute).toHaveBeenCalledTimes(1); // no wasted retries into a dead edge
+    expect(warnings).toHaveLength(1);
+    // Surfaces the operator-facing explanation, not the raw daemon blob…
+    expect(warnings[0]).toContain("the edge container is not running");
+    // …and never the misleading app-container / DNS advice.
+    const logged = logger.log.mock.calls.map((c: unknown[]) => String(c[0])).join("");
+    expect(logged).not.toContain("target container is still starting up");
+    expect(logged).not.toContain("fix DNS/routing");
   });
 
   it("registers cleanly on the first attempt with no warning", async () => {

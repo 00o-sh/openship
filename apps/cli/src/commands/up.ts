@@ -411,9 +411,15 @@ async function runCompose(opts: UpOpts & { yes?: boolean }): Promise<{ apiPort: 
     process.exit(1);
   }
   if (!edgePlan.proceed) {
+    // `blockedBy` = the handover itself failed (ports never came free), which is a
+    // different thing from the operator choosing to keep their proxy — and telling
+    // them "left it running, re-run when ready" would send them in a loop.
     console.log(
-      chalk.yellow("\n  Left the existing proxy on :80/:443 running — not starting the stack.\n") +
-        chalk.dim("  Re-run and choose migrate / take-over (or pass --edge=migrate|takeover) when ready.\n"),
+      edgePlan.blockedBy
+        ? chalk.red(`\n  Can't take over the edge: ${edgePlan.blockedBy}.\n`) +
+            chalk.dim("  Find what else is bound to those ports (`ss -ltnp | grep -E ':80|:443'`), then re-run.\n")
+        : chalk.yellow("\n  Left the existing proxy on :80/:443 running — not starting the stack.\n") +
+            chalk.dim("  Re-run and choose migrate / take-over (or pass --edge=migrate|takeover) when ready.\n"),
     );
     process.exit(1);
   }

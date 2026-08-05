@@ -62,6 +62,14 @@
     "filteredTitle": "Sin resultados",
     "filteredBody": "Ningún problema coincide con este filtro."
   },
+  "summary": {
+    "title": "Resumen",
+    "subtitle": "Estado de un vistazo",
+    "totalOpen": "abiertas",
+    "totalResolved": "resueltas",
+    "bySeverity": "Por gravedad",
+    "byArea": "Por área"
+  },
   "home": {
     "attentionTitle": "Necesita atención",
     "attentionSubtitle": "Algo está roto o espera una decisión",

@@ -199,7 +199,8 @@
       "staticNoServer": "Estático (sem servidor)",
       "modeSandboxed": "Isolado (contentor)",
       "modeDirect": "Direto (processo do anfitrião)",
-      "modeDefault": "Predefinido (resolvido na implementação)"
+      "modeDefault": "Predefinido (resolvido na implementação)",
+      "modeStatic": "Nenhum — servido como ficheiros estáticos"
     },
     "storage": {
       "title": "Armazenamento persistente",

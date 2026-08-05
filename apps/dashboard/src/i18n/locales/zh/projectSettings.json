@@ -199,7 +199,8 @@
       "staticNoServer": "静态（无服务器）",
       "modeSandboxed": "沙盒化（容器）",
       "modeDirect": "直接（主机进程）",
-      "modeDefault": "默认（部署时解析）"
+      "modeDefault": "默认（部署时解析）",
+      "modeStatic": "无 — 以静态文件形式提供"
     },
     "storage": {
       "title": "持久化存储",

@@ -24,12 +24,14 @@ export {
   edgeFailureReason,
   EdgeConflictError,
   EdgeMigrateRequested,
+  edgeCrashReason,
+  edgeIsBroken,
   freeEdgeTargets,
   ourEdgeContainerRunning,
-  ourLuaOnHost,
   probeEdge,
   stopTargetsForStatus,
 } from "./detect";
+export type { EdgeFreeResult } from "./detect";
 export { runEdgeTakeover, registerImportedSites } from "./takeover";
 export {
   recoverInterruptedTakeover,

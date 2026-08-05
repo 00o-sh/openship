@@ -20,6 +20,7 @@ import { useState } from "react";
 
 import { EmptyIssues } from "@/components/issues/EmptyIssues";
 import { IssueList } from "@/components/issues/IssueList";
+import { IssueSummary } from "@/components/issues/IssueSummary";
 import { ISSUE_FIXTURES, countFixtures } from "@/components/issues/issue-fixtures";
 
 type Variant = "mixed" | "outage" | "action" | "advisory" | "resolved" | "fleet" | "empty";
@@ -77,7 +78,14 @@ export function IssuesPreview() {
       {issues.length === 0 ? (
         <EmptyIssues filtered={false} resolved={false} />
       ) : (
-        <IssueList issues={issues} busyId={null} onResolve={() => {}} onInfraFix={() => {}} />
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_340px]">
+          <div className="min-w-0">
+            <IssueList issues={issues} busyId={null} onResolve={() => {}} onInfraFix={() => {}} />
+          </div>
+          <div className="space-y-4 lg:sticky lg:top-6 lg:self-start">
+            <IssueSummary issues={issues} tab={variant === "resolved" ? "resolved" : "open"} />
+          </div>
+        </div>
       )}
     </div>
   );

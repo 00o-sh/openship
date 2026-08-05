@@ -37,6 +37,7 @@ import { resolveAcmeProviderOptions } from "../../lib/acme-config";
 import { runConnectivityCheck } from "../../lib/connectivity";
 import "../../lib/connectivity-checks"; // registers ssh / ssh-server / backup-destination
 import { repos } from "@repo/db";
+import { refreshServerContainer } from "./server-containers.service";
 import { getRequestContext } from "../../lib/request-context";
 import { permission } from "../../lib/permission";
 import { safeErrorMessage } from "@repo/core";
@@ -554,6 +555,8 @@ export async function installStream(c: Context) {
     // the SSE stream stays open via the promise below
     const installPromise = (async () => {
       let hasFailure = false;
+      /** Per-component failure reason, for the cached row below. */
+      const failures = new Map<string, string>();
 
       // Before installing the edge, self-heal a takeover that crashed mid-flight
       // on this server on a prior attempt (restores the previous proxy if the
@@ -620,16 +623,30 @@ export async function installStream(c: Context) {
             appendSetupLog(session.id, name, `${name} installed successfully${result.version ? ` (${result.version})` : ""}`);
             updateComponentProgress(session.id, name, "installed");
           } else {
-            appendSetupLog(session.id, name, result.error ?? `${name} installation failed`, "error");
+            const msg = result.error ?? `${name} installation failed`;
+            appendSetupLog(session.id, name, msg, "error");
             updateComponentProgress(session.id, name, "failed", result.error);
+            failures.set(name, msg);
             hasFailure = true;
           }
         } catch (err) {
           const msg = safeErrorMessage(err);
           appendSetupLog(session.id, name, msg, "error");
           updateComponentProgress(session.id, name, "failed", msg);
+          failures.set(name, msg);
           hasFailure = true;
         }
+      }
+
+      // Write what the box now looks like into the cached edge row. Without this the
+      // install told nobody: a SUCCESSFUL "Fix edge" left the stale `down` row in
+      // place, so the operator refreshed and still saw "Edge down" — indistinguishable
+      // from the fix having done nothing. A FAILED one lands its reason on the same
+      // row, so the attention card names the cause (`bind() … Address already in use`)
+      // instead of repeating "is down". Edge only: it's the sole component here that
+      // has a container row (mail is provisioned by its own wizard).
+      if (validNames.includes("edge")) {
+        await refreshServerContainer(serverId, "edge", failures.get("edge"));
       }
 
       finishSetupSession(session.id, hasFailure ? "failed" : "completed");

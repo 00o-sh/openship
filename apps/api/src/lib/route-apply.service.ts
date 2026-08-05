@@ -188,8 +188,10 @@ export async function reconcileProjectRoutes(
         domain: r.hostname,
         tls: true,
         // A custom domain's TLS is ours to terminate, so the edge must keep a :443
-        // listener up for it even before its cert exists — otherwise the origin
-        // refuses the handshake and a proxied domain shows Cloudflare 525 (#308).
+        // listener up for it even before its cert exists — otherwise HTTPS for it
+        // falls through to the edge's 443 catch-all, which answers with a
+        // domain-less placeholder cert and the branded not-found page, i.e. the
+        // domain reads as unconfigured rather than pending (#308).
         // A free *.opsh.io host is fronted by Cloud's edge; not ours.
         terminatesTlsLocally: r.isCustomDomain,
         // staticRoot wins when present: it is the more specific instruction, and a

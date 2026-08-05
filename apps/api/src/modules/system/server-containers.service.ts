@@ -95,6 +95,14 @@ export interface ApplyContainerResult {
    * component on the box. Distinct from `updated:false` ("already current").
    */
   down: boolean;
+  /**
+   * Why the apply did not do what it was asked to. `updated:false, down:false` is
+   * ALSO what "already current, nothing to do" looks like, so without this an edge
+   * that refused to install (no takeover consent on a contested box) finished the
+   * session as `completed` — the green-banner-over-a-dead-edge bug. Set ⇒ the apply
+   * failed, whatever `down` says.
+   */
+  error?: string;
 }
 
 // ─── Detection (per component, given a live executor) ─────────────────────────
@@ -344,39 +352,93 @@ export async function applyServerContainer(
 
       if (component === "edge") {
         const r = await reconcileServerEdge(executor, { onLog: log });
-        outcome = { component, updated: r.updated, down: r.edgeDown };
+        outcome = { component, updated: r.updated, down: r.edgeDown, ...(r.error ? { error: r.error } : {}) };
       } else if (intent === "repair") {
         const r = await repairServerMail(executor, { onLog: log });
-        outcome = { component, updated: r.started, down: r.mailDown };
+        outcome = { component, updated: r.started, down: r.mailDown, ...(r.reason ? { error: r.reason } : {}) };
       } else {
         const record = await repos.mailServer.get(server.id);
         if (!record) throw new Error("no mail server is provisioned on this server");
         const r = await reconcileServerMail(executor, { onLog: log, domain: record.domain });
-        outcome = { component, updated: r.updated, down: r.mailDown };
+        outcome = { component, updated: r.updated, down: r.mailDown, ...(r.error ? { error: r.error } : {}) };
       }
 
-      // Refresh the cached row from the post-apply reality. Only a `present` probe
-      // rewrites the row; an inconclusive read leaves the pre-apply row in place
-      // rather than guessing (never remove here — we just acted on this box).
-      const probe =
-        component === "edge"
-          ? await detectEdge(executor).catch((): ContainerProbe => ({ kind: "unknown" }))
-          : await detectMail(executor, server).catch((): ContainerProbe => ({ kind: "unknown" }));
-      if (probe.kind === "present") {
-        await upsertView(
-          server,
-          probe.view,
-          outcome.down
+      // The reconcile's OWN reason beats the generic sentence: "no takeover consent"
+      // or an nginx `[emerg]` is something the operator can act on, "the update
+      // failed" is not. Falls back to the shape-based copy when there's no reason
+      // (an `edgeDown`/`mailDown` reported by a rollback-guarded swap).
+      await cacheAfterAction(
+        server,
+        executor,
+        component,
+        outcome.error ??
+          (outcome.down
             ? intent === "repair"
               ? "the container could not be started — see logs"
               : "the update failed and the container is down — see logs"
-            : undefined,
-        ).catch(() => {});
-      }
+            : undefined),
+      );
       return outcome;
     });
   } finally {
     await repos.serverContainerStatus.setInProgress(server.id, component, false).catch(() => {});
+  }
+}
+
+/**
+ * Re-read one component's LIVE state into its cached row, right after something
+ * acted on it. The single post-action cache write, shared by the apply service and
+ * the first-install stream.
+ *
+ * Two rules, both deliberate:
+ *  - only a `present` probe rewrites the row — an inconclusive read leaves the
+ *    pre-action row in place rather than guessing;
+ *  - never REMOVE here. We just acted on this box, so "the probe says absent" is far
+ *    more likely to be a probe that lost the race than a component that vanished;
+ *    dropping the row would erase the very issue the operator is trying to fix.
+ *    `detectServerContainers` (the scan) owns removal.
+ */
+async function cacheAfterAction(
+  server: Server,
+  executor: CommandExecutor,
+  component: ServerContainerComponent,
+  lastError?: string,
+): Promise<void> {
+  const probe =
+    component === "edge"
+      ? await detectEdge(executor).catch((): ContainerProbe => ({ kind: "unknown" }))
+      : await detectMail(executor, server).catch((): ContainerProbe => ({ kind: "unknown" }));
+  if (probe.kind === "present") await upsertView(server, probe.view, lastError).catch(() => {});
+}
+
+/**
+ * `cacheAfterAction` for a caller that holds a serverId and no executor — the
+ * first-install stream (`POST /system/install/stream`), which is how "Fix edge"
+ * reaches a box whose edge needs 80/443 takeover consent.
+ *
+ * It exists because that stream installed the edge and then told nobody: the cached
+ * `server_container_status` row still said `down`, so the home page kept the "Edge
+ * down" card after a SUCCESSFUL install (and the dropped-connection fallback,
+ * which reads that row back, called a good install a failure). The next `infra:scan`
+ * would have corrected it — minutes to an hour later, long after the operator
+ * refreshed and concluded the fix does nothing.
+ *
+ * Best-effort: the install's own outcome is already reported, and a cache write must
+ * never turn a finished install into a failed one.
+ */
+export async function refreshServerContainer(
+  serverId: string,
+  component: ServerContainerComponent,
+  lastError?: string,
+): Promise<void> {
+  try {
+    const server = await repos.server.get(serverId);
+    if (!server) return;
+    await sshManager.withExecutor(serverId, (executor) =>
+      cacheAfterAction(server, executor, component, lastError),
+    );
+  } catch {
+    /* best-effort */
   }
 }
 
@@ -415,14 +477,20 @@ export function runContainerApply(
         },
         intent,
       );
+      // `error` fails the session even when the box is still serving (a refused
+      // takeover leaves the old proxy up, so `down` is false and honest — but the
+      // apply did NOT do what the operator asked, and reporting `completed` is what
+      // put a green banner over an edge that had never bound :80).
+      const failed = result.down || Boolean(result.error);
       finishContainerApplySession(
         session.id,
-        result.down ? "failed" : "completed",
+        failed ? "failed" : "completed",
         { updated: result.updated, down: result.down },
-        result.down
-          ? intent === "repair"
-            ? "The container could not be started — see logs."
-            : "The update failed and the container is down — see logs."
+        failed
+          ? (result.error ??
+            (intent === "repair"
+              ? "The container could not be started — see logs."
+              : "The update failed and the container is down — see logs."))
           : undefined,
       );
       return { updated: result.updated, down: result.down };
@@ -508,11 +576,12 @@ const BULK_APPLY_CONCURRENCY = 3;
  *
  * Two classes of target are refused rather than attempted:
  * - A **missing** container — recreating it needs the secrets its setup path owns.
- * - An **edge whose box isn't clean** on 80/443. `reconcileServerEdge` has no
- *   `promptUser`, so `ensureEdgeClear` throws `EdgeConflictError` and the reconcile
- *   swallows it into a silent no-op. Rather than report a success that did nothing,
- *   pre-probe and hand the operator back to the per-server page, where the takeover
- *   consent prompt actually exists.
+ * - An **edge whose box isn't clean** on 80/443. This path has no `promptUser` (a
+ *   bulk run must never block on a modal), so `ensureEdgeClear` would refuse with
+ *   `EdgeConflictError`. The apply now reports that refusal as a failure rather than
+ *   swallowing it — but a target we KNOW would refuse shouldn't be promised in the
+ *   first place, so it's pre-probed and handed back to the per-server page, where the
+ *   takeover consent prompt actually exists.
  *
  * Returns as soon as the targets are classified: the applies run detached through
  * `runContainerApply`, so each one is a replayable session the operator can click

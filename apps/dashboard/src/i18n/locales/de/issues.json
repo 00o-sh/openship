@@ -62,6 +62,14 @@
     "filteredTitle": "Keine Treffer",
     "filteredBody": "Keine Probleme entsprechen diesem Filter."
   },
+  "summary": {
+    "title": "Übersicht",
+    "subtitle": "Zustand auf einen Blick",
+    "totalOpen": "offen",
+    "totalResolved": "behoben",
+    "bySeverity": "Nach Schweregrad",
+    "byArea": "Nach Bereich"
+  },
   "home": {
     "attentionTitle": "Benötigt Aufmerksamkeit",
     "attentionSubtitle": "Etwas ist defekt oder wartet auf dich",

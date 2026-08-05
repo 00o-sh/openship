@@ -299,7 +299,8 @@
       "staticNoServer": "Statik (sunucu yok)",
       "modeSandboxed": "Korumalı Alan (konteyner)",
       "modeDirect": "Doğrudan (ana makine süreci)",
-      "modeDefault": "Varsayılan (dağıtımda çözümlenir)"
+      "modeDefault": "Varsayılan (dağıtımda çözümlenir)",
+      "modeStatic": "Yok — statik dosya olarak sunulur"
     },
     "storage": {
       "title": "Kalıcı depolama",

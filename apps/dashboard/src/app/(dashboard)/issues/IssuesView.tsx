@@ -16,6 +16,7 @@ import { usePlatform } from "@/context/PlatformContext";
 import { useToast } from "@/components/toast";
 import { EmptyIssues } from "@/components/issues/EmptyIssues";
 import { IssueList } from "@/components/issues/IssueList";
+import { IssueSummary } from "@/components/issues/IssueSummary";
 import { useIssueActions } from "@/components/issues/useIssueActions";
 
 type SeverityFilter = "all" | IssueSeverity;
@@ -168,78 +169,121 @@ export function IssuesView() {
         ))}
       </div>
 
-      <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
-        <div className="relative w-full sm:flex-1 sm:min-w-[220px]">
-          <Search className="pointer-events-none absolute start-3.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-          <input
-            type="text"
-            placeholder={c.filters.searchPlaceholder}
-            value={queryDraft}
-            onChange={(e) => onQueryChange(e.target.value)}
-            className="h-10 w-full rounded-xl border border-border/50 bg-card ps-10 pe-4 text-sm text-foreground transition-all placeholder:text-muted-foreground focus:border-primary/20 focus:outline-none focus:ring-2 focus:ring-primary/20"
-          />
-        </div>
-        <div className="inline-flex max-w-full shrink-0 flex-wrap items-center gap-1 rounded-xl bg-muted/35 p-1">
-          {SEVERITY_FILTERS.map((f) => {
-            const n = facetCount(f);
-            return (
-              <button
-                key={f}
-                type="button"
-                onClick={() => setSeverity(f)}
-                className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-3.5 text-[12px] font-medium transition-colors ${
-                  severity === f
-                    ? "border border-border/60 bg-card text-foreground"
-                    : "text-muted-foreground hover:bg-background/60 hover:text-foreground"
-                }`}
-              >
-                {c.filters[f]}
-                {/* Hidden at 0: an empty facet is information, a "0" chip is noise. */}
-                {n > 0 && <span className="tabular-nums text-muted-foreground/60">{n}</span>}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* The Resolved tab is honest about its coverage: only incidents have a
-          lifecycle, so its silence is not a claim that nothing else ever broke. */}
-      {tab === "resolved" && (
-        <p className="mb-4 rounded-xl border border-border/50 bg-muted/25 px-4 py-3 text-[12px] leading-relaxed text-muted-foreground">
-          {c.resolvedNote}
-        </p>
-      )}
-
       {loading ? (
-        <div className="space-y-4">
-          {[0, 1].map((i) => (
-            <div key={i} className="overflow-hidden rounded-2xl border border-border/60 bg-card">
-              <div className="flex items-start gap-3 border-b border-border/60 px-5 py-4">
-                <div className="size-9 shrink-0 rounded-xl bg-muted" />
-                <div className="flex-1 space-y-2">
-                  <div className="h-3.5 w-32 rounded bg-muted" />
-                  <div className="h-3 w-56 rounded bg-muted" />
+        // Two-column skeleton: the feed on the left, the summary rail on the right,
+        // so the fold doesn't reflow when the real data lands.
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_340px]">
+          <div className="min-w-0 space-y-4">
+            {[0, 1].map((i) => (
+              <div key={i} className="overflow-hidden rounded-2xl border border-border/60 bg-card">
+                <div className="flex items-start gap-3 border-b border-border/60 px-5 py-4">
+                  <div className="size-9 shrink-0 rounded-xl bg-muted" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-3.5 w-32 rounded bg-muted" />
+                    <div className="h-3 w-56 rounded bg-muted" />
+                  </div>
+                </div>
+                <div className="space-y-3 px-5 py-4">
+                  <div className="h-3 w-3/5 rounded bg-muted" />
+                  <div className="h-3 w-2/5 rounded bg-muted" />
                 </div>
               </div>
-              <div className="space-y-3 px-5 py-4">
-                <div className="h-3 w-3/5 rounded bg-muted" />
-                <div className="h-3 w-2/5 rounded bg-muted" />
+            ))}
+          </div>
+          <div className="hidden rounded-2xl border border-border/50 bg-card lg:block">
+            <div className="flex items-center gap-3 border-b border-border/50 px-5 py-4">
+              <div className="size-9 shrink-0 rounded-xl bg-muted" />
+              <div className="space-y-2">
+                <div className="h-3.5 w-24 rounded bg-muted" />
+                <div className="h-3 w-32 rounded bg-muted" />
               </div>
             </div>
-          ))}
+            <div className="space-y-4 p-5">
+              <div className="h-6 w-16 rounded bg-muted" />
+              <div className="h-1.5 w-full rounded-full bg-muted" />
+              <div className="space-y-2 pt-1">
+                {[0, 1, 2].map((i) => (
+                  <div key={i} className="h-4 w-full rounded bg-muted" />
+                ))}
+              </div>
+            </div>
+          </div>
         </div>
-      ) : filtered.length === 0 ? (
-        <EmptyIssues filtered={issues.length > 0} resolved={tab === "resolved"} />
+      ) : issues.length === 0 ? (
+        // Nothing at all for this tab: the empty state stands alone, full width and
+        // centred, with no filters or summary rail to frame an absence.
+        <EmptyIssues filtered={false} resolved={tab === "resolved"} />
       ) : (
-        <IssueList issues={filtered} busyId={busyId} onResolve={resolve} onInfraFix={infraFix} />
-      )}
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_340px]">
+          {/* ── LEFT COLUMN — the feed ── */}
+          <div className="min-w-0">
+            <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+              <div className="relative w-full sm:flex-1 sm:min-w-[220px]">
+                <Search className="pointer-events-none absolute start-3.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  type="text"
+                  placeholder={c.filters.searchPlaceholder}
+                  value={queryDraft}
+                  onChange={(e) => onQueryChange(e.target.value)}
+                  className="h-10 w-full rounded-xl border border-border/50 bg-card ps-10 pe-4 text-sm text-foreground transition-all placeholder:text-muted-foreground focus:border-primary/20 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                />
+              </div>
+              <div className="inline-flex max-w-full shrink-0 flex-wrap items-center gap-1 rounded-xl bg-muted/35 p-1">
+                {SEVERITY_FILTERS.map((f) => {
+                  const n = facetCount(f);
+                  return (
+                    <button
+                      key={f}
+                      type="button"
+                      onClick={() => setSeverity(f)}
+                      className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-3.5 text-[12px] font-medium transition-colors ${
+                        severity === f
+                          ? "border border-border/60 bg-card text-foreground"
+                          : "text-muted-foreground hover:bg-background/60 hover:text-foreground"
+                      }`}
+                    >
+                      {c.filters[f]}
+                      {/* Hidden at 0: an empty facet is information, a "0" chip is noise. */}
+                      {n > 0 && <span className="tabular-nums text-muted-foreground/60">{n}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
 
-      {/* Shown out of total, only while a filter is narrowing the page — otherwise
-          the facet strip already says it. */}
-      {!loading && counts && filtered.length !== counts.total && (
-        <p className="mt-4 text-[12px] tabular-nums text-muted-foreground/70">
-          {filtered.length} / {counts.total}
-        </p>
+            {/* The Resolved tab is honest about its coverage: only incidents have a
+                lifecycle, so its silence is not a claim that nothing else ever broke. */}
+            {tab === "resolved" && (
+              <p className="mb-4 rounded-xl border border-border/50 bg-muted/25 px-4 py-3 text-[12px] leading-relaxed text-muted-foreground">
+                {c.resolvedNote}
+              </p>
+            )}
+
+            {filtered.length === 0 ? (
+              <EmptyIssues filtered resolved={tab === "resolved"} />
+            ) : (
+              <IssueList
+                issues={filtered}
+                busyId={busyId}
+                onResolve={resolve}
+                onInfraFix={infraFix}
+              />
+            )}
+
+            {/* Shown out of total, only while a filter is narrowing the page — otherwise
+                the facet strip and the rail already say it. */}
+            {counts && filtered.length !== counts.total && (
+              <p className="mt-4 text-[12px] tabular-nums text-muted-foreground/70">
+                {filtered.length} / {counts.total}
+              </p>
+            )}
+          </div>
+
+          {/* ── RIGHT COLUMN — sticky summary ── */}
+          <div className="space-y-4 lg:sticky lg:top-6 lg:self-start">
+            <IssueSummary issues={issues} tab={tab} />
+          </div>
+        </div>
       )}
     </PageContainer>
   );

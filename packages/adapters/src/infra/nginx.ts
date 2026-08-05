@@ -31,10 +31,9 @@ import { posix as edgePath } from "node:path";
 
 import type { CommandExecutor, ManualCert, RouteConfig, SslResult } from "../types";
 import type { RoutingProvider, SslProvider } from "./types";
-import { LUA_LOGGER_PATH, RULES_GUARD_PATH, luaSourceAvailable, buildReloadCommand, detectOpenRestyPaths, ACME_HTTP01_PORT, ACME_CHALLENGE_LOCATION, EDGE_CHALLENGE_DIR, EDGE_CHALLENGE_LOCATION, EDGE_CHALLENGE_URL_PREFIX, type OpenRestyPaths } from "./openresty-lua";
+import { LUA_LOGGER_PATH, RULES_GUARD_PATH, luaSourceAvailable, buildReloadCommand, detectOpenRestyPaths, ACME_HTTP01_PORT, ACME_CHALLENGE_LOCATION, EDGE_CHALLENGE_DIR, EDGE_CHALLENGE_LOCATION, EDGE_CHALLENGE_URL_PREFIX, edgeChallengeVhostConf, type OpenRestyPaths } from "./openresty-lua";
 import { safeErrorMessage, sanitizeProxySettings, resolveRedirectStatus, PROXY_DIRECTIVES, parseProxyValue, resolveProxyDirectives, type NginxVersion, type ProxySettings } from "@repo/core";
 import { sq } from "../system/local-shell";
-import { EDGE_UNROUTED_SENTINEL } from "./edge-not-found";
 import { edgeDownExplanation } from "../system/edge-exec-error";
 import { BOOTSTRAP_CERT_SEGMENT, validateCertFor } from "../system/proxy/cert-material";
 import { probeStaticOutput, type OutputProbeResult } from "../system/output-exists";
@@ -489,6 +488,14 @@ function certbotDiagnosis(output: string, domain: string): string | undefined {
   const detail = pick(/Detail:\s*[^\n]+/i);
   const hint = pick(/Hint:\s*[^\n]+/i);
 
+  // Let's Encrypt always REQUESTS `http://<host>/.well-known/acme-challenge/<token>`
+  // and follows redirects, so an `https://` URL in the failure means something
+  // between the internet and this box redirected the plain-HTTP request — and the
+  // answer came from whatever is on :443, not from whatever is on :80. That flips
+  // the remediation for an identical 404, so it is read before the branches.
+  const challengeUrl = pick(/https?:\/\/\S*\.well-known\/acme-challenge\/\S*/i);
+  const redirectedToHttps = /^https:/i.test(challengeUrl ?? "");
+
   let diagnosis: string | undefined;
   if (/timeout during connect|connection refused|failed to connect|Timeout/i.test(text)) {
     diagnosis =
@@ -498,9 +505,15 @@ function certbotDiagnosis(output: string, domain: string): string | undefined {
     diagnosis =
       `${domain} doesn't resolve to this server yet — the DNS A record is missing or hasn't propagated. ` +
       `Wait for propagation, then retry from the Domains tab.`;
-  } else if (/\b52[56]\b|ssl handshake failed|cloudflare/i.test(text)) {
+  } else if (/\b52[56]\b|ssl handshake failed/i.test(text)) {
     // MUST precede the 40x branch: certbot reports this as "Invalid response from
     // …", which that branch's /invalid response/ would otherwise claim.
+    //
+    // Matched on the STATUS, not on the word "cloudflare" appearing anywhere in the
+    // output — that also fired for certbot's own `--dns-cloudflare` plugin text and
+    // for a CF error page carrying any status at all, prescribing SSL/TLS-mode
+    // surgery for an unrelated failure. A genuine 40x behind Cloudflare is covered
+    // by the redirect branch below, which names CF for the reason it is there.
     //
     // Cloudflare answered the challenge itself instead of forwarding it: its proxy
     // redirected the plain-HTTP request to https ("Always Use HTTPS" / Automatic
@@ -514,28 +527,24 @@ function certbotDiagnosis(output: string, domain: string): string | undefined {
       `of three ways — set SSL/TLS → Overview to "Full" (not "Full (strict)") until the first ` +
       `certificate is issued, or turn the orange cloud off for this record until it is, or upload a ` +
       `Cloudflare Origin CA certificate from the Domains tab and skip Let's Encrypt entirely.`;
-  } else if (text.includes(EDGE_UNROUTED_SENTINEL)) {
-    // MUST precede the 40x branch, for the same reason the 52x branch does — and
-    // this branch is why the 52x one no longer catches this case.
-    //
-    // Our own edge answered, with the "service not found" page it serves for a
-    // hostname it has no vhost for (#431). Before that page existed the same
-    // situation surfaced as 525 (the :443 catch-all refused the handshake, so
-    // Cloudflare reported an origin TLS failure) and the branch above explained it.
-    // Now Cloudflare "Full" accepts the catch-all's placeholder cert, fetches the
-    // challenge, and gets this page — a 404, which the branch below would blame on
-    // "another web server is still serving :80" and answer with take-over / migrate.
-    // That remediation rewrites a working proxy config for a problem it cannot fix.
-    diagnosis =
-      `This server's edge answered the challenge for ${domain} with its "service not found" page: ` +
-      `nothing here is routing that hostname on the port the request arrived on. Either the domain ` +
-      `doesn't point at this server (check its A record), or it isn't registered here yet — add it ` +
-      `from the Domains tab and retry. Nothing else is occupying :80, so take-over / migrate will ` +
-      `not help.`;
   } else if (/404|invalid response|unauthorized|"?status"?:?\s*40\d/i.test(text)) {
-    diagnosis =
-      `Port 80 answered but not with our ACME challenge — another web server is still serving :80, so ` +
-      `the takeover didn't complete. Re-run and choose take-over / migrate.`;
+    // Same status, two different causes, told apart by which port answered.
+    //
+    // Redirected to HTTPS: the request never reached whatever is on :80, so "another
+    // web server is still serving :80" is wrong and its remediation — take-over /
+    // migrate — would rewrite a working proxy config for a problem it cannot fix.
+    // The usual redirector is Cloudflare ("Always Use HTTPS"); since #431 our own
+    // :443 catch-all now completes the handshake and answers with the "service not
+    // found" page, so this arrives as a 404 where it used to arrive as a 525.
+    diagnosis = redirectedToHttps
+      ? `The challenge for ${domain} was redirected from HTTP to HTTPS and then answered with a 404 — ` +
+        `so whatever served it isn't routing that hostname. If ${domain} is behind Cloudflare, its ` +
+        `"Always Use HTTPS" is doing the redirect: set SSL/TLS → Overview to "Full" (not "Full ` +
+        `(strict)") until the first certificate is issued, or turn the orange cloud off for this ` +
+        `record. Otherwise check the A record points at this server and the domain is registered ` +
+        `here. Nothing is occupying :80, so take-over / migrate will not help.`
+      : `Port 80 answered but not with our ACME challenge — another web server is still serving :80, so ` +
+        `the takeover didn't complete. Re-run and choose take-over / migrate.`;
   } else if (/too many certificates|rateLimited|rate limit/i.test(text)) {
     diagnosis = `Let's Encrypt rate limit reached for ${domain} — wait before retrying.`;
   }
@@ -1348,21 +1357,17 @@ ${serveLocation}
       };
     }
 
-    // 3. Nothing claims it — our own single-purpose vhost. Deliberately has NO
-    //    `location /`: an unmatched URI already 404s, and adding one would make the
-    //    proxy scanner read this as a static site rooted at the challenge dir and
-    //    surface it in the orphan sweep / migrate import.
-    const vhost = `# Auto-generated by Openship - do not edit manually
-# openship-oblien-challenge: answers ONLY ${EDGE_CHALLENGE_URL_PREFIX}<token> for
-# Host: ${host}, so Openship Cloud's shared edge can prove this box controls that
-# routing target. No location // on purpose — this is scaffolding, not a site.
-server {
-    listen 80;
-    server_name ${host};
-
-${EDGE_CHALLENGE_LOCATION}
-}
-`;
+    // 3. Nothing claims it — our own single-purpose vhost, carrying the shared
+    //    not-found page for every URI that isn't the challenge. It claims the whole
+    //    hostname (a server_name match beats the catch-all for all of it), so an
+    //    unmatched URI does NOT fall through to the catch-all's page: before the
+    //    `location /` it fell through to nginx's compiled-in `root html` and served
+    //    the OpenResty welcome page, which is the visit-by-IP case #431 reported.
+    //    What kept the page out of here was the proxy scanner reading a
+    //    `location /` as a static site rooted at the challenge dir; it now judges a
+    //    location by what it serves, so a `return`-only one leaves this block
+    //    classified as the scaffolding it is (see `isAcmeWebrootOnly`).
+    const vhost = edgeChallengeVhostConf(host);
     const path = this.challengeVhostPath(host);
     const existing = await this._readFile(path).catch(() => "");
     if (existing === vhost) return { served: true, via: "challenge-vhost" };

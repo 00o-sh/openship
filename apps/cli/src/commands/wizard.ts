@@ -755,8 +755,12 @@ export async function runWizard(): Promise<void> {
     // so the container edge can bind — the same host-edge pipe `openship up` uses.
     const edgePlan = await planAndApplyHostEdge({});
     if (!edgePlan.proceed) {
-      cancel("Left the existing proxy on 80/443 running — re-run and choose migrate/takeover when ready.");
-      process.exit(0);
+      cancel(
+        edgePlan.blockedBy
+          ? `Can't take over the edge: ${edgePlan.blockedBy}. Nothing was started.`
+          : "Left the existing proxy on 80/443 running — re-run and choose migrate/takeover when ready.",
+      );
+      process.exit(edgePlan.blockedBy ? 1 : 0);
     }
     // Kept outside this branch so the health-check failure below can roll the
     // takeover back, and so the post-up import knows what to register.

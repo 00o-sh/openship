@@ -82,13 +82,12 @@ function resolveProxyTarget(
 }
 
 /**
- * `location <path> { … proxy_pass … }` targets within a server block, in source
- * order. `proxy_pass` is only valid inside a location (or `if`) in nginx, so
- * this — not a server-level scan — is where real routes live. Balanced-brace
- * matched so a nested `if {}` inside a location doesn't truncate it.
+ * Every `location <path> { … }` in a server block with its body, in source order.
+ * Balanced-brace matched so a nested `if {}` / `types {}` inside a location doesn't
+ * truncate it.
  */
-function extractLocationProxies(serverBody: string): { path: string; proxyPass: string }[] {
-  const out: { path: string; proxyPass: string }[] = [];
+function locationBlocks(serverBody: string): { path: string; body: string }[] {
+  const out: { path: string; body: string }[] = [];
   const re = /(?:^|[\s;}])location\s+([^{]+?)\s*\{/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(serverBody)) !== null) {
@@ -101,12 +100,42 @@ function extractLocationProxies(serverBody: string): { path: string; proxyPass: 
       else if (serverBody[i] === "}") depth--;
     }
     if (depth !== 0) break; // unbalanced — stop
-    const locBody = serverBody.slice(openIdx + 1, i - 1);
+    out.push({ path, body: serverBody.slice(openIdx + 1, i - 1) });
     re.lastIndex = i;
-    const pp = firstDirective(locBody, "proxy_pass");
-    if (pp) out.push({ path, proxyPass: pp });
   }
   return out;
+}
+
+/**
+ * `location <path> { … proxy_pass … }` targets within a server block, in source
+ * order. `proxy_pass` is only valid inside a location (or `if`) in nginx, so
+ * this — not a server-level scan — is where real routes live.
+ */
+function extractLocationProxies(serverBody: string): { path: string; proxyPass: string }[] {
+  const out: { path: string; proxyPass: string }[] = [];
+  for (const loc of locationBlocks(serverBody)) {
+    const pp = firstDirective(loc.body, "proxy_pass");
+    if (pp) out.push({ path: loc.path, proxyPass: pp });
+  }
+  return out;
+}
+
+/** Blank out quoted tokens so a directive-shaped word inside a VALUE can't be read
+ *  as a directive. The edge's not-found page is one ~1.6 KB single-quoted token. */
+function withoutQuotedValues(body: string): string {
+  return body.replace(/'[^'\n]*'/g, "''").replace(/"[^"\n]*"/g, '""');
+}
+
+const SERVING_DIRECTIVE_RE =
+  /(?:^|[;{}\s])(?:proxy_pass|root|alias|fastcgi_pass|uwsgi_pass|scgi_pass|grpc_pass)\s/;
+
+/**
+ * Does this location serve anything — proxy to a backend, or map a URI onto the
+ * filesystem? A `return`-only location does not: it carries no route to migrate and
+ * nothing that identifies the block as a site.
+ */
+function servesNothing(locationBody: string): boolean {
+  return !SERVING_DIRECTIVE_RE.test(withoutQuotedValues(locationBody));
 }
 
 /**
@@ -159,20 +188,30 @@ function isHttpsUpgradeForSelf(body: string, names: string[]): boolean {
  * routing target, not a site. Recognising it HERE rather than in each consumer is
  * what keeps it out of the orphan sweep, the domain-claim warning
  * (`untrackedSiteFor`) and the migrate importer at once — all three read this.
+ *
+ * A `return`-only sibling location does not change that answer, and the reason is
+ * concrete: that challenge vhost claims a whole hostname, so it must also answer
+ * `/` — without a `location /` nginx falls back to its compiled-in `root html` and
+ * serves the OpenResty welcome page to anyone who visits the box by IP (#431). It
+ * carries the shared not-found page for that, which serves no files and proxies
+ * nowhere. Judging on what a location SERVES rather than on how many there are is
+ * what lets both be true at once.
  */
 const CHALLENGE_LOCATION_RE = /\.well-known\/(acme-challenge|oblien-proxy-challenge)/i;
 
 function isAcmeWebrootOnly(body: string): boolean {
-  const paths = [...body.matchAll(/(?:^|[\s;}])location\s+([^{]+?)\s*\{/g)].map((m) =>
-    m[1].trim(),
-  );
-  if (paths.length === 0) {
+  const locations = locationBlocks(body);
+  if (locations.length === 0) {
     // No locations at all — a bare `root` with nothing serving it is only ACME
     // scaffolding when the path itself says so (certbot's nonexistent webroot).
     const root = firstDirective(body, "root") ?? "";
     return /letsencrypt|acme|certbot/i.test(root);
   }
-  return paths.every((p) => CHALLENGE_LOCATION_RE.test(p));
+  // A challenge location must be PRESENT (otherwise a redirect-only vhost with a
+  // stray `root` would qualify by having nothing that serves), and nothing beside
+  // it may serve anything.
+  if (!locations.some((l) => CHALLENGE_LOCATION_RE.test(l.path))) return false;
+  return locations.every((l) => CHALLENGE_LOCATION_RE.test(l.path) || servesNothing(l.body));
 }
 
 /**

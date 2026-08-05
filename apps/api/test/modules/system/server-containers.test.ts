@@ -29,6 +29,7 @@ vi.mock("@repo/db", () => ({
     },
     mailServer: { get: vi.fn().mockResolvedValue(undefined) },
     server: {
+      get: vi.fn().mockResolvedValue(undefined),
       list: vi.fn().mockResolvedValue([]),
       listByOrganization: vi.fn().mockResolvedValue([]),
     },
@@ -78,6 +79,7 @@ import {
   classifyContainerIssues,
   detectServerContainers,
   applyServerContainer,
+  refreshServerContainer,
   scanInstanceContainers,
   scanOrgContainers,
 } from "../../../src/modules/system/server-containers.service";
@@ -123,6 +125,7 @@ beforeEach(() => {
   mocked.edge.mockResolvedValue(edgeAbsent as never);
   mocked.mailEngine.mockResolvedValue(mailEngineAbsent as never);
   mocked.mailServer.get.mockResolvedValue(undefined as never);
+  mocked.server.get.mockResolvedValue(undefined as never);
   mocked.server.list.mockResolvedValue([] as never);
   mocked.server.listByOrganization.mockResolvedValue([] as never);
   mocked.settings.get.mockResolvedValue(undefined as never);
@@ -411,6 +414,147 @@ describe("applyServerContainer", () => {
     expect(result).toMatchObject({ component: "edge", updated: true, down: false });
     expect(mocked.reconcileEdge).toHaveBeenCalled();
     expect(mocked.repairMail).not.toHaveBeenCalled();
+  });
+
+  // ── The apply must not report a REFUSED convergence as "nothing to do" ──
+  //
+  // A box whose 80/443 are held by a foreign proxy needs takeover consent, which this
+  // path has no way to ask for, so `reconcileServerEdge` returns a reason and leaves
+  // the old proxy serving: `edgeDown:false` (something IS serving), `updated:false`.
+  // That is byte-identical to a healthy already-current edge, and reading it as such
+  // is what put a green "edge installed" banner over an edge that had never bound :80.
+  it("reports a refused edge convergence as an error even though the box is still served", async () => {
+    mocked.reconcileEdge.mockResolvedValue({
+      converted: false,
+      updated: false,
+      edgeDown: false,
+      error: "Ports 80, 443 are in use by another service (openresty). Accept a migrate or takeover to continue.",
+    } as never);
+    mocked.edge.mockResolvedValue(edgeContainer("ghcr.io/oblien/openship-edge:0.5.0", false) as never);
+
+    const result = await applyServerContainer(server, "edge");
+    expect(result).toMatchObject({ updated: false, down: false });
+    expect(result.error).toMatch(/takeover to continue/i);
+    // The operator-actionable reason reaches the cached row, so the attention card
+    // names the conflict instead of repeating a generic failure.
+    expect(mocked.status.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        component: "edge",
+        detail: expect.objectContaining({ lastError: expect.stringMatching(/takeover to continue/i) }),
+      }),
+    );
+  });
+
+  it("prefers the reconcile's own reason over the generic sentence when the edge is also down", async () => {
+    mocked.reconcileEdge.mockResolvedValue({
+      converted: false,
+      updated: false,
+      edgeDown: true,
+      error: 'bind() to 0.0.0.0:80 failed (98: Address already in use)',
+    } as never);
+    mocked.edge.mockResolvedValue(edgeContainer("ghcr.io/oblien/openship-edge:0.5.0", false) as never);
+
+    const result = await applyServerContainer(server, "edge");
+    expect(result).toMatchObject({ down: true });
+    expect(mocked.status.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        detail: expect.objectContaining({ lastError: expect.stringContaining("Address already in use") }),
+      }),
+    );
+    expect(mocked.status.upsert).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        detail: expect.objectContaining({ lastError: expect.stringMatching(/see logs/i) }),
+      }),
+    );
+  });
+
+  it("carries a failed mail image swap's reason out of the apply", async () => {
+    mocked.reconcileMail.mockResolvedValue({
+      updated: false,
+      mailDown: false,
+      ran: true,
+      error: "manifest unknown: manifest tagged by 0.5.0 is not found",
+    } as never);
+    mocked.mailServer.get.mockResolvedValue({ domain: "mail.example.com" } as never);
+    mocked.mailEngine.mockResolvedValue(
+      mailContainerEngine("ghcr.io/oblien/openship-mail:0.4.0") as never,
+    );
+
+    const result = await applyServerContainer(server, "mail");
+    expect(result).toMatchObject({ updated: false, down: false });
+    expect(result.error).toMatch(/manifest unknown/);
+    expect(mocked.status.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        component: "mail",
+        detail: expect.objectContaining({ lastError: expect.stringMatching(/manifest unknown/) }),
+      }),
+    );
+  });
+
+  it("carries a mail repair's own reason instead of the generic start failure", async () => {
+    mocked.repairMail.mockResolvedValue({
+      started: false,
+      mailDown: true,
+      reason: "There is no mail engine on this server — run mail setup on it first.",
+    } as never);
+    mocked.mailServer.get.mockResolvedValue({ domain: "mail.example.com" } as never);
+    mocked.mailEngine.mockResolvedValue(
+      mailContainerEngine("ghcr.io/oblien/openship-mail:0.5.0", false) as never,
+    );
+
+    const result = await applyServerContainer(server, "mail", undefined, "repair");
+    expect(result.error).toMatch(/run mail setup/i);
+    expect(mocked.status.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        detail: expect.objectContaining({ lastError: expect.stringMatching(/run mail setup/i) }),
+      }),
+    );
+  });
+
+  it("leaves the cached row alone when the post-apply probe cannot conclude", async () => {
+    // An inconclusive re-read must not rewrite the row: the pre-action state is the
+    // best thing known, and guessing here is how a live component's row gets clobbered.
+    mocked.edge.mockRejectedValue(new Error("docker daemon not reachable") as never);
+
+    const result = await applyServerContainer(server, "edge");
+    expect(result).toMatchObject({ updated: true });
+    expect(mocked.status.upsert).not.toHaveBeenCalled();
+  });
+});
+
+describe("refreshServerContainer", () => {
+  // The install stream ("Fix edge" on a box needing 80/443 consent) acts on the box
+  // and then has to write what it did back to the cache — without this, a SUCCESSFUL
+  // install left the row saying `down`, so the home page kept its "Edge down" card
+  // and the operator refreshed into the same issue they had just fixed.
+  beforeEach(() => {
+    mocked.server.get.mockResolvedValue(server);
+  });
+
+  it("clears a stale down row after a successful install", async () => {
+    mocked.edge.mockResolvedValue(edgeContainer("ghcr.io/oblien/openship-edge:0.5.0") as never);
+
+    await refreshServerContainer("srv_1", "edge");
+    expect(mocked.status.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ component: "edge", behind: false, detail: null }),
+    );
+  });
+
+  it("records the failure reason when the install could not finish", async () => {
+    mocked.edge.mockResolvedValue(edgeContainer("ghcr.io/oblien/openship-edge:0.5.0", false) as never);
+
+    await refreshServerContainer("srv_1", "edge", "the edge ports are still bound");
+    expect(mocked.status.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        detail: expect.objectContaining({ down: true, lastError: "the edge ports are still bound" }),
+      }),
+    );
+  });
+
+  it("stays silent when the server is gone or unreachable", async () => {
+    mocked.server.get.mockResolvedValue(undefined as never);
+    await expect(refreshServerContainer("srv_gone", "edge")).resolves.toBeUndefined();
+    expect(mocked.status.upsert).not.toHaveBeenCalled();
   });
 });
 

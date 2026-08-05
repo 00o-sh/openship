@@ -62,6 +62,14 @@
     "filteredTitle": "No matches",
     "filteredBody": "No issues match this filter."
   },
+  "summary": {
+    "title": "Overview",
+    "subtitle": "Health at a glance",
+    "totalOpen": "open",
+    "totalResolved": "resolved",
+    "bySeverity": "By severity",
+    "byArea": "By area"
+  },
   "home": {
     "attentionTitle": "Needs attention",
     "attentionSubtitle": "Something is broken or waiting on you",

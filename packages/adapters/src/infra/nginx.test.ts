@@ -213,16 +213,27 @@ describe("NginxProvider.serveEdgeChallenge", () => {
     expect(files.get(`${EDGE_CHALLENGE_DIR}/tok-bbbbbbbbbbbb`)).toBeDefined();
   });
 
-  test("writes a challenge vhost keyed on the host, with NO `location /`", async () => {
-    // A `location /` would make the proxy scanner classify this as a static site
-    // rooted at the challenge dir, surfacing it in the orphan sweep / migrate import.
+  test("writes a challenge vhost keyed on the host, serving the not-found page at /", async () => {
+    // This vhost claims a `server_name` — the box's own IP, in production — and a named
+    // server beats the catch-all for EVERY URI of that host, not just the challenge
+    // one. With no `location /` nginx fell through to its compiled-in `root html`, so
+    // visiting the box by IP got OpenResty's 128 KB welcome page with the version
+    // banner: the direct-IP half of #431, on the one vhost the catch-all can't cover.
+    //
+    // It carries `location /` rather than dropping the server_name because the vhost's
+    // whole purpose is to answer for that host. Keeping the proxy scanner from reading
+    // the result as a static site rooted at the challenge dir is the other half, and
+    // it lives in openship-edge-scan.test.ts against these same bytes.
     const { nginx, files } = setup();
     const r = await nginx.serveEdgeChallenge({ host: "203.0.113.10", tokens: ["tok-abcdef123456"] });
     expect(r).toMatchObject({ served: true, via: "challenge-vhost" });
     const c = files.get(CHALLENGE)!;
     expect(c).toContain("server_name 203.0.113.10;");
     expect(c).toContain(`location ${EDGE_CHALLENGE_URL_PREFIX} {`);
-    expect(c).not.toContain("location / {");
+    expect(c).toContain("location / {");
+    expect(c).toContain("Service not found");
+    // Still a dead end: nothing here may reach a backend or serve a doc root at /.
+    expect(c).not.toContain("proxy_pass");
     // Never a default_server: sanitizeEdgeVhosts sed-strips those on every start.
     expect(c).not.toContain("default_server");
   });
@@ -502,9 +513,10 @@ describe("NginxProvider config generation", () => {
     await nginx.registerRoute(OURS);
     const c = conf("app-example-com")!;
     // The whole point of #308: without this block an HTTPS request for a domain we
-    // DO route falls through to the edge's `ssl_reject_handshake` default, so the
-    // origin refuses the handshake — Cloudflare reports that as error 525, and the
-    // ACME challenge it redirects to HTTPS fails for the same reason, forever.
+    // DO route falls through to the edge's 443 catch-all, which is deliberately a
+    // dead end — since #431 a placeholder cert and the "no application is configured"
+    // page, and before it `ssl_reject_handshake`. Either way the domain never reaches
+    // its backend, and an ACME challenge redirected to HTTPS fails there forever.
     expect(c).toContain("listen 443 ssl;");
     expect(c).toContain(`ssl_certificate ${BOOTSTRAP_DIR}/fullchain.pem;`);
     expect(c).toContain(`ssl_certificate_key ${BOOTSTRAP_DIR}/privkey.pem;`);

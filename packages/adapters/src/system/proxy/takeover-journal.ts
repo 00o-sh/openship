@@ -19,8 +19,14 @@
  */
 
 import type { CommandExecutor } from "../../types";
-import type { EdgeStatus, SystemLog, SystemLogCallback } from "../types";
-import { EDGE_CONTAINER_NAME, freeEdgeTargets, sq, stopTargetsForStatus } from "./detect";
+import type { EdgeStatus, EdgeStopTarget, SystemLog, SystemLogCallback } from "../types";
+import {
+  EDGE_CONTAINER_NAME,
+  freeEdgeTargets,
+  sq,
+  stopTargetsForStatus,
+  type EdgeFreeResult,
+} from "./detect";
 
 const JOURNAL_DIR = "/var/lib/openship";
 export const JOURNAL_PATH = `${JOURNAL_DIR}/edge-takeover.json`;
@@ -198,18 +204,30 @@ async function portIsServed(executor: CommandExecutor, port: number): Promise<bo
 }
 
 /**
- * Phase 1 of a two-process takeover: snapshot how to restore the foreign proxy,
- * THEN free the ports. The caller must finish with `completeEdgeTakeover` on
- * success or `rollbackEdgeTakeover` on failure — otherwise the next boot's
- * recovery sees an unfinished journal and restores the old proxy.
+ * Phase 1 of a takeover: snapshot how to restore the foreign proxy, THEN free the
+ * ports. The caller must finish with `completeEdgeTakeover` on success or
+ * `rollbackEdgeTakeover` on failure — otherwise the next boot's recovery sees an
+ * unfinished journal and restores the old proxy.
+ *
+ * Returns the port-free proof, so a caller can refuse to start anything on a
+ * handover that didn't actually happen instead of learning it from a crash loop.
+ *
+ * `targets` overrides what to stop, for a pre-accepted `edgePolicy.stopTargets`.
+ * The journal is still built from `status`, because restoring is about the OWNERS
+ * we found, not the subset a policy named.
  */
 export async function beginEdgeTakeover(
   executor: CommandExecutor,
   status: EdgeStatus,
   onLog: SystemLogCallback,
-): Promise<void> {
+  targets?: EdgeStopTarget[],
+): Promise<EdgeFreeResult> {
   await writeJournal(executor, await buildJournal(executor, status));
-  await freeEdgeTargets(executor, stopTargetsForStatus(status), (m, l) => onLog(log(m, l)));
+  return freeEdgeTargets(
+    executor,
+    targets?.length ? targets : stopTargetsForStatus(status),
+    (m, l) => onLog(log(m, l)),
+  );
 }
 
 /**

@@ -199,7 +199,8 @@
       "staticNoServer": "静的（サーバーなし）",
       "modeSandboxed": "サンドボックス化（コンテナ）",
       "modeDirect": "ダイレクト（ホストプロセス）",
-      "modeDefault": "デフォルト（デプロイ時に解決）"
+      "modeDefault": "デフォルト（デプロイ時に解決）",
+      "modeStatic": "なし（静的ファイルとして配信）"
     },
     "storage": {
       "title": "永続ストレージ",
