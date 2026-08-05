@@ -34,6 +34,7 @@ import type { RoutingProvider, SslProvider } from "./types";
 import { LUA_LOGGER_PATH, RULES_GUARD_PATH, luaSourceAvailable, buildReloadCommand, detectOpenRestyPaths, ACME_HTTP01_PORT, ACME_CHALLENGE_LOCATION, EDGE_CHALLENGE_DIR, EDGE_CHALLENGE_LOCATION, EDGE_CHALLENGE_URL_PREFIX, type OpenRestyPaths } from "./openresty-lua";
 import { safeErrorMessage, sanitizeProxySettings, resolveRedirectStatus, PROXY_DIRECTIVES, parseProxyValue, resolveProxyDirectives, type NginxVersion, type ProxySettings } from "@repo/core";
 import { sq } from "../system/local-shell";
+import { EDGE_UNROUTED_SENTINEL } from "./edge-not-found";
 import { edgeDownExplanation } from "../system/edge-exec-error";
 import { BOOTSTRAP_CERT_SEGMENT, validateCertFor } from "../system/proxy/cert-material";
 import { probeStaticOutput, type OutputProbeResult } from "../system/output-exists";
@@ -513,6 +514,24 @@ function certbotDiagnosis(output: string, domain: string): string | undefined {
       `of three ways — set SSL/TLS → Overview to "Full" (not "Full (strict)") until the first ` +
       `certificate is issued, or turn the orange cloud off for this record until it is, or upload a ` +
       `Cloudflare Origin CA certificate from the Domains tab and skip Let's Encrypt entirely.`;
+  } else if (text.includes(EDGE_UNROUTED_SENTINEL)) {
+    // MUST precede the 40x branch, for the same reason the 52x branch does — and
+    // this branch is why the 52x one no longer catches this case.
+    //
+    // Our own edge answered, with the "service not found" page it serves for a
+    // hostname it has no vhost for (#431). Before that page existed the same
+    // situation surfaced as 525 (the :443 catch-all refused the handshake, so
+    // Cloudflare reported an origin TLS failure) and the branch above explained it.
+    // Now Cloudflare "Full" accepts the catch-all's placeholder cert, fetches the
+    // challenge, and gets this page — a 404, which the branch below would blame on
+    // "another web server is still serving :80" and answer with take-over / migrate.
+    // That remediation rewrites a working proxy config for a problem it cannot fix.
+    diagnosis =
+      `This server's edge answered the challenge for ${domain} with its "service not found" page: ` +
+      `nothing here is routing that hostname on the port the request arrived on. Either the domain ` +
+      `doesn't point at this server (check its A record), or it isn't registered here yet — add it ` +
+      `from the Domains tab and retry. Nothing else is occupying :80, so take-over / migrate will ` +
+      `not help.`;
   } else if (/404|invalid response|unauthorized|"?status"?:?\s*40\d/i.test(text)) {
     diagnosis =
       `Port 80 answered but not with our ACME challenge — another web server is still serving :80, so ` +
@@ -712,14 +731,22 @@ export class NginxProvider implements RoutingProvider, SslProvider {
    * issued anything.
    *
    * Why a missing :443 block is a hard failure, not a soft one: an unmatched SNI
-   * falls through to the edge's `ssl_reject_handshake` default (correct — it stops
-   * unrouted hosts being cross-served someone else's cert). But that means the
-   * origin REFUSES the handshake for a domain we do route. Behind Cloudflare's
-   * proxy every visitor sees error 525, and issuance deadlocks: Cloudflare answers
-   * the HTTP-01 challenge with a 301 to https, then can't reach an origin that
-   * refuses TLS, so the challenge fails and the vhost stays HTTP-only — forever
-   * (#308). A placeholder breaks the loop: Cloudflare "Full" accepts it, the
-   * challenge completes, and the real cert takes over.
+   * falls through to the edge's :443 catch-all, which answers with the "service not
+   * found" page (#431) under a placeholder certificate that belongs to no domain.
+   * For a domain we DO route that is a broken site: the visitor is told nothing is
+   * deployed here, and behind Cloudflare "Full" — which accepts any origin cert —
+   * they get that page rather than the app. Issuance deadlocks with it: Cloudflare
+   * answers the HTTP-01 challenge with a 301 to https, the catch-all deliberately
+   * carries no ACME location on :443, so the challenge 404s and the vhost stays
+   * HTTP-only — forever (#308). A per-domain placeholder breaks the loop: the
+   * domain gets its OWN name-bound :443 block, the challenge completes, and the
+   * real cert takes over.
+   *
+   * So the :443 catch-all having gained a certificate of its own does NOT make this
+   * redundant — it only changed the symptom from a raw TLS error (#431's old error
+   * 525) into a wrong page. The catch-all's cert is deliberately valid for nothing;
+   * serving it for a domain we route is the cross-serving that block exists to
+   * prevent.
    *
    * Deliberately NOT written under `certDir`: `certsExist()` / `readCertInfo()`
    * read that path, so a self-signed cert there would short-circuit provisionCert
