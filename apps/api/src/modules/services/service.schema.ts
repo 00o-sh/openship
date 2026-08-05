@@ -111,6 +111,10 @@ const AdvancedSchema = Type.Object(
         Type.Null(),
       ]),
     ),
+    /** Custom east-west DNS alias resolving ALONGSIDE the service name on the
+     *  project network. Free-form here (normalized + collision-checked by
+     *  validateServiceAlias); `null`/`""` clears it. */
+    alias: Type.Optional(Type.Union([Type.String({ maxLength: 100 }), Type.Null()])),
   },
   { additionalProperties: false },
 );

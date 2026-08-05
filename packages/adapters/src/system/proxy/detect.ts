@@ -332,6 +332,47 @@ export async function resolveOurEdgeContainer(
   return resolved;
 }
 
+/**
+ * The edge container's identity + run state INCLUDING when it's stopped — the
+ * "track if installed" probe, deliberately distinct from
+ * {@link resolveOurEdgeContainer} (RUNNING-only, on the takeover hot path where a
+ * stopped edge must read as "no edge"). A `docker ps -a` pass so a
+ * provisioned-but-stopped edge still resolves (`running:false`, `exists:true`)
+ * instead of vanishing from tracking. Matches by NAME first, then by our image for
+ * a container renamed via OPENSHIP_EDGE_CONTAINER. The `.Image` field carries the
+ * created-with ref, which is what drift compares against the pinned ref — no extra
+ * `docker inspect`.
+ *
+ * Three outcomes, not two — the distinction the drift cache depends on:
+ *   - a match → `{ exists: true, … }`;
+ *   - the query RAN and no line matched (incl. empty output) → `exists:false`, a
+ *     CONFIDENT absence the caller may act on (drop the tracked row);
+ *   - the `docker ps -a` itself failed (daemon momentarily unreachable, an SSH
+ *     hiccup) → `null`, i.e. "couldn't tell". Collapsing this into `exists:false`
+ *     is what let a transient probe error DELETE a live edge's cached row; `null`
+ *     tells the caller to keep the last-known state instead.
+ */
+export async function detectEdgeContainer(
+  executor: CommandExecutor,
+): Promise<{ name: string | null; running: boolean; image: string | null; exists: boolean } | null> {
+  const out = await tryExec(
+    executor,
+    `docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.State}}' 2>/dev/null`,
+  );
+  // `null` = the command threw (inconclusive). An empty string = it ran and there
+  // are no containers — a real absence, not a failure.
+  if (out === null) return null;
+  const absent = { name: null, running: false, image: null, exists: false };
+  for (const line of out.split("\n").map((l) => l.trim()).filter(Boolean)) {
+    const [name, image, state] = line.split("\t");
+    if (!name) continue;
+    if (name === EDGE_CONTAINER_NAME || isOurEdgeContainer(name, image)) {
+      return { name, image: image || null, running: state === "running", exists: true };
+    }
+  }
+  return absent;
+}
+
 async function probeOurEdgeContainer(executor: CommandExecutor): Promise<string | null> {
   const byName = await tryExec(
     executor,

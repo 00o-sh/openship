@@ -1,7 +1,7 @@
 import { createReadStream } from "node:fs";
 import { mkdtemp, rm as fsRm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join, posix } from "node:path";
 
 import { prepareSourceTarArgs } from "../archive";
 import type {
@@ -18,6 +18,17 @@ import type { Readable, Duplex } from "node:stream";
 import { connectSshClient, openSftp, openSshUnixSocket, type StreamLocalCapableClient } from "./ssh-client";
 import { SshDisconnectedError } from "./errors";
 import { TRANSFER_EXCLUDES, formatBytes } from "@repo/core";
+
+/**
+ * `dirname` for a path on the TARGET box, which is Linux — so always POSIX,
+ * never the control plane's native separators. A backslash reaching SSH is an
+ * ordinary filename character there: the file lands in the login shell's cwd
+ * under that literal name instead of the directory it was meant to name.
+ *
+ * The plain `join` above is the other namespace — LOCAL staging paths under
+ * tmpdir, where native separators are correct.
+ */
+const remoteDirname = posix.dirname;
 
 /** Clamp a window dimension to a sane range to avoid garbage values
  *  reaching ssh2.Client.shell() / channel.setWindow(). */
@@ -335,7 +346,7 @@ export class SshExecutor implements CommandExecutor {
   }
 
   async writeFile(path: string, content: string): Promise<void> {
-    const dir = dirname(path);
+    const dir = remoteDirname(path);
     try {
       await this.exec(`mkdir -p ${sq(dir)}`);
     } catch {
@@ -677,7 +688,7 @@ export class SshExecutor implements CommandExecutor {
       onLog?.(logEntry("Packing source into a single archive..."));
       await packLocalArchive(tarArgs, localArchive);
       const totalBytes = (await stat(localArchive)).size;
-      await this.exec(`mkdir -p ${sq(dirname(remoteArchive))}`);
+      await this.exec(`mkdir -p ${sq(remoteDirname(remoteArchive))}`);
 
       const rsync = await canUseRemoteRsync(deps);
       if (rsync.ok) {

@@ -47,6 +47,7 @@ import { snapshotNeedsGitSource, withoutPinnedArtifacts } from "./pinned-artifac
 import { resolveProjectInfo } from "./prepare.service";
 import { getFolderSession } from "../projects/folder/session-store";
 import { hasMaskedValue, unmaskEnv } from "../../lib/secret-env";
+import { assertValidCustomDomains, customHostnamesOf } from "../../lib/custom-domain-guard";
 import { type RequestContext } from "../../lib/request-context";
 import { type PortCheckResult } from "../../lib/deployment-runtime";
 import * as sessionManager from "./session-manager";
@@ -104,7 +105,11 @@ export function metaWithPrevious(
   snapshot: DeploymentConfigSnapshot,
   project: Project,
 ): DeploymentConfigSnapshot {
-  return { ...snapshot, previousActiveDeploymentId: project.activeDeploymentId ?? undefined };
+  return {
+    ...snapshot,
+    previousActiveDeploymentId: project.activeDeploymentId ?? undefined,
+    envCapture: "flat-v1",
+  };
 }
 
 /** Run preflight against a snapshot+route state and throw a structured failure on any check fail. */
@@ -258,6 +263,17 @@ export interface DeploymentConfigSnapshot {
    */
   portCheckSkipped?: (number | string)[];
   previousActiveDeploymentId?: string;
+  /**
+   * Shape of this row's `envVars` capture. `"flat-v1"` = one unscoped
+   * `Record<key, encryptedValue>` with no service scoping and no provenance, so
+   * a key that was project-scoped at capture is indistinguishable from a
+   * service-scoped one. A rollback replays this map over every service (see
+   * `frozenEnvWins`), and the restore-plan diff marks affected keys
+   * `scopeAmbiguous` for exactly that reason. Absent on rows written before this
+   * field existed — which are also flat-v1; the stamp exists so a future scoped
+   * capture can be told apart without guessing.
+   */
+  envCapture?: "flat-v1";
   /**
    * Smart per-service target list. When set, only these service ids
    * are (re)built; others are recorded as `service_deployment` rows
@@ -533,6 +549,8 @@ export async function resolveRollbackContext(
  * Precedence:
  *   - deployTarget: explicit per-deploy override (the wizard picker)
  *       > cloudWorkspaceId (the canonical "is a cloud project" primitive)
+ *       > project.serverId (the DURABLE server binding — survives a fresh/partial
+ *         snapshot that a redeploy would otherwise resolve to "local")
  *       > the project's ACTIVE deployment's last target (what it runs on now)
  *       > undefined (host default, resolved later by the pipeline's resolver).
  *   - serverId: ONLY kept when the resolved target is "server". For cloud/local
@@ -552,21 +570,24 @@ export async function resolveSnapshotTarget(
   // Target priority, highest first:
   //   1. explicit override (the caller chose a target for this deploy)
   //   2. cloud — a promoted project (canonical on the SaaS)
-  //   3. the active deployment's stamped target
-  //   4. inferred "server" when the active meta carries a serverId
-  // Step 4 matches resolveEffectiveTarget (which routes ANY serverId over SSH)
-  // and repairs migrated (adopt/reattach) metas that set serverId but historically
-  // omitted deployTarget — without it this resolver dropped the serverId (gate
-  // below) and redeploy fell back to the desktop cloud default.
+  //   3. project.serverId — the DURABLE server binding
+  //   4. the active deployment's stamped target
+  //   5. inferred "server" when the active meta carries a serverId
+  // Step 3 is why a server-hosted project can no longer regress to "local" on a
+  // fresh/partial snapshot (which then nulled its custom-domain ports). Steps 4–5
+  // remain for legacy rows not yet backfilled: step 5 matches resolveEffectiveTarget
+  // (which routes ANY serverId over SSH) and repairs migrated (adopt/reattach) metas
+  // that set serverId but historically omitted deployTarget.
   let deployTarget: DeployTarget | undefined;
   if (override?.deployTarget) deployTarget = override.deployTarget;
   else if (project.cloudWorkspaceId) deployTarget = "cloud";
+  else if (project.serverId) deployTarget = "server";
   else if (activeMeta?.deployTarget) deployTarget = activeMeta.deployTarget;
   else if (activeMeta?.serverId) deployTarget = "server";
 
   const serverId =
     deployTarget === "server"
-      ? (override?.serverId ?? activeMeta?.serverId ?? undefined)
+      ? (override?.serverId ?? project.serverId ?? activeMeta?.serverId ?? undefined)
       : undefined;
 
   const runtimeMode =
@@ -978,6 +999,11 @@ export async function requestBuildAccess(ctx: RequestContext, input: BuildAccess
       projectDomains,
       nextPublicEndpoints,
       slug: routeState.publicEndpoints.find((endpoint) => endpoint.domainType === "free")?.domain,
+      // A deploy must never delete or null a user's VERIFIED custom domain, even
+      // if this deploy's endpoint set omitted it or lost its port (e.g. a target
+      // that mis-resolved to "local"). The Domains editor keeps the default (off)
+      // so explicit removals still apply.
+      preserveVerifiedCustom: true,
     });
     routeState = routing;
   }
@@ -1011,8 +1037,25 @@ export async function requestBuildAccess(ctx: RequestContext, input: BuildAccess
     // Best-effort: a persist failure must never block the deploy.
     const composeOnly = effectiveServices.filter((s) => serviceKind(s) === "compose");
     if (composeOnly.length) {
+      // #342: these rows' custom hostnames become vhosts like any other, so they
+      // carry the same shape gate as the service editors — and it runs on the set
+      // ACTUALLY persisted, which includes the compose a folder upload adopts when
+      // the request body carried no `services`. Net-new only: a deploy that echoes
+      // back a hostname the rows already hold is never refused (a deploy is not the
+      // place to enforce a cleanup). The project's OWN publicEndpoints are gated by
+      // syncProjectRouteState further down. Costs a query only when a custom service
+      // hostname is actually declared; throws BEFORE the best-effort persist below.
+      if (customHostnamesOf(composeOnly).length) {
+        const rows = await repos.service.listByProject(project.id).catch(() => []);
+        assertValidCustomDomains(composeOnly, { known: customHostnamesOf(rows) });
+      }
       await repos.service
-        .syncFromCompose(project.id, composeOnly)
+        // removeMissing: false — deploy-time sync creates and updates only. A
+        // service dropped from the compose file is removed by the explicit
+        // reconcile path, which can tell an intentional deletion from a stale
+        // snapshot; deleting here cascades its deploy history and orphans its
+        // running container (see syncFromCompose's docblock).
+        .syncFromCompose(project.id, composeOnly, { removeMissing: false })
         .catch((err) =>
           console.warn(
             `[requestBuildAccess] failed to persist compose services: ${safeErrorMessage(err)}`,
@@ -1221,9 +1264,12 @@ export async function cancelBuildSession(
   if (opts.keepProvisioned) {
     console.log(`[CANCEL] ${dep.id}: keeping provisioned resources (record-only delete)`);
   } else {
-    const manifest = await collectDeploymentManifest(dep, project).catch(
-      (): CleanupManifest => ({ projectId: dep.projectId, resources: [] }),
-    );
+    // protectRetained: a cancelled compose deploy carries the LIVE release's
+    // containerId/imageRef onto its own service rows for every service it hadn't
+    // replaced yet, so an unprotected manifest tears down the running app.
+    const manifest = await collectDeploymentManifest(dep, project, {
+      protectRetained: true,
+    }).catch((): CleanupManifest => ({ projectId: dep.projectId, resources: [] }));
     if (manifest.resources.length > 0) {
       await executeCleanup(manifest).catch((err) => {
         // Per-item failures are already isolated inside executeCleanup, so we

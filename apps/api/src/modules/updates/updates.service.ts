@@ -23,6 +23,49 @@ import { redeployBuildSession } from "../deployments/build.service";
 /** The union `getProjectCommitStatus` returns (widened for normalization). */
 type DriftStatus = Awaited<ReturnType<typeof getProjectCommitStatus>>;
 
+/** Tags that carry no version identity — fall back to the content digest for these. */
+const FLOATING_TAGS = new Set(["latest", "stable", "main", "master", "edge", "nightly"]);
+
+/** Tag portion of an image ref (`repo:tag` / `repo:tag@sha256:…`), or null if untagged. */
+function imageTag(ref: string): string | null {
+  const noDigest = ref.split("@")[0];
+  const lastColon = noDigest.lastIndexOf(":");
+  return lastColon > noDigest.lastIndexOf("/") ? noDigest.slice(lastColon + 1) : null;
+}
+
+/** Short form of a `sha256:…` (or bare hex) content digest. */
+function shortDigest(digest?: string | null): string | null {
+  if (!digest) return null;
+  const hex = digest.includes(":") ? digest.slice(digest.indexOf(":") + 1) : digest;
+  return hex.slice(0, 12) || null;
+}
+
+/**
+ * Human-readable version for one image service: a pinned/specific tag reads as the
+ * version; a floating tag (latest/stable/…) has none, so fall back to the short
+ * content digest of the resolved image.
+ */
+function serviceVersion(ref: string, digest?: string | null): string | null {
+  const tag = imageTag(ref);
+  if (tag && !FLOATING_TAGS.has(tag)) return tag.length > 12 ? tag.slice(0, 12) : tag;
+  return shortDigest(digest);
+}
+
+/** App-level version label across an image app's services (deduped; joined when they differ). */
+function imageLabel(
+  services: ReadonlyArray<{ ref: string; deployedDigest?: string | null; latestDigest?: string | null }>,
+  side: "deployed" | "latest",
+): string | null {
+  const parts = [
+    ...new Set(
+      services
+        .map((s) => serviceVersion(s.ref, side === "deployed" ? s.deployedDigest : s.latestDigest))
+        .filter((v): v is string => !!v),
+    ),
+  ];
+  return parts.length ? parts.join(", ") : null;
+}
+
 /**
  * Map a resolver result onto an `update_status` upsert payload. Returns null for
  * unsupported entities (local/upload/no-remote projects) so they're skipped.
@@ -63,8 +106,8 @@ function toUpsert(
   return {
     ...base,
     kind: "image",
-    currentLabel: null,
-    latestLabel: null,
+    currentLabel: imageLabel(status.services, "deployed"),
+    latestLabel: imageLabel(status.services, "latest"),
     detail: { services: status.services },
   };
 }

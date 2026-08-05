@@ -362,7 +362,22 @@ const TABLES: ReadonlyArray<TableSpec> = [
   // Analytics + audit — instance-only.
   { sqlName: "server_analytics", table: schema.serverAnalytics, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
   { sqlName: "server_analytics_geo", table: schema.serverAnalyticsGeo, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
+  // Project-scoped, unlike the two above (which are keyed by server + domain). So it
+  // carries a project scope as well as the instance one, and a project transfer takes
+  // its usage history along instead of silently resetting the charts on the receiver.
+  {
+    sqlName: "resource_usage",
+    table: schema.resourceUsage,
+    scopes: [
+      { in: "instance", via: "all-rows" },
+      { in: "project", via: "fk", column: "projectId" },
+    ],
+    hasOrganizationId: false,
+  },
   { sqlName: "audit_event", table: schema.auditEvent, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
+  // Travels with audit_event: without it, an instance migration silently turns
+  // audit recording back on for an org that had switched it off.
+  { sqlName: "audit_settings", table: schema.auditSettings, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
 ];
 
 // Deliberately NOT in the catalogue — ephemeral, cloud-only, or re-derived on

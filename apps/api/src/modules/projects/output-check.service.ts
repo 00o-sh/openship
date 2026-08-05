@@ -1,8 +1,8 @@
 import { repos } from "@repo/db";
-import { resolveStaticOutputPath, type BuildLogger } from "@repo/adapters";
+import { type BuildLogger } from "@repo/adapters";
 import {
   resolveDeploymentRuntime,
-  type DeploymentMeta,
+  resolveDeploymentStaticRoot,
   type OutputCheckResult,
 } from "../../lib/deployment-runtime";
 import { assertResourceInOrg } from "../../lib/controller-helpers";
@@ -67,14 +67,12 @@ async function runOutputProbe(
   if (!containerId) return [];
   try {
     const { runtime, routing } = await resolveDeploymentRuntime(deployment);
-    const meta = (deployment.meta ?? {}) as DeploymentMeta;
-    // Where this deployment SERVES from, as recorded by the deploy. Falling back to
-    // the project's outputDirectory covers deployments written before that field
-    // existed — correct for a bare build, and the only guess available for an older
-    // sandbox build (whose true root is ""). A wrong guess reads as `found:false`,
-    // which is advisory, so it can never break anything.
-    const staticServeOutputDir = meta.staticServeOutputDir ?? project.outputDirectory ?? "";
-    const staticRoot = resolveStaticOutputPath(containerId, staticServeOutputDir);
+    // Where this deployment SERVES from, as recorded by the deploy — the SAME
+    // resolver that points the vhost, so this probe audits the exact directory the
+    // edge was given rather than a second guess at it. A null root means there's
+    // nothing static to audit.
+    const staticRoot = resolveDeploymentStaticRoot(deployment, project);
+    if (!staticRoot) return [];
     const routeState = await resolveProjectRouteState(project);
     // `routing` (the edge) is asked first — it sees what actually serves the files.
     // The runtime is only the fallback, which is why this no longer gates on

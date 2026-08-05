@@ -1,6 +1,7 @@
 import {
   createPlatform,
   DockerRuntime,
+  resolveStaticOutputPath,
   type CommandExecutor,
   type DockerConnectionOptions,
   type Platform,
@@ -96,6 +97,39 @@ export interface DeploymentMeta {
    * agree on one path.
    */
   staticServeOutputDir?: string;
+}
+
+/**
+ * The host directory a deployment SERVES static files from, or null when it isn't
+ * a static one. THE one answer to that question outside the deploy pipeline — the
+ * live route apply and the output-check probe both read it, and they have to agree:
+ * the probe reports on the very directory the vhost was pointed at, so two copies
+ * of this formula means the probe can pass on a path nothing serves (or fail on one
+ * that works).
+ *
+ * `containerId` on a static-file-serve deployment is its release root on the host.
+ * `staticServeOutputDir` MUST come from meta and is checked for PRESENCE, not
+ * truthiness — `""` is the real answer for a Docker-sandbox build (which already
+ * extracted the doc root), and treating it as absent points one directory too deep
+ * at a path that doesn't exist. `?? project.outputDirectory` covers deployments
+ * predating the field.
+ *
+ * Null for a project that runs a server (its routes are upstreams, not files), a
+ * deployment with no release root, or an outputDirectory `resolveStaticOutputPath`
+ * rejects as absolute/escaping.
+ */
+export function resolveDeploymentStaticRoot(
+  deployment: Pick<Deployment, "containerId" | "meta">,
+  project: { hasServer?: boolean | null; outputDirectory?: string | null },
+): string | null {
+  if (project.hasServer || !deployment.containerId) return null;
+  const meta = (deployment.meta ?? {}) as DeploymentMeta;
+  const outputDirectory = meta.staticServeOutputDir ?? project.outputDirectory ?? "";
+  try {
+    return resolveStaticOutputPath(deployment.containerId, outputDirectory);
+  } catch {
+    return null;
+  }
 }
 
 /** One exposed port's advisory probe outcome (persisted in `deployment.meta`). */

@@ -471,6 +471,16 @@
     "dismissLink": "I know, hide this",
     "dismiss": "Dismiss"
   },
+  "engine": {
+    "downTitle": "The mail engine on this server isn't running",
+    "downBody": "While it's stopped, no mail is delivered or accepted, and every tab here needs it. Starting it back up is safe — nothing is reinstalled and no configuration is rewritten.",
+    "legacyNote": "This server runs the legacy host-native engine (systemd Postfix/Dovecot), so there is no container to inspect.",
+    "start": "Start the engine",
+    "missingTitle": "No mail engine on this server",
+    "missingBody": "Openship can't find a mail engine here — neither the engine container nor the Postfix/Dovecot units. Re-run mail setup to reinstall it.",
+    "rerunSetup": "Re-run mail setup",
+    "cardBlocked": "Unavailable until the mail engine is running."
+  },
   "welcome": {
     "invalidEmail": "Enter a valid email address",
     "sendFailed": "Failed to send",

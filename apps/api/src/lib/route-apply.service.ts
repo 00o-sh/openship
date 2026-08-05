@@ -31,7 +31,7 @@ import type {
   RouteHeaderRule,
   RouteHostRedirect,
 } from "@repo/adapters";
-import { safeErrorMessage } from "@repo/core";
+import { safeErrorMessage, sanitizeProxySettings, type RoutingConfig } from "@repo/core";
 import { platform } from "./controller-helpers";
 import { resolveDeploymentRuntime } from "./deployment-runtime";
 import {
@@ -43,6 +43,13 @@ import { webhookProxyTarget } from "../config";
 
 export interface RouteReconcileProject extends CloudRouteProject {
   webhookDomain?: string | null;
+  /**
+   * The project's routing config. Read here for `proxy` (upload limit, timeouts,
+   * buffering, gzip) so EVERY live route apply picks it up from one place —
+   * per-caller threading is how a domain edit and a redeploy end up emitting
+   * different vhosts for the same project.
+   */
+  routingConfig?: RoutingConfig | null;
 }
 
 export interface RouteRegister {
@@ -153,6 +160,10 @@ export async function reconcileProjectRoutes(
   }
 
   const webhookHost = project.webhookDomain?.trim().toLowerCase() || null;
+  // Sanitized here, not trusted from the row: the API validates on write, but a
+  // value could also have been seeded from a repo config or an older schema, and
+  // this string is interpolated into generated nginx config.
+  const proxy = sanitizeProxySettings(project.routingConfig?.proxy);
 
   for (const r of removes) {
     await routing
@@ -185,6 +196,10 @@ export async function reconcileProjectRoutes(
         // caller that resolved a doc root has already decided this domain serves
         // files. registerRoute keys off which one is set.
         ...(r.staticRoot ? { staticRoot: r.staticRoot } : { targetUrl: r.targetUrl! }),
+        // Project-wide tunables, applied on the LIVE path too so raising an upload
+        // limit takes effect on save rather than waiting for a redeploy — the same
+        // treatment a domain/port edit already gets.
+        ...(proxy ? { proxy } : {}),
         ...(isWebhook ? { webhookProxy: webhookProxyTarget } : {}),
         ...(r.proxyLocations?.length ? { proxyLocations: r.proxyLocations } : {}),
         ...(r.redirects?.length ? { redirects: r.redirects } : {}),

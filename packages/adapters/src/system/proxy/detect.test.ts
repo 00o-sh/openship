@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import type { CommandExecutor } from "../../types";
 import {
+  detectEdgeContainer,
   invalidateEdgeContainer,
   probeEdge,
   resolveOurEdgeContainer,
@@ -335,5 +336,64 @@ describe("resolveOurEdgeContainer memoization", () => {
     expect(await resolveOurEdgeContainer(executor)).toBe("openship-edge"); // still memoized
     invalidateEdgeContainer(executor);
     expect(await resolveOurEdgeContainer(executor)).toBeNull();
+  });
+});
+
+describe("detectEdgeContainer", () => {
+  // Unlike resolveOurEdgeContainer (running-only), this reads `docker ps -a` so a
+  // stopped edge is still tracked. One line per case: name<TAB>image<TAB>state.
+  const psa = (line: string) =>
+    makeExecutor([["docker ps -a", line]]);
+
+  test("finds a RUNNING edge by name and reports its image", async () => {
+    expect(
+      await detectEdgeContainer(psa("openship-edge\tghcr.io/oblien/openship-edge:0.5.0\trunning")),
+    ).toEqual({
+      name: "openship-edge",
+      image: "ghcr.io/oblien/openship-edge:0.5.0",
+      running: true,
+      exists: true,
+    });
+  });
+
+  test("finds a STOPPED edge — exists but not running (the track-if-installed case)", async () => {
+    expect(
+      await detectEdgeContainer(psa("openship-edge\tghcr.io/oblien/openship-edge:0.4.0\texited")),
+    ).toMatchObject({ name: "openship-edge", running: false, exists: true });
+  });
+
+  test("matches a container renamed off the default name but running our image", async () => {
+    expect(
+      await detectEdgeContainer(psa("my-proxy\tghcr.io/oblien/openship-edge:0.5.0\trunning")),
+    ).toMatchObject({ name: "my-proxy", running: true, exists: true });
+  });
+
+  test("reports absent when only foreign containers exist", async () => {
+    expect(await detectEdgeContainer(psa("some-app\tnginx:latest\trunning"))).toEqual({
+      name: null,
+      running: false,
+      image: null,
+      exists: false,
+    });
+  });
+
+  test("reports absent when docker returns nothing", async () => {
+    expect(await detectEdgeContainer(makeExecutor([]))).toEqual({
+      name: null,
+      running: false,
+      image: null,
+      exists: false,
+    });
+  });
+
+  test("returns null (inconclusive) when the docker probe itself errors — NOT absent", async () => {
+    // A `docker ps -a` that throws (daemon unreachable, SSH dropped) must not read
+    // as "no edge here": the drift cache keys off this to keep the last-known row.
+    const executor = {
+      exec: async () => {
+        throw new Error("ssh channel closed");
+      },
+    } as unknown as CommandExecutor;
+    expect(await detectEdgeContainer(executor)).toBeNull();
   });
 });

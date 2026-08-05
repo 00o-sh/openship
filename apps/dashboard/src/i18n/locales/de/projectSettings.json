@@ -102,6 +102,19 @@
         "saved": "Routing auf {mode} gesetzt",
         "failed": "Routing konnte nicht aktualisiert werden"
       }
+    },
+    "internalAlias": {
+      "title": "Interner Hostname",
+      "description": "Eigener Name, unter dem andere Dienste diese App privat erreichen",
+      "intro": "Lege einen zusätzlichen DNS-Namen für diese App in ihrem privaten Projektnetzwerk fest. Er wird neben dem Standard (dem Projekt-Slug) aufgelöst – andere verknüpfte Dienste können beide verwenden. Der öffentliche Zugriff bleibt unverändert; dies gibt niemals einen Port frei.",
+      "label": "Hostname-Alias",
+      "hint": "Nur Buchstaben, Ziffern und Bindestriche. Leer lassen, um den Projekt-Slug zu verwenden.",
+      "save": "Speichern",
+      "toast": {
+        "saved": "Interner Hostname aktualisiert",
+        "failed": "Interner Hostname konnte nicht aktualisiert werden",
+        "invalid": "Gib mindestens einen Buchstaben oder eine Ziffer ein"
+      }
     }
   },
   "backup": {

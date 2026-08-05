@@ -240,6 +240,29 @@ export const AdvancedSettings = ({ onDeleteProject }: Props) => {
           </SectionCard>
         )}
 
+        {/* Internal hostname (east-west alias) — single-app, self-hosted, with a
+            running container only. Compose projects set this per service in the
+            service form; static/cloud apps have no private container to name. */}
+        {projectData?.deployTarget !== "cloud" &&
+          (projectData?.serviceCount ?? 0) === 0 &&
+          projectData?.hasServer !== false &&
+          projectData?.options?.hasServer !== false &&
+          projectData?.productionMode !== "static" && (
+            <SectionCard
+              title={t.projectSettings.advanced.internalAlias.title}
+              description={t.projectSettings.advanced.internalAlias.description}
+              icon={Network}
+              iconTone="primary"
+              collapsible
+            >
+              <InternalAliasCard
+                projectId={projectData.id}
+                initial={(projectData?.internalAlias as string | null) ?? ""}
+                slug={(projectData?.slug as string | undefined) ?? ""}
+              />
+            </SectionCard>
+          )}
+
         {/* Health checks — collapsed, and off unless opted into. Reuses the
             wizard's section so the form and its copy exist once. */}
         <SectionCard
@@ -435,6 +458,85 @@ function RoutingStrategyCard({
         })}
       </div>
       <p className="text-[12px] text-muted-foreground">{t.projectSettings.advanced.routing.note}</p>
+    </>
+  );
+}
+
+/**
+ * Single-app custom east-west hostname. Persists `project.internalAlias`, which
+ * the deploy adds as an EXTRA docker alias alongside the default `<slug>` (both
+ * resolve). Explicit Save (free-text) with optimistic toast + rollback, matching
+ * RoutingStrategyCard. Server normalizes + rejects an empty-after-normalize value;
+ * we mirror the "needs a usable char" check client-side for a fast inline error.
+ */
+function InternalAliasCard({
+  projectId,
+  initial,
+  slug,
+}: {
+  projectId: string;
+  initial: string;
+  slug: string;
+}) {
+  const { t } = useI18n();
+  const { showToast } = useToast();
+  const c = t.projectSettings.advanced.internalAlias;
+  const [value, setValue] = useState(initial);
+  const [saved, setSaved] = useState(initial);
+  const [saving, setSaving] = useState(false);
+
+  const trimmed = value.trim();
+  const dirty = trimmed !== saved.trim();
+
+  async function handleSave() {
+    if (!dirty || saving) return;
+    // Empty clears it (server falls back to the slug). A non-empty value must
+    // carry at least one letter/digit or it normalizes to nothing.
+    if (trimmed && !/[a-z0-9]/i.test(trimmed)) {
+      showToast(c.toast.invalid, "error", c.title);
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await projectsApi.update(projectId, { internalAlias: trimmed || null });
+      if ((res as { success?: boolean })?.success === false) throw new Error("update failed");
+      setSaved(trimmed);
+      showToast(c.toast.saved, "success", c.title);
+    } catch {
+      showToast(c.toast.failed, "error", c.title);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      <p className="text-[12px] text-muted-foreground">{c.intro}</p>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+        <label className="flex-1">
+          <span className="mb-1 block text-[12px] font-medium text-foreground">{c.label}</span>
+          <input
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { e.preventDefault(); void handleSave(); }
+            }}
+            placeholder={slug || "app"}
+            spellCheck={false}
+            autoCapitalize="none"
+            className="h-11 w-full rounded-xl border border-border/50 bg-muted/20 px-3 text-sm text-foreground outline-none transition-colors focus:border-primary/40 font-mono"
+          />
+        </label>
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={!dirty || saving}
+          className="h-11 rounded-xl bg-primary px-4 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-40"
+        >
+          {c.save}
+        </button>
+      </div>
+      <p className="text-[12px] text-muted-foreground">{c.hint}</p>
     </>
   );
 }

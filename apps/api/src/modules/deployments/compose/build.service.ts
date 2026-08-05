@@ -22,6 +22,7 @@ import {
 } from "../build-config";
 import * as sessionManager from "../session-manager";
 import { pinnedImageForService } from "../pinned-artifacts";
+import { newerThanRestoredRelease } from "./project-services";
 import { serviceKind, isStaticService } from "../../../lib/deployable-service";
 import { normalizeProjectRootDirectory } from "../../../lib/project-root-detector";
 import { resolveServicePort } from "./domain-helpers";
@@ -229,9 +230,15 @@ export async function buildComposeImages(opts: {
   const isHandedOver = (service: { name: string }) =>
     !!pinnedImageForService(opts.snapshot, service.name);
 
+  // Rollback: a service added after the restored release is carried forward by
+  // the deploy step, so building it here is pure waste — and for a source-built
+  // one it fails, because the release's commit may not contain it at all.
+  const isNewerThanRelease = newerThanRestoredRelease(opts.dep);
+
   const buildable = enabled.filter(
     (service) =>
       !isHandedOver(service) &&
+      !isNewerThanRelease(service) &&
       // Smart redeploy: skip building services that aren't in the target
       // subset — they're carried forward at deploy with their existing image.
       // Also skip env-only refresh services — they recreate from their

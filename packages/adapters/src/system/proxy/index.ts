@@ -19,6 +19,7 @@ import { runEdgeTakeover, type EdgeTakeoverOptions, type EdgeTakeoverResult } fr
 // ── Engine surface (single import point) ──────────────────────────────────────
 export {
   classifyProxy,
+  detectEdgeContainer,
   EDGE_CONTAINER_NAME,
   edgeFailureReason,
   EdgeConflictError,

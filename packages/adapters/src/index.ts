@@ -72,6 +72,7 @@ export type {
   DockerContainerDetail,
   DockerVolumeInfo,
   DockerNetworkInfo,
+  ContainerLifecycleEvent,
 } from "./runtime/types";
 export { assertCapability, isMultiServiceRuntime } from "./runtime/types";
 export { DockerRuntime, type DockerConnectionOptions } from "./runtime/docker";
@@ -88,7 +89,7 @@ export { BareRuntime, STATIC_RELEASE_BASE, type BareRuntimeOptions } from "./run
 // The doc-root resolver, exported so the output-check path derives the served
 // location with the SAME confinement rules the deploy used (no reimplementation:
 // this function is what rejects absolute paths and `../` traversal out of the root).
-export { resolveStaticOutputPath } from "./runtime/stack-output";
+export { resolveServedStaticPath, resolveStaticOutputPath } from "./runtime/stack-output";
 export {
   CloudRuntime,
   type CloudAdminProxy,
@@ -119,6 +120,7 @@ export {
   type StabilityVerdict,
   classifyStability,
   watchContainerStability,
+  restartsAfter,
 } from "./runtime/stability";
 export {
   type PortOccupant,
@@ -156,10 +158,29 @@ export {
   EDGE_CONTAINER_MOUNTS,
   EDGE_HOST_PATHS,
   EDGE_HOST_STATE_DIR,
+  EDGE_CHALLENGE_DIR,
+  EDGE_CHALLENGE_HOST_DIR,
+  EDGE_CHALLENGE_ROOT,
+  EDGE_CHALLENGE_URL_PREFIX,
+  EDGE_SHARED_DICTS,
   deployLuaScripts,
   detectOpenRestyPaths,
   type OpenRestyPaths,
 } from "./infra/openresty-lua";
+export { bakedEdgeNginxConf } from "./infra/edge-baked-conf";
+export {
+  MAIL_CONTAINER,
+  MAIL_DB_CONTAINER,
+  MAIL_HOST_STATE_DIR,
+  MAIL_CONTAINER_MOUNTS,
+  MAIL_HOST_PATHS,
+  MAIL_PORTS,
+  MAIL_DB_NAME,
+  MAIL_DB_USER,
+  MAIL_DB_HOST_BIND,
+  MAIL_DB_PORT,
+  type MailMount,
+} from "./infra/mail-container";
 
 // ─── System layer ────────────────────────────────────────────────────────────
 export type {
@@ -185,6 +206,8 @@ export type {
 export type { EdgeConflictDetails, ImportedSite, ProxyScanResult } from "./system/types";
 export {
   classifyProxy,
+  detectEdgeContainer,
+  EDGE_CONTAINER_NAME,
   EdgeConflictError,
   EdgeMigrateRequested,
   freeEdgeTargets,
@@ -196,6 +219,8 @@ export {
 } from "./system/proxy/detect";
 export {
   containerEdgeProvider,
+  containerImageRef,
+  containerState,
   dockerAvailable,
   ensureContainerEdge,
   resolveEdgeImage,
@@ -204,6 +229,25 @@ export {
   type ContainerEdgeOptions,
   type ContainerEdgeResult,
 } from "./system/proxy/ensure-container-edge";
+export {
+  ensureContainerMail,
+  startContainerMail,
+  resolveMailImage,
+  setDefaultMailImage,
+  detectMailContainer,
+  verifyMailEngine,
+  buildMailRunCommand,
+  MAIL_DB_IMAGE,
+  type ContainerMailOptions,
+  type ContainerMailResult,
+} from "./system/mail/ensure-container-mail";
+export {
+  detectMailEngine,
+  startHostMail,
+  HOST_MAIL_UNITS,
+  type MailEngineFlavor,
+  type MailEngineProbe,
+} from "./system/mail/detect-engine";
 export { scanImportableSites, canImportProxy, scanOpenshipEdge } from "./system/proxy/import";
 export {
   runEdgeTakeover,
@@ -302,6 +346,13 @@ export {
   type EdgeFilesAt,
 } from "./system/edge-container-executor";
 export {
+  EDGE_DOWN_MARKER,
+  edgeDownExplanation,
+  explainEdgeDown,
+  isEdgeDownFailure,
+  isEdgeDownMessage,
+} from "./system/edge-exec-error";
+export {
   ensureRemoteJournal,
   runJournaled,
   runReliable,
@@ -328,11 +379,9 @@ export {
   COMPONENT_INSTALLERS,
   COMPONENT_UNINSTALLERS,
   getRemovalSupport,
-  installCertbot,
   installContainerEdge,
   installDocker,
   installGit,
-  installOpenResty,
   installRsync,
   uninstallEdge,
   uninstallRsync,

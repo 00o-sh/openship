@@ -12,8 +12,9 @@ import {
   PinOff,
 } from "lucide-react";
 import { generateIcon } from "@/utils/icons";
-import { deployApi, getApiErrorMessage } from "@/lib/api";
+import { deployApi, getApiErrorMessage, type RestorePlanUI } from "@/lib/api";
 import { useI18n, interpolate } from "@/components/i18n-provider";
+import { RollbackConfirmDialog } from "./RollbackConfirmDialog";
 
 interface Deployment {
   id: string;
@@ -45,6 +46,10 @@ export const DeploymentMenu: React.FC<DeploymentMenuProps> = ({
 }) => {
   const { t } = useI18n();
   const [isOpen, setIsOpen] = useState(false);
+  // Wrapped in an object so a null PLAN (the preview call failed) still opens the
+  // dialog — the rollback itself doesn't need the preview.
+  const [confirmPlan, setConfirmPlan] = useState<{ plan: RestorePlanUI | null } | null>(null);
+  const [rollbackBusy, setRollbackBusy] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -98,32 +103,40 @@ export const DeploymentMenu: React.FC<DeploymentMenuProps> = ({
     setIsOpen(false);
     if (!canRollback) return;
     // Ask the API how this restore will actually run so the confirm can say
-    // "instant" or "rebuild" truthfully instead of guessing from a DB flag.
+    // "instant" or "rebuild" truthfully instead of guessing from a DB flag —
+    // and which env keys the release's frozen snapshot would change.
     const plan = await deployApi
       .restorePlan(deployment.id)
       .then((res) => res.data)
       .catch(() => null);
-    const modeLine =
-      plan?.mode === "rebuild"
-        ? t.deployments.menu.rollbackModeRebuild
-        : plan?.mode === "redeploy-pinned" && plan.rebuildServices.length > 0
-          ? interpolate(t.deployments.menu.rollbackModeMixed, {
-              count: String(plan.rebuildServices.length),
-            })
-          : plan
-            ? t.deployments.menu.rollbackModeInstant
-            : "";
-    const ok = window.confirm(
-      [modeLine, t.deployments.menu.confirmRollback].filter(Boolean).join("\n\n"),
-    );
-    if (!ok) return;
+    setConfirmPlan({ plan });
+  };
+
+  const confirmRollback = async () => {
+    setRollbackBusy(true);
     try {
       await deployApi.rollback(deployment.id);
+      setConfirmPlan(null);
       onStatusChange?.();
     } catch (err) {
+      setConfirmPlan(null);
       window.alert(getApiErrorMessage(err, t.deployments.menu.rollbackFailed));
+    } finally {
+      setRollbackBusy(false);
     }
   };
+
+  const modeLine = !confirmPlan
+    ? ""
+    : confirmPlan.plan?.mode === "rebuild"
+      ? t.deployments.menu.rollbackModeRebuild
+      : confirmPlan.plan?.mode === "redeploy-pinned" && confirmPlan.plan.rebuildServices.length > 0
+        ? interpolate(t.deployments.menu.rollbackModeMixed, {
+            count: String(confirmPlan.plan.rebuildServices.length),
+          })
+        : confirmPlan.plan
+          ? t.deployments.menu.rollbackModeInstant
+          : "";
 
   const handleTogglePin = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -293,6 +306,15 @@ export const DeploymentMenu: React.FC<DeploymentMenuProps> = ({
           )}
         </div>
       )}
+
+      <RollbackConfirmDialog
+        isOpen={!!confirmPlan}
+        plan={confirmPlan?.plan ?? null}
+        modeLine={modeLine}
+        busy={rollbackBusy}
+        onConfirm={confirmRollback}
+        onClose={() => setConfirmPlan(null)}
+      />
     </div>
   );
 };

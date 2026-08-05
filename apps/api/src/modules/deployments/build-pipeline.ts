@@ -5,7 +5,10 @@ import { repos, type Project, type Deployment, type Domain } from "@repo/db";
 import {
   BUILD_ENV_VARS,
   safeErrorMessage,
+  sanitizeProxySettings,
+  normalizeServiceLabel,
 } from "@repo/core";
+import { ensureEdgeChallengeReady } from "../../lib/edge-challenge";
 import type {
   BuildResult,
   CommandExecutor,
@@ -71,7 +74,7 @@ import {
 import { firePreDeployBackups } from "../backups/triggers/pre-deploy";
 import { buildBackgroundContext } from "../../lib/request-context";
 import * as sessionManager from "./session-manager";
-import { onFailure, onSuccess, onCancelled, setDeploymentStatus, type LifecycleContext } from "./deployment-lifecycle";
+import { onFailure, onSuccess, onCancelled, reportPipelineError, setDeploymentStatus, routeIssuesWarning, type LifecycleContext } from "./deployment-lifecycle";
 import { auditPorts } from "./port-audit.service";
 import { verifyDeployedContainers } from "./stability-audit.service";
 import { resolveReadinessGate, runReadinessGate, type ResolvedReadinessGate } from "./readiness-gate";
@@ -81,6 +84,7 @@ import { pinnedAppImage, pinnedStaticDir, snapshotNeedsGitSource } from "./pinne
 import { shouldRetainArtifact } from "./rollback/restore-plan";
 import { resolveClonePlan } from "./clone-plan";
 import { collapseTerminalLogs } from "./terminal-logs";
+import { sanitizeLogsForPersistence } from "./build-log-sanitize";
 import {
   executeComposePipeline,
   resolveProjectServicePreflightServices,
@@ -456,8 +460,15 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
   // Single logger instance for the entire build→deploy lifecycle
   const logger = new BuildLogger(logCallback);
 
-  /** Collapsed logs for DB persistence - resolves \r overwrites to final state. */
-  const persistLogs = () => collapseTerminalLogs(logs);
+  /**
+   * Collapsed logs for DB persistence - resolves \r overwrites to final state,
+   * then sanitized: the column is jsonb, which Postgres refuses to store when
+   * the payload carries a NUL or an unpaired surrogate. Raw build output does
+   * (a failed docker exec surfaces the multiplexed stream, frame headers and
+   * all), and the rejected UPDATE used to be read as a deploy failure. This is
+   * the ONE place the persisted array is built.
+   */
+  const persistLogs = () => sanitizeLogsForPersistence(collapseTerminalLogs(logs));
 
   const provisioned: { imageRef?: string } = {};
   const ctx: LifecycleContext = {
@@ -631,7 +642,10 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
 
     // Resolved up front so the relay-fallback gate below can exclude
     // multi-service builds (whose clone path differs).
-    const useServicePipeline = (await resolveServicePipelineMode(project, snapshot)).useServicePipeline;
+    const { useServicePipeline, servicePreflightServices } = await resolveServicePipelineMode(
+      project,
+      snapshot,
+    );
 
     // "Clone on the server" — clone the repo directly on the remote build host
     // instead of cloning on the orchestrator and transferring the context. The
@@ -675,7 +689,13 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
     // A PINNED artifact (rollback restore / migration cutover) is git-free for
     // the same reason: its image already exists, so nothing is cloned or built.
     // snapshotNeedsGitSource owns both answers — see pinned-artifacts.ts.
-    const needsGitSource = snapshotNeedsGitSource(snapshot);
+    //
+    // The services list is REQUIRED for the image-only exemption: without it the
+    // helper falls back to the project-level hasBuild flag, which a webhook- or
+    // adopted-Docker-created snapshot may leave set even though every service runs
+    // a registry image. Same arguments preflight passes (preflight.ts) — the two
+    // must agree or a rollback resolves a git token it has no use for.
+    const needsGitSource = snapshotNeedsGitSource(snapshot, servicePreflightServices);
 
     const gitCred: Awaited<ReturnType<typeof resolveBuildGitToken>> = needsGitSource
       ? await resolveBuildGitToken({
@@ -836,7 +856,14 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
         (s) => serviceKind(s) === "compose",
       );
       if (composeOnly?.length) {
-        await repos.service.syncFromCompose(project.id, composeOnly);
+        // removeMissing: false — this list is the release's frozen snapshot, not
+        // an authoritative inventory. On a rollback it predates services added
+        // since; on any deploy the delete cascades `service_deployment` and so
+        // empties the input deployComposeServices reaps de-listed containers
+        // from. Removal belongs to the explicit reconcile path.
+        await repos.service.syncFromCompose(project.id, composeOnly, {
+          removeMissing: false,
+        });
       }
 
       // Clone-on-server for compose: open one repo-pinned relay for the whole
@@ -983,8 +1010,10 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     if (process.env.OPENSHIP_DEBUG_PIPELINE) console.error("[pipeline]", err);
-    logger.log(`Error: ${message}`, "error");
-    await onFailure(ctx, message);
+    // Only an UNSETTLED error is a deploy failure. An error thrown after the
+    // outcome was recorded is bookkeeping: reporting it as a failure would
+    // invert a working deploy and tear its containers down.
+    await reportPipelineError(ctx, message, logger);
   }
 }
 
@@ -1245,6 +1274,13 @@ function buildDeployEnvironment(
               if (plannedDomains.some((d) => d.requiresSslTooling)) {
                 await system.ensureFeature("ssl", systemLog);
               }
+              // Same idea for Openship Cloud's target check: make the box able to
+              // answer it now, so a free domain added later doesn't need a redeploy
+              // first. Cheap and idempotent (a couple of stats once written).
+              await ensureEdgeChallengeReady(phase.project.organizationId, phase.routing, {
+                serverId: phase.serverId ?? undefined,
+                onLog: (m) => logger.log(m, "warn"),
+              });
             } catch (err) {
               logger.log(
                 `Edge/routing setup failed — deploy continues; the app runs on its port and routing is retried later: ${safeErrorMessage(err)}\n`,
@@ -1567,6 +1603,17 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
     restartPolicy: serve.restartPolicy,
     runtimeName: project.slug ?? project.id,
     slug: project.slug ?? project.id,
+    // Stable per-project DNS alias so a single-app native container is
+    // reachable east-west (another linked project resolves `<alias>:<port>`),
+    // mirroring what compose services already get. Read only by
+    // DockerRuntime.deploy(); other runtimes ignore it. Publishing stays
+    // loopback-only — an alias is not exposure until an explicit link
+    // (attachLinkedNetworks) puts a consumer on this project's network.
+    networkAlias: normalizeServiceLabel(project.slug || project.name),
+    // A user-chosen custom hostname (Stage D) resolves ALONGSIDE the default.
+    extraAliases: project.internalAlias
+      ? [normalizeServiceLabel(project.internalAlias)]
+      : undefined,
     publicEndpoints: routeState.publicEndpoints,
     outputDirectory: snapshot.outputDirectory,
     // Optional chaining for the same reason as `volumes` below: a snapshot
@@ -1730,6 +1777,10 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
   // already existed.
   const deactivateOldInPipeline = !(canOverlap && shouldRetainArtifact(project));
 
+  // Sanitized rather than passed through: this reaches generated nginx config, and
+  // the row can also carry a value seeded from a repo config, not just the API.
+  const proxySettings = sanitizeProxySettings(project.routingConfig?.proxy);
+
   const deployResult = await runDeployPipeline(
     deployEnv,
     {
@@ -1739,12 +1790,12 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
       domains: toRoutedDomainInputs(routableDomains),
       routing,
       ssl: deploySsl,
-      routeOptions: project.webhookDomain
-        ? {
-            webhookDomain: project.webhookDomain,
-            webhookProxy: webhookProxyTarget,
-          }
-        : undefined,
+      routeOptions: {
+        ...(project.webhookDomain
+          ? { webhookDomain: project.webhookDomain, webhookProxy: webhookProxyTarget }
+          : {}),
+        ...(proxySettings ? { proxy: proxySettings } : {}),
+      },
       promptUser: (prompt) => sessionManager.promptUser(dep.id, prompt),
     },
     logger,
@@ -1858,9 +1909,7 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
   // by Retry routing / the next clean deploy.
   const routeIssues = [...domainClaimWarnings, ...(deployResult.routeWarnings ?? [])];
   if (routeIssues.length) {
-    const msg =
-      `Some domains aren't routed yet — the app is deployed and running; fix DNS/routing and ` +
-      `Retry from the Domains tab: ${routeIssues.join("; ")}`;
+    const msg = routeIssuesWarning(routeIssues);
     metaPatch.deployWarning = metaPatch.deployWarning ? `${metaPatch.deployWarning} · ${msg}` : msg;
     metaPatch.edgeUnsynced = true;
   }

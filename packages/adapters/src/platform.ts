@@ -251,8 +251,8 @@ async function createInfraProvider(
   // No bare edge on a non-Linux host. The paths below are Linux FHS (`/var/www/acme`,
   // `/usr/local/openresty/...`) and provisioning them needs root, so on macOS this
   // failed the deploy outright with `EACCES: mkdir '/var/www'` — before the workload
-  // was even built. Nothing here is installable there either: `installOpenResty` only
-  // implements apt.
+  // was even built. Nor is there anything to install: the edge is a Linux container
+  // image, and the host-package path it used to fall back to is gone.
   //
   // Gated on the executor being LOCAL, because `process.platform` describes THIS
   // process, not the target: a Mac driving a remote Linux box must still get the real

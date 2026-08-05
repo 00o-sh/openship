@@ -23,8 +23,13 @@ import { pruneAuditEvents } from "../audit/audit-prune";
 import { runReconcileSweep } from "../deployments/reconcile-schedule";
 import { runImageGcSweep } from "../deployments/image-gc";
 import { verifyPendingDomains } from "../domains/domain.service";
+import { runEdgeVerifySweep } from "../domains/edge-verify-schedule";
 import { scanInstanceUpdates } from "../updates/updates.service";
 import { scanInstanceModules } from "../system/server-modules.service";
+import { scanInstanceContainers } from "../system/server-containers.service";
+import { runHealthWatch, pruneResolvedIncidents } from "../monitoring/health-watch";
+import { runUsageSampleSweep } from "../monitoring/usage-sampler";
+import { runAnalyticsScrapeSweep } from "../system/analytics-scraper";
 import { runDueOnceJobs } from "./job-command";
 import type { JobSummary } from "../../lib/system-jobs";
 
@@ -40,6 +45,22 @@ export interface SystemJobDef {
 
 const WEBHOOK_EVENT_RETENTION_DAYS = 30;
 const JOB_RUN_RETENTION_DAYS = 30;
+/**
+ * Traffic analytics. Two horizons because the two tables differ by three orders of
+ * magnitude in row cost: `server_analytics` is one row per domain per MINUTE
+ * (~525k rows/domain/year) and only feeds the live chart, while
+ * `server_analytics_geo` is one row per domain per DAY and is the long-term
+ * history behind the country map. Nothing pruned either before, so both grew
+ * without bound for the life of the install.
+ */
+const ANALYTICS_BUCKET_RETENTION_DAYS = 90;
+const ANALYTICS_ROLLUP_RETENTION_DAYS = 400;
+/**
+ * Resource usage samples. The DENSEST of the three — one row per service per 5-minute
+ * bucket is ~288/day/service, against 1440/day/domain for traffic but spread over far
+ * more series on a busy install. Shortest horizon of the three for that reason.
+ */
+const RESOURCE_USAGE_RETENTION_DAYS = 30;
 
 export const SYSTEM_JOB_DEFS: SystemJobDef[] = [
   {
@@ -107,6 +128,78 @@ export const SYSTEM_JOB_DEFS: SystemJobDef[] = [
     },
   },
   {
+    key: "analytics:scrape",
+    label: "Traffic analytics collection",
+    // Every ~30 min, off the :00/:30 marks. The ceiling is the edge's shared-dict
+    // TTL — 24h for minute buckets, 48h for the daily rollup — because anything
+    // still in RAM when its key expires is gone for good. Well inside that: a
+    // missed tick or a box down for a few hours costs nothing, and the same shape
+    // of work (one connect per server) already runs every MINUTE for
+    // services:health-watch, so this is not a new cost profile.
+    //
+    // Only a seed — the job row is authoritative once created, so an operator with
+    // many servers can stretch it from the Jobs UI without a code change.
+    defaultCron: "13,43 * * * *",
+    // Cloud has no managed servers and no OpenResty: on the SaaS, traffic analytics
+    // live at Oblien's edge and are read through, never scraped into our DB.
+    available: () => platform().target !== "cloud",
+    run: async () => runAnalyticsScrapeSweep(),
+  },
+  {
+    key: "resources:sample",
+    label: "Resource usage sampling",
+    // :01, :06, :11 … — every 5 minutes, off the :00/:30 marks every other install
+    // also fires on. The cadence IS the chart's resolution: unlike traffic, which the
+    // edge counts for free, each sample is an active `docker stats` costing the daemon
+    // roughly a second, so sampling faster buys detail at a real and growing price.
+    // Only a seed — the job row wins afterwards, so a large estate can stretch it.
+    defaultCron: "1-59/5 * * * *",
+    // Desktop has no always-on process to sample from. Cloud is deliberately NOT
+    // excluded: CloudRuntime implements getUsage, so Oblien-hosted projects get
+    // history too — riding the health watch's `selfhosted` gate would have denied it.
+    available: () => platform().target !== "desktop",
+    run: async () => runUsageSampleSweep(),
+  },
+  {
+    key: "analytics:retention-prune",
+    label: "Traffic analytics prune",
+    defaultCron: "23 4 * * *",
+    // Only the self-hosted control plane scrapes OpenResty into these tables; on
+    // the SaaS, traffic analytics live at Oblien's edge and are read through, never
+    // persisted here, so there is nothing local to prune.
+    available: () => platform().target !== "cloud",
+    run: async () => {
+      const day = 24 * 60 * 60 * 1000;
+      const buckets = await repos.analytics.pruneBuckets(
+        Math.floor((Date.now() - ANALYTICS_BUCKET_RETENTION_DAYS * day) / 60_000),
+      );
+      const rollups = await repos.analytics.pruneGeo(
+        new Date(Date.now() - ANALYTICS_ROLLUP_RETENTION_DAYS * day)
+          .toISOString()
+          .slice(0, 10)
+          .replace(/-/g, ""),
+      );
+      return { buckets, rollups };
+    },
+  },
+  {
+    key: "resources:retention-prune",
+    label: "Resource usage prune",
+    defaultCron: "29 4 * * *",
+    // Matches resources:sample's gate, NOT analytics:retention-prune's. Collection
+    // and pruning must be available in the same places or the difference is a leak:
+    // usage IS sampled on cloud (CloudRuntime implements getUsage), so folding this
+    // into the cloud-excluded analytics prune would have let SaaS rows accumulate
+    // forever — at ~288/day/service, indefinitely.
+    available: () => platform().target !== "desktop",
+    run: async () => {
+      const cutoffMinute = Math.floor(
+        (Date.now() - RESOURCE_USAGE_RETENTION_DAYS * 24 * 60 * 60 * 1000) / 60_000,
+      );
+      return { deleted: await repos.resourceUsage.pruneOlderThan(cutoffMinute) };
+    },
+  },
+  {
     key: "deployments:reconcile",
     label: "Deployment reconcile",
     defaultCron: "*/10 * * * *",
@@ -137,6 +230,30 @@ export const SYSTEM_JOB_DEFS: SystemJobDef[] = [
     },
   },
   {
+    key: "edge:target-verify",
+    label: "Free-domain target verification",
+    // Openship Cloud proves target control ONCE and re-probes the SAME token before
+    // the 90-day expiry, so the standing job is to still be answering then. Deploys
+    // re-assert the token already; this covers the box that deploys nothing for three
+    // months and loses its host state dir in between — the failure that otherwise
+    // surfaces as a free domain dying ~83 days after a green deploy, with nothing
+    // anywhere saying why. Daily is ample against a 7-day renewal window. Cloud
+    // routes its own workloads through Oblien's edge and has no target to prove.
+    defaultCron: "43 5 * * *",
+    available: () => platform().target !== "cloud",
+    run: async () => {
+      const r = await runEdgeVerifySweep();
+      return {
+        targets: r.targets,
+        serving: r.serving,
+        notServing: r.notServing,
+        renewingSoon: r.renewingSoon,
+        reverified: r.reverified,
+        failed: r.failed,
+      };
+    },
+  },
+  {
     key: "updates:scan",
     label: "Update scan",
     // The one channel for "is anything out of date?" — refreshes the
@@ -163,6 +280,44 @@ export const SYSTEM_JOB_DEFS: SystemJobDef[] = [
       const r = await scanInstanceModules();
       return { servers: r.servers, behind: r.behind };
     },
+  },
+  {
+    key: "infra:scan",
+    label: "Managed-container update scan",
+    // The container sibling of modules:scan. Detect edge/mail image drift on
+    // every connected server (running tag != the tag this control plane pins to
+    // APP_VERSION) and cache it in server_container_status. When the instance
+    // opted into autoUpdateInfra, the same pass ALSO swaps behind containers —
+    // otherwise detection only, surfaced as an advisory. Desktop + self-hosted
+    // (both self-update their control plane and manage remote boxes), never
+    // cloud. Off-peak, off the :00/:30 marks.
+    defaultCron: "43 */6 * * *",
+    available: () => platform().target !== "cloud",
+    run: async () => {
+      const r = await scanInstanceContainers();
+      return { servers: r.servers, behind: r.behind, updated: r.updated };
+    },
+  },
+  {
+    key: "services:health-watch",
+    label: "Container health watch",
+    // Every minute. This is the ONLY thing that notices a container died after
+    // its deploy window closed, and detection latency is roughly two ticks (a
+    // fault must be seen twice before it alerts) — so the interval IS the
+    // feature. Cheap by construction: one `docker ps -a` per server, and no DB
+    // writes at all on a tick where nothing is wrong.
+    defaultCron: "* * * * *",
+    // Cloud workloads run on Oblien, whose runtime exposes no stability probe;
+    // desktop has no always-on process to poll from.
+    available: () => platform().target === "selfhosted",
+    run: async () => runHealthWatch(),
+  },
+  {
+    key: "incidents:prune",
+    label: "Incident history prune",
+    defaultCron: "51 4 * * *",
+    available: () => platform().target === "selfhosted",
+    run: async () => pruneResolvedIncidents(),
   },
   {
     key: "jobs:oneshot",

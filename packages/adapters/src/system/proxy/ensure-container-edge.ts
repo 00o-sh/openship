@@ -23,6 +23,7 @@ import type { InstallerConfig, SystemLog, SystemLogCallback } from "../types";
 import {
   EDGE_CONTAINER_MOUNTS,
   EDGE_HOST_PATHS,
+  EDGE_CHALLENGE_HOST_DIR,
   detectOpenRestyPaths,
   OPENRESTY_DEFAULT_PATHS,
 } from "../../infra/openresty-lua";
@@ -100,15 +101,38 @@ export async function dockerAvailable(executor: CommandExecutor): Promise<boolea
     .catch(() => false);
 }
 
-/** The image ref a running container was created from. */
-async function runningImage(
+/**
+ * A container's existence, run state and created-with image ref, in one
+ * `docker inspect`. `null` means no such container (or the daemon didn't answer).
+ *
+ * Run state comes from `.State.Running` and NEVER from the inspect having
+ * succeeded: `docker inspect` answers happily for a STOPPED container, so
+ * "inspect returned an image ref" proves existence only. Conflating the two is
+ * what made a stopped mail engine report as running — and its one-click repair a
+ * no-op that logged "already running".
+ */
+export async function containerState(
+  executor: CommandExecutor,
+  container: string,
+): Promise<{ running: boolean; image: string | null } | null> {
+  const out = await executor
+    .exec(`docker inspect -f '{{.State.Running}}\t{{.Config.Image}}' ${sq(container)} 2>/dev/null`)
+    .catch(() => "");
+  const line = out
+    .split("\n")
+    .map((l) => l.trim())
+    .find(Boolean);
+  if (!line) return null;
+  const [running, image] = line.split("\t");
+  return { running: running?.trim() === "true", image: image?.trim() || null };
+}
+
+/** The image ref a container was created from, running or not. */
+export async function containerImageRef(
   executor: CommandExecutor,
   container: string,
 ): Promise<string | null> {
-  const out = await executor
-    .exec(`docker inspect -f '{{.Config.Image}}' ${sq(container)} 2>/dev/null`)
-    .catch(() => "");
-  return out.trim() || null;
+  return (await containerState(executor, container))?.image ?? null;
 }
 
 /**
@@ -118,7 +142,7 @@ async function runningImage(
  */
 export type EdgeProviderOptions = Omit<
   NginxProviderOptions,
-  "executor" | "paths" | "pinPaths" | "containerEdge"
+  "executor" | "paths" | "pinPaths" | "containerEdge" | "challengeDir"
 >;
 
 /**
@@ -140,6 +164,13 @@ export async function containerEdgeProvider(
     // while reload/certbot run inside the container.
     paths: EDGE_HOST_PATHS,
     executor: edgeContainerExecutor(executor, container),
+    // Challenge tokens go to the HOST side of the ACME mount, for the same reason
+    // vhosts do. This is the ONE mount whose two sides differ
+    // (/var/lib/openship/edge/acme → /var/www/acme), so the write path and the
+    // vhost's `root` are genuinely different strings — `root` stays the container
+    // path. Overridden here and nowhere else, next to the `paths` override it
+    // mirrors, so the two cannot drift.
+    challengeDir: EDGE_CHALLENGE_HOST_DIR,
     // MUST be pinned: re-detection answers from inside the container and would
     // repoint sitesDir at a host dir the edge never reads.
     pinPaths: true,
@@ -319,7 +350,7 @@ export async function ensureContainerEdge(
     // Already ours. The only thing left to reconcile is the IMAGE: the edge's Lua
     // and nginx.conf are baked in, so an edge left on an old tag keeps serving
     // rules a newer API assumes it rewrote. Upgrading the API upgrades the edge.
-    const current = await runningImage(executor, existing);
+    const current = await containerImageRef(executor, existing);
     if (current && current !== image) {
       const swap = await swapEdgeImage(executor, existing, current, image, opts);
       return {

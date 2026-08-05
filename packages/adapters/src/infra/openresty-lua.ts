@@ -38,6 +38,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EMBEDDED_LUA } from "./lua-embedded";
 import type { CommandExecutor } from "../types";
+import { EDGE_REAL_IP_CONF_NAME, edgeRealIpConf } from "./edge-real-ip";
 
 // ── Paths & constants ────────────────────────────────────────────────────────
 
@@ -52,6 +53,73 @@ export const RULES_GUARD_PATH = `${OPENRESTY_LUA_DIR}/rules_guard.lua`;
 
 /** Management API port - loopback only, queried via SSH tunnel. */
 export const OPENRESTY_MGMT_PORT = 9145;
+
+/**
+ * Directory `require "openship.<mod>"` resolves from — the PARENT of the module
+ * dir, which is what makes the dotted module names in our Lua resolvable at all.
+ */
+const OPENRESTY_SITE_LUALIB = OPENRESTY_LUA_DIR.replace(/\/[^/]+$/, "");
+
+/** OpenResty's own default lualib (`;;`) plus the openship modules. */
+export const EDGE_LUA_PACKAGE_PATH = `${OPENRESTY_SITE_LUALIB}/?.lua;;`;
+
+/**
+ * nginx sizes the server_name hash to the LONGEST server_name it loads, and the
+ * 64-byte default rejects the whole config — `could not build server_names_hash`
+ * fails `nginx -t`, so the reload is REFUSED and no route change lands until the
+ * offending vhost is removed. A single long hostname (a generated
+ * `<project>-<service>.opsh.io`, or any custom domain past ~63 chars) would
+ * otherwise wedge routing for every site on the box, not just its own.
+ */
+export const EDGE_SERVER_NAMES_HASH_BUCKET_SIZE = 128;
+
+/**
+ * Shared-memory zones the openship Lua depends on, and the ONE definition of
+ * their sizes.
+ *
+ * Two consumers used to carry their own copy: the `grep || sed` patches that add
+ * them to a bare box's nginx.conf (below), and the baked container config in
+ * `apps/edge/nginx.conf` (now generated from this — see `bakedEdgeNginxConf`). A
+ * dict sized 256m on one install path and 16m on the other is an eviction bug
+ * that only appears under load, on one kind of box.
+ */
+export const EDGE_SHARED_DICTS: ReadonlyArray<{ name: string; size: string }> = [
+  /** Analytics counters. */
+  { name: "analytics", size: "256m" },
+  /** Raw-log ring buffers + the live-log pipe. */
+  { name: "request_data", size: "128m" },
+  /** Per-route rules cache: written reload-free by mgmt_api `POST /rules`, read
+   *  by rules_guard.lua in the access phase. The DB (route_rule) is the source
+   *  of truth, so losing this dict costs a re-push, not a ruleset. */
+  { name: "rules", size: "32m" },
+  /** Rate-limit COUNTERS, kept apart from `rules` so a high-cardinality flood (a
+   *  fresh key per source IP per second) can't LRU-evict the rulesets and
+   *  silently disable enforcement mid-attack.
+   *
+   *  32m, matching openresty module migration 1.1.0, which raises it from the
+   *  original 16m on boxes already installed. Both must state the same target: a
+   *  fresh install writes THIS value, so leaving it at 16m meant a new box got the
+   *  size the migration exists to correct — and only bare boxes that consented to
+   *  the migration would ever reach 32m. The migration stays because the
+   *  `grep || sed` convergence below is append-only and cannot resize an existing
+   *  directive; `edge-shared-dicts.test.ts` pins the two together. */
+  { name: "rl_counters", size: "32m" },
+  /**
+   * Distinct-visitor sets. One key per (domain, day, salted-IP hash) — high
+   * cardinality and short-lived, so it gets its own zone for the same reason
+   * `rl_counters` does: a busy day's visitor set must not LRU-evict the analytics
+   * counters or the rulesets.
+   *
+   * Privacy: keys hold a per-day-salted hash, never an address, and only the
+   * resulting COUNT is ever flushed to Postgres. Nothing that identifies a visitor
+   * leaves the box — see the visitor block in site_logger.lua.
+   *
+   * 64m ≈ 1M distinct visitors/day. Past that the zone LRU-evicts and the count
+   * UNDERSTATES; `GET /status` reports free_space so a reader can mark it
+   * approximate rather than present an eviction artifact as a measurement.
+   */
+  { name: "visitors", size: "64m" },
+];
 
 // ── Detected paths ───────────────────────────────────────────────────────────
 
@@ -73,6 +141,26 @@ export interface OpenRestyPaths {
   sitesDir: string;
   /** PID file path (e.g. /usr/local/openresty/nginx/logs/nginx.pid) */
   pidPath: string;
+  /**
+   * nginx version behind this OpenResty, when `openresty -V` could be read.
+   * Only consumer so far is the vhost renderer's gate on version-dependent
+   * directive syntax (`http2 on;` needs ≥ 1.25.1) — undefined means "unknown",
+   * which callers treat as allow. See `proxyDirectiveAllowed` in @repo/core.
+   */
+  nginxVersion?: readonly [number, number, number];
+}
+
+/**
+ * Pull the nginx version out of `openresty -V` output.
+ *
+ * The banner reads `nginx version: openresty/1.27.1.1` on OpenResty and
+ * `nginx version: nginx/1.24.0` on stock nginx; OpenResty's 4th component is its
+ * own patch level, which no nginx feature gate cares about, so it's dropped.
+ */
+export function parseNginxVersion(raw: string): readonly [number, number, number] | undefined {
+  const m = raw.match(/nginx version:\s*\S*?\/(\d+)\.(\d+)\.(\d+)/i);
+  if (!m) return undefined;
+  return [Number(m[1]), Number(m[2]), Number(m[3])] as const;
 }
 
 /** Fallback paths when `openresty -V` is unavailable (e.g. not yet installed). */
@@ -172,6 +260,7 @@ export async function detectOpenRestyPaths(
   }
 
   const confDir = confPath.replace(/\/[^/]+$/, "");
+  const nginxVersion = parseNginxVersion(raw);
 
   return {
     bin,
@@ -179,6 +268,7 @@ export async function detectOpenRestyPaths(
     confDir,
     sitesDir: `${confDir}/sites-enabled`,
     pidPath,
+    ...(nginxVersion ? { nginxVersion } : {}),
   };
 }
 
@@ -315,19 +405,29 @@ http {
     default_type  application/octet-stream;
     sendfile      on;
     keepalive_timeout 65;
-    # See apps/edge/nginx.conf: the 64-byte default fails \`nginx -t\` outright
-    # ("could not build server_names_hash") for any server_name past ~63 chars,
-    # which refuses the reload and wedges every route on the box, not just the
-    # long one. Keep this in step with the containerized edge's value.
-    server_names_hash_bucket_size 128;
+    # See EDGE_SERVER_NAMES_HASH_BUCKET_SIZE — the 64-byte default fails
+    # \`nginx -t\` outright for any server_name past ~63 chars, refusing the reload
+    # and wedging every route on the box, not just the long one.
+    server_names_hash_bucket_size ${EDGE_SERVER_NAMES_HASH_BUCKET_SIZE};
     include ${sitesDir}/*.conf;
 }
 `;
 }
-const GEOIP_DIR = "/usr/share/GeoIP";
-const GEOIP_DB_PATH = `${GEOIP_DIR}/GeoLite2-Country.mmdb`;
+export const GEOIP_DIR = "/usr/share/GeoIP";
+export const GEOIP_DB_PATH = `${GEOIP_DIR}/GeoLite2-Country.mmdb`;
+/**
+ * Fallback download source for a BARE box only — the container edge bakes the DB
+ * in (apps/edge/Dockerfile), so this is never the shipping path.
+ *
+ * Points at OUR vendored copy, matching apps/api/src/lib/geo-ip.ts. It used to
+ * point at a third-party mirror (P3TERX/GeoLite.mmdb releases/latest), which
+ * contradicted the stance that stands one directory over in
+ * apps/api/assets/geoip/README.md: production reads a copy we ship, and the only
+ * upstream reference belongs in a maintainer-time script (`bun run update:geoip`).
+ */
 const GEOIP_DB_URL =
-  "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-Country.mmdb";
+  process.env.OPENSHIP_GEOIP_URL?.trim() ||
+  "https://raw.githubusercontent.com/oblien/openship/main/apps/api/assets/geoip/GeoLite2-Country.mmdb";
 
 // ── Local Lua source directory ───────────────────────────────────────────────
 
@@ -379,9 +479,14 @@ function readLua(filename: string): string {
 
 // ── Management server block ──────────────────────────────────────────────────
 
-const MANAGEMENT_BLOCK = `\
-# Openship internal management - analytics & live-log streaming
-# Auto-generated - do not edit manually
+/**
+ * The internal analytics + live-log server block. Loopback only — reached by the
+ * api over the Docker network or an SSH tunnel, never publicly exposed.
+ *
+ * Shared with the baked container config (`bakedEdgeNginxConf`), which nests it
+ * inside `http {}` instead of writing it as its own `sites-enabled` file.
+ */
+export const EDGE_MGMT_SERVER_BLOCK = `\
 server {
     listen 127.0.0.1:${OPENRESTY_MGMT_PORT};
 
@@ -399,7 +504,12 @@ server {
     location / {
         content_by_lua_file ${OPENRESTY_LUA_DIR}/mgmt_api.lua;
     }
-}
+}`;
+
+const MANAGEMENT_BLOCK = `\
+# Openship internal management - analytics & live-log streaming
+# Auto-generated - do not edit manually
+${EDGE_MGMT_SERVER_BLOCK}
 `;
 
 /**
@@ -424,6 +534,103 @@ export const ACME_CHALLENGE_LOCATION = `\
         proxy_set_header Host $host;
     }`;
 
+/**
+ * URL prefix Openship Cloud's shared edge fetches to prove this box controls a
+ * routing target. Oblien issues `<prefix><token>` and expects the token back as
+ * the body with a 200.
+ */
+export const EDGE_CHALLENGE_URL_PREFIX = "/.well-known/oblien-proxy-challenge/";
+
+/**
+ * Doc root for those tokens, and the directory they are written to.
+ *
+ * A SUB-directory of the ACME webroot, not the webroot itself, for two reasons:
+ * it keeps our files clear of anything that ever re-uses `/var/www/acme`, and
+ * `nginx.test.ts` asserts a vhost contains no `root /var/www/acme;` — that
+ * assertion means "ACME is proxied to certbot, never served from a webroot", and
+ * it should keep meaning that.
+ *
+ * `/var/www/acme` is the CONTAINER path, and it is already bind-mounted in every
+ * mode (see EDGE_CONTAINER_MOUNTS) while being served by nothing since ACME moved
+ * to the standalone proxy — so this needs no new mount. Adding one would in fact
+ * be unworkable: the mount list is baked into the `docker run` argv, so it only
+ * takes effect on container RECREATE, and a rollback to an older release would
+ * recreate with the old list and lose the tokens.
+ */
+export const EDGE_CHALLENGE_ROOT = "/var/www/acme/oblien";
+export const EDGE_CHALLENGE_DIR = `${EDGE_CHALLENGE_ROOT}${EDGE_CHALLENGE_URL_PREFIX}`.replace(/\/$/, "");
+
+/**
+ * The same directory as seen from the HOST, for the one provider whose file ops
+ * land outside the container.
+ *
+ * This mount is the exception to the rule: every other edge mount keeps the same
+ * path on both sides on purpose, and `acme` does not
+ * (`/var/lib/openship/edge/acme` → `/var/www/acme`). Forgetting that is a mistake
+ * with history here — see the mail-SSL webroot note.
+ */
+export const EDGE_CHALLENGE_HOST_DIR = `${EDGE_HOST_STATE_DIR}/acme/oblien${EDGE_CHALLENGE_URL_PREFIX}`.replace(
+  /\/$/,
+  "",
+);
+
+/**
+ * The location that serves those tokens. SHARED by the per-vhost templates in
+ * nginx.ts, the per-target challenge vhost, and the baked container config — so
+ * every place that can receive the edge's probe agrees.
+ *
+ * Deliberately NOT in `DEFAULT_BLOCK`, and the reason is that no catch-all is the
+ * mechanism here. The container edge is the only INSTALL path and skips
+ * `ensureOpenRestyConfig`; `DEFAULT_BLOCK` is still evaluated on every deploy to a
+ * legacy bare box or a Docker-less server (see `platform.ts`), so it is
+ * legacy-but-live, not dead. Either way both catch-alls are version-pinned to
+ * whatever that box last got — the baked one to its image, `DEFAULT_BLOCK` to a
+ * config written once and only patched thereafter — so neither can be relied on to
+ * carry a location added later.
+ *
+ * What IS relied on is the per-target challenge vhost (`serveEdgeChallenge`): our own
+ * code writes it into the bind-mounted sites-enabled on every edge-ensure, so it
+ * reaches a box on an old image, a rolled-back one, and a bare one alike. The
+ * catch-alls are belt-and-braces; the baked image gets the location because it costs
+ * nothing there, and `DEFAULT_BLOCK` does not because emitting it into a file we only
+ * ever patch would read like coverage that arrives, and it wouldn't.
+ *
+ * Token-agnostic in config, token-specific in data. Two things follow, and both
+ * matter: issuing a token is a file write with no config edit and no reload, AND the
+ * vhost can be created BEFORE any token exists — which is what lets the box be ready
+ * from first install instead of only once a verification is in flight.
+ *
+ * `try_files $uri =404` means only tokens we actually wrote are served. That is a
+ * security property, not a detail — a handler that echoed the token back out of the
+ * URL would let anyone register THIS box as THEIR target, prove control with our own
+ * reply, and point their slug at us.
+ */
+export const EDGE_CHALLENGE_LOCATION = `\
+    location ${EDGE_CHALLENGE_URL_PREFIX} {
+        root ${EDGE_CHALLENGE_ROOT};
+        default_type text/plain;
+        try_files $uri =404;
+    }`;
+
+/**
+ * The HTTPS catch-all — shared by the bare edge's `DEFAULT_BLOCK` and the baked
+ * container config, comment included, because the RATIONALE is the part that must
+ * not drift: a future reader who thinks this block is decorative will delete it
+ * from whichever copy they happen to be holding.
+ */
+export const EDGE_HTTPS_REJECT_BLOCK = `\
+# HTTPS catch-all. WITHOUT a 443 default_server, nginx serves the first-loaded
+# 443 vhost to any request whose SNI matches no server_name - so a domain we do
+# NOT route (removed / never-added / just pointed at this IP) silently gets some
+# other app's cert + backend. That is cross-serving, a security hole. Owning the
+# 443 default and rejecting unknown SNI closes it: an unrouted host gets a TLS
+# handshake failure, never a fallthrough. ssl_reject_handshake (OpenResty/nginx
+# >= 1.19.4; our installer pulls the newest LTS) needs no certificate.
+server {
+    listen 443 ssl default_server;
+    ssl_reject_handshake on;
+}`;
+
 const DEFAULT_BLOCK = `\
 # Openship default catch-all - prevents the stock OpenResty welcome page AND
 # stops an unmatched Host/SNI from being served the first real vhost by default.
@@ -439,17 +646,7 @@ ${ACME_CHALLENGE_LOCATION}
     }
 }
 
-# HTTPS catch-all. WITHOUT a 443 default_server, nginx serves the first-loaded
-# 443 vhost to any request whose SNI matches no server_name - so a domain we do
-# NOT route (removed / never-added / just pointed at this IP) silently gets some
-# other app's cert + backend. That is cross-serving, a security hole. Owning the
-# 443 default and rejecting unknown SNI closes it: an unrouted host gets a TLS
-# handshake failure, never a fallthrough. ssl_reject_handshake (OpenResty/nginx
-# >= 1.19.4; our installer pulls the newest LTS) needs no certificate.
-server {
-    listen 443 ssl default_server;
-    ssl_reject_handshake on;
-}
+${EDGE_HTTPS_REJECT_BLOCK}
 `;
 
 // ── Deployment ───────────────────────────────────────────────────────────────
@@ -460,6 +657,11 @@ const LUA_SCRIPTS = [
   "pipe_stream.lua",
   "mgmt_api.lua",
   "geo_country.lua",
+  // Vendored FFI binding geo_country requires as `openship.maxminddb`. Ships with
+  // the rest so a bare box needs no `opm get` (which needs perl) — see the file
+  // header. Flat, like every other script: ensureLuaScripts writes this list into
+  // one directory and its presence scan is a plain `ls -1`.
+  "maxminddb.lua",
   "rules_lib.lua",
   "rules_guard.lua",
 ] as const;
@@ -554,11 +756,16 @@ export async function ensureLuaScripts(
 }
 
 /**
- * Install libmaxminddb (C library needed by lua-resty-maxminddb's FFI),
- * the OpenResty Lua binding via opm, and download the GeoLite2 database.
+ * Install libmaxminddb (the C library geo_country's FFI binding loads) and place
+ * the GeoLite2 database — for a BARE box. The container edge bakes both in
+ * (apps/edge/Dockerfile), which is the shipping path.
+ *
+ * No `opm get` any more: the Lua binding is vendored as `maxminddb.lua` and
+ * installed with the rest of LUA_SCRIPTS. opm needs perl, which the openresty
+ * alpine base doesn't ship, so that step could never have worked there.
  *
  * Non-fatal - if any step fails the analytics pipeline still works,
- * geo_country.lua just returns nil for every lookup.
+ * geo_country.lua just returns nil for every lookup (and `GET /status` says why).
  */
 async function installGeoDeps(executor: CommandExecutor): Promise<void> {
   // ── 1. libmaxminddb (C library) ───────────────────────────────────────
@@ -577,28 +784,16 @@ async function installGeoDeps(executor: CommandExecutor): Promise<void> {
       await executor.exec("dnf install -y libmaxminddb libmaxminddb-devel");
     } else if (await hasPkg("yum")) {
       await executor.exec("yum install -y libmaxminddb libmaxminddb-devel");
+    } else if (await hasPkg("apk")) {
+      // Alpine — the openresty base image's distro, and the branch whose absence
+      // meant geo could never initialise on a containerized edge.
+      await executor.exec("apk add --no-cache libmaxminddb");
     }
   } catch {
     // Non-fatal - geo just won't work
   }
 
-  // ── 2. lua-resty-maxminddb (Lua binding via opm) ──────────────────────
-  try {
-    await executor.exec(
-      "opm get anjia0532/lua-resty-maxminddb",
-    );
-  } catch {
-    // opm might not be in PATH - try the full path
-    try {
-      await executor.exec(
-        "/usr/local/openresty/bin/opm get anjia0532/lua-resty-maxminddb",
-      );
-    } catch {
-      // Non-fatal
-    }
-  }
-
-  // ── 3. GeoLite2-Country database ──────────────────────────────────────
+  // ── 2. GeoLite2-Country database ──────────────────────────────────────
   try {
     const exists = await executor.exists(GEOIP_DB_PATH);
     if (!exists) {
@@ -655,38 +850,37 @@ export async function deployLuaScripts(
 
   // ── Patch nginx.conf ─────────────────────────────────────────────────
 
-  // Shared dict: analytics counters (256 MB)
-  await executor.exec(
-    `grep -q 'lua_shared_dict analytics ' ${paths.confPath} || ` +
-      `sed -i '/http *{/a \\    lua_shared_dict analytics 256m;' ${paths.confPath}`,
-  );
-
-  // Shared dict: request data - ring buffers + live-log pipe (128 MB)
-  await executor.exec(
-    `grep -q 'lua_shared_dict request_data ' ${paths.confPath} || ` +
-      `sed -i '/http *{/a \\    lua_shared_dict request_data 128m;' ${paths.confPath}`,
-  );
-
-  // Shared dict: per-route rules cache (32 MB). Written reload-free by mgmt_api
-  // `POST /rules`, read by rules_guard.lua in the access phase. The DB
-  // (route_rule table) is the source of truth.
-  await executor.exec(
-    `grep -q 'lua_shared_dict rules ' ${paths.confPath} || ` +
-      `sed -i '/http *{/a \\    lua_shared_dict rules 32m;' ${paths.confPath}`,
-  );
-
-  // Separate dict for rate-limit COUNTERS (16 MB). Kept apart from `rules` so a
-  // high-cardinality flood (a fresh key per source IP per second) can't LRU-evict
-  // the rulesets and silently disable enforcement mid-attack.
-  await executor.exec(
-    `grep -q 'lua_shared_dict rl_counters ' ${paths.confPath} || ` +
-      `sed -i '/http *{/a \\    lua_shared_dict rl_counters 16m;' ${paths.confPath}`,
-  );
+  // Shared dicts, sized from EDGE_SHARED_DICTS so a bare box and the baked
+  // container image can't diverge. `grep || sed` per dict, not a rewrite: an
+  // operator-extended nginx.conf must survive being patched.
+  for (const dict of EDGE_SHARED_DICTS) {
+    await executor.exec(
+      `grep -q 'lua_shared_dict ${dict.name} ' ${paths.confPath} || ` +
+        `sed -i '/http *{/a \\    lua_shared_dict ${dict.name} ${dict.size};' ${paths.confPath}`,
+    );
+  }
 
   // Lua module search path (OpenResty default + openship modules)
   await executor.exec(
     `grep -q 'lua_package_path' ${paths.confPath} || ` +
-      `sed -i '/http *{/a \\    lua_package_path "/usr/local/openresty/site/lualib/?.lua;;";' ${paths.confPath}`,
+      `sed -i '/http *{/a \\    lua_package_path "${EDGE_LUA_PACKAGE_PATH}";' ${paths.confPath}`,
+  );
+
+  // Real client address behind Cloudflare / a front proxy.
+  //
+  // An INCLUDE file plus one include line, unlike the dicts above, because the
+  // `grep || sed` idiom is append-only: it cannot update what it already wrote. The
+  // trusted-proxy list changes (Cloudflare adds ranges; an operator sets
+  // OPENSHIP_EDGE_TRUSTED_PROXIES), so its content has to be rewritable — the file is
+  // overwritten wholesale every deploy and the include line is appended exactly once.
+  //
+  // Written BEFORE the include is added: nginx -t fails on a missing include, and a
+  // failed test means the reload is refused and no routing change lands at all.
+  const realIpPath = `${paths.confDir}/${EDGE_REAL_IP_CONF_NAME}`;
+  await executor.writeFile(realIpPath, edgeRealIpConf());
+  await executor.exec(
+    `grep -q '${EDGE_REAL_IP_CONF_NAME}' '${paths.confPath}' || ` +
+      `sed -i '/http *{/a \\    include ${realIpPath};' '${paths.confPath}'`,
   );
 
   // Base server blocks (_management.conf + _default.conf) are written by

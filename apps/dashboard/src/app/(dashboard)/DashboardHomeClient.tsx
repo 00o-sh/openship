@@ -15,11 +15,11 @@ import {
   GitBranch,
   Settings,
   Activity,
-  CheckCircle2,
 } from "lucide-react";
 import { projectsApi } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import UpdatesBlock from "@/components/overview/UpdatesBlock";
+import SystemStatusRow from "@/components/overview/SystemStatusRow";
 import HomeWelcome from "@/components/overview/HomeWelcome";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import { getProjectStatus, PROJECT_STATUS_META, projectStatusLabel } from "@/utils/project-status";
@@ -50,6 +50,7 @@ function timeAgo(dateStr: string, labels: Dictionary["dashboard"]["home"]["time"
 }
 
 import { useDashboardHome } from "@/hooks/useDashboardHome";
+import { useAttentionFeed } from "@/hooks/useAttentionFeed";
 
 /* ------------------------------------------------------------------ */
 /*  Component                                                         */
@@ -65,6 +66,8 @@ export default function DashboardHomeClient({ initialData }: DashboardHomeClient
   const router = useRouter();
   
   const { projects, numbers, loading } = useDashboardHome(initialData);
+  /** Read once here, not inside the card: the count decides the column's layout below. */
+  const attention = useAttentionFeed();
 
   // Split catalog apps out of the projects list — they get their own box.
   const userProjects = projects.filter((p) => !p.isApp);
@@ -80,9 +83,6 @@ export default function DashboardHomeClient({ initialData }: DashboardHomeClient
         : t.dashboard.home.goodEvening;
   const displayName = user?.name?.split(" ")[0] || "";
 
-  const successRate = numbers.total_deployments 
-    ? Math.round(((numbers.total_success_deployments || 0) / numbers.total_deployments) * 100)
-    : 0;
 
   return (
     <PageContainer>
@@ -217,53 +217,50 @@ export default function DashboardHomeClient({ initialData }: DashboardHomeClient
           {/* ── RIGHT COLUMN (Sticky) ──────────────────────────────── */}
           <div className="space-y-4 lg:sticky lg:top-6 lg:self-start">
             
-            {/* Activity Overview */}
-            <div className="bg-card rounded-2xl border border-border/50 p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <Activity className="size-4 text-muted-foreground" />
-                <h3 className="font-semibold text-foreground text-sm">{t.dashboard.home.activityTitle}</h3>
-              </div>
+            {/* Activity Overview — gives up the column when BOTH attention cards are
+                showing. Two alert panels plus the Apps card already fill the fold, and
+                lifetime deploy counts are the least urgent thing on screen while
+                something is down; they stay one click away under Deployments. */}
+            {attention.cards < 2 && (
+              <div className="bg-card rounded-2xl border border-border/50 p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <Activity className="size-4 text-muted-foreground" />
+                  <h3 className="font-semibold text-foreground text-sm">{t.dashboard.home.activityTitle}</h3>
+                </div>
               
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
-                      <FolderKanban className="size-4 text-primary" />
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
+                        <FolderKanban className="size-4 text-primary" />
+                      </div>
+                      <span className="text-sm text-muted-foreground">{t.dashboard.home.statsProjects}</span>
                     </div>
-                    <span className="text-sm text-muted-foreground">{t.dashboard.home.statsProjects}</span>
+                    <span className="text-lg font-semibold text-foreground">
+                      {loading ? "–" : numbers.total_active_projects ?? 0}
+                    </span>
                   </div>
-                  <span className="text-lg font-semibold text-foreground">
-                    {loading ? "–" : numbers.total_active_projects ?? 0}
-                  </span>
-                </div>
                 
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-lg bg-orange-500/10 flex items-center justify-center">
-                      <Rocket className="size-4 text-orange-500" />
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-lg bg-orange-500/10 flex items-center justify-center">
+                        <Rocket className="size-4 text-orange-500" />
+                      </div>
+                      <span className="text-sm text-muted-foreground">{t.dashboard.home.statsDeployments}</span>
                     </div>
-                    <span className="text-sm text-muted-foreground">{t.dashboard.home.statsDeployments}</span>
+                    <span className="text-lg font-semibold text-foreground">
+                      {loading ? "–" : numbers.total_deployments ?? 0}
+                    </span>
                   </div>
-                  <span className="text-lg font-semibold text-foreground">
-                    {loading ? "–" : numbers.total_deployments ?? 0}
-                  </span>
-                </div>
                 
-                <div className="h-px bg-border/60 my-2" />
-                
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <CheckCircle2 className="size-4 text-success" />
-                    <span className="text-sm text-muted-foreground">{t.dashboard.home.successRate}</span>
-                  </div>
-                  <span className={`text-sm font-medium ${successRate >= 80 ? 'text-success' : successRate >= 50 ? 'text-warning' : 'text-danger'}`}>
-                    {loading ? "–" : `${successRate}%`}
-                  </span>
+                  <div className="h-px bg-border/60 my-2" />
+
+                  <SystemStatusRow broken={attention.broken} loaded={attention.loaded} />
                 </div>
               </div>
-            </div>
+            )}
 
-            <UpdatesBlock projectCount={projects.length} loading={loading} />
+            <UpdatesBlock feed={attention} projectCount={projects.length} loading={loading} />
 
             {/* Apps — compact, colorful. Install is the fancy + in the header; the
                 empty state is a small colorful vector, no big button. */}
@@ -304,17 +301,17 @@ export default function DashboardHomeClient({ initialData }: DashboardHomeClient
                       header gap) rather than pushing the copy + 6-logo stack down.
                       Real (colorful) logos live in the bottom stack. */}
                   <svg className="-mt-1 mb-2 h-14" viewBox="0 0 130 64" fill="none">
-                    <circle cx="65" cy="32" r="22" fill="hsl(var(--primary))" fillOpacity="0.06" />
+                    <circle cx="65" cy="32" r="22" fill="var(--primary)" fillOpacity="0.06" />
                     <path d="M42 32h8" stroke="var(--th-on-12)" strokeWidth="2" strokeDasharray="3 3" strokeLinecap="round" />
                     <path d="M80 32h8" stroke="var(--th-on-12)" strokeWidth="2" strokeDasharray="3 3" strokeLinecap="round" />
                     <rect x="16" y="20" width="26" height="26" rx="8" fill="var(--th-sf-04)" stroke="var(--th-bd-default)" strokeWidth="1" />
                     <rect x="24" y="28" width="10" height="10" rx="3" fill="var(--th-on-16)" />
                     <rect x="50" y="13" width="30" height="38" rx="9" fill="var(--th-card-bg)" stroke="var(--th-bd-default)" strokeWidth="1" />
-                    <rect x="57" y="20" width="9" height="9" rx="3" fill="hsl(var(--primary))" />
+                    <rect x="57" y="20" width="9" height="9" rx="3" fill="var(--primary)" />
                     <rect x="57" y="33" width="16" height="3.5" rx="1.75" fill="var(--th-on-12)" />
                     <rect x="57" y="40" width="11" height="3.5" rx="1.75" fill="var(--th-on-08)" />
                     <rect x="88" y="20" width="26" height="26" rx="8" fill="var(--th-sf-04)" stroke="var(--th-bd-default)" strokeWidth="1" />
-                    <path d="M101 29v8M97 33h8" stroke="hsl(var(--primary))" strokeWidth="2" strokeLinecap="round" />
+                    <path d="M101 29v8M97 33h8" stroke="var(--primary)" strokeWidth="2" strokeLinecap="round" />
                     <circle cx="9" cy="13" r="3" fill="var(--th-on-10)" />
                     <circle cx="121" cy="51" r="4" fill="var(--th-on-08)" />
                   </svg>

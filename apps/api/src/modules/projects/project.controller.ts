@@ -13,7 +13,12 @@ import { assertResourceInOrg, param } from "../../lib/controller-helpers";
 import { maskDeploymentEnv } from "../../lib/secret-env";
 import { serviceKind } from "../../lib/deployable-service";
 import { reconcileProjectRoutes } from "../../lib/route-apply.service";
-import { isLoopbackHost, isReservedLoopbackPort } from "../../lib/public-endpoints";
+import {
+  isLoopbackHost,
+  isReservedLoopbackPort,
+  pickCanonicalDomainRow,
+  resolveProjectAccess,
+} from "../../lib/public-endpoints";
 import { buildUpstreamUrl, resolveRouteStrategy } from "../../lib/upstream-url";
 import { getRequestContext } from "../../lib/request-context";
 import type { RequestContext } from "../../lib/request-context";
@@ -1409,9 +1414,12 @@ export async function listBranches(c: Context) {
  * Links a GitHub repo to an existing project and registers a deploy webhook.
  */
 export async function linkRepo(c: Context) {
-  const ctx = getRequestContext(c);
   const id = param(c, "id");
-  await permission.assert(ctx, { resourceType: "project", resourceId: id, action: "write" });
+  await permission.assert(getRequestContext(c), { resourceType: "project", resourceId: id, action: "write" });
+  // ctx AFTER assert — resource-scoped org for cross-org callers; a stale org makes
+  // linkProjectRepo's assertResourceInOrg throw 404 and mis-attributes the audit
+  // record to the session org (see setSleepMode).
+  const ctx = getRequestContext(c);
   const { owner, repo, branch, installationId } = await c.req.json<{
     owner: string;
     repo: string;
@@ -1807,9 +1815,11 @@ export async function setOptions(c: Context) {
 
 /** GET /:id/commit-status — drift check for the "project outdated" banner. */
 export async function getCommitStatus(c: Context) {
-  const ctx = getRequestContext(c);
   const id = param(c, "id");
-  await permission.assert(ctx, { resourceType: "project", resourceId: id, action: "read" });
+  await permission.assert(getRequestContext(c), { resourceType: "project", resourceId: id, action: "read" });
+  // ctx AFTER assert — resource-scoped org for cross-org callers; a stale org makes
+  // getProjectCommitStatus's assertResourceInOrg throw 404 (see setSleepMode).
+  const ctx = getRequestContext(c);
   const status = await projectService.getProjectCommitStatus(ctx, id, ctx.organizationId);
   return c.json({ data: status });
 }
@@ -1822,9 +1832,12 @@ export async function getCommitStatus(c: Context) {
  * `/routing/edge-status`), so the project list and detail reads pay nothing.
  */
 export async function getPendingActions(c: Context) {
-  const ctx = getRequestContext(c);
   const id = param(c, "id");
-  await permission.assert(ctx, { resourceType: "project", resourceId: id, action: "read" });
+  await permission.assert(getRequestContext(c), { resourceType: "project", resourceId: id, action: "read" });
+  // ctx AFTER assert: it rebinds organizationId to the resource's org for cross-org
+  // (grant/admin) access. Read before, getProjectPendingActions would get the stale
+  // session org and drop every item on the org check → []. Same rule as setSleepMode.
+  const ctx = getRequestContext(c);
   const { getProjectPendingActions } = await import("./pending-actions.service");
   const actions = await getProjectPendingActions(id, ctx.organizationId);
   return c.json({ data: { actions } });
@@ -2025,12 +2038,18 @@ export async function getInfo(c: Context) {
     primary: d.isPrimary,
   }));
 
-  const verifiedPrimaryDomain =
-    rawDomains.find((domain) => domain.isPrimary && domain.verified)?.hostname ??
-    rawDomains.find((domain) => domain.verified)?.hostname ??
-    null;
   refreshProjectFaviconIfStale(project, {
-    hostname: verifiedPrimaryDomain,
+    hostname: pickCanonicalDomainRow(rawDomains)?.hostname ?? null,
+  });
+
+  // One server-computed access URL for every client surface. Derived from ALL
+  // domain rows (service-scoped included, which the project-level publicEndpoints
+  // resolver drops) + the effective deploy target, so a multi-service project
+  // with only service-scoped domains no longer falls back to localhost.
+  const access = resolveProjectAccess({
+    rows: rawDomains,
+    target: project.cloudWorkspaceId ? "cloud" : project.serverId ? "server" : "local",
+    port: project.port ?? null,
   });
 
   return c.json({
@@ -2039,6 +2058,7 @@ export async function getInfo(c: Context) {
       project: {
         ...project,
         publicEndpoints,
+        access,
         options,
         domains,
         serviceCount,

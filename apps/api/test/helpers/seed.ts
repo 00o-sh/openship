@@ -143,3 +143,52 @@ export async function seedServiceDeployment(
     .returning();
   return row!;
 }
+
+/* ── Backups ─────────────────────────────────────────────────────────────── */
+
+export async function seedBackupDestination(
+  organizationId: string,
+  over: Partial<typeof schema.backupDestination.$inferInsert> = {},
+) {
+  const id = uid("bkd");
+  const [row] = await db
+    .insert(schema.backupDestination)
+    .values({ id, organizationId, name: over.name ?? id, kind: over.kind ?? "local", ...over })
+    .returning();
+  return row!;
+}
+
+export async function seedBackupPolicy(
+  destinationId: string,
+  over: Partial<typeof schema.backupPolicy.$inferInsert> = {},
+) {
+  const id = uid("bkp");
+  const [row] = await db
+    .insert(schema.backupPolicy)
+    .values({ id, destinationId, ...over })
+    .returning();
+  return row!;
+}
+
+/**
+ * A finished run. `artifacts` is the write-once record of what was captured and
+ * how to put it back — the D5 backfill's whole subject — so callers pass it
+ * explicitly rather than getting a default they'd have to reason about.
+ */
+export async function seedBackupRun(
+  organizationId: string,
+  over: Partial<typeof schema.backupRun.$inferInsert> = {},
+) {
+  const id = uid("bkr");
+  const [row] = await db
+    .insert(schema.backupRun)
+    .values({
+      id,
+      organizationId,
+      status: over.status ?? "succeeded",
+      triggeredBy: over.triggeredBy ?? "manual",
+      ...over,
+    })
+    .returning();
+  return row!;
+}

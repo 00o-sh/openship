@@ -19,17 +19,34 @@ FROM openresty/openresty:1.27.1.1-alpine
 # (49180) transiently and the edge proxies /.well-known/acme-challenge/ to it
 # (see nginx.conf) — zero downtime, no webroot, no port-80 fight.
 # procps → `pkill` for the reload command's restart fallback.
-# curl   → optional GeoLite2 download (geo is non-fatal if absent).
+# curl   → the mgmt-API exec transport (project-analytics.ts execMgmt) reaches
+#          127.0.0.1:9145 from INSIDE this container, since network_mode: host
+#          puts that loopback out of the api container's reach.
 # openssl → the CLI (the base image ships only the libraries) for the temporary
 #           self-signed certs a domain serves until its real one is issued, so a
 #           routed host never refuses a TLS handshake. See ensureBootstrapCert in
 #           packages/adapters/src/infra/nginx.ts; without it that falls back to an
 #           HTTP-only vhost, which is what Cloudflare reports as error 525.
-RUN apk add --no-cache certbot procps curl openssl
+# libmaxminddb → the C library geo_country.lua's FFI binding loads. WITHOUT IT
+#           every country lookup returns nil: no per-country analytics is ever
+#           recorded, and rules_guard.lua's country rules fail CLOSED (a country
+#           ban blocks all traffic). It was never installed here, and the only
+#           installer (installGeoDeps) probed apt/dnf/yum but never apk — so geo
+#           has been silently dark on every containerized edge.
+RUN apk add --no-cache certbot procps curl openssl libmaxminddb
 
-# Openship Lua (rules engine + analytics + logging + webhook). Baked in at the
-# path lua_package_path resolves (`require "openship.rules_lib"` etc.).
+# Openship Lua (rules engine + analytics + logging + webhook) plus the vendored
+# maxminddb FFI binding. Baked in at the path lua_package_path resolves
+# (`require "openship.rules_lib"`, `require "openship.maxminddb"` etc.).
 COPY packages/adapters/src/infra/lua/ /usr/local/openresty/site/lualib/openship/
+
+# GeoLite2-Country, from the copy we already vendor and already treat as the
+# source of truth for the API's own lookups (apps/api/assets/geoip/README.md:
+# "production reads this shipped copy — the running server never depends on a
+# third-party mirror"). Baking it holds that line for the edge too: no runtime
+# download, and nothing to lose when the container is recreated on upgrade.
+# Refresh both copies together with `bun run update:geoip`.
+COPY apps/api/assets/geoip/GeoLite2-Country.mmdb /usr/share/GeoIP/GeoLite2-Country.mmdb
 
 # Complete config: shared dicts, lua path, ACME/default catch-all, the loopback
 # management API, and the dynamic sites-enabled include. No runtime sed.

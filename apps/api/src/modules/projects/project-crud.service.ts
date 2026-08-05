@@ -16,6 +16,8 @@ import {
   isBehind,
   GITHUB_REPO,
   normalizeRollbackWindow,
+  normalizeAliasStrict,
+  aliasConflictsWithSiblings,
   type ReleaseSource,
   type UpdatableIdentity,
 } from "@repo/core";
@@ -38,6 +40,7 @@ import { ensureSharedWebhook } from "./project-git-webhook";
 import {
   deriveEnvironmentPublicEndpoints,
   deriveNextProjectRouteState,
+  listProjectRouteRows,
   persistProjectRouteState,
   reapplyProjectLiveRoutes,
   resolveProjectRouteState,
@@ -48,6 +51,7 @@ import { applyProjectRouting } from "../domains/routing-apply.service";
 import { syncProjectManagedEdge } from "./project-runtime.service";
 import { normalizeStoredPublicEndpoints, publicEndpointHostname } from "../../lib/public-endpoints";
 import { assertFreeEndpointsAllowed } from "../../lib/free-domain-guard";
+import { assertValidCustomDomains, customHostnamesOf } from "../../lib/custom-domain-guard";
 import { hasMaskedValue, unmaskEnv } from "../../lib/secret-env";
 import { getFolderSession } from "./folder/session-store";
 import type {
@@ -156,10 +160,14 @@ export async function enrichProject(p: Project) {
   if (p.activeDeploymentId) {
     activeDep = (await repos.deployment.findById(p.activeDeploymentId)) ?? null;
     ({ deployTarget, serverId } = readDeployMeta(activeDep));
-    if (serverId) {
-      const server = await repos.server.get(serverId);
-      serverName = server?.name || server?.sshHost || null;
-    }
+  }
+  // The durable project.serverId is the source of truth for the server binding;
+  // meta.serverId is a per-deploy snapshot a fresh/partial deploy can drop. Fall
+  // back to the column so the binding (and its name) survive a stale snapshot.
+  serverId = serverId ?? p.serverId ?? null;
+  if (serverId) {
+    const server = await repos.server.get(serverId);
+    serverName = server?.name || server?.sshHost || null;
   }
 
   return {
@@ -201,6 +209,11 @@ export async function enrichProjectsBatch(
     const meta = d.meta as { serverId?: string } | null;
     if (meta?.serverId) serverIds.add(meta.serverId);
   }
+  // Prefetch the durable column's servers too — enrich coalesces to it when the
+  // snapshot meta dropped serverId, so its name must be in the map (see below).
+  for (const p of projects) {
+    if (p.serverId) serverIds.add(p.serverId);
+  }
   const servers = await repos.server
     .getMany(Array.from(serverIds))
     .catch(() => new Map<string, Server>());
@@ -216,10 +229,11 @@ export async function enrichProjectsBatch(
     if (p.activeDeploymentId) {
       activeDep = deployments.get(p.activeDeploymentId) ?? null;
       ({ deployTarget, serverId } = readDeployMeta(activeDep));
-      if (serverId) {
-        const server = servers.get(serverId);
-        serverName = server?.name || server?.sshHost || null;
-      }
+    }
+    serverId = serverId ?? p.serverId ?? null;
+    if (serverId) {
+      const server = servers.get(serverId);
+      serverName = server?.name || server?.sshHost || null;
     }
 
     return {
@@ -368,6 +382,7 @@ function buildProductionProjectInput(
     rollbackWindow:
       data.rollbackWindow !== undefined ? normalizeRollbackWindow(data.rollbackWindow) : null,
     cloudArchiveStrategy: data.cloudArchiveStrategy ?? undefined,
+    defaultRollbackStrategy: data.defaultRollbackStrategy ?? undefined,
     // Edge→app upstream addressing. Omitted → schema default "auto" (loopback-
     // port). The wizard seeds this from the user's route-strategy default.
     routeStrategy: data.routeStrategy ?? undefined,
@@ -398,12 +413,20 @@ async function persistMonorepoApps(
   // so a client echoing them back sends the sentinel — unmask-merge against the
   // stored row before persisting, same rule as persistComposeServices, else an
   // edit clobbers the stored secret / ships "••••••••" into the container.
-  const storedEnvByName = new Map<string, Record<string, string>>();
-  if (data.monorepoApps.some((app) => hasMaskedValue(app.environment))) {
-    for (const row of await repos.service.listByProjectKind(projectId, "monorepo").catch(() => [])) {
-      storedEnvByName.set(row.name, (row.environment as Record<string, string> | null) ?? {});
-    }
-  }
+  //
+  // The rows are read for the hostname gate too (#342): a sub-app's custom domain
+  // becomes a vhost like any other, so a bogus one is refused here — except when
+  // the row already carries it, which is just this payload echoing stored state back.
+  const needsRows =
+    data.monorepoApps.some((app) => hasMaskedValue(app.environment)) ||
+    customHostnamesOf(data.monorepoApps).length > 0;
+  const storedRows = needsRows
+    ? await repos.service.listByProjectKind(projectId, "monorepo").catch(() => [])
+    : [];
+  const storedEnvByName = new Map<string, Record<string, string>>(
+    storedRows.map((row) => [row.name, (row.environment as Record<string, string> | null) ?? {}]),
+  );
+  assertValidCustomDomains(data.monorepoApps, { known: customHostnamesOf(storedRows) });
 
   await repos.service.syncMonorepoApps(
     projectId,
@@ -459,6 +482,15 @@ async function persistComposeServices(
 ): Promise<void> {
   if (!data.services?.length) return;
 
+  // #342: a compose service's custom domain becomes a vhost like the project's own,
+  // so it gets the same shape gate — exempting hostnames the stored rows already
+  // carry, so re-syncing a project that holds a bad one isn't refused outright.
+  // Only reads the rows when a custom hostname is actually in play.
+  if (customHostnamesOf(data.services).length) {
+    const rows = await repos.service.listByProject(projectId).catch(() => []);
+    assertValidCustomDomains(data.services, { known: customHostnamesOf(rows) });
+  }
+
   let services: ParsedComposeServiceInput[] = data.services;
   if (services.some((svc) => hasMaskedValue(svc.environment))) {
     // Same precedence as requestBuildAccess: stored rows first, then the upload
@@ -507,6 +539,17 @@ async function createProductionProject(
       normalizeStoredPublicEndpoints(data.publicEndpoints),
     );
   }
+  // Same placement, same reason as the free-endpoint gate above: refuse a bogus
+  // custom hostname BEFORE ensureProjectApp writes a project-group row, so a rejected
+  // create leaves nothing behind (the funnel and the persist* helpers below would
+  // each catch it, but only after that row exists). Unconditional: a brand-new
+  // project has no prior hostnames, so everything in the body is net-new. #342
+  // `services` only exists on the ensure body (which creates through here too).
+  assertValidCustomDomains([
+    { publicEndpoints: data.publicEndpoints },
+    ...(data.monorepoApps ?? []),
+    ...((data as Partial<EnsureProjectBody>).services ?? []),
+  ]);
   const { app, created: appCreated } = await ensureProjectApp(data, slug, organizationId);
   const routing = deriveNextProjectRouteState({
     slug,
@@ -1042,6 +1085,17 @@ export async function updateProject(
   const p = await repos.project.findById(projectId);
   assertResourceInOrg(p, "Project", organizationId, projectId);
 
+  // Reject a bogus custom hostname before the field edits below are committed — the
+  // route sync happens after them, so validating there alone would 400 a request
+  // that had already written the rest of the patch. Net-new only (the endpoint list
+  // is authoritative, so a save echoes back hostnames the project already has —
+  // including any bad one predating this gate, which must stay removable). #342
+  if (data.publicEndpoints !== undefined) {
+    assertValidCustomDomains([{ publicEndpoints: data.publicEndpoints }], {
+      known: (await listProjectRouteRows(projectId).catch(() => [])).map((row) => row.hostname),
+    });
+  }
+
   // SECURITY (mass-assignment): pick ONLY the allow-listed editable fields from
   // the (unvalidated, type-cast) request body. A raw `{ ...data }` spread let a
   // project:write caller write arbitrary project columns — e.g. activeDeploymentId
@@ -1126,6 +1180,38 @@ export async function updateProject(
     update.defaultRollbackStrategy = data.defaultRollbackStrategy;
   }
 
+  // ── internalAlias (single-app east-west hostname) ──────────────────
+  // Normalize to a DNS label; empty/null clears it back to the default
+  // `<slug>` alias. Reject an entry that carries no usable characters so a
+  // garbage value never becomes the misleading `"service"` fallback.
+  if (data.internalAlias !== undefined) {
+    if (data.internalAlias === null || String(data.internalAlias).trim() === "") {
+      update.internalAlias = null;
+    } else {
+      const alias = normalizeAliasStrict(String(data.internalAlias));
+      if (!alias) {
+        throw new ValidationError(
+          "internalAlias must contain at least one letter or digit",
+        );
+      }
+      // Reject an internalAlias that collides with a sidecar service's name or
+      // custom alias on this project's network (embedded DNS is first-match).
+      // Skip the check on a no-op re-save of the current value so a value that
+      // already coexists stays editable. Not checked against the project's own
+      // slug: internalAlias == slug is the same single-app container answering to
+      // both names, not a collision. Runs BEFORE repos.project.update below.
+      if (alias !== normalizeAliasStrict(p.internalAlias)) {
+        const siblings = await repos.service.listByProject(projectId).catch(() => []);
+        if (aliasConflictsWithSiblings(alias, siblings)) {
+          throw new ValidationError(
+            "internalAlias collides with a service name or alias on this project",
+          );
+        }
+      }
+      update.internalAlias = alias;
+    }
+  }
+
   await repos.project.update(projectId, update);
 
   // Reconcile routes AFTER persisting the project (best-effort) — a route-sync
@@ -1193,7 +1279,13 @@ export async function updateProject(
     const refreshed = await repos.project.findById(projectId);
     if (refreshed) {
       void (async () => {
-        await reapplyProjectLiveRoutes(refreshed, previousHostnames).catch((err) =>
+        // `managedEdgeSyncedByCaller`: the `syncProjectManagedEdge` below already
+        // covers every managed hostname on the project, including the ones added by
+        // this edit. Letting the re-apply sync them too raced its own follow-up —
+        // two challenges for one target, the second resetting the first's token.
+        await reapplyProjectLiveRoutes(refreshed, previousHostnames, {
+          managedEdgeSyncedByCaller: true,
+        }).catch((err) =>
           console.warn(
             `[updateProject] live route re-apply failed (non-fatal): ${safeErrorMessage(err)}`,
           ),
@@ -1361,6 +1453,7 @@ export async function createProjectEnvironment(
     sleepMode: base.sleepMode,
     rollbackWindow: base.rollbackWindow,
     cloudArchiveStrategy: base.cloudArchiveStrategy,
+    defaultRollbackStrategy: base.defaultRollbackStrategy,
     webhookId: null,
     webhookDomain: null,
     autoDeploy: base.autoDeploy,

@@ -1,10 +1,11 @@
 import { serve } from "@hono/node-server";
-import { setBackupCredentialSecret, setDefaultEdgeImage } from "@repo/adapters";
+import { setBackupCredentialSecret, setDefaultEdgeImage, setDefaultMailImage } from "@repo/adapters";
 import { isDevWatchReload } from "@repo/db";
 import { app } from "./app";
 import { cloudRuntimeTarget, cloudRuntimeTargetId, env, runtimeTargetId } from "./config/env";
 import { getAuthMode } from "./lib/auth-mode";
 import { pinnedEdgeImage } from "./lib/edge-image";
+import { pinnedMailImage } from "./lib/mail-image";
 import { getJobRunner } from "./lib/job-runner";
 import { enforceRouteScanAtBoot } from "./lib/route-scanner";
 import { attachTunnelingLifecycle, type TunnelingLifecycle } from "./modules/tunneling";
@@ -25,6 +26,11 @@ setBackupCredentialSecret(env.BETTER_AUTH_SECRET);
 // this, any edge install that forgot to pass the pin fell back to `:latest` and
 // could run edge Lua from a different build than the API driving it.
 setDefaultEdgeImage(pinnedEdgeImage());
+
+// Same pattern for the mail engine: adapters can't derive the APP_VERSION-pinned
+// ref, so declare it once here so a mail install that passes no image still runs
+// the engine matching this build.
+setDefaultMailImage(pinnedMailImage());
 
 // Refuse to start if any registered route is mis-tagged or any
 // mutation route was mounted on a raw Hono instance (bypassing
@@ -142,6 +148,20 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
       await stopAllTunnels();
     } catch (err) {
       console.warn("[shutdown] port-forward close failed:", err);
+    }
+
+    // Health-watch Docker event streams. Each holds a `retain()` on a pooled SSH
+    // connection, so these must be released before sshManager.destroy() below —
+    // and before it, not after, so the pool isn't tearing down connections a
+    // reconnect is still trying to use. Skipped on a reload for the same reason as
+    // the tunnels: the successor's first poll tick re-subscribes.
+    try {
+      const { stopAllContainerEventWatchers } = await import(
+        "./modules/monitoring/container-events"
+      );
+      await stopAllContainerEventWatchers();
+    } catch (err) {
+      console.warn("[shutdown] container event watcher close failed:", err);
     }
   }
 

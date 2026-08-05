@@ -31,6 +31,7 @@ import {
   onFailure,
   onReconciling,
   onSuccess,
+  routeIssuesWarning,
   setDeploymentStatus,
   type LifecycleContext,
 } from "../deployment-lifecycle";
@@ -212,8 +213,7 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
   // single-app pipeline uses (`edgeUnsynced` + `deployWarning` → routingUnsynced
   // → project attention + Domains-tab dot), cleared by Retry routing / next deploy.
   const routingWarning = composeResult.routeWarnings?.length
-    ? `Some domains aren't routed yet — the app is deployed and running; fix DNS/routing and ` +
-      `Retry from the Domains tab: ${composeResult.routeWarnings.join("; ")}`
+    ? routeIssuesWarning(composeResult.routeWarnings)
     : undefined;
   const successWarning = routingWarning ?? composeResult.warning;
   await onSuccess(ctx, {

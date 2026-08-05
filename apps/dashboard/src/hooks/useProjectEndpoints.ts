@@ -39,7 +39,17 @@ interface ProjectInfoData {
 
 export interface AnalyticsSummaryResponse {
   totalRequests: number;
-  uniqueVisitors: number;
+  /** Non-static ("page") requests — NOT people. Five views from one browser = 5. */
+  pageRequests: number;
+  /**
+   * Genuinely distinct visitors, or null when this source can't tell.
+   *
+   * Non-null only where the source dedups (Oblien). The self-hosted edge dedups per
+   * DAY, which doesn't decompose into the minute buckets this summary is built
+   * from — so it's null there and the real number comes from `useAnalyticsGeo`.
+   * Null means "ask elsewhere", never "zero visitors".
+   */
+  uniqueVisitors: number | null;
   bandwidthIn: number;
   bandwidthOut: number;
   avgResponseTimeMs: number;
@@ -56,6 +66,55 @@ export interface AnalyticsPeriodResponse {
   avgResponseTimeMs: number;
 }
 
+/** /analytics/geo — the daily rollup behind the country map and top-paths list. */
+export interface AnalyticsGeoResponse {
+  total: number;
+  countries: { code: string; count: number; pct: number }[];
+  /**
+   * Distinct visitors summed PER DAY over the window, so a visitor returning on
+   * three days counts three. An UPPER bound on window-distinct visitors — the edge
+   * dedups within a day and per-day counts can't be merged without an HLL.
+   * Label it accordingly; don't render it as "visitors".
+   */
+  visitorDays: number;
+  /** Largest single day in the window — exact for that day, and a LOWER bound on
+   *  window-distinct visitors. Brackets the real number with `visitorDays`. */
+  peakDayVisitors: number;
+  topPaths: { path: string; count: number }[];
+  statuses: Record<string, number>;
+  /** False = the edge can't resolve countries at all, so an empty map is a FAULT
+   *  rather than "no visitors". Drives the advisory instead of a blank map. */
+  geoAvailable: boolean;
+  /** Visitor count may understate (edge visitor zone under eviction pressure). */
+  approximate: boolean;
+  source: "self-hosted" | "cloud" | "none";
+  /**
+   * Whether per-path aggregation is switched on for this project.
+   *
+   * "Off" and "on but nothing collected yet" both give an empty `topPaths` and need
+   * opposite UI — an Enable button versus a wait — so the two must be distinguishable.
+   * Always true for cloud, where Oblien's edge aggregates paths regardless.
+   */
+  pathsEnabled?: boolean;
+}
+
+/** /analytics/usage/history — persisted CPU/memory series from the resources:sample job. */
+export interface UsageHistoryResponse {
+  buckets: Array<{
+    minute: number;
+    cpuPercent: number;
+    memoryMb: number;
+    networkRxBytes: number;
+    networkTxBytes: number;
+    /** False when no sample landed here — render a GAP, never a zero. */
+    hasData: boolean;
+  }>;
+  services: Array<{ serviceKey: string; name: string }>;
+  granularityMinutes: number;
+  /** null = All (the per-bucket sum across services). */
+  serviceKey: string | null;
+}
+
 /** /analytics/overview — summary + periods from one server fetch (one cloud
  *  round-trip), so the dashboard doesn't hit the SaaS twice per project view. */
 export interface AnalyticsOverviewResponse {
@@ -70,7 +129,18 @@ export interface AnalyticsData {
   domain: string;
   summary: {
     totalRequests: number;
+    /**
+     * @deprecated Never was unique IPs — it's the non-static request count, which
+     * `pageRequests` now names correctly. Kept only so OverviewTab's existing card
+     * keeps rendering; new surfaces should read `pageRequests` (page views) or
+     * `uniqueVisitors` / `useAnalyticsGeo().visitors` (people).
+     */
     uniqueIPs: number;
+    /** Non-static ("page") requests. Honest name for the old `uniqueIPs`. */
+    pageRequests: number;
+    /** Real distinct visitors when the source dedups, else null — see the response
+     *  type. `useAnalyticsGeo().visitors` is the self-hosted answer. */
+    uniqueVisitors: number | null;
     uniqueRequests: number;
     totalIPs: number;
     uniqueIPsPercentage: string;
@@ -123,6 +193,8 @@ type CacheEntry<T> =
 
 const infoCache = new Map<string, CacheEntry<ProjectInfoData>>();
 const overviewCache = new Map<string, CacheEntry<AnalyticsOverviewResponse>>();
+const geoCache = new Map<string, CacheEntry<AnalyticsGeoResponse>>();
+const usageHistoryCache = new Map<string, CacheEntry<UsageHistoryResponse>>();
 
 // ─── Revision store (drives live refresh on invalidation) ──────────────────
 //
@@ -302,6 +374,39 @@ async function fetchOverview(key: string): Promise<AnalyticsOverviewResponse> {
   };
 }
 
+async function fetchGeo(key: string): Promise<AnalyticsGeoResponse> {
+  const sepIndex = key.indexOf(OVERVIEW_KEY_SEP);
+  const projectId = sepIndex === -1 ? key : key.slice(0, sepIndex);
+  const domain = sepIndex === -1 ? undefined : key.slice(sepIndex + OVERVIEW_KEY_SEP.length);
+  const response = await api.get<{ data: AnalyticsGeoResponse; success?: boolean; error?: string }>(
+    endpoints.analytics.geo,
+    { params: { projectId, ...(domain ? { domain } : {}) } },
+  );
+  if (response.success === false || !response.data) {
+    throw new Error(response.error || "Failed to load visitor geography");
+  }
+  return response.data;
+}
+
+/**
+ * Cache key for the history read. Encodes the SERIES as well as the project, so
+ * switching All ⇄ a service refetches instead of returning the previous series'
+ * numbers under the new label.
+ */
+const HISTORY_SEP = "##";
+
+async function fetchUsageHistory(key: string): Promise<UsageHistoryResponse> {
+  const [projectId, serviceKey] = key.split(HISTORY_SEP);
+  const response = await api.get<{ data: UsageHistoryResponse; success?: boolean; error?: string }>(
+    endpoints.analytics.usageHistory,
+    { params: { projectId, ...(serviceKey ? { serviceKey } : {}) } },
+  );
+  if (response.success === false || !response.data) {
+    throw new Error(response.error || "Failed to load usage history");
+  }
+  return response.data;
+}
+
 // ─── Public hooks — one per endpoint ───────────────────────────────────────
 
 /**
@@ -331,6 +436,35 @@ export function useProjectInfo(id: string | null | undefined) {
 export function useAnalyticsOverview(id: string | null | undefined, domain?: string | null) {
   const key = id ? overviewCacheKey(id, domain) : id;
   return useEndpoint(key, overviewCache, fetchOverview, id);
+}
+
+/**
+ * Fetches /analytics/geo — the daily rollup: requests per country, real distinct
+ * visitors, top paths, status mix.
+ *
+ * Separate from /analytics/overview because the two have different shapes in the
+ * edge's shared memory: overview is a per-MINUTE series (the traffic chart), this
+ * is per-DAY aggregates. Countries, visitors and paths are only kept daily —
+ * holding them per minute would multiply the edge's key cardinality by ~1440 and
+ * evict the counters they annotate.
+ */
+export function useAnalyticsGeo(id: string | null | undefined, domain?: string | null) {
+  const key = id ? overviewCacheKey(id, domain) : id;
+  return useEndpoint(key, geoCache, fetchGeo, id);
+}
+
+/**
+ * Fetches /analytics/usage/history — the persisted CPU/memory series.
+ *
+ * Separate from the live SSE stream on purpose: the stream answers "right now" at 5s
+ * and keeps nothing, this answers "what happened overnight" from the sampled buckets.
+ */
+export function useProjectUsageHistory(
+  id: string | null | undefined,
+  serviceKey?: string | null,
+) {
+  const key = id ? `${id}${HISTORY_SEP}${serviceKey ?? ""}` : id;
+  return useEndpoint(key, usageHistoryCache, fetchUsageHistory, id);
 }
 
 /**
@@ -383,18 +517,24 @@ export function mapAnalyticsData(
     1,
     Math.ceil((new Date(lastRequest).getTime() - new Date(firstRequest).getTime()) / 3_600_000),
   );
-  const uniqueIPs = summary.uniqueVisitors;
+  // Legacy `uniqueIPs` = page requests, which is what it always actually was.
+  // Preserved (rather than switched to the real visitor count) so OverviewTab's
+  // existing card keeps showing the same number it always showed instead of
+  // silently changing meaning; only its LABEL was ever wrong.
+  const pageRequests = summary.pageRequests ?? 0;
   const totalRequests = summary.totalRequests;
   return {
     success: true,
     domain,
     summary: {
       totalRequests,
-      uniqueIPs,
+      uniqueIPs: pageRequests,
+      pageRequests,
+      uniqueVisitors: summary.uniqueVisitors ?? null,
       uniqueRequests: totalRequests,
       totalIPs: totalRequests,
       uniqueIPsPercentage:
-        totalRequests > 0 ? ((uniqueIPs / totalRequests) * 100).toFixed(1) : "0.0",
+        totalRequests > 0 ? ((pageRequests / totalRequests) * 100).toFixed(1) : "0.0",
       firstRequest,
       lastRequest,
       timeRangeHours,

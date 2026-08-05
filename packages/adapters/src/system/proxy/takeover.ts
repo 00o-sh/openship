@@ -117,6 +117,12 @@ export async function registerImportedSites(
             terminatesTlsLocally: site.ssl,
             targetUrl: site.target.url,
             ...(proxyLocations.length ? { proxyLocations } : {}),
+            // Carry the source vhost's tunables (upload limit, upstream timeouts).
+            // Taking the ports over swaps the config the site is served from, so
+            // without this a 20 MB-upload site starts 413ing at nginx's 1 MB the
+            // moment we bind — a regression the operator never asked for and has
+            // no reason to connect to the takeover. Already sanitized by the parser.
+            ...(site.proxy ? { proxy: site.proxy } : {}),
           });
         } else {
           // Adopted: this root is what the operator's own proxy was already serving, so
@@ -127,6 +133,7 @@ export async function registerImportedSites(
             terminatesTlsLocally: site.ssl,
             staticRoot: site.target.root,
             staticRootAdopted: true,
+            ...(site.proxy ? { proxy: site.proxy } : {}),
           });
         }
 

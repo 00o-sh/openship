@@ -12,6 +12,7 @@ import { migrationGuard } from "./middleware/migration-guard";
 import { initPlatform } from "@repo/adapters";
 import { resolvePlatformConfig } from "./lib/controller-helpers";
 import { runWithRequestStore } from "./lib/request-store";
+import { runWithCallSource } from "./lib/call-source";
 
 import { authRoutes } from "./modules/auth/auth.routes";
 import { auth } from "./lib/auth";
@@ -24,6 +25,7 @@ import { projectConnectionRoutes } from "./modules/projects/project-connection.r
 import { projectStorageRoutes } from "./modules/projects/project-storage.routes";
 import { deploymentRoutes } from "./modules/deployments/deployment.routes";
 import { domainRoutes } from "./modules/domains/domain.routes";
+import { issuesRoutes } from "./modules/issues/issues.routes";
 import { jobRoutes } from "./modules/jobs/job.routes";
 import { noticeRoutes } from "./modules/notices/notice.routes";
 import { serviceRoutes } from "./modules/services/service.routes";
@@ -74,6 +76,10 @@ app.use("*", logger());
 // auth-mode, installations) to one call each — a single /github/status was
 // fanning out into ~6 /cloud/account + 3 installations round-trips otherwise.
 app.use("*", (_c, next) => runWithRequestStore(() => next()));
+// Ambient call source (dashboard / mcp / cli / api). Seeded here so the audit
+// emitters that run outside the handler chain — Better Auth's organization hooks
+// — can still record WHERE a member/invitation change came from.
+app.use("*", (c, next) => runWithCallSource(c, () => next()));
 app.use("*", clientIpMiddleware);
 // CSRF defence: reject mutating requests from untrusted origins BEFORE
 // the auth chain touches the session. Webhooks (Stripe, Oblien) don't
@@ -140,6 +146,8 @@ app.route("/api/audit", auditRoutes);
 app.route("/api/permissions", permissionsRoutes);
 app.route("/api/notifications", notificationsRoutes);
 app.route("/api/updates", updatesRoutes);
+// Org-wide issue feed — reads the caches the jobs above write; no detection of its own.
+app.route("/api/issues", issuesRoutes);
 app.route("/api/jobs", jobRoutes);
 // Platform status notices — banner feed (public read) + operator push (internal).
 // Both modes; primarily consumed on the SaaS.
@@ -232,8 +240,11 @@ if (env.CLOUD_MODE) {
   const { billingLocalRoutes } = await import("./modules/billing/billing-local.routes");
   app.route("/api/billing", billingLocalRoutes);
 
-  // Analytics is scraped ON-DEMAND when a server's analytics is viewed
-  // (analytics.controller → scrapeServerIfStale) — no background interval.
+  // Analytics is scraped on two triggers, neither wired here: the
+  // `analytics:scrape` system job owns durability (the edge holds counters in RAM
+  // under a TTL, so an unswept server loses them), and the read handlers scrape
+  // on view for freshness. Both go through scrapeServerIfStale, which throttles
+  // and dedups, so they collapse rather than compete.
 }
 
 // ─── Backup job runner + boot reconcile ─────────────────────────────

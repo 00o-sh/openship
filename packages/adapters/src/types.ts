@@ -278,6 +278,19 @@ export interface DeployConfig {
    *  projects that pick the same volume name never share one. */
   slug?: string;
   /**
+   * Internal DNS alias for this single-app container. When set, the container
+   * joins its `openship-<slug>` bridge network with this name as a network
+   * alias + `Hostname`, so another project linked to it (via
+   * `attachLinkedNetworks`) resolves it by name — the same east-west
+   * reachability compose services already have. This does NOT publish a public
+   * port: loopback-only publishing is unchanged and the network is the project's
+   * own boundary (a consumer only lands on it through an explicit link).
+   */
+  networkAlias?: string;
+  /** Extra network aliases (e.g. a user-chosen custom hostname) added alongside
+   *  `networkAlias`. All resolve to this container on the project network. */
+  extraAliases?: string[];
+  /**
    * Persistent mounts for this workload, in compose syntax
    * (`name:/container/path`, or a host bind mount). Already resolved from the
    * project's declaration or the stack's defaults by `resolveProjectVolumes`.

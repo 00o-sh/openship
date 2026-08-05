@@ -27,6 +27,7 @@
 
 import type { ComposeHealthcheck } from "./types";
 import type { AppManagement, AppSettingGroup } from "./app-settings";
+import { resolveServiceHostnameLabel } from "./service-routing";
 import catalog from "./apps/catalog.json";
 
 export type AppCategory =
@@ -321,6 +322,8 @@ export interface AppTemplate {
   minEngine?: string;
   /** ISO timestamp of the last catalog edit — surface-only ("template updated"). */
   updatedAt?: string;
+  /** Public source repository (or homepage) for the underlying project — surfaced as a link in the app's Source tab. */
+  repository?: string;
   name: string;
   description: string;
   /** "template" = instantiate the services below; "flow" = defer to `flowHref`. */
@@ -441,19 +444,68 @@ export function getAppConnection(template: AppTemplate): AppConnection | null {
 }
 
 /**
+ * Every route a template service DECLARES, primary first — ONE entry per port
+ * that can carry a hostname.
+ *
+ * The single authority for "what routes does this service have", shared by the
+ * install wizard's pickers and the installer's routing plan. They used to
+ * disagree: the wizard derived one endpoint per SERVICE while the plan walked
+ * every declared port, so a secondary route (Convex's 3211 HTTP-actions port)
+ * was never shown yet still got a live *.opsh.io hostname minted for it.
+ * `exposedPort` is appended when it isn't already a declared route so a
+ * service's primary port can never become unaskable.
+ */
+export function declaredServiceRoutes(
+  svc: Pick<TemplateServiceSpec, "routes" | "exposedPort">,
+): readonly { port: number; slugSuffix?: string }[] {
+  const out: { port: number; slugSuffix?: string }[] = [];
+  for (const route of svc.routes ?? []) {
+    if (out.some((r) => r.port === route.port)) continue;
+    out.push({ port: route.port, slugSuffix: route.slugSuffix });
+  }
+  if (svc.exposedPort !== undefined && !out.some((r) => r.port === svc.exposedPort)) {
+    out.push({ port: svc.exposedPort });
+  }
+  return out;
+}
+
+/**
+ * The free-subdomain LABEL an app install defaults to for one declared route.
+ *
+ * ONE answer, because the wizard PREVIEWS it and the installer PERSISTS it: the
+ * wizard used to preview the raw project name (`Convex.opsh.io`) while the
+ * installer wrote `convex-backend`, so the hostname the operator was shown was
+ * not the hostname they got.
+ */
+export function defaultAppRouteLabel(
+  projectLabel: string,
+  serviceName: string,
+  slugSuffix?: string,
+): string {
+  const base = resolveServiceHostnameLabel(projectLabel, serviceName, undefined, "compose");
+  return slugSuffix ? `${base}-${slugSuffix}` : base;
+}
+
+/**
  * Exposable endpoints for the install wizard. Uses the template's explicit
- * `endpoints` when present; otherwise derives one `http` endpoint per exposed
- * service (its primary route/exposedPort) so single-web-UI apps (Convex, n8n, …)
- * get the same one-picker flow they had before, with no per-template metadata.
+ * `endpoints` when present; otherwise derives one `http` endpoint per DECLARED
+ * ROUTE of every exposed service — one picker per port, so a multi-port service
+ * (Convex's 3210 API + 3211 HTTP actions) surfaces both instead of hiding the
+ * second behind a server-side default.
  */
 export function getAppEndpoints(template: AppTemplate): readonly AppEndpoint[] {
   if (template.endpoints && template.endpoints.length > 0) return template.endpoints;
   const derived: AppEndpoint[] = [];
   for (const svc of template.services ?? []) {
     if (!svc.exposed) continue;
-    const port = svc.exposedPort ?? svc.routes?.[0]?.port;
-    if (port === undefined) continue;
-    derived.push({ service: svc.name, port, label: svc.name, kind: "http" });
+    for (const route of declaredServiceRoutes(svc)) {
+      derived.push({
+        service: svc.name,
+        port: route.port,
+        label: route.slugSuffix ? `${svc.name} (${route.slugSuffix})` : svc.name,
+        kind: "http",
+      });
+    }
   }
   return derived;
 }

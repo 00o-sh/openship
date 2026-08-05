@@ -1,8 +1,8 @@
 /**
  * Edge-ownership consent gate — decides how to make ports 80/443 ours to bind
  * without ever blind-killing a foreign proxy. Lives with the rest of the edge
- * module (not in the generic component installer): `installOpenResty` calls this
- * at the top of its run.
+ * module (not in the generic component installer): `ensureContainerEdge` calls this
+ * before it stops or starts anything.
  */
 
 import type { CommandExecutor } from "../../types";

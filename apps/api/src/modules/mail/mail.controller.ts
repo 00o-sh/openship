@@ -43,7 +43,6 @@ import { permission } from "../../lib/permission";
 import { isServerInOrg } from "../../lib/controller-helpers";
 import {
   MAIL_SETUP_STEPS,
-  detectMailInstall,
   TOTAL_STEPS,
   STEP_RUNNERS,
   STEP_TIMEOUT_MS,
@@ -51,11 +50,12 @@ import {
   type StepResult,
   type StepLogger,
   type BasicStepFn,
-  type RebootStepFn,
   type InstallerStepFn,
+  type SslStepFn,
   type IRedMailConfig,
 } from "./mail.service";
-import { checkMailHealth, MAIL_COMPONENTS } from "./mail-health.service";
+import { checkMailHealth, mailIsServing, MAIL_COMPONENTS } from "./mail-health.service";
+import { resolveMailEngine } from "./mail-engine";
 import { updatePostmasterPassword } from "./mail-credentials.service";
 import { reserveMailSetup } from "./mail-setup-lease";
 import { applyRelayToState } from "./admin/outbound-relay.service";
@@ -256,9 +256,18 @@ export async function getStatus(c: Context) {
   }
 
   try {
-    let state = await sshManager.withExecutor(serverId, (executor) =>
-      readState(executor),
-    );
+    // One connection answers both questions: what HAS been installed (the state
+    // file) and what is actually there RIGHT NOW (the engine topology). The probe
+    // is memoized per executor and only runs on a box that has a state file, so
+    // this is two execs on a connection we were opening anyway — and it's what
+    // lets the admin panel say "the engine is stopped, here's the fix" instead of
+    // letting every tab discover it as a 409 of its own.
+    const probed = await sshManager.withExecutor(serverId, async (executor) => {
+      const found = await readState(executor);
+      const engine = found ? await resolveMailEngine(executor).catch(() => null) : null;
+      return { state: found, engine };
+    });
+    let state = probed.state;
     // Older state files (pre-IP-detection) don't carry A/AAAA records.
     // Backfill from the server's sshHost so the DNS banner doesn't have
     // a hole where the host records should be.
@@ -266,7 +275,15 @@ export async function getStatus(c: Context) {
       state = await augmentStateWithHostRecords(state, serverId);
       state = await reconcileWebmailInstalled(state, serverId);
     }
-    return c.json(statusFromState(state, serverId));
+    return c.json({
+      ...statusFromState(state, serverId),
+      // OMITTED, never nulled, when the probe couldn't conclude: absence means
+      // "we didn't look", and the dashboard banner must never claim an engine is
+      // missing off a failed read.
+      ...(probed.engine
+        ? { engine: { flavor: probed.engine.flavor, running: probed.engine.running } }
+        : {}),
+    });
   } catch {
     // SSH unreachable - treat as no-state. The dashboard handles this
     // gracefully and shows the empty form.
@@ -396,7 +413,7 @@ export async function scanMailInstall(c: Context) {
     const { iredmailInstalled, state } = await sshManager.withExecutor(
       serverId,
       async (exec) => ({
-        iredmailInstalled: await detectMailInstall(exec),
+        iredmailInstalled: await mailIsServing(exec),
         state: await readState(exec),
       }),
     );
@@ -448,7 +465,7 @@ export async function adoptMailServer(c: Context) {
     const { iredmailInstalled, state } = await sshManager.withExecutor(
       serverId,
       async (exec) => ({
-        iredmailInstalled: await detectMailInstall(exec),
+        iredmailInstalled: await mailIsServing(exec),
         state: await readState(exec),
       }),
     );
@@ -754,21 +771,20 @@ export async function startSetup(c: Context) {
 
       // ── PTR gate ──────────────────────────────────────────────────
       //
-      // Runs BEFORE the loop, so it fires when the user resumes from
-      // step 12+ with DNS acknowledged but PTR not yet. The flow is:
-      //   1. Step 11 emits dns_pending → user clicks "I've set DNS" →
-      //      ack endpoint flips dnsAcknowledged → resume with startStep=12
+      // Runs BEFORE the loop, so it fires when the user resumes from step 7+
+      // (request_ssl) with DNS acknowledged but PTR not yet. The flow is:
+      //   1. Step 6 (dkim_keys) emits dns_pending → user clicks "I've set DNS" →
+      //      ack endpoint flips dnsAcknowledged → resume with startStep=7
       //   2. Pre-loop check below: dnsAck=true, ptrAck=false → emit
       //      ptr_pending → halt
-      //   3. User clicks "I've set PTRs" → ack endpoint flips ptrAck →
-      //      resume with startStep=12 → pre-loop check passes → loop runs
+      //   3. User clicks "I've set PTRs" → ack flips ptrAck → resume with
+      //      startStep=7 → pre-loop check passes → loop runs request_ssl
       //
-      // The `startStep > 11` guard prevents the gate from firing when
-      // the user resumes from an earlier step (e.g., step 7 transfer) -
-      // in that case the loop will re-run step 11 and re-issue dns_pending,
-      // which is the right order.
+      // The `startStep > 6` guard prevents the gate from firing when the user
+      // resumes from an earlier step — the loop re-runs dkim_keys and re-issues
+      // dns_pending, which is the right order.
       if (
-        startStep > 11 &&
+        startStep > 6 &&
         state.dnsRecords &&
         state.dnsAcknowledged &&
         !state.ptrAcknowledged
@@ -812,18 +828,7 @@ export async function startSetup(c: Context) {
           // silent output. The user can Retry (and on retry, the engine's
           // status file may show the work as already done).
           const runStep = (): Promise<StepResult> => {
-            if (stepDef.key === "first_reboot" || stepDef.key === "configure_ssl") {
-              const reconnectFn = async () => {
-                sshManager.invalidate(serverId);
-                return sshManager.acquire(serverId);
-              };
-              return sshManager
-                .acquire(serverId)
-                .then((executor) =>
-                  (runner as RebootStepFn)(executor, domain, log, reconnectFn),
-                );
-            }
-            if (stepDef.key === "run_installer") {
+            if (stepDef.key === "deploy_engine") {
               const installerConfig: IRedMailConfig = {
                 ...config,
                 prefillSecrets:
@@ -831,6 +836,17 @@ export async function startSetup(c: Context) {
               };
               return sshManager.withExecutor(serverId, (executor) =>
                 (runner as InstallerStepFn)(executor, domain, log, installerConfig),
+              );
+            }
+            if (stepDef.key === "request_ssl") {
+              // Issues through `platform.ssl`, which is resolved per SERVER — so
+              // unlike every other step this one needs the server's identity, not
+              // just an executor.
+              return sshManager.withExecutor(serverId, (executor) =>
+                (runner as SslStepFn)(executor, domain, log, {
+                  serverId,
+                  organizationId: ctx.organizationId,
+                }),
               );
             }
             return sshManager.withExecutor(serverId, (executor) =>
@@ -866,10 +882,22 @@ export async function startSetup(c: Context) {
           data: result.data,
         });
 
-        // Installer step returns generated DB passwords - persist so
-        // retries reuse the same values iRedMail wrote into its configs.
-        if (stepDef.key === "run_installer" && result.data?.secrets) {
+        // The deploy step returns generated DB passwords - persist so a re-run
+        // reuses the same values the engine's first boot wrote into its configs.
+        if (stepDef.key === "deploy_engine" && result.data?.secrets) {
           state = mergeSecrets(state, result.data.secrets as Record<string, string>);
+        }
+
+        // ...and which engine image + container it brought up, so the dashboard can
+        // show the running version and the next deploy's swap compares against the
+        // real ref rather than re-deriving it.
+        if (stepDef.key === "deploy_engine" && result.data?.engine) {
+          const engine = result.data.engine as { image?: string; container?: string };
+          state = {
+            ...state,
+            ...(engine.image ? { engineImage: engine.image } : {}),
+            ...(engine.container ? { containerName: engine.container } : {}),
+          };
         }
 
         await stream.writeSSE({
@@ -1305,6 +1333,12 @@ export async function saveMailBackupPolicy(c: Context) {
       typeof body.cronExpression === "string" && body.cronExpression.trim()
         ? body.cronExpression.trim()
         : null,
+    // Omission stores null here rather than DEFAULT_RETAIN_COUNT because this is
+    // an upsert: `shared` is also the update patch, so a default would overwrite
+    // whatever the operator had set. Harmless today — `prunePolicy` skips
+    // mail-server policies outright — but when mail retention lands, omitted and
+    // explicit-null have to be told apart here or retention silently won't run
+    // for mail, which is exactly how it silently didn't run for projects.
     retainCount: typeof body.retainCount === "number" ? body.retainCount : null,
     retainDays: typeof body.retainDays === "number" ? body.retainDays : null,
     payloadKind: payload.payloadKind,
