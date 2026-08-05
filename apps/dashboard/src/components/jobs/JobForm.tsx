@@ -321,7 +321,7 @@ export function JobForm({
 
         {/* Actions */}
         <div className="flex items-center justify-end gap-2">
-          <button onClick={onCancel} className="rounded-xl border border-border px-5 py-2.5 text-sm font-medium text-foreground hover:bg-muted">{c.cancel}</button>
+          <button type="button" onClick={onCancel} className="rounded-xl border border-border px-5 py-2.5 text-sm font-medium text-foreground hover:bg-muted">{c.cancel}</button>
           <button onClick={() => void submit()} disabled={!canSave}
             className="inline-flex items-center gap-2 rounded-xl bg-primary px-6 py-2.5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40">
             {saving ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}
