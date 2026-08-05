@@ -210,7 +210,7 @@
           "--no-verbose",
           "--tries=1",
           "--spider",
-          "http://localhost:5000/status"
+          "http://127.0.0.1:5000/status"
         ],
         "interval": "5s",
         "timeout": "5s",

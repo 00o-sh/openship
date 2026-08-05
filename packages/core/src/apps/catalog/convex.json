@@ -92,7 +92,7 @@
       "service": "backend",
       "command": "./generate_admin_key.sh",
       "capture": "adminKey",
-      "capturePattern": "Admin key:\\s*(\\S+)",
+      "capturePattern": "([^\\r\\n]+)\\s*$",
       "persistAs": {
         "key": "CONVEX_ADMIN_KEY"
       },

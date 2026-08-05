@@ -234,7 +234,7 @@
               "--no-verbose",
               "--tries=1",
               "--spider",
-              "http://localhost:5000/status"
+              "http://127.0.0.1:5000/status"
             ],
             "interval": "5s",
             "timeout": "5s",
@@ -578,12 +578,8 @@
           },
           "healthcheck": {
             "test": [
-              "CMD",
-              "wget",
-              "--no-verbose",
-              "--tries=1",
-              "--spider",
-              "http://localhost:8081/"
+              "CMD-SHELL",
+              "wget -q -S --spider http://127.0.0.1:8081/ 2>&1 | grep -q \"HTTP/\""
             ],
             "interval": "10s",
             "timeout": "5s",
@@ -773,7 +769,7 @@
           "service": "backend",
           "command": "./generate_admin_key.sh",
           "capture": "adminKey",
-          "capturePattern": "Admin key:\\s*(\\S+)",
+          "capturePattern": "([^\\r\\n]+)\\s*$",
           "persistAs": {
             "key": "CONVEX_ADMIN_KEY"
           },
