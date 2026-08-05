@@ -826,6 +826,26 @@ function keepConfig(
   return carried || undefined;
 }
 
+const ACME_ENV_KEYS = [
+  "OPENSHIP_ACME_EMAIL",
+  "OPENSHIP_ACME_DIRECTORY_URL",
+  "OPENSHIP_ACME_EAB_KID",
+  "OPENSHIP_ACME_EAB_HMAC_KEY",
+  "OPENSHIP_ACME_KEY_TYPE",
+  "OPENSHIP_ACME_CA_BUNDLE",
+  "OPENSHIP_ACME_TOS_AGREED",
+] as const;
+
+/** Preserve operator-owned ACME settings, with the current shell overriding .env. */
+function renderAcmeEnv(prev: Record<string, string>): string[] {
+  return ACME_ENV_KEYS.flatMap((key) => {
+    const value = process.env[key]?.trim() || prev[key]?.trim();
+    if (!value) return [];
+    if (/[\r\n]/.test(value)) throw new Error(`${key} must be a single-line value`);
+    return [`${key}=${value}`];
+  });
+}
+
 /** The effective config for this run: flags over previous `.env` over defaults. */
 export function resolveEnvConfig(
   prev: Record<string, string>,
@@ -990,6 +1010,9 @@ function renderEnv(
     // silently defaults to 3001 when unset. Ports are dynamic now, so leaving it
     // out publishes a domain routed to a port nothing is listening on.
     `OPENSHIP_DASHBOARD_PORT=${cfg.dashPort}`,
+    // Alternate CA/EAB values are operator configuration (including one secret),
+    // so a routine `openship up`/upgrade must not silently discard them.
+    ...renderAcmeEnv(prev),
   ];
   if (cfg.bindAddr) lines.push(`OPENSHIP_BIND_ADDR=${cfg.bindAddr}`);
   // The origin allowlist. Losing either of these is the ORIGIN_REJECTED failure

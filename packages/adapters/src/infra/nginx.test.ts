@@ -1,5 +1,10 @@
 import { describe, expect, test } from "vitest";
-import { NginxProvider, renderProxyOptions, renderProxyTlsOptions } from "./nginx";
+import {
+  NginxProvider,
+  renderProxyOptions,
+  renderProxyTlsOptions,
+  type NginxProviderOptions,
+} from "./nginx";
 import {
   PROXY_DIRECTIVES,
   PROXY_GZIP_TYPES,
@@ -26,6 +31,8 @@ interface FakeOpts {
   certDomains?: string[];
   /** Simulate an edge with no `openssl` CLI (bootstrap cert can't be produced). */
   noOpenssl?: boolean;
+  provider?: Partial<NginxProviderOptions>;
+  certbotFailure?: string;
 }
 
 /** Stateful fake executor: in-memory file map + atomic-rename (`mv`) handling.
@@ -35,6 +42,7 @@ function makeExecutor(
   opts: FakeOpts,
   calls: string[],
   removed: string[] = [],
+  writes: Array<{ path: string; content: string }> = [],
 ): CommandExecutor {
   const exec = async (command: string): Promise<string> => {
     calls.push(command);
@@ -46,6 +54,9 @@ function makeExecutor(
       // the `mv` below has something to move.
       for (const m of command.matchAll(/'([^']*\.pem)'/g)) files.set(m[1], "PEM");
       return "";
+    }
+    if ((command.startsWith("certbot ") || command.startsWith("env ")) && opts.certbotFailure) {
+      throw new Error(opts.certbotFailure);
     }
     if (command.startsWith("mv -f ")) {
       // Pair swap: `mv -f 'staging/fullchain.pem' 'staging/privkey.pem' 'dir'/`
@@ -72,7 +83,7 @@ function makeExecutor(
   };
   return {
     exec,
-    writeFile: async (p: string, c: string) => { files.set(p, c); },
+    writeFile: async (p: string, c: string) => { writes.push({ path: p, content: c }); files.set(p, c); },
     readFile: async (p: string) => {
       const c = files.get(p);
       if (c === undefined) throw new Error(`ENOENT ${p}`);
@@ -89,8 +100,13 @@ function setup(opts: FakeOpts = {}) {
   const files = new Map<string, string>();
   const calls: string[] = [];
   const removed: string[] = [];
-  const nginx = new NginxProvider({ paths: PATHS, executor: makeExecutor(files, opts, calls, removed) });
-  return { nginx, files, calls, removed, conf: (slug: string) => files.get(`${SITES}/${slug}.conf`) };
+  const writes: Array<{ path: string; content: string }> = [];
+  const nginx = new NginxProvider({
+    ...opts.provider,
+    paths: PATHS,
+    executor: makeExecutor(files, opts, calls, removed, writes),
+  });
+  return { nginx, files, calls, removed, writes, conf: (slug: string) => files.get(`${SITES}/${slug}.conf`) };
 }
 
 const PROXY: RouteConfig = { domain: "app.example.com", tls: true, targetUrl: "http://127.0.0.1:3009" };
@@ -332,6 +348,129 @@ describe("NginxProvider config generation", () => {
     expect(certbot).toContain(String(ACME_HTTP01_PORT));
     expect(certbot).toContain("--cert-name");
     expect(certbot).not.toContain("--webroot");
+  });
+
+  test("alternate ACME directory, CA bundle, and key type reach certbot", async () => {
+    const { nginx, calls } = setup({
+      provider: {
+        acmeDirectoryUrl: "https://acme.example.test/directory",
+        acmeCaBundle: "/etc/ssl/private/acme-root.pem",
+        acmeKeyType: "ec384",
+      },
+    });
+    await expect(nginx.provisionCert("app.example.com")).rejects.toThrow();
+    const certbot = calls.find((c) => c.startsWith("env ") && c.includes("certbot"));
+    expect(certbot).toContain("REQUESTS_CA_BUNDLE=/etc/ssl/private/acme-root.pem");
+    expect(certbot).toContain("--server");
+    expect(certbot).toContain("https://acme.example.test/directory");
+    expect(certbot).toContain("--key-type");
+    expect(certbot).toContain("ecdsa");
+    expect(certbot).toContain("secp384r1");
+  });
+
+  test("EAB HMAC is passed through an ephemeral 0600 config and never argv or errors", async () => {
+    const hmac = "c3VwZXItc2VjcmV0LWhtYWM";
+    const { nginx, calls, writes, removed } = setup({
+      provider: { acmeEabKid: "kid-123", acmeEabHmacKey: hmac },
+      certbotFailure: `CA rejected EAB key ${hmac}`,
+    });
+    let error: Error | undefined;
+    try {
+      await nginx.provisionCert("app.example.com");
+    } catch (err) {
+      error = err as Error;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect(error?.message).not.toContain(hmac);
+    expect(error?.message).toContain("[REDACTED]");
+
+    const secretWrite = writes.find((w) => w.path.includes(".openship-eab-"));
+    expect(secretWrite?.content).toContain("eab-kid = kid-123");
+    expect(secretWrite?.content).toContain(`eab-hmac-key = ${hmac}`);
+    const certbot = calls.find((c) => c.startsWith("certbot "));
+    expect(certbot).toContain("--config");
+    expect(certbot).not.toContain(hmac);
+    const configPath = certbot?.match(/'--config' '([^']+)'/)?.[1];
+    expect(configPath).toBeDefined();
+    // git-ssh-material layout: the ini lives in its own 0700 directory (locked
+    // down BEFORE any secret bytes land, covering even the staged temp file),
+    // the file itself is chmod 600 before the rename publishes it, and cleanup
+    // removes the whole directory as a unit.
+    const secretDir = configPath!.replace(/\/eab\.ini$/, "");
+    expect(secretDir).toContain(".openship-eab-");
+    const dirChmodIdx = calls.findIndex((c) => c.startsWith("chmod ") && c.includes("'700'") && c.includes(secretDir));
+    const fileChmodIdx = calls.findIndex((c) => c.startsWith("chmod ") && c.includes("'600'") && c.includes(`${configPath}.tmp-`));
+    const publishIdx = calls.findIndex((c) => c.startsWith("mv ") && c.includes(`'${configPath}'`));
+    expect(dirChmodIdx).toBeGreaterThanOrEqual(0);
+    expect(fileChmodIdx).toBeGreaterThan(dirChmodIdx);
+    expect(publishIdx).toBeGreaterThan(fileChmodIdx);
+    expect(removed).toContain(secretDir);
+  });
+
+  test("rejects incomplete or malformed EAB configuration before issuance", () => {
+    expect(() => setup({ provider: { acmeEabKid: "kid-only" } })).toThrow(/requires both/i);
+    expect(() => setup({
+      provider: { acmeEabKid: "kid", acmeEabHmacKey: "not standard base64/+" },
+    })).toThrow(/base64url/i);
+  });
+
+  test("renewing a lineage issued by a DIFFERENT directory reissues under the configured CA", async () => {
+    const { nginx, files, calls } = setup({
+      certDomains: ["app.example.com"],
+      provider: { acmeDirectoryUrl: "https://acme.example.test/directory" },
+    });
+    // Pre-switch lineage: certbot's renewal conf records the OLD issuing server,
+    // which `renew` holds no account for after the operator changed CAs.
+    files.set(
+      "/etc/letsencrypt/renewal/app.example.com.conf",
+      "[renewalparams]\nserver = https://acme-v02.api.letsencrypt.org/directory\n",
+    );
+    await nginx.renewCert("app.example.com").catch(() => undefined);
+    const certonly = calls.find((c) => c.includes("certonly"));
+    expect(certonly).toContain("--force-renewal");
+    expect(certonly).toContain("--server");
+    expect(certonly).toContain("https://acme.example.test/directory");
+    expect(calls.find((c) => c.includes("'renew'"))).toBeUndefined();
+  });
+
+  test("renewing a lineage issued by the SAME directory renews plainly, without --server", async () => {
+    const { nginx, files, calls } = setup({
+      certDomains: ["app.example.com"],
+      provider: { acmeDirectoryUrl: "https://acme.example.test/directory" },
+    });
+    files.set(
+      "/etc/letsencrypt/renewal/app.example.com.conf",
+      "[renewalparams]\nserver = https://acme.example.test/directory\n",
+    );
+    await nginx.renewCert("app.example.com").catch(() => undefined);
+    const renew = calls.find((c) => c.startsWith("certbot ") && c.includes("'renew'"));
+    expect(renew).toContain("--cert-name");
+    expect(renew).not.toContain("--server");
+    expect(calls.find((c) => c.includes("certonly"))).toBeUndefined();
+  });
+
+  test("a renew failure never leaks the EAB HMAC in the thrown error", async () => {
+    const hmac = "c3VwZXItc2VjcmV0LWhtYWM";
+    const { nginx, files } = setup({
+      certDomains: ["app.example.com"],
+      provider: { acmeEabKid: "kid-123", acmeEabHmacKey: hmac },
+      certbotFailure: `CA rejected EAB key ${hmac}`,
+    });
+    // Matching lineage (no custom directory → certbot's Let's Encrypt default),
+    // so the PLAIN renew path runs — the one with no redacting catch of its own.
+    files.set(
+      "/etc/letsencrypt/renewal/app.example.com.conf",
+      "[renewalparams]\nserver = https://acme-v02.api.letsencrypt.org/directory\n",
+    );
+    let error: Error | undefined;
+    try {
+      await nginx.renewCert("app.example.com");
+    } catch (err) {
+      error = err as Error;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect(error?.message).not.toContain(hmac);
+    expect(error?.message).toContain("[REDACTED]");
   });
 
   test("webhook proxy adds the /_openship/hooks/ location", async () => {
