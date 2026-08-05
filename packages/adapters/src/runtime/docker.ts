@@ -23,6 +23,12 @@
  *   - TCP: mutual TLS (client cert + CA) - no plaintext TCP.
  */
 
+// `tar-fs` ships no types and `@types/tar-fs` isn't vendored; this reference
+// pulls in our local ambient declaration so tsc sees it whether the adapters
+// package compiles itself (its `src/**` glob) OR a consumer (the API) reaches
+// this file only through import resolution and never scans our src for stray
+// `.d.ts` files (#448).
+/// <reference path="./tar-fs.d.ts" />
 import Dockerode from "dockerode";
 import * as tarFs from "tar-fs";
 import { createGzip } from "node:zlib";

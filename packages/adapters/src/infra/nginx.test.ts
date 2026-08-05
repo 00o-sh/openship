@@ -13,7 +13,8 @@ import {
   type ProxySettings,
 } from "@repo/core";
 import { scanOpenshipEdge } from "../system/proxy/import/nginx";
-import { OPENRESTY_DEFAULT_PATHS, luaSourceAvailable, RULES_GUARD_PATH, ACME_HTTP01_PORT, EDGE_CHALLENGE_DIR, EDGE_CHALLENGE_ROOT, EDGE_CHALLENGE_URL_PREFIX, ensureOpenRestyConfig } from "./openresty-lua";
+import { OPENRESTY_DEFAULT_PATHS, luaSourceAvailable, RULES_GUARD_PATH, ACME_HTTP01_PORT, EDGE_CHALLENGE_DIR, EDGE_CHALLENGE_ROOT, EDGE_CHALLENGE_URL_PREFIX, ensureOpenRestyConfig, edgeDefaultCertPaths } from "./openresty-lua";
+import { EDGE_NOT_FOUND_HTML } from "./edge-not-found";
 import type { CommandExecutor, RouteConfig } from "../types";
 
 // L1 — config GENERATION. Proves NginxProvider emits the right nginx directives
@@ -118,8 +119,9 @@ const BOOTSTRAP_DIR = "/etc/letsencrypt/openship-bootstrap/app.example.com";
  * Openship Cloud's shared edge proves this box controls a routing target by fetching
  * a token over plain HTTP from the target. Every `:80` shape must answer it, because
  * any of them can be the vhost the probe lands on — and a `:443` block must NOT,
- * since the target is always schemed `http://` and there is no HTTPS catch-all
- * (the 443 default is `ssl_reject_handshake` with no locations).
+ * since the target is always schemed `http://`. The 443 catch-all is not an
+ * exception: it answers unmatched SNI with the "service not found" page and carries
+ * no challenge location, so an HTTPS probe there is a 404, never a proxied request.
  *
  * The location must also out-prefix `location /`: without it, a probe for a hostname
  * target served by a TENANT's app would be proxied INTO that app, which could then
@@ -1111,29 +1113,62 @@ describe("canonical host redirect", () => {
 
 // Security: an HTTPS request whose SNI matches no vhost must NOT fall through to
 // the first-loaded 443 server block (cross-serving another app's cert+backend).
-// The default catch-all owns `443 ssl default_server` and rejects unknown SNI.
-describe("default catch-all rejects unmatched HTTPS hosts", () => {
-  test("ensureOpenRestyConfig writes a 443 default_server that rejects unknown SNI", async () => {
+// The default catch-all owns `443 ssl default_server` and answers there itself.
+describe("default catch-all owns unmatched HTTPS hosts", () => {
+  test("ensureOpenRestyConfig writes a 443 default_server serving the not-found page", async () => {
     const files = new Map<string, string>();
     const calls: string[] = [];
     // nginx.conf already present → exercises the steady-state path (not bootstrap).
     files.set(PATHS.confPath, `http {\n    include ${SITES}/*.conf;\n}\n`);
+    // openssl succeeds here, so the placeholder cert exists and the handshake can
+    // complete — the point of #431.
     await ensureOpenRestyConfig(makeExecutor(files, {}, calls), PATHS);
     const def = files.get(`${SITES}/_default.conf`);
     expect(def).toBeDefined();
     expect(def).toContain("listen 443 ssl default_server;");
-    expect(def).toContain("ssl_reject_handshake on;");
-    // and the HTTP catch-all stays a default_server too (no fallthrough on :80).
+    const { certPath, keyPath } = edgeDefaultCertPaths(PATHS.confDir);
+    expect(def).toContain(`ssl_certificate ${certPath};`);
+    expect(def).toContain(`ssl_certificate_key ${keyPath};`);
+    expect(def).toContain(EDGE_NOT_FOUND_HTML);
+    // and the HTTP catch-all stays a default_server too (no fallthrough on :80),
+    // now answering with the same page instead of a bare `return 404`.
     expect(def).toContain("listen 80 default_server;");
+    expect(calls.some((c) => c.includes("openssl req -x509"))).toBe(true);
+  });
+
+  test("falls back to refusing the handshake when the cert cannot be made", async () => {
+    // The fail-safe that matters most: naming an ssl_certificate that is not on disk
+    // does not cost us a page, it stops OpenResty loading the config at all — so
+    // `openresty -t` fails, the deploy's reload is refused, and every later route
+    // change on the box is refused with it. A box with no openssl keeps the
+    // unfriendly TLS error; it does not lose routing.
+    const files = new Map<string, string>();
+    files.set(PATHS.confPath, `http {\n    include ${SITES}/*.conf;\n}\n`);
+    await ensureOpenRestyConfig(makeExecutor(files, { noOpenssl: true }, []), PATHS);
+    const def = files.get(`${SITES}/_default.conf`)!;
+    expect(def).toContain("ssl_reject_handshake on;");
+    expect(def).not.toContain("ssl_certificate ");
+    // The :80 half still lands — it needs no certificate.
+    expect(def).toContain(EDGE_NOT_FOUND_HTML);
+  });
+
+  test("the 443 catch-all is a dead end — it never proxies or serves a real cert", async () => {
+    const files = new Map<string, string>();
+    files.set(PATHS.confPath, `http {\n    include ${SITES}/*.conf;\n}\n`);
+    await ensureOpenRestyConfig(makeExecutor(files, {}, []), PATHS);
+    const def = files.get(`${SITES}/_default.conf`)!;
+    const https = def.slice(def.indexOf("listen 443 ssl default_server;"));
+    expect(https).not.toContain("proxy_pass");
+    expect(https).not.toContain("/etc/letsencrypt");
   });
 
   test("catch-all is re-written on every ensure (self-heals a stale 80-only copy)", async () => {
     const files = new Map<string, string>();
     files.set(PATHS.confPath, `http {\n    include ${SITES}/*.conf;\n}\n`);
-    // Simulate an already-deployed box whose _default.conf predates the 443 reject.
+    // Simulate an already-deployed box whose _default.conf predates the 443 default.
     files.set(`${SITES}/_default.conf`, "server {\n    listen 80 default_server;\n}\n");
     await ensureOpenRestyConfig(makeExecutor(files, {}, []), PATHS);
-    expect(files.get(`${SITES}/_default.conf`)).toContain("ssl_reject_handshake on;");
+    expect(files.get(`${SITES}/_default.conf`)).toContain("listen 443 ssl default_server;");
   });
 
   test("does NOT carry the edge-target challenge — that block is never evaluated", async () => {
