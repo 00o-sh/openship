@@ -169,19 +169,28 @@ describe("reconcileStack", () => {
     expect(netWarning).not.toContain("myapp_default");
   });
 
+  const withDefaults = reconcileStack({
+    serverId: "srv-1",
+    details: [DB],
+    volumes: VOLUMES,
+    networks: NETWORKS,
+    declared: declaredMap(COMPOSE),
+    alreadyManaged: 0,
+    imageDefaults: new Map([["postgres:16", new Set(["PATH=/usr/bin", "LANG=C.UTF-8"])]]),
+  });
+
   it("subtracts image-default env, keeping user-set vars", () => {
-    const withDefaults = reconcileStack({
-      serverId: "srv-1",
-      details: [DB],
-      volumes: VOLUMES,
-      networks: NETWORKS,
-      declared: declaredMap(COMPOSE),
-      alreadyManaged: 0,
-      imageDefaults: new Map([["postgres:16", new Set(["PATH=/usr/bin", "LANG=C.UTF-8"])]]),
-    });
     const db = withDefaults.services.find((s) => s.name === "db")!;
     // LANG is an image default (dropped), PATH is denylisted, POSTGRES_PASSWORD survives.
     expect(db.env).toEqual({ POSTGRES_PASSWORD: "secret" });
+  });
+
+  it("names the env it dropped instead of omitting it silently", () => {
+    const db = withDefaults.services.find((s) => s.name === "db")!;
+    const dropped = db.warnings.find((w) => w.includes("Env not imported"));
+    // LANG is what was subtracted; PATH is denylisted noise and was never config.
+    expect(dropped).toContain("LANG");
+    expect(dropped).not.toContain("PATH");
   });
 
   const coolify = reconcileStack({
@@ -201,6 +210,14 @@ describe("reconcileStack", () => {
       NODE_ENV: "production",
       DATABASE_URL: "postgres://db:5432/app",
     });
+  });
+
+  it("has nothing to report as dropped on a Coolify container", () => {
+    // The two halves of the #394 fix meet here: Coolify containers subtract no
+    // image defaults at all, so the drop report must stay silent rather than
+    // listing every variable the Nixpacks image happens to bake in.
+    const app = coolify.services.find((s) => s.name === "app-kso4gc8")!;
+    expect(app.warnings.some((w) => w.includes("Env not imported"))).toBe(false);
   });
 
   it("reports the Coolify variables Docker cannot expose", () => {
