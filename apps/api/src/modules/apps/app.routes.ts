@@ -51,7 +51,10 @@ r.post(
     collection: true,
     projectCreate: true,
     body: InstallAppBody,
-    mcp: { description: "Install an app from the catalog as a project (or return a flow route for wizard apps)." },
+    mcp: {
+      description:
+        "Install an app from the catalog as a project (or return a flow route for wizard apps). Public hostnames come ONLY from `routes` — omit it and the app installs port-only (no domain is invented).",
+    },
   },
   ctrl.install,
 );

@@ -136,6 +136,20 @@ const envSchema = z.object({
    */
   OPENSHIP_PROMPT_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
 
+  /**
+   * Escape hatch for the container health watch's Docker event streams (one
+   * persistent `/events` subscription per server, which is what cuts failure
+   * detection from ~90s to ~10s — see modules/monitoring/container-events).
+   *
+   * Setting this does NOT disable monitoring: the once-a-minute poll keeps running
+   * and every alert still fires, just at the slower cadence. It exists for a box
+   * where the persistent connection itself is the problem (a flaky link that
+   * reconnect-storms, an audited daemon), so nobody has to choose between "no
+   * event stream" and "no health watch". To mute monitoring entirely, disable the
+   * `services:health-watch` job — which also drains these streams.
+   */
+  OPENSHIP_DISABLE_CONTAINER_EVENTS: envBool("false"),
+
   /* ---------- Mode ---------- */
   CLOUD_MODE: envBool("false"),
   /**

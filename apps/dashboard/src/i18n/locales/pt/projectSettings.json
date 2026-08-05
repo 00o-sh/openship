@@ -102,6 +102,19 @@
         "saved": "Roteamento definido como {mode}",
         "failed": "Falha ao atualizar o roteamento"
       }
+    },
+    "internalAlias": {
+      "title": "Nome de host interno",
+      "description": "Nome personalizado que outros serviços usam para alcançar este app de forma privada",
+      "intro": "Defina um nome DNS adicional para este app na sua rede de projeto privada. Ele é resolvido junto com o padrão (o slug do projeto) — outros serviços vinculados podem usar qualquer um. O acesso público permanece inalterado; isto nunca expõe uma porta.",
+      "label": "Alias de nome de host",
+      "hint": "Apenas letras, dígitos e hífens. Deixe vazio para usar o slug do projeto.",
+      "save": "Salvar",
+      "toast": {
+        "saved": "Nome de host interno atualizado",
+        "failed": "Não foi possível atualizar o nome de host interno",
+        "invalid": "Digite ao menos uma letra ou dígito"
+      }
     }
   },
   "backup": {

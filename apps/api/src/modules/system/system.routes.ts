@@ -24,6 +24,7 @@ import * as rateLimit from "./rate-limit.controller";
 import * as tunnels from "./tunnels.controller";
 import * as serverGithub from "../github/server-github.controller";
 import * as serverModules from "./server-modules.controller";
+import * as serverContainers from "./server-containers.controller";
 import * as migration from "./migration/migration.controller";
 import * as dataTransfer from "./data-transfer/data-transfer.controller";
 import * as systemHealth from "./system-health.controller";
@@ -129,6 +130,25 @@ r.post("/servers/:id/ports/scan", { tag: "server:read", readOnly: true }, server
 r.get("/servers/:id/modules", { tag: "server:read" }, serverModules.listServerModules);
 r.post("/servers/:id/modules/scan", { tag: "server:write" }, serverModules.scanServerModules);
 r.post("/servers/:id/modules/:module/apply", { tag: "server:write" }, serverModules.applyServerModuleUpdate);
+
+// ── Managed CONTAINER versioning (edge / mail images pinned to APP_VERSION).
+//    Same `:id`-server permission resource + cloud/org guards as modules; apply
+//    STREAMS the rollback-guarded image swap. ──
+// Org-wide drift count for the home nudge — no :id, so collection:true scopes
+// the permission check to the active org (like /install/stream, /monitor/stream)
+// instead of demanding a server param.
+r.get("/containers/behind", { tag: "server:read", collection: true }, serverContainers.containersBehind);
+r.get("/containers/issues", { tag: "server:read", collection: true }, serverContainers.containerIssues);
+// Global infra view — every server × component. No :id, so collection:true scopes
+// the check to the active org (same as /containers/behind). Scan is detect-only.
+r.get("/containers", { tag: "server:read", collection: true }, serverContainers.listAllContainers);
+r.post("/containers/scan", { tag: "server:write", collection: true }, serverContainers.scanAllContainers);
+// Fleet bulk apply — targets are derived from the cache server-side, so the body
+// only carries which intents to run ("update" swaps, "repair" restarts).
+r.post("/containers/apply-all", { tag: "server:write", collection: true }, serverContainers.applyAllContainers);
+r.get("/servers/:id/containers", { tag: "server:read" }, serverContainers.listServerContainers);
+r.post("/servers/:id/containers/scan", { tag: "server:write" }, serverContainers.scanServerContainers);
+r.post("/servers/:id/containers/:component/apply/stream", { tag: "server:write" }, serverContainers.applyServerContainerStream);
 
 // ── Per-server GitHub auth (self-hosted): device-login token / PAT / SSH
 //    server-key / per-repo deploy-key. The `:id` server is the permission

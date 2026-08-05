@@ -107,6 +107,12 @@ export class BareRuntime implements RuntimeAdapter {
     "destroy",
     "runtimeLogs",
     "streamLogs",
+    // Real measurements now (cgroup → /proc → ps, via the supervisor), so this can
+    // finally be declared. It was absent while getUsage returned a zeros stub — but
+    // nothing checked, so callers rendered those zeros as data. Anything reading
+    // usage should gate on supports("usage") rather than trust the numbers.
+    // Network is the one gap: per-process rx/tx needs eBPF or a netns, so it stays 0.
+    "usage",
     "containerIp",
     "rollback",
     // The release dir + supervisor unit survive a redeploy, so restoring a
@@ -851,11 +857,19 @@ export class BareRuntime implements RuntimeAdapter {
     return sv.streamLogs(containerId, onLog, opts);
   }
 
-  async getUsage(_containerId: string): Promise<ResourceUsage> {
-    // Resource usage monitoring is supervisor-independent - systemd can use
-    // cgroup stats, nohup can use /proc. For now return zeros; the dashboard
-    // already handles this gracefully.
-    return { cpuPercent: 0, memoryMb: 0, diskMb: 0, networkRxBytes: 0, networkTxBytes: 0 };
+  /**
+   * CPU / memory / disk-IO for the deployment's process.
+   *
+   * `containerId` is the DEPLOYMENT id here, not a docker container id — that's the
+   * bare runtime's convention throughout (it's what the supervisor keys units and
+   * PID files on).
+   *
+   * The supervisor owns the measurement because the identity differs: systemd has a
+   * unit and a cgroup, nohup has a PID file. Both land on the same probe.
+   */
+  async getUsage(containerId: string): Promise<ResourceUsage> {
+    const sv = await this.supervisor();
+    return sv.getUsage(containerId);
   }
 
   // ── Network ────────────────────────────────────────────────────────────

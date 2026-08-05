@@ -194,7 +194,7 @@ export const OPENSHIP_READINESS_FAILURE_ACTIONS: readonly OpenshipReadinessFailu
  * `advanced` as sent on a WRITE, rather than as stored.
  *
  * Every key is additionally nullable because the server MERGES this onto the
- * stored blob instead of replacing it (mergeAdvanced in service.service.ts):
+ * stored blob instead of replacing it (`mergeAdvanced`, below):
  *   omitted → leave the stored value alone
  *   null    → remove that key
  * Replacing wholesale meant any caller that mentioned one key silently dropped the
@@ -234,7 +234,47 @@ export type ComposeAdvanced = {
    * UNLIMITED_RESOURCES in ./resources).
    */
   resources?: { cpuCores?: number; memoryMb?: number };
+  /**
+   * Custom east-west DNS alias for this service, resolving ALONGSIDE the default
+   * `service.name` on the project network — both names reach the container. Set
+   * so another service can address this one by a stable, operator-chosen name
+   * (e.g. `db` instead of `postgres-1`). Normalized with `normalizeServiceLabel`
+   * before it reaches Docker; the single-app equivalent is `project.internal_alias`.
+   * An alias existing is not exposure — publish stays loopback-only behind the edge.
+   */
+  alias?: string;
 };
+
+/**
+ * Merge an incoming `advanced` patch onto what's stored, so a caller that mentions
+ * one key can't erase the others.
+ *
+ * Semantics, mirroring how a JSON-merge patch behaves:
+ *   key absent  → leave the stored value alone
+ *   key = null  → remove it
+ *   key present → replace that key outright (shallow — see the call site)
+ *
+ * Lives beside the type it operates on because @repo/db needs it too: the compose
+ * sync in service.repo.ts writes this blob and cannot import from apps/api. It is
+ * the only thing standing between a partial write and a silently-wiped readiness
+ * gate, generated config files, or an east-west alias.
+ */
+export function mergeAdvanced(
+  stored: ComposeAdvanced | null | undefined,
+  incoming: unknown,
+): ComposeAdvanced {
+  const base: ComposeAdvanced = { ...(stored ?? {}) };
+  // A non-object (or explicit null) `advanced` means "clear it" — the one way to
+  // reset the whole blob, kept because that used to be the only behaviour.
+  if (incoming === null || typeof incoming !== "object" || Array.isArray(incoming)) {
+    return incoming === undefined ? base : {};
+  }
+  for (const [key, value] of Object.entries(incoming as Record<string, unknown>)) {
+    if (value === null) delete (base as Record<string, unknown>)[key];
+    else if (value !== undefined) (base as Record<string, unknown>)[key] = value;
+  }
+  return base;
+}
 
 /**
  * Per-route edge rules (rate-limit, ban, allow/deny) enforced by the self-hosted

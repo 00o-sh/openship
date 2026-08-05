@@ -225,6 +225,7 @@ export const appTemplateSchema = z.object({
   schemaVersion: z.number().optional(),
   minEngine: z.string().optional(),
   updatedAt: z.string().optional(),
+  repository: z.string().url().optional(),
 }).superRefine((data, ctx) => {
   // Referential integrity — catch dangling references at the gate rather than at
   // deploy time. Only enforced when the template declares services (flow apps

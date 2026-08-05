@@ -37,7 +37,7 @@ import { getInstanceReachability } from "../../lib/public-url";
 import { sshManager } from "../../lib/ssh-manager";
 import { encryptSecretField } from "@/lib/credential-encryption";
 import { ensureLocalUser, invalidateLocalUserCache } from "../../lib/local-user";
-import { ensureLocalServerRegistered } from "../../lib/startup/self-server";
+import { ensureLocalServer } from "../../lib/startup/self-server";
 import { provisionUser } from "../../lib/provision-user";
 import { COOKIE_PREFIX } from "../../lib/auth";
 import { mintSession } from "../../lib/cloud-auth-proxy";
@@ -243,6 +243,11 @@ export async function getSetup(c: Context) {
     teamMode: settings?.teamMode ?? "single_user",
     migrationTargetUrl: settings?.migrationTargetUrl ?? null,
     migratedAt: settings?.migratedAt?.toISOString() ?? null,
+    // Instance-wide auto-update of remote edge/mail containers when this control
+    // plane's APP_VERSION moves forward. Server-side (works on desktop too),
+    // distinct from the desktop-only Electron app auto-update.
+    autoUpdateInfra: settings?.autoUpdateInfra ?? false,
+    autoScanInfra: settings?.autoScanInfra ?? true,
     teamReachability,
   });
 }
@@ -288,6 +293,8 @@ export async function updateSettings(c: Context) {
     }
     patch.invitationMailSource = raw;
   }
+  if (body.autoUpdateInfra !== undefined) patch.autoUpdateInfra = Boolean(body.autoUpdateInfra);
+  if (body.autoScanInfra !== undefined) patch.autoScanInfra = Boolean(body.autoScanInfra);
 
   if (Object.keys(patch).length === 0) {
     return c.json({ error: "No fields to update" }, 400);
@@ -570,7 +577,7 @@ export async function bootstrapAdmin(c: Context) {
   // "No servers yet" until the API happened to restart, even though Openship itself
   // was listed under Apps. Best-effort: a failure here must not fail the bootstrap,
   // since the boot hook will still catch it on the next restart.
-  await ensureLocalServerRegistered().catch((err) =>
+  await ensureLocalServer().catch((err) =>
     console.warn("[setup] local server registration deferred to next boot:", safeErrorMessage(err)),
   );
 
@@ -660,6 +667,15 @@ export async function resetAdminPassword(c: Context) {
   await repos.session.revokeAllForUser(admin.id);
   invalidateLocalUserCache();
   clearAuthModeCache();
+
+  // Same invariant as bootstrap-admin: an admin exists, so this box can own its
+  // "This Server" row. The free-domain install lands HERE and not there —
+  // cloud-connect runs first and mirrors the cloud user into a real admin, so
+  // bootstrap-admin 409s and the CLI falls back to this endpoint. Hanging
+  // registration off bootstrap alone is what left those boxes with no server.
+  await ensureLocalServer().catch((err) =>
+    console.warn("[setup] local server registration deferred to next boot:", safeErrorMessage(err)),
+  );
 
   // The admin's personal org (org_<id>) is created by provisionUser, so record
   // against it — the literal "instance" has no organization row and the audit

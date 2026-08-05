@@ -176,18 +176,36 @@ function normalizeHostPorts(
   claimed: Set<number>,
 ): { ports: string[]; droppedDuplicates: number[] } {
   const droppedDuplicates: number[] = [];
-  const out = ports.map((spec) => {
+  const out: string[] = [];
+  for (const spec of ports) {
     const { host, container, proto } = parseComposePort(spec);
     const containerOnly = proto ? `${container}/${proto}` : container;
-    if (host == null) return spec; // container-only expose — nothing published
-    if (EDGE_PORTS.has(host)) return containerOnly; // edge → OpenResty
+    if (host == null) {
+      // DROP a bare "<port>" — it does NOT mean "nothing published". A single-part
+      // compose `ports:` entry publishes the container port on a RANDOM host port
+      // (docker: `HostPort: ""`). Adoption deliberately leaves services UNEXPOSED
+      // (routing + its pinned loopback host port are added later from the Domains
+      // tab), so an internal / expose-only port — e.g. a database's 5432 that the
+      // source never published — must not be host-published here: doing so
+      // needlessly exposes the DB and collides with whatever already holds a host
+      // port on the box (#388). Compose service-to-service still resolves the
+      // container by name over the shared network with no `ports:` entry, so this
+      // is safe; the discovered ports are untouched, so the wizard still shows the
+      // port for the operator to route to.
+      continue;
+    }
+    if (EDGE_PORTS.has(host)) {
+      out.push(containerOnly); // edge → OpenResty owns 80/443
+      continue;
+    }
     if (claimed.has(host)) {
       droppedDuplicates.push(host);
-      return containerOnly; // duplicate host port — keep only the container side
+      out.push(containerOnly); // duplicate host port — keep only the container side
+      continue;
     }
     claimed.add(host);
-    return spec; // unique host publish — keep as-is
-  });
+    out.push(spec); // unique host publish — keep as-is
+  }
   return { ports: out, droppedDuplicates };
 }
 

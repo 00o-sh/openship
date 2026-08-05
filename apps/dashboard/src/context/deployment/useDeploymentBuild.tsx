@@ -738,7 +738,10 @@ export function useDeploymentBuild(
         packageManager: config.packageManager,
         buildImage: config.buildImage,
         buildCommand: config.options.buildCommand,
-        outputDirectory: config.options.outputDirectory,
+        // Blank default must be OMITTED, not sent as "": the ensure schema's
+        // outputDirectory pattern rejects an empty string → 400 before the
+        // handler (#427). Mirror productionPaths' `|| undefined` on the line below.
+        outputDirectory: config.options.outputDirectory || undefined,
         productionPaths: config.options.productionPaths || undefined,
         installCommand: config.options.installCommand,
         startCommand: config.options.startCommand,

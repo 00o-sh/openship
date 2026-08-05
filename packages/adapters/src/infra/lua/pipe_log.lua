@@ -19,8 +19,11 @@ if not geo_ok then geo = nil end
 -- Reused payload table per worker (cleared after encode to avoid GC pressure)
 local payload = {}
 
+-- `cc` is the country site_logger already resolved for this request. Passed in rather
+-- than looked up again: one mmdb hit per request, and the live frame can never disagree
+-- with the rollup or the ring buffer about where a hit came from.
 local function pipe_request_log(premature, host, ip, ts, ua, uri,
-                                req_len, bytes, rt, method, status)
+                                req_len, bytes, rt, method, status, cc)
     if premature then return end
 
     local sh = ngx.shared.request_data
@@ -30,9 +33,12 @@ local function pipe_request_log(premature, host, ip, ts, ua, uri,
     if not sh:get(SUB_PREFIX .. host) then return end
 
     pcall(function()
-        local country = nil
-        if geo and geo.get_country_code then
-            country = geo.get_country_code(ip)
+        -- Falls back to its own lookup only if the caller passed nothing, which happens
+        -- when a box is mid-deploy and still has the previous site_logger.
+        local country = cc
+        if (not country or country == "") and geo and geo.get_country_code then
+            local ok_cc, res = pcall(geo.get_country_code, ip)
+            if ok_cc then country = res end
         end
 
         payload.id           = string.format("%.3f-%d", ts, math.random(10000, 99999))

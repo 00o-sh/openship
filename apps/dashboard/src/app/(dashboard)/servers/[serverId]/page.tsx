@@ -37,6 +37,7 @@ import { ServerForm } from "../_components/server-form";
 import { OverviewTab } from "./_components/overview-tab";
 import { ComponentsTab } from "./_components/components-tab";
 import { ServerModuleUpdates } from "./_components/module-updates";
+import { ServerContainerUpdates } from "./_components/container-updates";
 import { TerminalTab } from "./_components/terminal-tab";
 import {
   ConnectionBanner,
@@ -711,6 +712,7 @@ export default function ServerDetailPage({
 
             {activeTab === "components" && (
               <>
+              {serverId && <ServerContainerUpdates serverId={serverId} />}
               {serverId && <ServerModuleUpdates serverId={serverId} />}
               <ComponentsTab
                 components={components}

@@ -24,6 +24,18 @@ const svc = (over: Partial<DiscoveredService> & { name: string }): DiscoveredSer
     ...over,
   }) as DiscoveredService;
 
+describe("buildAdoptedServiceRows — adoption never host-publishes an internal port (#388)", () => {
+  it("drops a bare/expose-only container port so an internal DB (e.g. postgres 5432) isn't re-published on a random host port", () => {
+    const { rows } = buildAdoptedServiceRows([svc({ name: "postgres", ports: ["5432"] })], new Set(["postgres"]));
+    expect(rows[0]?.ports ?? []).toEqual([]);
+  });
+
+  it("keeps a genuinely published host mapping", () => {
+    const { rows } = buildAdoptedServiceRows([svc({ name: "web", ports: ["8080:80"] })], new Set(["web"]));
+    expect(rows[0]?.ports).toContain("8080:80");
+  });
+});
+
 describe("buildAdoptedServiceRows — repo-service rename (migration mapping)", () => {
   it("names the adopted row after the mapped repo service AND preserves the live volume + image", () => {
     // The exact same-server case: a moved `postgres` container mapped to the

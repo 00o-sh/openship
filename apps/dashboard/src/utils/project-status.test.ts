@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { getProjectStatus } from "./project-status";
+import { getProjectStatus, projectDisplayDomain } from "./project-status";
 import {
   calculateDeploymentStats,
   filterDeployments,
@@ -68,6 +68,72 @@ describe("getProjectStatus — a blocked deploy needs attention", () => {
   it("keeps the existing attention triggers working", () => {
     expect(getProjectStatus({ activeDeploymentId: "d", awaitingDecision: true })).toBe("attention");
     expect(getProjectStatus({ activeDeploymentId: "d", routingUnsynced: true })).toBe("attention");
+  });
+});
+
+describe("getProjectStatus — a failed latest deploy is never Live", () => {
+  it("reports failed when the only deploy failed", () => {
+    expect(getProjectStatus({ latestDeploymentId: "d1", latestDeploymentStatus: "failed" })).toBe(
+      "failed",
+    );
+  });
+
+  it("reports failed when the failed deploy is somehow also the live pointer", () => {
+    // Shouldn't happen (a failure never advances the pointer) but if it does,
+    // "live" is the one answer that is definitely wrong.
+    expect(
+      getProjectStatus({
+        activeDeploymentId: "d1",
+        latestDeploymentId: "d1",
+        latestDeploymentStatus: "failed",
+      }),
+    ).toBe("failed");
+  });
+
+  it("reports attention — not live — when an older release serves and the newest deploy failed", () => {
+    // The site IS up, so "failed" would be a lie; the newest deploy died, so
+    // "live" hides it. Same signal the other operator-needed states use.
+    expect(
+      getProjectStatus({
+        activeDeploymentId: "d1",
+        latestDeploymentId: "d2",
+        latestDeploymentStatus: "failed",
+      }),
+    ).toBe("attention");
+  });
+
+  it("reports attention for a failed latest even when the caller omits latestDeploymentId", () => {
+    // Environment summaries pass activeDeploymentId + status only. A failure
+    // never advances the pointer, so a set pointer means an older release.
+    expect(getProjectStatus({ activeDeploymentId: "d1", latestDeploymentStatus: "failed" })).toBe(
+      "attention",
+    );
+  });
+
+  it("keeps a blocked latest at attention even with a live release", () => {
+    expect(
+      getProjectStatus({ activeDeploymentId: "d1", latestDeploymentStatus: "action_required" }),
+    ).toBe("attention");
+  });
+
+  it("still reports live for the self-app, which has no deployment at all", () => {
+    expect(getProjectStatus({ appTemplateId: "openship", latestDeploymentStatus: "failed" })).toBe(
+      "live",
+    );
+  });
+});
+
+describe("projectDisplayDomain — only a persisted route", () => {
+  it("returns nothing when the project has no route", () => {
+    // Was `<slug>.<baseDomain>`: the Apps list advertised "convex.opsh.io" for a
+    // project whose Domains page correctly said "No domain".
+    expect(projectDisplayDomain({})).toBeNull();
+    expect(projectDisplayDomain({ primaryDomain: null })).toBeNull();
+    expect(projectDisplayDomain({ primaryDomain: "   " })).toBeNull();
+  });
+
+  it("returns the persisted primary route", () => {
+    expect(projectDisplayDomain({ primaryDomain: "convex.example.com" })).toBe("convex.example.com");
   });
 });
 

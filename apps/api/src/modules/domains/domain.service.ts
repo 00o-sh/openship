@@ -33,7 +33,7 @@ import { generateToken } from "../../lib/domain-token";
 import { untrackedSiteFor } from "../../lib/edge-orphans.service";
 import { publicEndpointHostname, resolveServicePublicEndpoints } from "../../lib/public-endpoints";
 import { sshManager } from "../../lib/ssh-manager";
-import type { DeploymentMeta } from "../../lib/deployment-runtime";
+import { resolveServerIdForProject, withServerHostExecutor } from "../../lib/edge-host-executor";
 import {
   assertRedirectSupported,
   assertRedirectTargets,
@@ -481,36 +481,6 @@ async function markDomainVerifiedActive(
   });
 }
 
-/** The server the project's active deployment runs on (for edge/cert reads). */
-async function resolveServerIdForProject(project: Project): Promise<string | null> {
-  if (!project.activeDeploymentId) return null;
-  const dep = await repos.deployment.findById(project.activeDeploymentId).catch(() => null);
-  return (dep?.meta as DeploymentMeta | undefined)?.serverId ?? null;
-}
-
-/**
- * Run `fn` with an executor that reaches the BOX the project's edge lives on —
- * the same host the bare/containerized OpenResty + certbot + /etc/letsencrypt sit
- * on. For the auto-registered "this server" (server-host mode) that's
- * `createHostExecutor()` (the LOCAL host — SSH-to-host when the API is itself
- * containerized); for a real remote server it's the pooled SSH executor. Returns
- * null when there's no server or the box is unreachable. This is what lets cert
- * reuse read the HOST's /etc/letsencrypt even when the API runs in a container
- * whose own /etc/letsencrypt is a different (empty) volume.
- */
-async function withServerHostExecutor<T>(
-  ctx: RequestContext,
-  project: Project,
-  fn: (exec: CommandExecutor) => Promise<T>,
-): Promise<T | null> {
-  const serverId = await resolveServerIdForProject(project);
-  if (!serverId) return null;
-  // No local/remote branch: `acquire` already returns the pooled HOST channel for a
-  // local row. The old branch handed out a fresh `createHostExecutor()` per call and
-  // never closed it — one leaked sshd session per domain/SSL status read (#291).
-  return sshManager.withExecutor(serverId, fn).catch(() => null);
-}
-
 /**
  * Bare-metal edge, but the SSL executor lands INSIDE a container: every SSL op
  * (certbot, cert read, vhost write) then hits the container's own (empty)
@@ -643,7 +613,7 @@ export async function reuseServerCertForDomain(ctx: RequestContext, domainId: st
     //    bare-metal edge whose certs live on the host while the API container's own
     //    /etc/letsencrypt is a separate, empty volume.
     if (isPathSafeHostname(domain.hostname)) {
-      const hostCert = await withServerHostExecutor(ctx, project, async (exec) => {
+      const hostCert = await withServerHostExecutor(project, async (exec) => {
         for (const base of await certbotLineageDirs(exec, domain.hostname)) {
           const certPem = await readEdgeFile(exec, `${base}/fullchain.pem`);
           const keyPem = await readEdgeFile(exec, `${base}/privkey.pem`);
@@ -663,7 +633,7 @@ export async function reuseServerCertForDomain(ctx: RequestContext, domainId: st
     // 3. Whatever the edge proxy currently serves for this host — one reader for
     //    every proxy kind, so caddy's store and traefik's acme.json are reachable
     //    here and not just declared nginx/apache paths.
-    const fromProxy = await withServerHostExecutor(ctx, project, async (exec) => {
+    const fromProxy = await withServerHostExecutor(project, async (exec) => {
       const proxy = await edgeProxy(exec);
       if (!proxy) return null;
       const candidate = await proxy.certCandidateFor(domain.hostname);

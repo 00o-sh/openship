@@ -12,6 +12,7 @@
     "kindImage": "Konteyner imajı",
     "current": "Mevcut sürüm",
     "latest": "En son sürüm",
+    "repository": "Depo",
     "notChecked": "Henüz kontrol edilmedi",
     "upToDate": "Güncel",
     "updateAvailable": "Güncelleme mevcut",
@@ -172,6 +173,19 @@
       "toast": {
         "saved": "Yönlendirme {mode} olarak ayarlandı",
         "failed": "Yönlendirme güncellenemedi"
+      }
+    },
+    "internalAlias": {
+      "title": "Dahili ana bilgisayar adı",
+      "description": "Diğer servislerin bu uygulamaya özel olarak ulaşmak için kullandığı özel ad",
+      "intro": "Bu uygulama için özel proje ağında ek bir DNS adı belirleyin. Varsayılanın (proje kısaltması) yanında çözümlenir; bağlı diğer servisler ikisini de kullanabilir. Genel erişim değişmez; bu asla bir bağlantı noktasını açığa çıkarmaz.",
+      "label": "Ana bilgisayar adı takma adı",
+      "hint": "Yalnızca harf, rakam ve tire. Proje kısaltmasını kullanmak için boş bırakın.",
+      "save": "Kaydet",
+      "toast": {
+        "saved": "Dahili ana bilgisayar adı güncellendi",
+        "failed": "Dahili ana bilgisayar adı güncellenemedi",
+        "invalid": "En az bir harf veya rakam girin"
       }
     }
   },

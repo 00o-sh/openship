@@ -172,6 +172,29 @@ export const instanceSettings = pgTable("instance_settings", {
    */
   ghDeviceTokenMethod: text("gh_device_token_method").$type<"device" | "token" | null>(),
 
+  // ── Remote infra (edge / mail container) updates ────────────────────────────
+  //
+  // When the control plane's APP_VERSION moves forward (desktop self-update or
+  // `openship update`), the edge/mail containers already deployed on remote
+  // servers stay on their old image tag. These two columns drive the
+  // "monitor → advise → apply" loop for that drift (server-containers.service):
+  //
+  //   autoUpdateInfra → true reconciles behind containers automatically on the
+  //     version-change boot hook; false surfaces an advisory the operator applies.
+  //     Instance-wide (not per-user) so it holds on desktop's zero-auth user and
+  //     on self-hosted alike. Off by default — an update recreates a live edge.
+  //   lastSeenVersion → the APP_VERSION the infra reconcile last ran for. The
+  //     boot hook compares readApiVersion() to this to fire `infra:scan` exactly
+  //     once per upgrade rather than on every boot. Null on a fresh install.
+  autoUpdateInfra: boolean("auto_update_infra").notNull().default(false),
+  //   autoScanInfra → true lets the dashboard run ONE detect-only scan when a
+  //     relevant surface loads (Infrastructure tab / home) if the cached drift
+  //     state is stale, so the attention dot + issue list stay fresh without a
+  //     manual Scan. Detect-only — it never applies (that's autoUpdateInfra).
+  //     The 6h cron + boot hook run regardless. On by default (cheap probe).
+  autoScanInfra: boolean("auto_scan_infra").notNull().default(true),
+  lastSeenVersion: text("last_seen_version"),
+
   // ── Timestamps ─────────────────────────────────────────────────────────────
 
   createdAt: timestamp("created_at").notNull().defaultNow(),

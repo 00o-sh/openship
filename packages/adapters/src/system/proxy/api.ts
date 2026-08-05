@@ -20,6 +20,8 @@
  * one pass over the box.
  */
 
+import type { ProxySettings } from "@repo/core";
+
 import type { CommandExecutor, ManualCert } from "../../types";
 import type { EdgeStatus, ImportedSite, ProxyKind, ProxyScanResult } from "../types";
 import { probeEdge } from "./detect";
@@ -53,6 +55,14 @@ export interface ProxySiteRoute {
   path: string;
   domains: string[];
   ssl: ProxySiteRouteSsl;
+  /**
+   * Adoptable reverse-proxy tunables the source vhost declared (`ImportedSite.proxy`).
+   * Carried through the by-port index so a migrating project inherits the limits it
+   * was already running under — adopting a site whose nginx allowed 200 MB uploads
+   * and silently dropping it back to nginx's 1 MB default breaks the app on the
+   * first upload after the cutover, with nothing in the UI to explain it.
+   */
+  proxy?: ProxySettings;
   /** Config file the vhost came from (traceability). */
   source?: string;
 }
@@ -93,11 +103,15 @@ export function buildProxyRouteIndex(sites: ImportedSite[]): Map<number, ProxySi
             existing.ssl.keyPath = site.tls.keyPath;
           }
         }
+        // Same precedence as the cert above: the TLS vhost is the one really
+        // serving the traffic, so its tunables win over the :80 helper's.
+        if (site.proxy && (site.ssl || !existing.proxy)) existing.proxy = site.proxy;
       } else {
         list.push({
           port,
           path: up.path,
           domains: [...site.serverNames],
+          ...(site.proxy ? { proxy: site.proxy } : {}),
           ssl: site.ssl
             ? { enabled: true, certPath: site.tls?.certPath, keyPath: site.tls?.keyPath }
             : { enabled: false },

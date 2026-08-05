@@ -7,7 +7,8 @@ import { serviceKind, serviceCanStartWithoutBuild, servicesApi, sortServicesByPu
 import { ServiceIcon } from "@/components/services/ServiceIcon";
 import { getApiErrorMessage, isAbortError } from "@/lib/api/client";
 import { useToast } from "@/context/ToastContext";
-import { resolveServiceHostnameLabel, internalServiceAddress } from "@repo/core";
+import { internalServiceAddress, effectiveServiceAlias, type ComposeAdvanced } from "@repo/core";
+import { serviceDisplayUrl } from "@/utils/route-display";
 import { useRouter } from "next/navigation";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import type { Dictionary } from "@/i18n";
@@ -102,19 +103,14 @@ export const ServicesTab = () => {
 
   const selectedService = services.find((s) => s.id === selectedId);
 
-  const resolveServiceUrl = (service: Service) => {
-    if (!service.exposed) return null;
-    if (service.domainType === "custom" && service.customDomain) {
-      return `https://${service.customDomain}`;
-    }
-    const subdomain = resolveServiceHostnameLabel(
-      projectSlugBase,
-      service.name,
-      service.domain,
-      serviceKind(service),
-    );
-    return `https://${subdomain}.${baseDomain}`;
-  };
+  // Null for a service with no route — it is reachable on its port, and linking
+  // to a derived `<project>-<service>` host sent people to a name nobody created.
+  const resolveServiceUrl = (service: Service) =>
+    serviceDisplayUrl(service, {
+      projectLabel: projectSlugBase,
+      baseDomain,
+      kind: serviceKind(service),
+    });
 
   const openService = (serviceId: string) => {
     if (!hasProjectId) return;
@@ -416,6 +412,7 @@ export const ServicesTab = () => {
           projectType={(projectData as { projectType?: string })?.projectType}
           activeDeploymentId={projectData?.activeDeploymentId}
           deployTarget={projectData?.deployTarget}
+          serverId={(projectData as { serverId?: string | null })?.serverId}
           siblingServices={servicesData.services}
         />
       </div>
@@ -610,15 +607,17 @@ export const ServicesTab = () => {
                   ) : svc.exposed && urlHost ? (
                     // Exposed compose service — its public URL.
                     urlHost
-                  ) : ct?.ip ? (
-                    // Internal service that's running — its real internal IP on
-                    // the openship network (what the user actually wants to see).
-                    <span className="font-mono">{ct.ip}</span>
                   ) : (
-                    // Not running yet — fall back to the stable address SIBLINGS
-                    // use to reach it (service-name:port).
+                    // Internal service — the STABLE address siblings use to reach
+                    // it (alias:port), NOT the container's ephemeral bridge IP.
+                    // The IP changes every restart and is never what you'd put in
+                    // another service's env; the alias is. Custom alias wins when
+                    // set (effectiveServiceAlias), matching what DNS resolves.
                     <span className="font-mono">
-                      {internalServiceAddress(svc.name, svc.ports as string[])}
+                      {internalServiceAddress(
+                        effectiveServiceAlias(svc.name, (svc.advanced as ComposeAdvanced | null)?.alias),
+                        svc.ports as string[],
+                      )}
                     </span>
                   )}
                 </p>

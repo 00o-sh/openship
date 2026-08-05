@@ -47,8 +47,13 @@
 #
 # REMOTE ACCESS: reaching this from another machine (LAN IP or a reverse proxy)
 # requires OPENSHIP_PUBLIC_URL in .env — else the dashboard loads but login is
-# rejected (403 ORIGIN_REJECTED). Behind a proxy also set TRUST_PROXY=true. Set
-# OPENSHIP_BIND_ADDR to publish the ports on one interface instead of all. See
+# rejected (403 ORIGIN_REJECTED). Behind a proxy also set TRUST_PROXY=true.
+#
+# BIND INTERFACE: the api/dashboard ports publish on 127.0.0.1 (loopback) by
+# default — the bundled `edge` (host-networked OpenResty) fronts your public
+# domains and reaches them over loopback, so nothing needs to sit on a public
+# interface. Set OPENSHIP_BIND_ADDR only if you deliberately want direct off-box
+# access without a domain (e.g. OPENSHIP_BIND_ADDR=0.0.0.0 or a LAN IP). See
 # .env.example → "Remote access".
 # ──────────────────────────────────────────────────────────
 
@@ -103,9 +108,10 @@ services:
     image: ${OPENSHIP_IMAGE_REGISTRY:-ghcr.io/oblien}/openship-api:${OPENSHIP_VERSION:-latest}
     restart: unless-stopped
     ports:
-      # Publish on all interfaces by default; OPENSHIP_BIND_ADDR pins one.
+      # Loopback by default — the host-net edge reaches it over loopback.
+      # OPENSHIP_BIND_ADDR opts into a public/LAN interface (see header note).
       # API_PORT overrides the port (host + container move together).
-      - "${OPENSHIP_BIND_ADDR:-0.0.0.0}:${API_PORT:-4000}:${API_PORT:-4000}"
+      - "${OPENSHIP_BIND_ADDR:-127.0.0.1}:${API_PORT:-4000}:${API_PORT:-4000}"
     # Host Docker socket → the API (dockerode) builds + runs deployed apps on the
     # host daemon. dockerode's local transport targets this exact path.
     #
@@ -161,7 +167,7 @@ services:
     image: ${OPENSHIP_IMAGE_REGISTRY:-ghcr.io/oblien}/openship-dashboard:${OPENSHIP_VERSION:-latest}
     restart: unless-stopped
     ports:
-      - "${OPENSHIP_BIND_ADDR:-0.0.0.0}:${DASHBOARD_PORT:-3001}:${DASHBOARD_PORT:-3001}"
+      - "${OPENSHIP_BIND_ADDR:-127.0.0.1}:${DASHBOARD_PORT:-3001}:${DASHBOARD_PORT:-3001}"
     env_file:
       - ../.env
     environment:

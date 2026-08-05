@@ -13,6 +13,7 @@ import { env } from "../../config";
 import { sshManager } from "../../lib/ssh-manager";
 import { resolvesToLocalHost } from "@/lib/self-host";
 import { boxOwningOrgId } from "@/lib/box-org";
+import { ensureLocalServer } from "@/lib/startup/self-server";
 import { encryptSecretField } from "@/lib/credential-encryption";
 import { getRequestContext } from "../../lib/request-context";
 import { permission } from "../../lib/permission";
@@ -49,6 +50,11 @@ export async function listServers(c: Context) {
 
   // Org-scoped: only the caller's org's servers.
   const ctx = getRequestContext(c);
+  // Self-heal: "this box is a deploy target" is an invariant about the MACHINE, so
+  // materialize it on read instead of trusting whichever install branch ran (that
+  // trust is why a free-domain install listed no servers). Idempotent, single-flight
+  // and a no-op — one findLocal — once the row exists.
+  await ensureLocalServer().catch(() => null);
   const rows = await repos.server.listByOrganization(ctx.organizationId);
   // Host control off (`openship up --no-host-control`): this box is not a deploy
   // target and every host operation refuses, so the local row is hidden rather
@@ -124,17 +130,20 @@ export async function createServer(c: Context) {
         400,
       );
     }
-    // Adopt the canonical isLocal "This Server" row (create it if the boot
-    // reconcile hasn't run yet) so the box is a first-class, working deploy
-    // target with the right transport — never a duplicate loopback SSH row.
-    const local =
-      (await repos.server.findLocal(ctx.organizationId)) ??
-      (await repos.server.create({
-        organizationId: ctx.organizationId,
-        name: body.name?.trim() || "This Server",
-        sshHost: host,
-        isLocal: true,
-      }));
+    // Adopt the canonical isLocal "This Server" row (create it if nothing has yet)
+    // so the box is a first-class, working deploy target with the right transport —
+    // never a duplicate loopback SSH row. Through the ONE registration primitive,
+    // so this can't race the boot hook / an install call into a second row.
+    const local = await ensureLocalServer({ name: body.name?.trim(), sshHost: host });
+    if (!local) {
+      // Only reachable with host control off (`--no-host-control`): every host
+      // operation refuses and listServers hides the row, so creating one would hand
+      // back a server that cannot work. Say so instead.
+      return c.json(
+        { error: "Host control is disabled on this instance, so the local host can't be a deploy target." },
+        400,
+      );
+    }
     return c.json(serializeServer(local), 201);
   }
 

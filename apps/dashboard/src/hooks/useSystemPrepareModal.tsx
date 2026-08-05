@@ -18,10 +18,10 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, CheckCircle2, AlertCircle, ShieldCheck, Copy, RefreshCw } from "lucide-react";
+import { Loader2, CheckCircle2, AlertCircle, ShieldCheck, Copy, RefreshCw, Circle } from "lucide-react";
 import { useModal } from "@/context/ModalContext";
 import { PromptDetails } from "@/components/import-project/PromptDetails";
-import { getApiBaseUrl, domainsApi } from "@/lib/api";
+import { getApiBaseUrl, domainsApi, projectsApi, systemApi } from "@/lib/api";
 import { canReportStreamEnd, reportLostStream } from "./prepare-stream-outcome";
 
 interface StreamPrompt {
@@ -32,11 +32,65 @@ interface StreamPrompt {
   details?: Record<string, unknown>;
 }
 
+/** A coarse step of a streamed operation, driving the optional progress bar. A
+ *  flow that never emits `steps` (verify, edge takeover) simply never shows it. */
+interface StreamStep {
+  id: string;
+  label: string;
+  status: "pending" | "running" | "done" | "error";
+}
+
+/** Percentage bar + per-step checklist, shown only when the stream emits steps. */
+function StepProgress({ steps }: { steps: StreamStep[] }) {
+  const done = steps.filter((s) => s.status === "done").length;
+  const pct = steps.length ? Math.round((done / steps.length) * 100) : 0;
+  return (
+    <div className="space-y-2">
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+        <div
+          className="h-full rounded-full bg-primary transition-all duration-500"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <div className="space-y-1">
+        {steps.map((s) => (
+          <div key={s.id} className="flex items-center gap-2 text-[13px]">
+            {s.status === "done" ? (
+              <CheckCircle2 className="size-3.5 shrink-0 text-success" />
+            ) : s.status === "error" ? (
+              <AlertCircle className="size-3.5 shrink-0 text-danger" />
+            ) : s.status === "running" ? (
+              <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />
+            ) : (
+              <Circle className="size-3.5 shrink-0 text-muted-foreground/40" />
+            )}
+            <span
+              className={
+                s.status === "pending"
+                  ? "text-muted-foreground/60"
+                  : s.status === "error"
+                    ? "text-danger"
+                    : "text-foreground"
+              }
+            >
+              {s.label}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 type Phase = "running" | "completed" | "failed" | "error";
 
 export interface SystemPrepareOptions {
   /** POST SSE endpoint (relative to the API base) that runs the flow. */
   streamUrl: string;
+  /** JSON body for the stream POST. The takeover/verify flows carry their target
+   *  in the URL and need none; the shared install endpoint takes it in the body
+   *  (`{ serverId, components }`), so it's optional and defaults to `{}`. */
+  body?: Record<string, unknown>;
   /** POST endpoint answered with `{ sessionId, action }` for a prompt. Omit for
    *  flows that never prompt (e.g. verify) — the modal is pure log + result. */
   respondUrl?: string;
@@ -65,6 +119,7 @@ function PrepareStreamContent({
   onClose: () => void;
 }) {
   const [logs, setLogs] = useState<Array<{ message: string; level: string }>>([]);
+  const [steps, setSteps] = useState<StreamStep[]>([]);
   const [prompt, setPrompt] = useState<StreamPrompt | null>(null);
   const [phase, setPhase] = useState<Phase>("running");
   const [error, setError] = useState<string | null>(null);
@@ -116,6 +171,7 @@ function PrepareStreamContent({
 
   const retry = useCallback(() => {
     setLogs([]);
+    setSteps([]);
     setError(null);
     setPrompt(null);
     setPhase("running");
@@ -138,6 +194,7 @@ function PrepareStreamContent({
           method: "POST",
           credentials: "include",
           headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+          body: JSON.stringify(opts.body ?? {}),
           signal: controller.signal,
         });
         if (!res.ok || !res.body) {
@@ -170,6 +227,7 @@ function PrepareStreamContent({
               message?: string;
               level?: string;
               status?: Phase;
+              steps?: StreamStep[];
             } & Partial<StreamPrompt>;
             try {
               json = JSON.parse(dataLine.slice(5).trim());
@@ -177,6 +235,7 @@ function PrepareStreamContent({
               continue;
             }
             if (json.type === "session" && json.sessionId) sessionIdRef.current = json.sessionId;
+            else if (json.type === "steps") setSteps(json.steps ?? []);
             else if (json.type === "log")
               setLogs((p) => [...p, { message: json.message ?? "", level: json.level ?? "info" }]);
             else if (json.type === "prompt") setPrompt(json as StreamPrompt);
@@ -273,6 +332,9 @@ function PrepareStreamContent({
     </div>
   );
 
+  /** The step checklist, when the flow emits one; null for step-less flows. */
+  const stepBar = steps.length > 0 ? <StepProgress steps={steps} /> : null;
+
   return (
     <div className="space-y-4 p-6">
       <div className="flex items-center gap-2.5">
@@ -312,6 +374,7 @@ function PrepareStreamContent({
             <CheckCircle2 className="size-5 shrink-0" />
             <span className="font-medium">{l.done ?? "Done."}</span>
           </div>
+          {stepBar}
           {logConsole}
           <div className="flex justify-end">
             <button type="button" onClick={onClose} className="px-4 py-2 rounded-xl bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-colors">
@@ -327,6 +390,7 @@ function PrepareStreamContent({
               {error || l.failed || "Couldn't finish — nothing was disrupted."}
             </span>
           </div>
+          {stepBar}
           {logConsole}
           <div className="flex items-center justify-end gap-2">
             <button
@@ -348,6 +412,7 @@ function PrepareStreamContent({
             <Loader2 className="size-4 animate-spin" />
             <span>{l.working ?? "Working…"}</span>
           </div>
+          {stepBar}
           {logConsole}
         </div>
       )}
@@ -413,6 +478,134 @@ export function useVerifyModal() {
   );
 }
 
+/** Managed-container converge (edge / mail) on one server — streams the
+ *  rollback-guarded pull→recreate→verify with a step bar. Never prompts (neither
+ *  intent asks for consent), so no respondUrl. Both this manual click and a
+ *  boot-time auto-update attach to the SAME replayable server-side session, so
+ *  re-opening mid-run resumes the live progress rather than starting a second run.
+ *
+ *  `intent: "repair"` starts a STOPPED container instead of swapping its image —
+ *  the recovery path for a mail engine, whose update is swap-only by design.
+ *  `openContainerModal(serverId, "edge", { label, intent, onDone })`. */
+export function useContainerApplyModal() {
+  const prepare = useSystemPrepareModal();
+  return useCallback(
+    (
+      serverId: string,
+      component: "edge" | "mail",
+      opts?: { label?: string; intent?: "update" | "repair"; onDone?: () => void },
+    ): string => {
+      const noun = opts?.label ?? (component === "edge" ? "edge" : "mail engine");
+      const repair = opts?.intent === "repair";
+      // A dropped stream doesn't mean a dropped run — the container may already be
+      // running (new image, or simply started) and the row already say so. Read it
+      // back rather than reporting an unknown outcome for a run that finished.
+      const resolveOutcome = async () => {
+        const list = await systemApi.listServerContainers(serverId).catch(() => null);
+        const row = list?.find((r) => r.component === component) ?? null;
+        if (repair) {
+          if (row && !row.detail?.down) {
+            return {
+              ok: true,
+              message: `The ${noun} is running again (${row.runningLabel ?? row.runningVersion ?? "current"}) — the connection dropped after the run finished.`,
+            };
+          }
+          return {
+            ok: false,
+            message: `The ${noun} is still stopped — ${row?.detail?.lastError ?? "the log above is what the run got through"}.`,
+          };
+        }
+        if (row && !row.behind && !row.detail?.down) {
+          return {
+            ok: true,
+            message: `The ${noun} is up to date (${row.runningLabel ?? row.runningVersion ?? "current"}) — the connection dropped after the run finished.`,
+          };
+        }
+        if (row?.detail?.down) {
+          return {
+            ok: false,
+            message: `The ${noun} is down after the update — ${row.detail.lastError ?? "see the log above"}.`,
+          };
+        }
+        return {
+          ok: false,
+          message: `The ${noun} is still behind (running ${row?.runningVersion ?? "?"}, target ${row?.pinnedVersion ?? "?"}). The log above is what the run got through.`,
+        };
+      };
+
+      return prepare({
+        streamUrl: `system/servers/${serverId}/containers/${component}/apply/stream${repair ? "?intent=repair" : ""}`,
+        title: repair ? `Start ${noun}` : `Update ${noun}`,
+        labels: repair
+          ? {
+              working: `Starting the ${noun}…`,
+              done: `Started — the ${noun} is running again.`,
+              failed: `The ${noun} didn't start — see the log above for the exact reason.`,
+            }
+          : {
+              working: `Updating the ${noun}…`,
+              done: `Updated — the ${noun} is running the new version.`,
+              failed: `Update didn't finish — the ${noun} was rolled back to its previous version. See the log above.`,
+            },
+        onDone: opts?.onDone,
+        resolveOutcome,
+      });
+    },
+    [prepare],
+  );
+}
+
+/** One-click edge install/fix for a server — reuses the FIRST-INSTALL engine
+ *  (`/system/install/stream` + `/install/respond`) verbatim, so a missing edge
+ *  installs and a down edge is recreated through the SAME 80/443-takeover
+ *  consent path a fresh server setup takes (`startEdgeContainer` does `docker rm
+ *  -f` first, so a stopped leftover is replaced cleanly). Body carries the
+ *  target `{ serverId, components:["edge"] }` — the endpoint is shared, unlike
+ *  the URL-scoped takeover/apply flows. `openEdgeInstallModal(serverId, { onDone })`. */
+export function useServerEdgeInstallModal() {
+  const prepare = useSystemPrepareModal();
+  return useCallback(
+    (serverId: string, opts?: { onDone?: () => void }): string =>
+      prepare({
+        streamUrl: "system/install/stream",
+        respondUrl: "system/install/respond",
+        body: { serverId, components: ["edge"] },
+        title: "Install edge",
+        labels: {
+          working: "Installing the edge — taking over ports 80/443 if needed…",
+          done: "Edge installed — it owns ports 80/443 and routes are live.",
+          failed: "Edge install didn't finish — nothing else was disrupted. See the log above.",
+        },
+        onDone: opts?.onDone,
+        // The install path is takeover-heavy and can outlive its connection; read
+        // the edge row back rather than reporting an unknown outcome for an
+        // install that actually finished. Present && not down == success.
+        resolveOutcome: async () => {
+          const list = await systemApi.listServerContainers(serverId).catch(() => null);
+          const edge = list?.find((r) => r.component === "edge") ?? null;
+          if (edge && !edge.detail?.down) {
+            return {
+              ok: true,
+              message: `The edge is installed and running (${edge.runningLabel ?? edge.runningVersion ?? "current"}) — the connection dropped after the run finished.`,
+            };
+          }
+          if (edge?.detail?.down) {
+            return {
+              ok: false,
+              message: `The edge is installed but down — ${edge.detail.lastError ?? "see the log above"}.`,
+            };
+          }
+          return {
+            ok: false,
+            message:
+              "The edge isn't installed yet. The connection dropped before this run reported a result — the log above is what it got through.",
+          };
+        },
+      }),
+    [prepare],
+  );
+}
+
 /** Port-80/443 edge takeover — the first `useSystemPrepareModal` consumer.
  *  `openEdgeModal(projectId, { onDone })`. */
 export function useEdgeModal() {
@@ -429,6 +622,27 @@ export function useEdgeModal() {
           failed: "Edge setup didn't finish — the app stays on its port; routing is flagged on this tab.",
         },
         onDone: opts?.onDone,
+        // Edge setup installs OpenResty and can take a takeover path, so it's the
+        // flow most likely to outlive its own connection. The result is readable
+        // from the server afterwards — ask, the way the verify modal does, rather
+        // than reporting an unknown outcome for an install that finished.
+        resolveOutcome: async () => {
+          const status = await projectsApi.getEdgeStatus(projectId);
+          if (status.ready) {
+            return {
+              ok: true,
+              message: "The server's edge is set up and owns ports 80/443 — the connection dropped after the run finished.",
+            };
+          }
+          return {
+            ok: false,
+            message:
+              status.reason ??
+              (status.reachable === false
+                ? "The server isn't reachable, so the edge couldn't be checked. The log above is what the run got through."
+                : `The edge is not set up yet${status.classification ? ` (ports 80/443: ${status.classification})` : ""}. The log above is what the run got through.`),
+          };
+        },
       }),
     [prepare],
   );

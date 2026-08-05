@@ -13,11 +13,16 @@ import { repos, type Deployment, type Domain, type Project, type Service } from 
 import {
   SYSTEM,
   resolveServiceHostnameLabel,
-  resolvePublicUrlPlaceholders,
+  normalizeServiceLabel,
+  buildPublicUrlLookup,
+  servicePortPairs,
+  resolvePublicUrlTemplate,
   getAppPrepareSteps,
   resolveProjectVolumes,
+  sanitizeProxySettings,
   UNLIMITED_RESOURCES,
   type ComposeAdvanced,
+  type ProxySettings,
 } from "@repo/core";
 import { getTemplateForOrg } from "../../apps/catalog-source";
 import { attachLinkedNetworks } from "../attach-linked-networks";
@@ -40,7 +45,8 @@ import {
   type SystemManager,
 } from "@repo/adapters";
 import { decryptEnvMap, encrypt } from "../../../lib/encryption";
-import { resolveServerHost } from "../../../lib/server-target";
+import { isLoopbackHost, resolveServerHost } from "../../../lib/server-target";
+import { resolveEdgeTargetHost } from "../../../lib/edge-target";
 import { containerIdForService } from "../../services/service-container";
 import { isConnectionLoss } from "../../../lib/remote-state";
 import {
@@ -55,7 +61,7 @@ import { resolveServiceEndpointUrls, resolveServicePublicEndpoints } from "../..
 import { ensureManagedEdgeProxy } from "../../../lib/managed-edge-proxy";
 import { ensureRoutingReady } from "../../../lib/edge-reconcile";
 import * as sessionManager from "../session-manager";
-import { isStaticService } from "../../../lib/deployable-service";
+import { isStaticService, parseServicePort } from "../../../lib/deployable-service";
 import { computeKeepSet } from "../image-gc";
 import { auditPorts } from "../port-audit.service";
 import {
@@ -67,7 +73,7 @@ import { resolveReadinessGate, type ResolvedReadinessGate } from "../readiness-g
 import type { PortCheckResult } from "../../../lib/deployment-runtime";
 import { resolveServicePort } from "./domain-helpers";
 import { buildCompositeRegistration, buildDomainFanoutRegistrations } from "./composite-route";
-import { serviceKind } from "./project-services";
+import { newerThanRestoredRelease, serviceKind } from "./project-services";
 import { buildUpstreamUrl, resolveRouteStrategy } from "../../../lib/upstream-url";
 import { withLoopbackPublish } from "../../../lib/loopback-publish";
 
@@ -171,19 +177,146 @@ function resolveServicePublicUrl(project: Project, service: Service): string | u
   return publicSlug ? `https://${publicSlug}.${SYSTEM.DOMAINS.CLOUD_DOMAIN}` : undefined;
 }
 
-/** Host ports a service publishes via fixed `host:container` mappings. A
- *  container-only spec ("3000") gets a random host port we can't know up front,
- *  so it's skipped. Used to give port-only (no-domain) services a reachable
- *  `http://host:port` fallback for `{{publicUrl:…}}`. */
-function hostPublishedPorts(service: Service): number[] {
-  const out: number[] = [];
-  for (const spec of (service.ports as string[] | null) ?? []) {
-    const parts = String(spec).split(":");
-    if (parts.length < 2) continue;
-    const host = Number(parts[parts.length - 2]);
-    if (Number.isFinite(host)) out.push(host);
+/**
+ * Every `{{publicUrl:…}}` key for a deploy: `<name>` (the service's primary URL)
+ * and `<name>:<port>` for each ROUTED container port plus each published
+ * host/container port. Two sources only — a PERSISTED route (a hostname a human
+ * chose) and the honest `http://<host>:<hostPort>` a published port answers on —
+ * and a route always wins the port it owns.
+ *
+ * Per-port entries are filled for EVERY service, including one that already has a
+ * primary URL. Convex routes :3210 to a chosen domain and leaves :3211 port-only;
+ * skipping the whole service once :3210 resolved left `{{publicUrl:backend:3211}}`
+ * with no entry at all, which became `CONVEX_SITE_ORIGIN=""` in the container.
+ */
+export function buildServicePublicUrlMap(
+  project: Project,
+  services: readonly Service[],
+  host: string | null,
+): Map<string, string> {
+  return buildPublicUrlLookup(
+    services.map((svc) => ({
+      name: svc.name,
+      routedUrls: new Map(
+        resolveServiceEndpointUrls(project, svc).map(({ port, url }) => [port, url]),
+      ),
+      portPairs: servicePortPairs(svc.ports as string[] | null),
+      primaryPort: parseServicePort(svc.exposedPort) ?? undefined,
+    })),
+    host,
+  );
+}
+
+/** One env key whose `{{publicUrl:…}}` token(s) resolved to nothing. */
+export interface UnresolvedEnvPublicUrl {
+  key: string;
+  tokens: string[];
+}
+
+/**
+ * Substitute `{{publicUrl:…}}` across a merged env map, REPORTING every key that
+ * couldn't be resolved and OMITTING it.
+ *
+ * A half-resolved origin is not a value. `CONVEX_SITE_ORIGIN=""` reads as
+ * "configured, deliberately blank" to the container and there is nothing in it
+ * that says otherwise, so the variable is left UNSET (the image's own default
+ * applies) and the caller warns loudly instead.
+ */
+export function resolveEnvPublicUrls(
+  env: Record<string, string>,
+  urlForService: (serviceName: string, port?: number) => string | undefined,
+): { env: Record<string, string>; unresolved: UnresolvedEnvPublicUrl[] } {
+  const out: Record<string, string> = {};
+  const unresolved: UnresolvedEnvPublicUrl[] = [];
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value !== "string") {
+      out[key] = value;
+      continue;
+    }
+    const resolved = resolvePublicUrlTemplate(value, urlForService);
+    if (resolved.unresolved.length > 0) {
+      unresolved.push({ key, tokens: resolved.unresolved.map((p) => p.token) });
+      continue;
+    }
+    out[key] = resolved.value;
   }
-  return out;
+  return { env: out, unresolved };
+}
+
+/** The four env layers a compose service is deployed with, before token resolution. */
+export interface ServiceEnvLayers {
+  /** Project-scoped rows, live. */
+  project: Record<string, string>;
+  /** This deployment's frozen capture (`dep.envVars`, decrypted). Flat, unscoped. */
+  frozen: Record<string, string>;
+  /** The compose file's inline `environment:` for this service. */
+  inline: Record<string, string>;
+  /** Service-scoped rows for this service, live. */
+  service: Record<string, string>;
+}
+
+/**
+ * Layer a service's env. Service rows beat inline compose env beats project rows,
+ * so the compose UI can override a global per service.
+ *
+ * `frozenWins` moves the frozen layer LAST, which is what makes a rollback replay
+ * the release it restores instead of running old code against today's config —
+ * the one combination nobody ever ran. It is layered last rather than used alone
+ * because `dep.envVars` is flat and unscoped: it cannot express "this key was
+ * never set here", so dropping the live layers would delete keys the snapshot
+ * never captured. Last-wins shadows exactly the keys the release had.
+ *
+ * It shadows inline and service-scoped values too, which for a key that was
+ * project-scoped at capture and is service-scoped now means one value lands on
+ * every service. That case is unresolvable from a flat map, so it is surfaced per
+ * key as `scopeAmbiguous` in the rollback confirm diff rather than hidden.
+ */
+export function mergeServiceDeployEnv(
+  layers: ServiceEnvLayers,
+  frozenWins: boolean,
+): Record<string, string> {
+  return {
+    ...layers.project,
+    ...(frozenWins ? {} : layers.frozen),
+    ...layers.inline,
+    ...layers.service,
+    ...(frozenWins ? layers.frozen : {}),
+  };
+}
+
+/**
+ * Host a CONTAINER may dial to reach a published HOST port on the box this deploy
+ * targets, or `{ host: null, reason }`.
+ *
+ * A server row's `sshHost` is display-only for the local "This Server" row —
+ * self-server.ts writes `127.0.0.1` there when no public address was known — and
+ * inside a container `127.0.0.1` is the container itself, so injecting it hands
+ * the app a self-referential origin. Loopback is therefore treated as UNKNOWN and
+ * the one edge-target resolver is asked for this box's real address rather than a
+ * host being invented here. Cloud publishes no host port to dial, so it stays
+ * unresolved there (the reason is surfaced in the deploy log).
+ */
+export async function resolvePortOnlyEnvHost(
+  organizationId: string,
+  opts: { serverId?: string; cloudRuntime?: boolean } = {},
+): Promise<{ host: string | null; reason?: string }> {
+  const stored = await resolveServerHost(organizationId, opts.serverId).catch(() => null);
+  if (stored && !isLoopbackHost(stored)) return { host: stored };
+  if (opts.cloudRuntime) {
+    return { host: null, reason: "the cloud runtime publishes no host port to dial" };
+  }
+  const edge = await resolveEdgeTargetHost(organizationId, { serverId: opts.serverId }).catch(
+    () => null,
+  );
+  if (edge?.host) return { host: edge.host };
+  return {
+    host: null,
+    reason:
+      edge?.reason ??
+      (stored
+        ? `the target server's only known address is ${stored}, which inside a container is the container itself`
+        : "no address is known for the target server"),
+  };
 }
 
 /**
@@ -322,6 +455,17 @@ function resolveServiceResources(
   };
 }
 
+/** Normalized custom alias(es) for a compose service, drawn from
+ *  `service.advanced.alias`. Returns undefined when unset or when it collapses
+ *  to the service's own name (the default alias already covers that). */
+function aliasExtras(service: Service): string[] | undefined {
+  const raw = (service.advanced as ComposeAdvanced | null | undefined)?.alias;
+  if (!raw) return undefined;
+  const alias = normalizeServiceLabel(raw);
+  if (!alias || alias === normalizeServiceLabel(service.name)) return undefined;
+  return [alias];
+}
+
 function createServiceRuntimeConfig(opts: {
   project: Project;
   dep: Deployment;
@@ -362,6 +506,10 @@ function createServiceRuntimeConfig(opts: {
     // actually rolls forward. Every other trigger stays pull-if-missing.
     forcePull: dep.trigger === "update",
     advanced: service.advanced ?? undefined,
+    // Operator-chosen east-west alias (service.advanced.alias) resolving
+    // alongside the default service name. Normalized here; skipped when it
+    // collapses to the service name (no extra alias needed).
+    extraAliases: aliasExtras(service),
     resources,
     expose: service.exposed,
     publicPort: resolveServicePublicPort(service),
@@ -423,6 +571,14 @@ interface ServiceRouteContext {
   serverId?: string;
   routeOptions?: RouteRegistrationOptions;
   domainByHostname: Map<string, Domain>;
+  /**
+   * The project's reverse-proxy tunables, sanitized once. Lives on the context
+   * because a compose project writes vhosts from FOUR places (per-service
+   * container via the deploy pipeline, static service, composite single-domain,
+   * path fan-out) and every one of them omitted it — the main app honoured a
+   * 50 MB upload limit while the service's own domain 413'd at nginx's 1 MB.
+   */
+  proxy?: ProxySettings;
 }
 
 async function prepareServiceRoutes(opts: {
@@ -629,6 +785,18 @@ export async function deployComposeServices(
       })
     : {};
 
+  // A rollback replays a release, so the env frozen with it wins over today's
+  // rows (see `mergeServiceDeployEnv`). Derived here from the trigger so no
+  // caller and no option has to opt in. The rollback confirm dialog shows which
+  // keys this shadows, by key and direction, before the operator commits.
+  const frozenEnvWins = dep.trigger === "rollback" && Object.keys(depEnv).length > 0;
+  if (frozenEnvWins) {
+    logger.log(
+      `Rollback: replaying the ${Object.keys(depEnv).length} environment variable(s) frozen with this release; they override current project/service values.\n`,
+      "info",
+    );
+  }
+
   // 4. Load previous service containers so each service is replaced in-place
   //    instead of tearing down the whole app before the first deploy attempt.
   const previousServiceDeps = project.activeDeploymentId
@@ -683,6 +851,17 @@ export async function deployComposeServices(
     return true;
   };
 
+  // Rollback: a service added after the release being restored is carried
+  // forward, not recreated (see newerThanRestoredRelease).
+  const isNewerThanRelease = newerThanRestoredRelease(dep);
+
+  // Sanitized rather than passed through: this reaches generated nginx config, and
+  // the row can also carry a value seeded from a repo config, not just the API.
+  // Resolved HERE, not at the callers, so neither of them (`compose/pipeline.ts`,
+  // `service.service.ts`) can forget it — the per-service add path passed no
+  // routeOptions at all.
+  const proxySettings = sanitizeProxySettings(project.routingConfig?.proxy);
+
   let routeContext: ServiceRouteContext | undefined;
   if (opts?.routing && opts.ssl && typeof opts.usesManagedRouting === "boolean") {
     // Reuses the map built above (needsDomainMap covers this branch).
@@ -692,8 +871,16 @@ export async function deployComposeServices(
       usesManagedRouting: opts.usesManagedRouting,
       organizationId: dep.organizationId,
       serverId: opts.serverId,
-      routeOptions: opts.routeOptions,
+      ...(opts.routeOptions || proxySettings
+        ? {
+            routeOptions: {
+              ...opts.routeOptions,
+              ...(proxySettings ? { proxy: proxySettings } : {}),
+            },
+          }
+        : {}),
       domainByHostname,
+      ...(proxySettings ? { proxy: proxySettings } : {}),
     };
   }
 
@@ -726,39 +913,29 @@ export async function deployComposeServices(
   // deploy resolves to `reconciling` and reconciliation reads the true state.
   const indeterminateServiceNames = new Set<string>();
 
-  // Each exposed service's assigned public URL, resolved up front so catalog-app
-  // env placeholders like `{{publicUrl:backend}}` can be substituted per service
-  // (Convex origins, dashboard→backend, Ghost/n8n URLs).
-  // Keyed by `name` (the service's PRIMARY route → the no-port token) AND
-  // `name:port` (each endpoint → `{{publicUrl:svc:port}}`), so Convex can wire
-  // CLOUD_ORIGIN→:3210 and SITE_ORIGIN→:3211.
-  const publicUrlByService = new Map<string, string>();
-  for (const s of ordered) {
-    const endpointUrls = resolveServiceEndpointUrls(project, s);
-    if (endpointUrls.length === 0) continue;
-    publicUrlByService.set(s.name, endpointUrls[0].url);
-    for (const { port, url } of endpointUrls) {
-      publicUrlByService.set(`${s.name}:${port}`, url);
-    }
-  }
-  // Port-only (no-domain) fallback: a service with no public URL but a fixed
-  // published host port still resolves `{{publicUrl:…}}` to its reachable
-  // `http://host:port` (so e.g. Convex's own CONVEX_CLOUD_ORIGIN and the
-  // dashboard's NEXT_PUBLIC_DEPLOYMENT_URL aren't blanked out on a no-domain
-  // install). Deterministic host port from the mapping, resolved up front so
-  // self-references resolve at env-substitution time.
-  const serverHost = await resolveServerHost(dep.organizationId, opts?.serverId).catch(() => null);
-  if (serverHost) {
-    for (const s of ordered) {
-      if (publicUrlByService.has(s.name)) continue;
-      const hostPorts = hostPublishedPorts(s);
-      if (hostPorts.length === 0) continue;
-      const primary = Number(s.exposedPort) || hostPorts[0];
-      publicUrlByService.set(s.name, `http://${serverHost}:${primary}`);
-      for (const p of hostPorts)
-        publicUrlByService.set(`${s.name}:${p}`, `http://${serverHost}:${p}`);
-    }
-  }
+  // Each service's public URL keys, resolved up front so catalog-app env
+  // placeholders like `{{publicUrl:backend}}` / `{{publicUrl:backend:3211}}` can be
+  // substituted per service (Convex origins, dashboard→backend, Ghost/n8n URLs).
+  // Persisted route first, then the honest `http://<host>:<hostPort>` of a
+  // published port — PER PORT, so a service with a domain on one port still
+  // resolves its other ports.
+  const { host: serverHost, reason: serverHostReason } = await resolvePortOnlyEnvHost(
+    dep.organizationId,
+    { serverId: opts?.serverId, cloudRuntime: runtime.name === "cloud" },
+  );
+  const publicUrlByService = buildServicePublicUrlMap(project, ordered, serverHost);
+  const urlForPublicUrlToken = (name: string, port?: number) =>
+    publicUrlByService.get(port !== undefined ? `${name}:${port}` : name);
+  /** A `{{publicUrl:…}}` token with no URL behind it is never silent: it lands in
+   *  the deploy log AND in the routing warnings that raise action-required. */
+  const warnUnresolvedPublicUrl = (serviceName: string, detail: string) => {
+    const message =
+      `Service "${serviceName}": ${detail}` +
+      `${serverHostReason ? ` (${serverHostReason})` : ""}. ` +
+      `Assign a domain to the referenced service, or publish a fixed host port for it, then redeploy.`;
+    logger.log(`${message}\n`, "warn", { serviceName });
+    composeRouteWarnings.push(message);
+  };
 
   // loopback-port routing (compose): host ports pinned this deploy, so two
   // services in the same pass never collide on an allocation. Seed with every
@@ -774,16 +951,19 @@ export async function deployComposeServices(
     if (svc.projectId !== project.id) continue;
 
     // Leave a service running exactly as-is (carry its previous runtime row
-    // forward under THIS deployment id) instead of recreating it, in two cases:
+    // forward under THIS deployment id) instead of recreating it, in three cases:
     //   1. Smart (partial) redeploy — it's not in the target subset.
     //   2. Full/forceAll deploy — it's an unchanged image-only external (isExternalUnchanged).
+    //   3. Rollback — it was added AFTER the release being restored.
     // Either way we don't rebuild, recreate, or re-register its route (register
     // is additive; nothing tears it down); it stays in `enabledServiceIds` (so
     // the de-listed reaper won't kill it) and out of `unavailableServiceNames`
     // (so dependents aren't blocked). The liveness check below still redeploys
     // it if its container turns out to be gone.
     const carried =
-      (opts?.targetServiceIds && !opts.targetServiceIds.has(svc.id)) || isExternalUnchanged(svc)
+      (opts?.targetServiceIds && !opts.targetServiceIds.has(svc.id)) ||
+      isExternalUnchanged(svc) ||
+      isNewerThanRelease(svc)
         ? previousByServiceId.get(svc.id)
         : undefined;
     if (carried?.containerId) {
@@ -907,18 +1087,30 @@ export async function deployComposeServices(
       );
     });
 
-    // Merge: shared project env → current deploy shared env → service env.
-    // Service values intentionally win so the compose UI can override globals per service.
-    // Then resolve `{{publicUrl:<service>}}` placeholders to the assigned public URLs.
-    const mergedEnv: Record<string, string> = resolvePublicUrlPlaceholders(
-      {
-        ...decryptedProjectEnv,
-        ...depEnv,
-        ...((svc.environment as Record<string, string>) ?? {}),
-        ...decryptedServiceEnv,
-      },
-      (name, port) => publicUrlByService.get(port !== undefined ? `${name}:${port}` : name),
+    // Layer the env (see `mergeServiceDeployEnv` for the ordering and why a
+    // rollback moves the frozen layer last), THEN resolve
+    // `{{publicUrl:<service>}}` against live routing — which is why a frozen
+    // token still points at today's hostname rather than the release's.
+    const { env: mergedEnv, unresolved: unresolvedEnvUrls } = resolveEnvPublicUrls(
+      mergeServiceDeployEnv(
+        {
+          project: decryptedProjectEnv,
+          frozen: depEnv,
+          inline: (svc.environment as Record<string, string>) ?? {},
+          service: decryptedServiceEnv,
+        },
+        frozenEnvWins,
+      ),
+      urlForPublicUrlToken,
     );
+    if (unresolvedEnvUrls.length > 0) {
+      warnUnresolvedPublicUrl(
+        svc.name,
+        `no public URL is known for ${unresolvedEnvUrls
+          .map((u) => `${u.key}=${u.tokens.join("")}`)
+          .join(", ")} — ${unresolvedEnvUrls.length === 1 ? "that variable is" : "those variables are"} left UNSET rather than blank`,
+      );
+    }
 
     const buildFailure = opts?.buildFailures?.get(svc.id);
     if (buildFailure) {
@@ -1025,6 +1217,7 @@ export async function deployComposeServices(
                 route.hostname,
                 routeContext.domainByHostname.get(routeKey),
               ),
+              ...(routeContext.proxy ? { proxy: routeContext.proxy } : {}),
             })
             .catch((err) => {
               composeRouteWarnings.push(
@@ -1111,11 +1304,20 @@ export async function deployComposeServices(
         );
       } else {
         for (const file of advancedFiles) {
-          const content = resolvePublicUrlPlaceholders({ __c: file.content }, (name, port) =>
-            publicUrlByService.get(port !== undefined ? `${name}:${port}` : name),
-          ).__c;
+          // Token-local on purpose: one unresolved URL must not blank the whole
+          // file (the mount is required — a missing kong.yml is a dead service),
+          // so the file is still written and the gap is reported loudly instead.
+          const resolved = resolvePublicUrlTemplate(file.content, urlForPublicUrlToken);
+          if (resolved.unresolved.length > 0) {
+            warnUnresolvedPublicUrl(
+              svc.name,
+              `generated config ${file.path} references ${resolved.unresolved
+                .map((p) => p.token)
+                .join(", ")} and no public URL is known for it — that value is written EMPTY`,
+            );
+          }
           const hostPath = appConfigHostPath(project.id, svc.name, file.path);
-          await opts.executor.writeFile(hostPath, content);
+          await opts.executor.writeFile(hostPath, resolved.value);
           serviceRuntimeConfig.volumes = [
             ...serviceRuntimeConfig.volumes,
             `${hostPath}:${file.path}:ro`,
@@ -1852,6 +2054,7 @@ export async function deployComposeServices(
           ...(r.proxyLocations?.length ? { proxyLocations: r.proxyLocations } : {}),
           ...(r.redirects?.length ? { redirects: r.redirects } : {}),
           ...(r.headerRules?.length ? { headerRules: r.headerRules } : {}),
+          ...(routeContext.proxy ? { proxy: routeContext.proxy } : {}),
         });
         logger.log(
           `Composed single domain ${r.hostname}: frontend at "/", backend proxied per vercel.json.\n`,
@@ -1874,6 +2077,7 @@ export async function deployComposeServices(
           ),
           targetUrl: reg.targetUrl!,
           ...(reg.proxyLocations?.length ? { proxyLocations: reg.proxyLocations } : {}),
+          ...(routeContext.proxy ? { proxy: routeContext.proxy } : {}),
         });
         logger.log(
           `Composed path-routed domain ${reg.hostname}: ${reg.proxyLocations?.length ?? 0} extra path location(s).\n`,

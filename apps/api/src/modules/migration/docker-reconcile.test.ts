@@ -6,6 +6,7 @@ import {
   isBuildHelper,
   discoveredServiceName,
   openshipStackName,
+  toDiscoveredService,
 } from "./docker-reconcile";
 
 describe("isBuildHelper", () => {
@@ -58,6 +59,24 @@ function manifestEntry(over: Partial<ManifestProjectEntry> & { id: string }): Ma
     ...over,
   };
 }
+
+describe("toDiscoveredService — env dropped as an image default is reported (#394)", () => {
+  it("omits vars identical to the image's baked-in default from imported env, but warns which keys were dropped", () => {
+    const detail = container({ labels: {}, env: ["FOO=bar", "USER_SET=1"] });
+    const imageDefaults = new Set(["FOO=bar"]); // FOO=bar is baked into the image
+
+    const svc = toDiscoveredService(detail, undefined, imageDefaults);
+
+    expect(svc.env).toEqual({ USER_SET: "1" }); // FOO not carried as explicit config
+    expect(svc.warnings.some((w) => /image default/i.test(w) && w.includes("FOO"))).toBe(true);
+  });
+
+  it("adds no such warning when nothing matched an image default", () => {
+    const detail = container({ labels: {}, env: ["USER_SET=1"] });
+    const svc = toDiscoveredService(detail, undefined, new Set(["FOO=bar"]));
+    expect(svc.warnings.some((w) => /image default/i.test(w))).toBe(false);
+  });
+});
 
 describe("reconcileOpenshipProjects", () => {
   it("recovers an orphaned project and enriches name/slug/domains from the manifest", () => {

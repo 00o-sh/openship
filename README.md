@@ -177,7 +177,7 @@ An **MCP** endpoint (for AI agents) and a **REST API** round it out for automati
 | **CDN** | Edge caching, HTTP/3, Brotli compression, instant purge |
 | **Mail server** | Built-in SMTP with DKIM/SPF/DMARC — no Mailgun or SES needed |
 | **Backups** | Scheduled, databases + volumes, one-click restore, export anytime |
-| **Real-time monitoring** | Live build logs, container metrics, and resource usage streamed to your screen |
+| **Real-time monitoring** | Live build logs, container metrics, visitor geography and per-code response mix — [~1.4 µs per request, zero DB writes per request](docs/monitoring.md) |
 | **Scaling** | Auto-scaling on cloud, multi-node ready on self-hosted |
 | **Portability** | Standard Docker containers — move between providers freely |
 | **Docker Compose** | Deploy existing compose files as-is |

@@ -1,5 +1,22 @@
-import { DeployError, safeErrorMessage } from "@repo/core";
-import { posix as pathPosix } from "node:path";
+import { DeployError, safeErrorMessage, type ProxySettings } from "@repo/core";
+import { resolveServedStaticPath } from "./stack-output";
+
+/**
+ * Docker refuses inspect/exec against a container that is mid-restart with
+ * "Container <id> is restarting, wait until the container is running". During a
+ * deploy the app container can still be in its post-start stabilization window
+ * (a normal 1–2 restart "dependency wait" — see the deploy stabilization watch,
+ * #335) when routing resolves its upstream, so this error is TRANSIENT, not a
+ * real routing failure. We retry briefly before recording a warning so a settling
+ * container doesn't falsely mark the project "Action Required".
+ */
+function isContainerRestartingError(message: string): boolean {
+  return /is restarting, wait until the container is running/i.test(message);
+}
+
+const ROUTE_RETRY_DELAY_MS = 1500;
+const ROUTE_MAX_ATTEMPTS = 5;
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 import type { RouteConfig, RouteHostRedirect } from "../types";
 import type { BuildLogger } from "./build-pipeline";
@@ -24,6 +41,16 @@ export interface RouteRegistrationOptions {
   webhookDomain?: string | null;
   /** The proxy target for webhook requests (e.g. http://127.0.0.1:4000/api/webhooks/) */
   webhookProxy?: string;
+  /**
+   * Reverse-proxy tunables applied to EVERY domain of this deployment — upload
+   * size limit, timeouts, buffering, gzip.
+   *
+   * An option rather than part of each `routeTarget`, because it is a property of
+   * the project, not of a particular upstream: every vhost the project owns gets
+   * the same values, and threading it through `resolveRoute`/`resolveTargetUrl`
+   * would make each of them re-answer a question the project already answered.
+   */
+  proxy?: ProxySettings;
 }
 
 /**
@@ -112,14 +139,13 @@ export async function registerResolvedRoutes(
         targetUrl,
       };
     } else if (hasPathTarget && typeof staticRoot === "string") {
-      const targetPath = domain.targetPath!;
       routeConfig = {
         domain: domain.hostname,
         tls: domain.tls,
         terminatesTlsLocally: domain.terminatesTlsLocally,
-        staticRoot: targetPath === "/"
-          ? staticRoot
-          : pathPosix.join(staticRoot, targetPath.slice(1)),
+        // Shared rule — see resolveServedStaticPath. The live re-apply and the
+        // output probe resolve the same path through it.
+        staticRoot: resolveServedStaticPath(staticRoot, domain.targetPath!),
       };
     } else {
       throw new DeployError("Resolved route target is invalid", "INVALID_ROUTE_TARGET");
@@ -127,6 +153,13 @@ export async function registerResolvedRoutes(
 
     if (domain.redirectHost) {
       routeConfig.redirectHost = domain.redirectHost;
+    }
+
+    // Project-wide proxy tunables. Set for a static root too: `client_max_body_size`
+    // and the body timeouts govern the REQUEST, which nginx reads before it decides
+    // whether the response comes from a file or an upstream.
+    if (options?.proxy) {
+      routeConfig.proxy = options.proxy;
     }
 
     // Add webhook proxy location if this domain is the project's webhook domain
@@ -160,16 +193,36 @@ export async function registerResolvedRoutes(
   };
 
   for (const domain of domains) {
-    try {
-      await registerOne(domain);
-    } catch (err) {
+    let lastError = "";
+    for (let attempt = 1; attempt <= ROUTE_MAX_ATTEMPTS; attempt++) {
+      try {
+        await registerOne(domain);
+        lastError = "";
+        break;
+      } catch (err) {
+        lastError = safeErrorMessage(err);
+        // Only the "container is restarting" transient is worth waiting on — any
+        // other failure (bad upstream, invalid target, nginx reload error) is
+        // recorded immediately so genuine problems aren't hidden behind a delay.
+        if (attempt < ROUTE_MAX_ATTEMPTS && isContainerRestartingError(lastError)) {
+          logger.log(
+            `Routing ${domain.hostname}: target container is still starting up — ` +
+              `retrying (${attempt}/${ROUTE_MAX_ATTEMPTS - 1})…\n`,
+            "warn",
+          );
+          await sleep(ROUTE_RETRY_DELAY_MS);
+          continue;
+        }
+        break;
+      }
+    }
+    if (lastError) {
       // A failed domain never fails the deploy — the container is already up.
-      const message = safeErrorMessage(err);
       logger.log(
-        `Routing failed for ${domain.hostname} (deploy continues; the app is up — fix DNS/routing and retry): ${message}\n`,
+        `Routing failed for ${domain.hostname} (deploy continues; the app is up — fix DNS/routing and retry): ${lastError}\n`,
         "warn",
       );
-      warnings.push(`${domain.hostname}: ${message}`);
+      warnings.push(`${domain.hostname}: ${lastError}`);
     }
   }
 

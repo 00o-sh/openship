@@ -21,8 +21,9 @@ own (npm), buy the ready-to-use boxed version (the desktop app), or wire it into
 
 <Tab value="Install script">
 
-The fastest way. One command downloads the **Bun** runtime (if you don't already have it) and installs
-the `openship` command — no Node or npm required.
+The fastest way. One command installs the `openship` command as a self-contained, checksum-verified
+bundle that runs under **Node** — it uses your system Node when it's recent enough and otherwise fetches
+an official Node build just for Openship, never touching your global tools. No Node or npm setup required.
 
 ```bash
 curl -fsSL https://get.openship.io | sh
@@ -41,8 +42,8 @@ prefix sets the variable only for `curl`; the piped `sh` never sees it.)
 </Callout>
 
 <Callout title="Can't find the openship command afterward?" type="info">
-The installer adds Bun's global bin folder to your `PATH`. If your shell still can't find `openship`,
-open a new terminal — or on macOS/Linux run `export PATH="$HOME/.bun/bin:$PATH"` — and try again.
+The installer adds Openship's bin folder to your `PATH`. If your shell still can't find `openship`,
+open a new terminal — or on macOS/Linux run `export PATH="$HOME/.openship/bin:$PATH"` — and try again.
 </Callout>
 
 When it finishes you'll have the `openship` command. Now jump to [Run Openship](#run-openship) below.

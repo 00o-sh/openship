@@ -77,4 +77,20 @@ Certbot failed to authenticate some domains (authenticator: webroot).
   it("empty output → still names the domain", () => {
     expect(summarizeCertbotFailure("", "hekai.org")).toContain("hekai.org");
   });
+
+  it("edge container down → surfaces the executor's explanation WHOLE", () => {
+    // certbot never ran: the `docker exec` that would have started it was refused
+    // because the edge is crash-looping, and the executor already explained why in one
+    // line. No certbot lens applies — and the tail fallback would chop that explanation
+    // into fragments joined by " · ", which is how the useful half gets lost.
+    const explanation =
+      `the edge container is not running ("openship-edge") (restarting) — it is crash-looping, ` +
+      `so nothing that runs through the edge on this server can work — certificate issuance, ` +
+      `config reloads and route changes all go through it. OpenResty is refusing to start: ` +
+      `cannot load certificate "/etc/letsencrypt/live/hekai.org/fullchain.pem". Fix that, then ` +
+      "`docker start openship-edge` and retry.";
+    const out = `${OPENER}\nRequesting a certificate for hekai.org\n${explanation}\nError response from daemon: Container b896 is restarting, wait until the container is running`;
+
+    expect(summarizeCertbotFailure(out, "hekai.org")).toBe(explanation);
+  });
 });

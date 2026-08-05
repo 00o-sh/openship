@@ -13,6 +13,30 @@ export interface RestorePlanUI {
   needsRepository: boolean;
   /** Services that must rebuild because their image aged out. */
   rebuildServices: string[];
+  /**
+   * Which env keys the release's frozen snapshot would change, and how it lands.
+   * KEYS ONLY — the API never sends values here. Absent when the plan is
+   * ineligible or the preview couldn't be derived.
+   */
+  env?: {
+    /** `overlay` = frozen shadows matching keys; `replace` = frozen used
+     *  verbatim (keys added since are dropped); `unchanged` = the container is
+     *  restarted, not recreated. */
+    strategy: "overlay" | "replace" | "unchanged";
+    changes: Array<{
+      key: string;
+      direction: "frozen-wins" | "removed-since" | "added-since";
+      /** Defined per-service today but captured unscoped — one value would
+       *  land on every service. */
+      scopeAmbiguous?: boolean;
+      serviceName?: string;
+    }>;
+    /** Count BEFORE the cap — show this, not `changes.length`. */
+    totalChanges: number;
+    truncated: boolean;
+  };
+  /** Services that exist today but not in this release. They keep running. */
+  untouchedServices: string[];
   code?: string;
   reason?: string;
 }

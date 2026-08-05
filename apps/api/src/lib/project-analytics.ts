@@ -12,6 +12,7 @@
  *   - analytics-scraper.ts  (periodic scrape via SSH)
  */
 
+import { safeErrorMessage } from "@repo/core";
 import { repos, type Project } from "@repo/db";
 import {
   OPENRESTY_MGMT_PORT,
@@ -337,6 +338,61 @@ export async function postMgmt<T>(serverId: string, path: string): Promise<T | n
  * POST a JSON body to the OpenResty management API through the SSH tunnel.
  * Used to push per-route rules into the edge's `rules` shared dict (reload-free).
  */
+/**
+ * POST to an edge's mgmt API — ONE way in, whichever box that edge is on.
+ *
+ * ── Why there is no loopback branch ─────────────────────────────────────────
+ *
+ * This used to fetch `http://127.0.0.1:9145` when `serverId` was null, on the theory that
+ * "local" means the API can reach the edge on its own loopback. That is wrong on the
+ * install shape we ship: the API and the edge are SEPARATE CONTAINERS, so 127.0.0.1 inside
+ * the API container is the API container, and the request either connects to nothing or —
+ * worse on a control plane that also runs an edge — configures the wrong box's edge. It
+ * failed silently because the call was already `.catch()`-ed.
+ *
+ * The loopback that IS correct is the one inside the edge container, and `mgmtRequest`
+ * already owns it: SSH port-forward when the executor has one, otherwise `docker exec`
+ * into the edge and curl its own loopback. Both go through a serverId.
+ *
+ * So "local" is not a transport, it is a SERVER ROW — the auto-registered "This Server".
+ * `sshManager.acquire` returns the pooled host channel for it (see edge-host-executor:
+ * "SSH-to-host when the API is itself containerized"), which makes the local box just
+ * another server and leaves exactly one code path to reach any edge.
+ *
+ * A null serverId with no local row means this box is not a deploy target — host control
+ * off, or the SaaS control plane — so there is no edge of ours to configure and doing
+ * nothing is the correct answer, not a loopback guess.
+ *
+ * Best-effort by contract: a push that cannot be delivered logs and resolves. The database
+ * is the source of truth and every caller re-pushes on route apply, so a missed push costs
+ * freshness until the next apply, never correctness. BOTH outcomes swallow — the server
+ * branch used to let a tunnel failure propagate, so a dead box could abort a whole routing
+ * reconcile over a metrics push.
+ */
+export async function postEdgeMgmt(
+  serverId: string | null,
+  path: string,
+  json: unknown,
+  organizationId?: string,
+): Promise<void> {
+  let target = serverId;
+  if (!target) {
+    if (!organizationId) {
+      systemDebug("analytics", `${path}: no serverId and no org to resolve the local one`);
+      return;
+    }
+    const local = await repos.server.findLocal(organizationId).catch(() => undefined);
+    if (!local) {
+      systemDebug("analytics", `${path}: no local server row; nothing of ours to configure`);
+      return;
+    }
+    target = local.id;
+  }
+  await postMgmtJson(target, path, json).catch((err) =>
+    console.warn(`[edge-mgmt] ${path} failed for server ${target}: ${safeErrorMessage(err)}`),
+  );
+}
+
 export async function postMgmtJson<T>(
   serverId: string,
   path: string,

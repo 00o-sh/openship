@@ -190,6 +190,35 @@ describe("resolveEnvConfig", () => {
   });
 });
 
+describe("resolveEnvConfig — bind interface (0.0.0.0 elimination)", () => {
+  it("leaves the interface unset on a local install (no public URL) → compose loopback default", async () => {
+    // Nothing pinned, nothing exposed off-box: OPENSHIP_BIND_ADDR is omitted so the
+    // compose fallback (${OPENSHIP_BIND_ADDR:-127.0.0.1}) keeps the ports on loopback.
+    expect(resolveEnvConfig({}, {}).bindAddr).toBeUndefined();
+  });
+
+  it("publishes on all interfaces when a public URL is configured (non-breaking remote default)", async () => {
+    // A configured public URL is an explicit decision to be reachable off-host, so we
+    // publish publicly rather than trap the box behind loopback with no domain served.
+    expect(resolveEnvConfig({}, { publicUrl: "https://x.example.com" }).bindAddr).toBe("0.0.0.0");
+    // Same when the URL was carried from a prior install rather than passed as a flag.
+    expect(resolveEnvConfig({ OPENSHIP_PUBLIC_URL: "https://x.example.com" }, {}).bindAddr).toBe(
+      "0.0.0.0",
+    );
+  });
+
+  it("an explicitly pinned interface always wins over the public-URL default", async () => {
+    // A domain-fronted box that pins loopback (edge reaches it over loopback) must
+    // NOT be silently re-exposed on 0.0.0.0 just because a public URL is set.
+    expect(
+      resolveEnvConfig(
+        { OPENSHIP_PUBLIC_URL: "https://x.example.com", OPENSHIP_BIND_ADDR: "127.0.0.1" },
+        {},
+      ).bindAddr,
+    ).toBe("127.0.0.1");
+  });
+});
+
 describe("composeUp — re-run on a configured install", () => {
   it("does not drop the public URL (the ORIGIN_REJECTED regression)", async () => {
     seedEnv(CONFIGURED);
@@ -324,6 +353,26 @@ describe("compose port resolution", () => {
     expect(res.ok).toBe(true);
     expect(verbs()).toContainEqual(["up", "-d"]);
     expect(verbs().some((v) => v.includes("--force-recreate"))).toBe(false);
+  });
+
+  it("renders api + dashboard to a loopback bind default, never a bare 0.0.0.0", async () => {
+    // A local install writes no OPENSHIP_BIND_ADDR, so the compose FILE's fallback is
+    // what decides the interface — it must be loopback, not Docker's all-interfaces
+    // default. This is the file-level half of the 0.0.0.0 elimination.
+    await composeUp({});
+    const file = h.written.get(composePaths.file) ?? "";
+    expect(file).toContain("${OPENSHIP_BIND_ADDR:-127.0.0.1}:${API_PORT:-4000}:${API_PORT:-4000}");
+    expect(file).toContain(
+      "${OPENSHIP_BIND_ADDR:-127.0.0.1}:${DASHBOARD_PORT:-3001}:${DASHBOARD_PORT:-3001}",
+    );
+    expect(file).not.toContain("0.0.0.0");
+    // A local install leaves the key out entirely → the loopback fallback applies.
+    expect(writtenEnv().OPENSHIP_BIND_ADDR).toBeUndefined();
+  });
+
+  it("writes an explicit 0.0.0.0 to .env for a remote install (public URL set)", async () => {
+    await composeUp({ publicUrl: "https://remote.example.com" });
+    expect(writtenEnv().OPENSHIP_BIND_ADDR).toBe("0.0.0.0");
   });
 });
 

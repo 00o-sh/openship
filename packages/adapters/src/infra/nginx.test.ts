@@ -1,7 +1,14 @@
 import { describe, expect, test } from "vitest";
-import { NginxProvider, renderProxyOptions } from "./nginx";
-import { PROXY_GZIP_TYPES } from "@repo/core";
-import { OPENRESTY_DEFAULT_PATHS, luaSourceAvailable, RULES_GUARD_PATH, ACME_HTTP01_PORT, ensureOpenRestyConfig } from "./openresty-lua";
+import { NginxProvider, renderProxyOptions, renderProxyTlsOptions } from "./nginx";
+import {
+  PROXY_DIRECTIVES,
+  PROXY_GZIP_TYPES,
+  expectedProxyState,
+  type ProxyDirectiveSpec,
+  type ProxySettings,
+} from "@repo/core";
+import { scanOpenshipEdge } from "../system/proxy/import/nginx";
+import { OPENRESTY_DEFAULT_PATHS, luaSourceAvailable, RULES_GUARD_PATH, ACME_HTTP01_PORT, EDGE_CHALLENGE_DIR, EDGE_CHALLENGE_ROOT, EDGE_CHALLENGE_URL_PREFIX, ensureOpenRestyConfig } from "./openresty-lua";
 import type { CommandExecutor, RouteConfig } from "../types";
 
 // L1 — config GENERATION. Proves NginxProvider emits the right nginx directives
@@ -90,6 +97,173 @@ const PROXY: RouteConfig = { domain: "app.example.com", tls: true, targetUrl: "h
 /** Same route, flagged as one whose TLS this box terminates (a custom domain). */
 const OURS: RouteConfig = { ...PROXY, terminatesTlsLocally: true };
 const BOOTSTRAP_DIR = "/etc/letsencrypt/openship-bootstrap/app.example.com";
+
+/**
+ * Openship Cloud's shared edge proves this box controls a routing target by fetching
+ * a token over plain HTTP from the target. Every `:80` shape must answer it, because
+ * any of them can be the vhost the probe lands on — and a `:443` block must NOT,
+ * since the target is always schemed `http://` and there is no HTTPS catch-all
+ * (the 443 default is `ssl_reject_handshake` with no locations).
+ *
+ * The location must also out-prefix `location /`: without it, a probe for a hostname
+ * target served by a TENANT's app would be proxied INTO that app, which could then
+ * echo back any token and prove control of this box as its own routing target.
+ */
+describe("NginxProvider edge-target challenge location", () => {
+  const hasChallenge = (c: string) => c.includes(`location ${EDGE_CHALLENGE_URL_PREFIX} {`);
+
+  test("is emitted in the HTTP-only shape (no cert yet)", async () => {
+    const { nginx, conf } = setup();
+    await nginx.registerRoute(PROXY);
+    const c = conf("app-example-com")!;
+    expect(hasChallenge(c)).toBe(true);
+    expect(c).toContain(`root ${EDGE_CHALLENGE_ROOT};`);
+    // Files only — never an echo of whatever token the URL carried.
+    expect(c).toContain("try_files $uri =404;");
+  });
+
+  test("is emitted in the cert-present shape, on :80 ONLY", async () => {
+    const { nginx, conf } = setup({ certDomains: ["app.example.com"] });
+    await nginx.registerRoute(PROXY);
+    const c = conf("app-example-com")!;
+    const [httpBlock, tlsBlock] = c.split("listen 443 ssl;");
+    expect(hasChallenge(httpBlock!)).toBe(true);
+    expect(hasChallenge(tlsBlock ?? "")).toBe(false);
+  });
+
+  test("is emitted in the bootstrap-TLS shape, on :80 ONLY", async () => {
+    const { nginx, conf } = setup();
+    await nginx.registerRoute(OURS);
+    const c = conf("app-example-com")!;
+    expect(c).toContain("openship-bootstrap-tls:");
+    const [httpBlock, tlsBlock] = c.split("listen 443 ssl;");
+    expect(hasChallenge(httpBlock!)).toBe(true);
+    expect(hasChallenge(tlsBlock ?? "")).toBe(false);
+  });
+
+  test("precedes `location /` so the longest-prefix match wins", async () => {
+    // nginx picks the longest matching prefix regardless of order, but emitting it
+    // first keeps the generated file readable and matches the ACME slot.
+    const { nginx, conf } = setup();
+    await nginx.registerRoute(PROXY);
+    const c = conf("app-example-com")!;
+    expect(c.indexOf(EDGE_CHALLENGE_URL_PREFIX)).toBeLessThan(c.indexOf("location / {"));
+  });
+});
+
+describe("NginxProvider.serveEdgeChallenge", () => {
+  const CHALLENGE = `${SITES}/_oblien-challenge-203-0-113-10.conf`;
+
+  test("with NO tokens, still writes the vhost — the box is ready before any challenge", async () => {
+    // The whole point of the proactive form. The location serves a DIRECTORY, so it is
+    // valid with nothing in it (a missing token 404s, which is the right answer), and
+    // this vhost lands in the bind-mounted sites-enabled written by our own code — so
+    // it works on any edge image, including one predating this feature or a rollback.
+    const { nginx, files } = setup();
+    const r = await nginx.serveEdgeChallenge({ host: "203.0.113.10" });
+
+    expect(r).toMatchObject({ served: true, via: "challenge-vhost" });
+    expect(files.get(CHALLENGE)).toContain(`location ${EDGE_CHALLENGE_URL_PREFIX} {`);
+    // No token files yet — nothing has been issued.
+    expect([...files.keys()].some((k) => k.startsWith(EDGE_CHALLENGE_DIR))).toBe(false);
+  });
+
+  test("a later token write reuses the existing vhost without a second reload", async () => {
+    // The two call forms in sequence: ensure at deploy, then serve at verify time.
+    const { nginx, files, calls } = setup();
+    await nginx.serveEdgeChallenge({ host: "203.0.113.10" });
+    const reloads = calls.filter((c) => c.includes("-s reload")).length;
+
+    const r = await nginx.serveEdgeChallenge({ host: "203.0.113.10", tokens: ["tok-abcdef123456"] });
+
+    expect(r).toMatchObject({ served: true, via: "challenge-vhost" });
+    expect(files.get(`${EDGE_CHALLENGE_DIR}/tok-abcdef123456`)).toBe("tok-abcdef123456");
+    expect(calls.filter((c) => c.includes("-s reload")).length).toBe(reloads);
+  });
+
+  test("writes each token as a FILE named after itself", async () => {
+    const { nginx, files } = setup();
+    await nginx.serveEdgeChallenge({ host: "203.0.113.10", tokens: ["tok-abcdef123456"] });
+    // The body must be the token verbatim — Oblien compares after trimming.
+    expect(files.get(`${EDGE_CHALLENGE_DIR}/tok-abcdef123456`)).toBe("tok-abcdef123456");
+  });
+
+  test("serves several tokens at once (re-issue + multi-org on one box)", async () => {
+    const { nginx, files } = setup();
+    await nginx.serveEdgeChallenge({ host: "203.0.113.10", tokens: ["tok-aaaaaaaaaaaa", "tok-bbbbbbbbbbbb"] });
+    expect(files.get(`${EDGE_CHALLENGE_DIR}/tok-aaaaaaaaaaaa`)).toBeDefined();
+    expect(files.get(`${EDGE_CHALLENGE_DIR}/tok-bbbbbbbbbbbb`)).toBeDefined();
+  });
+
+  test("writes a challenge vhost keyed on the host, with NO `location /`", async () => {
+    // A `location /` would make the proxy scanner classify this as a static site
+    // rooted at the challenge dir, surfacing it in the orphan sweep / migrate import.
+    const { nginx, files } = setup();
+    const r = await nginx.serveEdgeChallenge({ host: "203.0.113.10", tokens: ["tok-abcdef123456"] });
+    expect(r).toMatchObject({ served: true, via: "challenge-vhost" });
+    const c = files.get(CHALLENGE)!;
+    expect(c).toContain("server_name 203.0.113.10;");
+    expect(c).toContain(`location ${EDGE_CHALLENGE_URL_PREFIX} {`);
+    expect(c).not.toContain("location / {");
+    // Never a default_server: sanitizeEdgeVhosts sed-strips those on every start.
+    expect(c).not.toContain("default_server");
+  });
+
+  test("is idempotent — a second identical call neither rewrites nor reloads", async () => {
+    const { nginx, calls, files } = setup();
+    await nginx.serveEdgeChallenge({ host: "203.0.113.10", tokens: ["tok-abcdef123456"] });
+    const reloadsAfterFirst = calls.filter((c) => c.includes("reload") || c.includes("openresty")).length;
+    files.delete(`${EDGE_CHALLENGE_DIR}/tok-abcdef123456`); // prove the token is re-asserted
+    const r = await nginx.serveEdgeChallenge({ host: "203.0.113.10", tokens: ["tok-abcdef123456"] });
+    expect(r).toMatchObject({ served: true, via: "challenge-vhost" });
+    expect(files.get(`${EDGE_CHALLENGE_DIR}/tok-abcdef123456`)).toBe("tok-abcdef123456");
+    const reloadsAfterSecond = calls.filter((c) => c.includes("reload") || c.includes("openresty")).length;
+    expect(reloadsAfterSecond).toBe(reloadsAfterFirst);
+  });
+
+  test("defers to an existing vhost that already claims the host", async () => {
+    // Writing a second vhost for the same server_name would be actively harmful:
+    // nginx only WARNS on a conflict (so `-t` passes and no rollback fires) and then
+    // serves whichever loaded first — `_` sorts before lowercase, so ours would win
+    // and reduce the real site to 404s.
+    const { nginx, files } = setup();
+    await nginx.registerRoute(PROXY);
+    const before = files.get(`${SITES}/app-example-com.conf`);
+    const r = await nginx.serveEdgeChallenge({ host: "app.example.com", tokens: ["tok-abcdef123456"] });
+    expect(r).toMatchObject({ served: true, via: "existing-vhost" });
+    expect(files.get(`${SITES}/_oblien-challenge-app-example-com.conf`)).toBeUndefined();
+    expect(files.get(`${SITES}/app-example-com.conf`)).toBe(before); // untouched
+  });
+
+  test("refuses (with the file named) when a STALE vhost claims the host", async () => {
+    const { nginx, files } = setup();
+    // A vhost from before challenge support: claims the host, has no challenge location.
+    files.set(`${SITES}/legacy-example-com.conf`, "server {\n    server_name legacy.example.com;\n}\n");
+    const r = await nginx.serveEdgeChallenge({ host: "legacy.example.com", tokens: ["tok-abcdef123456"] });
+    expect(r.served).toBe(false);
+    expect(r.claimedBy).toContain("legacy-example-com.conf");
+    expect(r.reason).toMatch(/Re-register/);
+  });
+
+  test("rejects a token that would escape the challenge directory", async () => {
+    // The token becomes a FILENAME, so this is stricter than the nginx-syntax guard:
+    // neither `/` nor `..` contains a character nginx would object to.
+    const { nginx } = setup();
+    for (const bad of ["../../etc/passwd", "a/b", "sh ort", ""]) {
+      await expect(
+        nginx.serveEdgeChallenge({ host: "203.0.113.10", tokens: [bad] }),
+      ).rejects.toThrow(/challenge token/);
+    }
+  });
+
+  test("rolls back the vhost when the reload fails", async () => {
+    const { nginx, files } = setup({ failReload: true });
+    await expect(
+      nginx.serveEdgeChallenge({ host: "203.0.113.10", tokens: ["tok-abcdef123456"] }),
+    ).rejects.toThrow();
+    expect(files.get(CHALLENGE)).toBeUndefined();
+  });
+});
 
 describe("NginxProvider config generation", () => {
   test("proxy route with no cert yet → HTTP-only block", async () => {
@@ -329,6 +503,282 @@ describe("registerRoute renders proxy directives at server scope", () => {
   });
 });
 
+/* ── The curated tunables, driven by the table rather than a hand-listed set ──
+ *
+ * `PROXY_DIRECTIVES` in @repo/core is the one declaration of what exists; the type,
+ * the API schema, this renderer, the config parser and the editor all derive from it.
+ * The failure that matters is a row that reaches some of those and not others — a
+ * setting that validates and saves and then never appears in a vhost. So these tests
+ * iterate the table: a new row with no render form fails them without anyone
+ * remembering to add a case.
+ */
+
+/** A valid value for a row, from its declared kind. */
+function sampleFor(spec: ProxyDirectiveSpec): string | number | boolean {
+  switch (spec.kind) {
+    case "size":
+      return "50m";
+    case "time":
+      return "300s";
+    case "buffers":
+      return "8 16k";
+    case "int":
+      return spec.min ?? 1;
+    default:
+      return true;
+  }
+}
+
+/** Every directive set at once. */
+const FULL_PROXY = Object.fromEntries(
+  PROXY_DIRECTIVES.map((spec) => [spec.key, sampleFor(spec)]),
+) as ProxySettings;
+
+/** The `server { … }` bodies of a generated vhost, in file order. */
+function serverBlocks(conf: string): string[] {
+  return conf.split(/^server \{$/m).slice(1);
+}
+
+const httpBlock = (conf: string) => serverBlocks(conf).find((b) => b.includes("listen 80;"))!;
+const tlsBlock = (conf: string) => serverBlocks(conf).find((b) => b.includes("listen 443 ssl;"))!;
+
+/** Nesting depth at `index`; 0 = directly inside the `server { }` body. */
+function braceDepthAt(block: string, index: number): number {
+  let depth = 0;
+  for (let i = 0; i < index; i++) {
+    if (block[i] === "{") depth++;
+    else if (block[i] === "}") depth--;
+  }
+  return depth;
+}
+
+describe("renderProxyOptions covers the whole directive table", () => {
+  test("emits every row, exactly once, terminated and indented", () => {
+    const out = `${renderProxyOptions(FULL_PROXY)}${renderProxyTlsOptions(FULL_PROXY)}`;
+    for (const spec of PROXY_DIRECTIVES) {
+      const line = `    ${spec.directive} ${
+        spec.kind === "bool" ? "on" : String(sampleFor(spec))
+      };`;
+      expect(out, spec.key).toContain(line);
+      // Emitted twice, nginx rejects the vhost and the site stops serving.
+      expect(out.split(`\n    ${spec.directive} `).length - 1, spec.key).toBe(1);
+    }
+  });
+
+  test("every emitted line is a single complete directive", () => {
+    // The injection guard, restated on the output side: nothing we write may carry a
+    // `;`, a brace or a newline inside its argument.
+    const lines = `${renderProxyOptions(FULL_PROXY)}${renderProxyTlsOptions(FULL_PROXY)}`
+      .split("\n")
+      .filter((l) => l.trim());
+    expect(lines.length).toBeGreaterThan(PROXY_DIRECTIVES.length - 1);
+    for (const line of lines) {
+      expect(line).toMatch(/^ {4}[a-z][a-z0-9_]* [^;{}]+;$/);
+    }
+  });
+
+  test("keeps TLS-only directives out of the shared text", () => {
+    const shared = renderProxyOptions(FULL_PROXY);
+    const tls = renderProxyTlsOptions(FULL_PROXY);
+    for (const spec of PROXY_DIRECTIVES.filter((d) => d.tlsOnly)) {
+      expect(shared, spec.key).not.toContain(spec.directive);
+      expect(tls, spec.key).toContain(spec.directive);
+    }
+    for (const spec of PROXY_DIRECTIVES.filter((d) => !d.tlsOnly)) {
+      expect(tls, spec.key).not.toContain(`${spec.directive} `);
+    }
+  });
+
+  test("skips a directive the box's nginx is too old to accept", () => {
+    // `http2 on;` at server scope arrived in 1.25.1. On an older bare-host install it
+    // fails `openresty -t`, the vhost rolls back, and the operator's setting vanishes
+    // with no explanation — so the renderer drops it instead of trying.
+    expect(renderProxyTlsOptions({ http2: true }, [1, 24, 0])).toBe("");
+    expect(renderProxyTlsOptions({ http2: true }, [1, 25, 1])).toContain("http2 on;");
+    // Unknown version (detection unavailable on some executors) → emit; `-t` +
+    // rollback is the net, and silently dropping a setting is worse.
+    expect(renderProxyTlsOptions({ http2: true })).toContain("http2 on;");
+    expect(renderProxyTlsOptions({ http2: true }, null)).toContain("http2 on;");
+  });
+});
+
+describe("the generated vhost carries the tunables in every server block", () => {
+  test("both :80 and :443 get the shared directives at server scope", async () => {
+    // The :80 block is not decorative: behind a TLS-terminating CDN (Cloudflare
+    // "Flexible") it is the block that actually serves, so a limit that only exists
+    // on :443 is a 413 for exactly those users.
+    const { nginx, conf } = setup({ certDomains: ["app.example.com"] });
+    await nginx.registerRoute({ ...PROXY, proxy: FULL_PROXY });
+    const c = conf("app-example-com")!;
+
+    expect(serverBlocks(c)).toHaveLength(2);
+    for (const spec of PROXY_DIRECTIVES.filter((d) => !d.tlsOnly)) {
+      expect(httpBlock(c), spec.key).toContain(`${spec.directive} `);
+      expect(tlsBlock(c), spec.key).toContain(`${spec.directive} `);
+    }
+  });
+
+  test("directives sit above `location /`, so they cover every location", async () => {
+    // Inside `location /` they would miss the webhook location and every
+    // path-prefix proxy the project also owns.
+    const { nginx, conf } = setup({ certDomains: ["app.example.com"] });
+    await nginx.registerRoute({
+      ...PROXY,
+      proxy: FULL_PROXY,
+      webhookProxy: "http://127.0.0.1:3009/hooks",
+    });
+    const c = conf("app-example-com")!;
+
+    for (const block of serverBlocks(c)) {
+      const serve = block.indexOf("location / {");
+      for (const spec of PROXY_DIRECTIVES) {
+        const at = block.indexOf(`\n    ${spec.directive} `);
+        if (at === -1) continue;
+        // Brace depth 0 = directly in `server { }`, so every location inherits it.
+        expect(braceDepthAt(block, at), spec.key).toBe(0);
+        expect(at, spec.key).toBeLessThan(serve);
+      }
+    }
+  });
+
+  test("http2 lands ONLY in the TLS block", async () => {
+    // In a `listen 80` block it would enable cleartext h2c, which no browser
+    // negotiates — and every generated vhost has a :80 block, including the one
+    // that exists only to answer the ACME challenge.
+    const { nginx, conf } = setup({ certDomains: ["app.example.com"] });
+    await nginx.registerRoute({ ...PROXY, proxy: { http2: true, clientMaxBodySize: "50m" } });
+    const c = conf("app-example-com")!;
+
+    expect(tlsBlock(c)).toContain("http2 on;");
+    expect(httpBlock(c)).not.toContain("http2");
+    expect(httpBlock(c)).toContain("client_max_body_size 50m;");
+  });
+
+  test("an HTTP-only vhost never gets http2", async () => {
+    // No cert yet: one `listen 80` block and nothing else.
+    const { nginx, conf } = setup();
+    await nginx.registerRoute({ ...PROXY, proxy: { http2: true } });
+    const c = conf("app-example-com")!;
+    expect(serverBlocks(c)).toHaveLength(1);
+    expect(c).not.toContain("http2");
+  });
+
+  test("the bootstrap-TLS shape carries them too", async () => {
+    // The placeholder-cert vhost is a real listener a real browser hits; dropping
+    // the tunables there would make the limits appear only once ACME succeeds.
+    const { nginx, conf } = setup();
+    await nginx.registerRoute({ ...OURS, proxy: { clientMaxBodySize: "50m", http2: true } });
+    const c = conf("app-example-com")!;
+    expect(c).toContain(`${BOOTSTRAP_DIR}/fullchain.pem`);
+    expect(httpBlock(c)).toContain("client_max_body_size 50m;");
+    expect(tlsBlock(c)).toContain("client_max_body_size 50m;");
+    expect(tlsBlock(c)).toContain("http2 on;");
+    expect(httpBlock(c)).not.toContain("http2");
+  });
+
+  test("a static route gets them as well", async () => {
+    const { nginx, conf } = setup({ certDomains: ["app.example.com"] });
+    await nginx.registerRoute({
+      domain: "app.example.com",
+      tls: true,
+      staticRoot: "/opt/openship/static/site",
+      proxy: { clientMaxBodySize: "50m", gzip: true },
+    });
+    const c = conf("app-example-com")!;
+    expect(c).toContain("client_max_body_size 50m;");
+    expect(c).toContain("gzip on;");
+  });
+});
+
+describe("render → parse round-trip (the renderer and the read-back agree)", () => {
+  /** Read our own edge back the way the live read-back and migrate both do. */
+  async function scanBack(conf: string) {
+    const exec = async (cmd: string) => (cmd.startsWith("cat ") ? conf : "");
+    const result = await scanOpenshipEdge({ exec } as unknown as CommandExecutor);
+    return result.sites.find((s) => s.serverNames.includes("app.example.com"))!;
+  }
+
+  test("every value we wrote comes back out of the generated config", async () => {
+    // This is the test that keeps drift detection honest: the UI compares a live
+    // parse against `expectedProxyState`, so any field the parser can't read back
+    // reports permanent drift on a box serving exactly what we asked for.
+    const { nginx, conf } = setup({ certDomains: ["app.example.com"] });
+    await nginx.registerRoute({ ...PROXY, proxy: FULL_PROXY });
+
+    const site = await scanBack(conf("app-example-com")!);
+    expect(site.ssl).toBe(true);
+    expect(site.proxy).toEqual(expectedProxyState(FULL_PROXY, { tls: true }));
+  });
+
+  test("an unset directive comes back absent, not defaulted", async () => {
+    const { nginx, conf } = setup({ certDomains: ["app.example.com"] });
+    await nginx.registerRoute({ ...PROXY, proxy: { clientMaxBodySize: "50m" } });
+
+    const site = await scanBack(conf("app-example-com")!);
+    expect(site.proxy).toEqual({ clientMaxBodySize: "50m" });
+    expect(site.proxyRaw).toEqual({ clientMaxBodySize: "50m" });
+  });
+
+  test("gzip's companion defaults read back as expected, not as drift", async () => {
+    // `gzip: true` also writes `gzip_min_length 1024`. A read-back that compared the
+    // live vhost against the raw settings saw a value nobody asked for and reported
+    // drift forever — hence `expectedProxyState`.
+    const { nginx, conf } = setup({ certDomains: ["app.example.com"] });
+    await nginx.registerRoute({ ...PROXY, proxy: { gzip: true } });
+
+    const site = await scanBack(conf("app-example-com")!);
+    expect(site.proxy).toEqual({ gzip: true, gzipMinLength: 1024 });
+    expect(site.proxy).toEqual(expectedProxyState({ gzip: true }, { tls: true }));
+  });
+
+  test("a plaintext vhost reads back without the TLS-only directives", async () => {
+    const { nginx, conf } = setup();
+    await nginx.registerRoute({ ...PROXY, proxy: { http2: true, gzip: true } });
+
+    const site = await scanBack(conf("app-example-com")!);
+    expect(site.ssl).toBe(false);
+    expect(site.proxy).toEqual(expectedProxyState({ http2: true, gzip: true }, { tls: false }));
+    expect(site.proxy?.http2).toBeUndefined();
+  });
+});
+
+describe("issuing a certificate keeps the tunables", () => {
+  test("the route sidecar carries them, so the re-register is exact", async () => {
+    // provisionCert re-registers from this file rather than re-deriving the route
+    // from the conf. If `proxy` weren't in it, issuing a cert would quietly revert
+    // the site to nginx's 1 MB / 60 s defaults.
+    const { nginx, files } = setup();
+    await nginx.registerRoute({ ...PROXY, proxy: { clientMaxBodySize: "50m", gzip: true } });
+
+    const sidecar = JSON.parse(files.get(`${SITES}/app-example-com.route.json`)!) as RouteConfig;
+    expect(sidecar.proxy).toEqual({ clientMaxBodySize: "50m", gzip: true });
+  });
+
+  test("a legacy route with no sidecar keeps them by scraping its own vhost", async () => {
+    // Routes registered before the sidecar existed fall back to reading the conf.
+    // Same table as the renderer, read backwards — so the recovery is not a
+    // hand-maintained subset that silently drops the newer directives.
+    const opts: FakeOpts = { certDomains: [] };
+    const { nginx, files, conf } = setup(opts);
+    await nginx.registerRoute({ ...PROXY, proxy: FULL_PROXY });
+    expect(conf("app-example-com")).not.toContain("listen 443 ssl;");
+
+    files.delete(`${SITES}/app-example-com.route.json`);
+    // certbot "succeeds" and the cert appears on disk.
+    opts.certDomains!.push("app.example.com");
+    // ensureIssued still fails in the fake (no real cert to read), which is AFTER
+    // the re-register we care about.
+    await nginx.provisionCert("app.example.com", { force: true }).catch(() => undefined);
+
+    const c = conf("app-example-com")!;
+    // Proof the conf was rewritten: it grew the TLS listener.
+    expect(c).toContain("listen 443 ssl;");
+    for (const spec of PROXY_DIRECTIVES.filter((d) => !d.tlsOnly)) {
+      expect(c, spec.key).toContain(`${spec.directive} `);
+    }
+  });
+});
+
 // A CDN in front of us may terminate TLS and reach origin on plain :80
 // (Cloudflare's "Flexible" mode). Two things must hold there.
 describe("behind a TLS-terminating CDN", () => {
@@ -435,6 +885,20 @@ describe("canonical host redirect", () => {
     expect(c).toContain(`proxy_pass http://127.0.0.1:${ACME_HTTP01_PORT}`);
   });
 
+  test("KEEPS the edge-target challenge location — a 301 host is still a valid target", async () => {
+    // Same reasoning as ACME above, and the same mechanism: both are interpolated in
+    // their own slot OUTSIDE sharedBody, so the canonical-redirect suppression can't
+    // reach them, and both out-prefix `location /` so the 301 inside it never runs
+    // for the challenge path. Openship Cloud's edge can therefore verify a target
+    // whose vhost redirects — which `hostnameTargetWarning` warns breaks the free
+    // URL, but does NOT break verification.
+    const { nginx, conf } = setup({ certDomains: ["www.example.com"] });
+    await nginx.registerRoute(REDIRECT);
+    const c = wwwConf(conf);
+    expect(c).toContain(`location ${EDGE_CHALLENGE_URL_PREFIX} {`);
+    expect(c).toContain(`root ${EDGE_CHALLENGE_ROOT};`);
+  });
+
   test("still gets a :443 listener before its real cert exists (bootstrap TLS)", async () => {
     // Same reason as any other locally-terminated host: no listener means the origin
     // refuses the handshake (Cloudflare 525) and issuance deadlocks.
@@ -531,6 +995,17 @@ describe("default catch-all rejects unmatched HTTPS hosts", () => {
     files.set(`${SITES}/_default.conf`, "server {\n    listen 80 default_server;\n}\n");
     await ensureOpenRestyConfig(makeExecutor(files, {}, []), PATHS);
     expect(files.get(`${SITES}/_default.conf`)).toContain("ssl_reject_handshake on;");
+  });
+
+  test("does NOT carry the edge-target challenge — that block is never evaluated", async () => {
+    // The container edge is the only install path and it skips ensureOpenRestyConfig,
+    // so emitting the challenge location here would be coverage we don't have. The
+    // catch-all equivalent is in the baked image; the mechanism is the per-target
+    // challenge vhost, which our own code writes into the bind-mounted sites-enabled.
+    const files = new Map<string, string>();
+    files.set(PATHS.confPath, `http {\n    include ${SITES}/*.conf;\n}\n`);
+    await ensureOpenRestyConfig(makeExecutor(files, {}, []), PATHS);
+    expect(files.get(`${SITES}/_default.conf`)!).not.toContain(EDGE_CHALLENGE_URL_PREFIX);
   });
 });
 

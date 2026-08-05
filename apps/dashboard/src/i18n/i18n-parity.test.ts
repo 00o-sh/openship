@@ -19,7 +19,11 @@ import { checkI18nParity, defaultLocalesDir } from "../../scripts/check-i18n.mjs
  * goal is for every entry here to reach 0 and this map to be `{}`.
  */
 const MISSING_BASELINE: Record<string, number> = {
-  projectSettings: 1058,
+  // +7: appSource.repository — the app Source tab's "Repository" link label.
+  // Translated in tr (whose appSource block is otherwise complete); English-first
+  // in the other 7 locales, which have no appSource block at all and fall back to
+  // English via deepMerge, so the row renders correctly in every locale.
+  projectSettings: 1065,
   jobs: 876,
   migration: 1237,
   // +64: the GitHub card's credential-health strings — 8 English-first keys for
@@ -40,6 +44,10 @@ const MISSING_BASELINE: Record<string, number> = {
   // else, and that built files stay on disk. A mistranslation is somebody taking a
   // live site offline, or leaving a forgotten one serving. English falls through via
   // deepMerge, so the card is correct in every locale, just not localised.
+  //
+  // -14: settings.infrastructure is now fully translated in all 9 locales (the
+  // auto-scan toggle copy included) — the tab shrank to policy + a roll-up line,
+  // so the list-era keys are gone and the remainder is short enough to translate.
   settings: 1136,
   emailsAdmin: 628,
   // +360: permissions.sourceAccess — 45 keys for the source access modal and its
@@ -52,7 +60,18 @@ const MISSING_BASELINE: Record<string, number> = {
   widgets: 498,
   // +40: mcpAuthorize gained 5 English-first keys — two digest lines that answer
   // "can it read my source?" either way, and three level tooltips.
-  misc: 163,
+  //
+  // +88: restoreWizard gained 11 English-first keys for the apply-phase cancel
+  // affordance (#434). Same reasoning as the security blocks above: these are the
+  // strings that tell an operator whether aborting now loses data — "nothing has
+  // been overwritten yet" vs "that volume now holds partial data, finish a restore
+  // before starting the service". A mistranslation is somebody aborting a restore
+  // believing the volume is intact, or leaving a half-written volume in service.
+  // English falls through via deepMerge, so the wizard is correct in every locale.
+  misc: 233,
+  // -35: overview.issues (the home "needs attention" surface — edge down / not
+  // installed / mail engine down + their actions) is now translated in all 9
+  // locales, so the block no longer contributes.
   overview: 120,
   servers: 113,
   importProject: 81,

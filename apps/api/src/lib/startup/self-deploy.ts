@@ -230,7 +230,10 @@ export async function provisionSelfAppEdge(
   hostname: string,
   dashPort: number,
   progress: SelfEdgeStepProgress = {},
-  options?: SelfEdgeOptions,
+  // `managedEdgeSyncedByCaller` is not a `SelfEdgeOptions` field on purpose — that
+  // type describes the INFRA install (takeover/migrate) and is forwarded verbatim to
+  // `ensureSelfEdgeInfra`, which has no business knowing about Cloud's edge.
+  options?: SelfEdgeOptions & { managedEdgeSyncedByCaller?: boolean },
 ): Promise<{ verified: boolean; expiresAt?: string; reason?: string }> {
   const log = progress.onLog;
 
@@ -259,7 +262,13 @@ export async function provisionSelfAppEdge(
     return { verified: false, reason: "no_project" };
   }
   try {
-    await reapplyProjectLiveRoutes(project, [], { isSelfApp: true });
+    await reapplyProjectLiveRoutes(project, [], {
+      isSelfApp: true,
+      // The free-domain wizard has already registered the slug on Cloud's edge via
+      // `ensureManagedEdgeProxy` before calling us; re-syncing it here would issue a
+      // second target challenge and reset the first one's token mid-check.
+      managedEdgeSyncedByCaller: options?.managedEdgeSyncedByCaller,
+    });
   } catch (err) {
     log?.(safeErrorMessage(err), "error");
     progress.onStep?.("route", "failed");

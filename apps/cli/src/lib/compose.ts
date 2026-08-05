@@ -332,7 +332,10 @@ services:
   api:
     image: \${OPENSHIP_IMAGE_REGISTRY:-ghcr.io/oblien}/openship-api:\${OPENSHIP_VERSION:-latest}
     restart: unless-stopped
-    ports: ["\${OPENSHIP_BIND_ADDR:-0.0.0.0}:\${API_PORT:-4000}:\${API_PORT:-4000}"]
+    # Loopback by default — the host-net edge reaches it over loopback, so nothing
+    # sits on a public interface. OPENSHIP_BIND_ADDR opts into a public/LAN interface
+    # (set by \`openship up\` when a public URL is configured for off-box access).
+    ports: ["\${OPENSHIP_BIND_ADDR:-127.0.0.1}:\${API_PORT:-4000}:\${API_PORT:-4000}"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # Routing state shared with the edge, as HOST BIND MOUNTS (generated from
@@ -367,7 +370,8 @@ ${edgeVolumeYaml("      ")}
   dashboard:
     image: \${OPENSHIP_IMAGE_REGISTRY:-ghcr.io/oblien}/openship-dashboard:\${OPENSHIP_VERSION:-latest}
     restart: unless-stopped
-    ports: ["\${OPENSHIP_BIND_ADDR:-0.0.0.0}:\${DASHBOARD_PORT:-3001}:\${DASHBOARD_PORT:-3001}"]
+    # Loopback by default (see api note); OPENSHIP_BIND_ADDR opts into a public interface.
+    ports: ["\${OPENSHIP_BIND_ADDR:-127.0.0.1}:\${DASHBOARD_PORT:-3001}:\${DASHBOARD_PORT:-3001}"]
     env_file: [.env]
     environment:
       NODE_ENV: production
@@ -838,10 +842,18 @@ export function resolveEnvConfig(
   hostControl: boolean;
 } {
   const publicUrl = keepConfig(prev, "OPENSHIP_PUBLIC_URL", opts.publicUrl);
-  // Carried, not defaulted: an operator who pinned the stack to one interface has
-  // made a security decision, and regenerating `.env` without it silently
-  // republishes the api + dashboard on every interface of the box.
-  const bindAddr = keepConfig(prev, "OPENSHIP_BIND_ADDR");
+  // Bind interface. An explicit setting always wins and is carried across re-runs
+  // (an operator who pinned one interface made a security decision; regenerating
+  // `.env` without it must not silently republish the api + dashboard everywhere).
+  // With nothing pinned we default by EXPOSURE, not to 0.0.0.0 blindly:
+  //   • public URL configured → the box is meant to be reachable off-host, so
+  //     publish on all interfaces (matches prior behavior; never breaks a remote
+  //     install whose `.env` predates this key or that is reached by IP:port).
+  //   • no public URL (a local / same-host install) → leave it unset so the
+  //     compose loopback default (${OPENSHIP_BIND_ADDR:-127.0.0.1}) applies and the
+  //     ports never touch a public interface. The host-net edge still fronts any
+  //     domains over loopback, so a domain-fronted box can also pin 127.0.0.1.
+  const bindAddr = keepConfig(prev, "OPENSHIP_BIND_ADDR") ?? (publicUrl ? "0.0.0.0" : undefined);
   return {
     apiPort: keepConfig(prev, "API_PORT", opts.apiPort) ?? String(DEFAULT_API_PORT),
     dashPort: keepConfig(prev, "DASHBOARD_PORT", opts.dashboardPort) ?? String(DEFAULT_DASHBOARD_PORT),
@@ -881,7 +893,10 @@ export function composeEnvPorts(): { api?: number; dashboard?: number } {
 
 /** The interface the stack publishes the api + dashboard on (compose default). */
 export function composeBindAddr(): string {
-  return readEnvFile().OPENSHIP_BIND_ADDR?.trim() || "0.0.0.0";
+  // Match the compose template fallback (${OPENSHIP_BIND_ADDR:-127.0.0.1}): when
+  // `.env` pins no interface the ports bind loopback, so port-conflict probing
+  // must check loopback too, not the whole box.
+  return readEnvFile().OPENSHIP_BIND_ADDR?.trim() || "127.0.0.1";
 }
 
 /**
@@ -1113,6 +1128,41 @@ export function composePrefetch(opts: ComposeUpOpts): boolean {
 }
 
 /**
+ * Pre-create the edge's host bind-mount source directories so the Docker daemon
+ * doesn't have to. Returns the dirs it COULDN'T create (empty = all good).
+ *
+ * A ROOTFUL daemon creates a missing mount source itself (as root), so a failure
+ * here is harmless there — we stay quiet and let Docker do it (preserving the
+ * rootful non-root-invoker case that works today). A ROOTLESS daemon runs as the
+ * invoking user and CANNOT mkdir under root-owned /var/lib, /opt or /etc — it
+ * dies with an opaque "error while creating mount source path … permission
+ * denied" (#372). Callers pair a non-empty result with isRootlessDocker() to
+ * surface a one-time fix instead of that.
+ */
+function ensureEdgeMountDirs(): string[] {
+  const failed: string[] = [];
+  for (const { host } of EDGE_CONTAINER_MOUNTS) {
+    try {
+      mkdirSync(host, { recursive: true });
+    } catch (err) {
+      // recursive mkdir is idempotent, so a throw means we truly can't (EACCES
+      // under a root-owned parent — the rootless case), not "already there".
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") failed.push(host);
+    }
+  }
+  return failed;
+}
+
+/** True when the Docker daemon runs rootless (a missing bind-mount source is
+ *  created by the invoking user, not root). Probed only on the failure path. */
+function isRootlessDocker(): boolean {
+  const r = spawnSync("docker", ["info", "-f", "{{println .SecurityOptions}}"], {
+    encoding: "utf8",
+  });
+  return r.status === 0 && /rootless/i.test(r.stdout ?? "");
+}
+
+/**
  * `openship up` (compose): write files, then either PULL the pinned images
  * (normal install) or BUILD api/dashboard/edge from the source checkout (dev
  * install). Postgres/redis are upstream images and are pulled either way.
@@ -1152,6 +1202,25 @@ export async function composeUp(
   // volume-held certs + vhosts, or the stack comes back up serving nothing.
   migrateLegacyEdgeVolumes(project);
   warnOrphanedVolumes(project);
+
+  // #372: create the edge's bind-mount source dirs ourselves. A rootful daemon
+  // would create any that are missing, but a rootless daemon runs as this user
+  // and can't mkdir under root-owned /var/lib|/opt|/etc — it fails the whole
+  // stack with an opaque "error while creating mount source path". If our own
+  // create can't cover them AND the daemon is rootless, surface the one-time fix
+  // rather than letting compose die cryptically.
+  const unmakeableMounts = ensureEdgeMountDirs();
+  if (unmakeableMounts.length && isRootlessDocker()) {
+    const dirs = unmakeableMounts.join(" ");
+    console.error(
+      `\n  Rootless Docker can't create the edge's host directories under root-owned paths:\n` +
+        `    ${unmakeableMounts.join("\n    ")}\n\n` +
+        `  Create them once (owned by your user), then re-run \`openship up --compose\`:\n` +
+        `    sudo mkdir -p ${dirs}\n` +
+        `    sudo chown -R "$(id -un)" ${dirs}\n`,
+    );
+    return { ok: false, apiPort, dashPort };
+  }
 
   // A surviving data volume can hold a password this `.env` doesn't know, and the
   // api then crash-loops on 28P01 behind a compose error that blames the wrong

@@ -152,7 +152,7 @@ export const DeploymentCard: React.FC<DeploymentCardProps> = ({
         {appTemplateId ? (
           <AppLogo appId={appTemplateId} className="size-5 object-contain" />
         ) : frameworkConfig.icon ? (
-          frameworkConfig.icon("hsl(var(--foreground))")
+          frameworkConfig.icon("var(--foreground)")
         ) : (
           <span className="text-xs font-mono font-bold text-muted-foreground">
             {(deployment.framework || "?").slice(0, 2).toUpperCase()}

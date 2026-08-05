@@ -12,6 +12,7 @@
     "kindImage": "Container image",
     "current": "Current version",
     "latest": "Latest version",
+    "repository": "Repository",
     "notChecked": "Not checked yet",
     "upToDate": "Up to date",
     "updateAvailable": "Update available",
@@ -196,6 +197,19 @@
       "toast": {
         "saved": "Routing set to {mode}",
         "failed": "Failed to update routing"
+      }
+    },
+    "internalAlias": {
+      "title": "Internal hostname",
+      "description": "Custom name other services use to reach this app privately",
+      "intro": "Set an extra DNS name for this app on its private project network. It resolves alongside the default (the project slug) — other linked services can use either. Public access is unchanged; this never exposes a port.",
+      "label": "Hostname alias",
+      "hint": "Letters, digits and dashes only. Leave empty to use the project slug.",
+      "save": "Save",
+      "toast": {
+        "saved": "Internal hostname updated",
+        "failed": "Couldn't update the internal hostname",
+        "invalid": "Enter at least one letter or digit"
       }
     }
   },

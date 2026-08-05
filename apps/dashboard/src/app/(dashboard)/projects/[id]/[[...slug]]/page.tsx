@@ -19,6 +19,8 @@ import { BuildSettings } from "../components/BuildSettings";
 import { LogsSettings } from "../components/LogsSettings";
 import { BackupSettings } from "../components/BackupSettings";
 import { Deployments } from "../components/Deployments";
+import { HealthTab } from "../components/HealthTab";
+import { MonitoringTab } from "../components/MonitoringTab";
 import { AdvancedSettings } from "../components/AdvancedSettings";
 import { OverviewTab } from "../components/OverviewTab";
 import { AppConfiguration } from "../components/AppConfiguration";
@@ -721,6 +723,10 @@ const ProjectSettingsContent = () => {
         return <DomainSettings />;
       case "deployments":
         return <Deployments />;
+      case "health":
+        return <HealthTab />;
+      case "monitoring":
+        return <MonitoringTab />;
       case "source":
       case "git":
         return <GitSettings />;

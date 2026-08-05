@@ -10,6 +10,8 @@ import {
   ALL_PACKAGE_MANAGERS,
   ALL_RESOURCE_TIERS,
   CLOUD_RESOURCE_TIER_IDS,
+  PROXY_DIRECTIVES,
+  proxyKindRegex,
   type ResourceTier,
 } from "@repo/core";
 
@@ -69,7 +71,10 @@ export const MonorepoSubAppFieldsSchema = {
   installCommand: Type.Optional(Type.String({ maxLength: 1000 })),
   buildCommand: Type.Optional(Type.String({ maxLength: 1000 })),
   startCommand: Type.Optional(Type.String({ maxLength: 1000 })),
-  outputDirectory: Type.Optional(Type.String({ maxLength: 200, pattern: "^[A-Za-z0-9._~/-]+$" })),
+  // `*` not `+`: an empty string is the pipeline's own "serve from root / unset"
+  // value (build-config default, `!outputDirectory` checks), so `""` must be a
+  // VALID input — a `+` here 400'd every caller sending the blank default (#427).
+  outputDirectory: Type.Optional(Type.String({ maxLength: 200, pattern: "^[A-Za-z0-9._~/-]*$" })),
   framework: Type.Optional(FrameworkEnum),
   packageManager: Type.Optional(PackageManagerEnum),
   buildImage: Type.Optional(Type.String({ maxLength: 200 })),
@@ -215,6 +220,38 @@ const ReadinessSchema = Type.Object({
   stabilizationSeconds: Type.Optional(Type.Number({ minimum: 1, maximum: 600 })),
   onFailure: Type.Optional(Type.Union([Type.Literal("warn"), Type.Literal("fail")])),
 });
+/**
+ * Curated reverse-proxy tunables. CURATED, never arbitrary nginx passthrough:
+ * these strings are interpolated straight into generated config.
+ *
+ * GENERATED from `PROXY_DIRECTIVES` in @repo/core, not hand-listed — the same table
+ * drives `sanitizeProxySettings`, which re-checks every value right before
+ * rendering. Two hand-written copies would drift and the API would start accepting
+ * values the renderer silently drops (or reject ones it renders fine). Adding a
+ * directive means one row in that table; nothing here changes.
+ */
+const ProxySettingsSchema = Type.Object(
+  Object.fromEntries(
+    PROXY_DIRECTIVES.map((spec) => {
+      if (spec.kind === "bool") return [spec.key, Type.Optional(Type.Boolean())];
+      if (spec.kind === "int") {
+        return [
+          spec.key,
+          Type.Optional(
+            Type.Integer({
+              ...(spec.min !== undefined ? { minimum: spec.min } : {}),
+              ...(spec.max !== undefined ? { maximum: spec.max } : {}),
+            }),
+          ),
+        ];
+      }
+      // `size` | `time` | `buffers` — the kind's regex IS the schema pattern.
+      const re = proxyKindRegex(spec.kind);
+      return [spec.key, Type.Optional(Type.String({ pattern: re!.source, maxLength: 64 }))];
+    }),
+  ),
+);
+
 const RoutingConfigSchema = Type.Object({
   rewrites: Type.Optional(Type.Array(RoutingRuleSchema, { maxItems: 200 })),
   redirects: Type.Optional(
@@ -243,6 +280,9 @@ const RoutingConfigSchema = Type.Object({
   ),
   cleanUrls: Type.Optional(Type.Boolean()),
   trailingSlash: Type.Optional(Type.Boolean()),
+  // No explicit null: `routingConfig` is replaced wholesale on save, so omitting
+  // `proxy` already clears it (and null-ing the whole blob clears everything).
+  proxy: Type.Optional(ProxySettingsSchema),
 });
 
 /**
@@ -287,7 +327,10 @@ export const CreateProjectBody = Type.Object({
   packageManager: Type.Optional(PackageManagerEnum),
   installCommand: Type.Optional(Type.String({ maxLength: 500 })),
   buildCommand: Type.Optional(Type.String({ maxLength: 500 })),
-  outputDirectory: Type.Optional(Type.String({ maxLength: 200, pattern: "^[A-Za-z0-9._~/-]+$" })),
+  // `*` not `+`: an empty string is the pipeline's own "serve from root / unset"
+  // value (build-config default, `!outputDirectory` checks), so `""` must be a
+  // VALID input — a `+` here 400'd every caller sending the blank default (#427).
+  outputDirectory: Type.Optional(Type.String({ maxLength: 200, pattern: "^[A-Za-z0-9._~/-]*$" })),
   productionPaths: Type.Optional(Type.String({ maxLength: 2000 })),
   /**
    * Persistent mounts, compose syntax or a bare app-relative path. Omit to keep
@@ -387,6 +430,13 @@ export const CreateProjectBody = Type.Object({
    */
   isApp: Type.Optional(Type.Boolean()),
   appTemplateId: Type.Optional(Type.String({ maxLength: 100 })),
+  /**
+   * Custom east-west DNS alias for a single-app project, resolving ALONGSIDE the
+   * default `<slug>` on the project network. Free-form here (normalized +
+   * collision-checked server-side); `null`/`""` clears it back to the default.
+   * The compose equivalent is per-service `advanced.alias`.
+   */
+  internalAlias: Type.Optional(Type.Union([Type.String({ maxLength: 100 }), Type.Null()])),
 });
 
 export const UpdateProjectBody = Type.Partial(CreateProjectBody);

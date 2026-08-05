@@ -20,7 +20,7 @@ import type {
   ProxyKind,
 } from "@repo/adapters";
 import { classifyProxy } from "@repo/adapters";
-import type { ComposeHealthcheck } from "@repo/core";
+import type { ComposeHealthcheck, ProxySettings } from "@repo/core";
 import type { ComposeService } from "../../lib/compose-parser";
 import type { ManifestProjectEntry } from "../../lib/openship-manifest";
 import type { ExistingRoute } from "./proxy-route-scan";
@@ -86,6 +86,10 @@ export interface DiscoveredService {
     path: string;
     domains: string[];
     ssl: { enabled: boolean; certPath?: string; keyPath?: string };
+    /** Adoptable reverse-proxy tunables the foreign vhost declared (upload limit,
+     *  timeouts, …). Carried so the migrated project keeps the limits it already ran
+     *  under instead of dropping to nginx's defaults on cutover. */
+    proxy?: ProxySettings;
     source?: string;
   }>;
   warnings: string[];
@@ -179,8 +183,12 @@ export function isDefaultNetwork(name: string, composeProjects: string[]): boole
   return composeProjects.some((p) => name === `${p}_default`) || name === "default";
 }
 
-function envArrayToRecord(env: string[], imageDefaults?: Set<string>): Record<string, string> {
+function envArrayToRecord(
+  env: string[],
+  imageDefaults?: Set<string>,
+): { record: Record<string, string>; droppedImageDefaults: string[] } {
   const out: Record<string, string> = {};
+  const droppedImageDefaults: string[] = [];
   for (const entry of env) {
     const eq = entry.indexOf("=");
     if (eq <= 0) continue;
@@ -189,10 +197,20 @@ function envArrayToRecord(env: string[], imageDefaults?: Set<string>): Record<st
     // Drop entries identical to the image's baked-in default (exact KEY=VALUE),
     // so an overridden var survives but the base image's dozen defaults don't
     // masquerade as user config. Without image data, nothing is dropped.
-    if (imageDefaults?.has(entry)) continue;
+    //
+    // But the match is by KEY=VALUE: a var the OPERATOR set that happens to equal
+    // the image default is dropped too (common for Coolify/Nixpacks images that
+    // bake config as ENV layers). It's still supplied at runtime by the same
+    // image, so import behaviour is intentionally unchanged — but we RECORD the
+    // dropped keys so the wizard can tell the operator exactly what wasn't carried
+    // as explicit config, instead of silently omitting it (#394).
+    if (imageDefaults?.has(entry)) {
+      droppedImageDefaults.push(key);
+      continue;
+    }
     out[key] = entry.slice(eq + 1);
   }
-  return out;
+  return { record: out, droppedImageDefaults };
 }
 
 function portsToComposeStrings(ports: DockerPortBinding[]): string[] {
@@ -399,10 +417,27 @@ export function toDiscoveredService(
     ];
     for (const port of publicPorts) {
       for (const hit of proxyRoutesByPort.get(port) ?? []) {
-        routes.push({ port: hit.port, path: hit.path, domains: hit.domains, ssl: hit.ssl, source: hit.source });
+        routes.push({
+          port: hit.port,
+          path: hit.path,
+          domains: hit.domains,
+          ssl: hit.ssl,
+          ...(hit.proxy ? { proxy: hit.proxy } : {}),
+          source: hit.source,
+        });
       }
     }
     if (routes.length > 0) existingRoute = routes;
+  }
+
+  const { record: env, droppedImageDefaults } = envArrayToRecord(detail.env, imageDefaults);
+  if (droppedImageDefaults.length > 0) {
+    // Not carried as explicit config because they matched the image's baked-in
+    // default (still supplied at runtime by the same image). Surfaced so the
+    // operator knows exactly what to re-enter if they change the image (#394).
+    warnings.push(
+      `Env not imported (identical to image defaults; provided by the image at runtime): ${droppedImageDefaults.join(", ")}`,
+    );
   }
 
   return {
@@ -416,7 +451,7 @@ export function toDiscoveredService(
     build: declared?.build,
     dockerfile: declared?.dockerfile,
     ports,
-    env: envArrayToRecord(detail.env, imageDefaults),
+    env,
     volumes: mounts,
     networks: detail.networks,
     dependsOn: declared?.dependsOn ?? [],

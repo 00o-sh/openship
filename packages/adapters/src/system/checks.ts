@@ -24,11 +24,28 @@ import { safeErrorMessage } from "@repo/core";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Run a command via executor, return stdout or null on failure. */
+/**
+ * A probe's outcome. `output` is stdout on exit 0 (possibly empty); `error` is the
+ * failure text, null when the command ran.
+ *
+ * The two are deliberately NOT collapsed into one `string | null`. That is what
+ * made #408 undiagnosable: a probe that FAILED and a probe that returned nothing
+ * produced the identical static "the daemon is not running", so the daemon's own
+ * answer — "permission denied while trying to connect to the Docker daemon
+ * socket", "Cannot connect to the Docker daemon", "Command timed out after
+ * 10000ms" — was read off the wire, logged behind SYSTEM_DEBUG_LOGS, and then
+ * discarded in favour of a guess the reporter had no way to check.
+ */
+interface ExecOutcome {
+  output: string;
+  error: string | null;
+}
+
+/** Run a command via executor; never throws except on a transport drop. */
 async function tryExec(
   executor: CommandExecutor,
   command: string,
-): Promise<string | null> {
+): Promise<ExecOutcome> {
   const startedAt = Date.now();
   systemDebug("checks", `exec:start ${command}`);
   try {
@@ -37,7 +54,9 @@ async function tryExec(
       "checks",
       `exec:ok ${command} (${formatDuration(startedAt)})`,
     );
-    return result;
+    // Trimmed so "did this produce anything" is an honest test — a
+    // whitespace-only reply from a half-answering daemon is not output.
+    return { output: result.trim(), error: null };
   } catch (err) {
     if (isRemoteConnectionError(err)) {
       systemDebug(
@@ -51,8 +70,26 @@ async function tryExec(
       "checks",
       `exec:fail ${command} (${formatDuration(startedAt)}) ${msg}`,
     );
-    return null;
+    return { output: "", error: msg || `\`${command}\` failed` };
   }
+}
+
+/**
+ * Fold a probe's own failure text into the component message, so the UI states the
+ * cause instead of repeating a guess. Server owners read this string and act on it;
+ * they have a shell on the same box, so there is nothing here they can't already see.
+ *
+ * First line only, capped: `docker info` and certbot can answer with a paragraph,
+ * and the message renders inline in the Components tab.
+ */
+function withReason(message: string, error: string | null): string {
+  if (!error) return message;
+  const first = error
+    .split("\n")
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (!first) return message;
+  return `${message} — ${first.length > 200 ? `${first.slice(0, 199)}…` : first}`;
 }
 
 function healthy(
@@ -103,17 +140,23 @@ export async function checkDocker(
   const startedAt = Date.now();
   const recipe = systemCatalog.checks.docker;
   const version = await tryExec(executor, recipe.versionCommand);
-  if (!version) {
+  if (!version.output) {
     systemDebug("checks", `docker:missing (${formatDuration(startedAt)})`);
-    return unhealthy("docker", recipe.missingMessage);
+    return unhealthy("docker", withReason(recipe.missingMessage, version.error));
   }
 
-  const parsed = recipe.parseVersion(version);
+  const parsed = recipe.parseVersion(version.output);
 
+  // Two distinct diagnoses, one verdict: the probe failed (error carries why), or
+  // it exited 0 without naming a server version (daemon answered nothing useful).
+  // Both mean "not running" — only the first can explain itself.
   const info = await tryExec(executor, recipe.daemonCommand!);
-  if (!info) {
-    systemDebug("checks", `docker:not-running (${formatDuration(startedAt)})`);
-    return unhealthy("docker", recipe.notRunningMessage!, {
+  if (!info.output) {
+    systemDebug(
+      "checks",
+      `docker:not-running (${formatDuration(startedAt)}) ${info.error ?? "probe exited 0 with no server version"}`,
+    );
+    return unhealthy("docker", withReason(recipe.notRunningMessage!, info.error), {
       version: parsed,
       running: false,
     });
@@ -129,11 +172,11 @@ export async function checkGit(
   const startedAt = Date.now();
   const recipe = systemCatalog.checks.git;
   const version = await tryExec(executor, recipe.versionCommand);
-  if (!version) {
+  if (!version.output) {
     systemDebug("checks", `git:missing (${formatDuration(startedAt)})`);
-    return unhealthy("git", recipe.missingMessage);
+    return unhealthy("git", withReason(recipe.missingMessage, version.error));
   }
-  const parsed = recipe.parseVersion(version);
+  const parsed = recipe.parseVersion(version.output);
   systemDebug("checks", `git:healthy (${formatDuration(startedAt)})`);
   return healthy("git", parsed);
 }
@@ -144,11 +187,11 @@ export async function checkRsync(
   const startedAt = Date.now();
   const recipe = systemCatalog.checks.rsync;
   const version = await tryExec(executor, recipe.versionCommand);
-  if (!version) {
+  if (!version.output) {
     systemDebug("checks", `rsync:missing (${formatDuration(startedAt)})`);
-    return unhealthy("rsync", recipe.missingMessage);
+    return unhealthy("rsync", withReason(recipe.missingMessage, version.error));
   }
-  const parsed = recipe.parseVersion(version);
+  const parsed = recipe.parseVersion(version.output);
   systemDebug("checks", `rsync:healthy (${formatDuration(startedAt)})`);
   return healthy("rsync", parsed);
 }
@@ -174,17 +217,20 @@ export async function checkEdge(executor: CommandExecutor): Promise<ComponentSta
   }
 
   const version = await tryExec(executor, containerCommand(container, "openresty -v 2>&1"));
-  if (!version) {
+  if (!version.output) {
     systemDebug("checks", `edge:container-unresponsive (${formatDuration(startedAt)})`);
     return unhealthy(
       "edge",
-      `The edge container ${container} is running but not responding — check \`docker logs ${container}\``,
+      withReason(
+        `The edge container ${container} is running but not responding — check \`docker logs ${container}\``,
+        version.error,
+      ),
       { running: false },
     );
   }
 
   systemDebug("checks", `edge:healthy (${formatDuration(startedAt)})`);
-  return healthy("edge", systemCatalog.checks.openresty.parseVersion(version), true);
+  return healthy("edge", systemCatalog.checks.openresty.parseVersion(version.output), true);
 }
 
 // ─── Registry ────────────────────────────────────────────────────────────────

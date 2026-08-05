@@ -565,24 +565,31 @@ export function usesServiceDeployment(
   return config.projectType === "services" && config.serviceDeploymentMode === "services";
 }
 
+/**
+ * The hostnames a deploy screen may PRINT for a config, in endpoint order.
+ *
+ * Only hosts the config actually names: a custom domain the operator typed, or
+ * `<chosen label>.<baseDomain>`. Empty when the config names none — the caller
+ * then hides the row / disables the link rather than showing a guess.
+ *
+ * It used to synthesize a missing endpoint from a `fallbackDomain` seeded with
+ * `config.projectName` — the RAW project name, not a slug — so "My App" became
+ * a `My App.opsh.io` Domain row AND the target of the primary "Visit Site"
+ * button on the deploy-success screen. That host never existed: the deploy mints
+ * its free route from the project's SLUG, so even the slug-shaped cases pointed
+ * somewhere else. Nothing may name a host this function can't derive from the
+ * config's own endpoints.
+ */
 export function getPublicEndpointHosts(
   endpoints: PublicEndpoint[] | undefined,
   baseDomain: string,
-  fallbackDomain: string,
 ): string[] {
-  return ensurePublicEndpoints(endpoints, {
-    domain: fallbackDomain,
-    domainType: "free",
-  })
-    .map((endpoint) => (
-      endpoint.domainType === "custom"
-        ? endpoint.customDomain
-        : endpoint.domain
-          ? `${endpoint.domain}.${baseDomain}`
-          : fallbackDomain
-            ? `${fallbackDomain}.${baseDomain}`
-            : ""
-    ))
+  return (endpoints ?? [])
+    .map((endpoint) => {
+      if (endpoint.domainType === "custom") return endpoint.customDomain?.trim() ?? "";
+      const label = endpoint.domain?.trim();
+      return label && baseDomain ? `${label}.${baseDomain}` : "";
+    })
     .filter((hostname, index, hostnames) => Boolean(hostname) && hostnames.indexOf(hostname) === index);
 }
 

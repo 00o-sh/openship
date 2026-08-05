@@ -6,8 +6,10 @@
  * setup finishes, Openship itself shows up under the dashboard's **Apps** tab
  * with a real domain:
  *   - createProject({ isApp:true, appTemplateId:"openship" })  → the Apps row
- *   - free  domain → Oblien edge proxy (slug.opsh.io → this box), reusing
- *     cloudClient().edgeProxy.sync — needs the owner connected to Openship Cloud
+ *   - free  domain → Cloud edge proxy (slug.opsh.io → this box) through
+ *     ensureManagedEdgeProxy, the same funnel a deployed app's free subdomain uses
+ *     (which is also what proves this box controls the target) — needs the owner
+ *     connected to Openship Cloud
  *   - custom domain → OpenResty + Let's Encrypt via provisionSelfEdge, streamed
  *     live through a setup-session for the wizard's spinner
  *
@@ -23,10 +25,10 @@ import { env } from "../../config";
 import { assertNotCloud, platform } from "../../lib/controller-helpers";
 import { ensureLocalUser } from "../../lib/local-user";
 import { createProject } from "../projects/project-crud.service";
-import { cloudClient } from "../../lib/cloud/client";
 import { getCloudConnectionStatusForOrg } from "../../lib/cloud/session";
-import { resolveEdgeTargetHost } from "../../lib/edge-target";
+import { ensureManagedEdgeProxy, ManagedEdgeError } from "../../lib/managed-edge-proxy";
 import { ensureAdoptDeployment, provisionSelfAppEdge } from "../../lib/startup/self-deploy";
+import { ensureLocalServer } from "../../lib/startup/self-server";
 import { reapplyProjectLiveRoutes } from "../domains/project-route.service";
 import { refreshSelfAppPublicUrl } from "../../lib/public-url";
 import { streamSSE } from "../../lib/sse";
@@ -149,6 +151,7 @@ export async function cloudConnect(c: Context) {
       // queries the admin row directly — NOT resolveOrg()/ensureLocalUser(), which
       // would miss the renamed local user and provision a phantom org.
       await storeCloudSession(adminId, data.sessionToken);
+      await ensureLocalServer().catch(() => {});
       return c.json({
         ok: true,
         userId: adminId,
@@ -160,6 +163,10 @@ export async function cloudConnect(c: Context) {
 
     const userId = await mirrorCloudUser(data.user);
     await storeCloudSession(userId, data.sessionToken);
+    // The mirror just made this box's founding admin, so its "This Server" row is
+    // now registerable — and this is the EARLIEST point on the free-domain install
+    // where that's true (bootstrap-admin will 409 on the very admin created here).
+    await ensureLocalServer().catch(() => {});
     // Fresh box → local login becomes cloud-backed (passwordless). Reuse the
     // singleton upsert; clear the cached mode so the change takes effect now.
     //
@@ -220,21 +227,12 @@ export async function selfRegister(c: Context) {
     const slug = (body.slug ?? "").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-|-$/g, "");
     if (!slug) return c.json({ error: "slug is required for a free domain" }, 400);
     const hostname = `${slug}.${SYSTEM.DOMAINS.CLOUD_DOMAIN}`;
-    // SAME resolver the deployed-app free subdomains use (managed-edge-proxy →
-    // resolveEdgeTargetHost), with the operator's `--public-url` host as the first
-    // candidate. Not a local copy of the rules: this path having its own notion of a
-    // valid target — none at all, in fact — is exactly how it came to wire
-    // `<slug>.opsh.io` at itself while the deploy path was guarded.
-    const { host, reason } = await resolveEdgeTargetHost(organizationId, {
-      preferHost: body.publicHost,
-    });
-    if (!host) {
-      return c.json({ error: `Cannot route ${hostname} to this box: ${reason}` }, 400);
-    }
-    // Bare public host — the SAME shape `managed-edge-proxy` sends for a deployed
-    // app's free subdomain (the shipped, proven path), and what the SaaS handler
-    // documents ("slug + target IP"). It schemes it to `http://<host>` itself, so
-    // Oblien always proxies to :80 = OUR EDGE.
+    // THE shared funnel — `ensureManagedEdgeProxy`, the same call a deployed app's
+    // free subdomain goes through, with the operator's `--public-url` host passed as
+    // a target candidate. This path used to resolve the target and post to the SaaS
+    // itself; that bypass is now load-bearing to close, because Openship Cloud
+    // refuses to route to an unproven target and the verify-and-retry lives in the
+    // funnel. A wizard with its own copy would 403 with nothing to explain it.
     //
     // NOT `:${dashPort}`: pointing Cloud straight at :3001 meant the free domain
     // only worked with that port open to the internet, put the dashboard on a
@@ -243,18 +241,24 @@ export async function selfRegister(c: Context) {
     // for the hostname at all, so every request fell to default_server. Now the box
     // needs nothing but :80/:443, and a free domain routes exactly like a custom
     // one: through the edge, matched on Host, to the dashboard on loopback.
-    const target = host;
+    let host: string;
+    let targetWarning: string | undefined;
     try {
-      const result = await cloudClient({ organizationId }).edgeProxy.sync({ slug, target });
-      if (!result) {
-        return c.json(
-          { error: "Openship Cloud is not connected — connect it to use a free .opsh.io domain." },
-          409,
-        );
-      }
+      const wired = await ensureManagedEdgeProxy(organizationId, slug, {
+        preferHost: body.publicHost,
+      });
+      host = wired.target;
+      targetWarning = wired.warning;
     } catch (err) {
-      return c.json({ error: safeErrorMessage(err) }, 502);
+      // The funnel's own status: 400 unresolvable target, 409 Cloud not linked,
+      // 502 upstream refusal. Preserved rather than collapsed — the wizard shows
+      // this straight to the operator and each one has a different fix.
+      const status = err instanceof ManagedEdgeError ? err.status : 502;
+      return c.json({ error: safeErrorMessage(err) }, status);
     }
+    // Reported back with the result: the target decides whether this URL serves,
+    // and `warning` is set when it's a hostname rather than this box's IP.
+    const edgeNote = targetWarning ? `${hostname} is ${targetWarning}` : undefined;
     // Oblien's edge terminates TLS for *.opsh.io, so the domain is secured the
     // moment the proxy syncs — but it forwards to :80 here, which is OUR edge, so
     // the edge also needs a vhost for this hostname or every request lands on
@@ -293,8 +297,14 @@ export async function selfRegister(c: Context) {
         },
         // No cert step: the row above is `domainType: "free"`, so both the
         // provisioner and manageDomainSsl skip issuance (tlsIssuedElsewhere) —
-        // Cloud terminates TLS for *.opsh.io.
-        { edgeTakeover: body.edgeTakeover === true, edgeMigrate: body.edgeMigrate === true },
+        // Cloud terminates TLS for *.opsh.io. And no managed-edge sync:
+        // `ensureManagedEdgeProxy` above already did it (and verified the target if
+        // Cloud asked), so a second one would only race its own token.
+        {
+          edgeTakeover: body.edgeTakeover === true,
+          edgeMigrate: body.edgeMigrate === true,
+          managedEdgeSyncedByCaller: true,
+        },
       )
         .then(async (res) => {
           await refreshSelfAppPublicUrl().catch(() => {});
@@ -304,7 +314,14 @@ export async function selfRegister(c: Context) {
           appendSetupLog(session.id, "edge", safeErrorMessage(err), "error");
           finishSetupSession(session.id, "failed");
         });
-      return c.json({ ok: true, url: `https://${hostname}`, hostname, sessionId: session.id });
+      return c.json({
+        ok: true,
+        url: `https://${hostname}`,
+        hostname,
+        sessionId: session.id,
+        target: host,
+        ...(edgeNote ? { warning: edgeNote } : {}),
+      });
     }
 
     // Compose (the container edge owns :80) or no host edge: just register the
@@ -313,14 +330,28 @@ export async function selfRegister(c: Context) {
     // and then 404s, indistinguishable from a DNS problem to the operator.
     const freshFree = await repos.project.findById(projectId);
     if (freshFree) {
-      await reapplyProjectLiveRoutes(freshFree, [], { isSelfApp: true }).catch((err) =>
+      // `managedEdgeSyncedByCaller`: `ensureManagedEdgeProxy` above already registered
+      // this slug on Cloud's edge (and verified the target if it had to). With
+      // `previousHostnames` empty the re-apply would treat the row we just created as
+      // newly added and sync it a second time — a duplicate challenge for the same
+      // target, where the loser's check fails against a token the winner reset.
+      await reapplyProjectLiveRoutes(freshFree, [], {
+        isSelfApp: true,
+        managedEdgeSyncedByCaller: true,
+      }).catch((err) =>
         console.warn(
           `[self-register] free domain ${hostname} registered with Cloud but the local edge route failed: ${safeErrorMessage(err)}`,
         ),
       );
     }
     await refreshSelfAppPublicUrl().catch(() => {});
-    return c.json({ ok: true, url: `https://${hostname}`, hostname });
+    return c.json({
+      ok: true,
+      url: `https://${hostname}`,
+      hostname,
+      target: host,
+      ...(edgeNote ? { warning: edgeNote } : {}),
+    });
   }
 
   if (domainType === "custom") {

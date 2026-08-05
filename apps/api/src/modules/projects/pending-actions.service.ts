@@ -383,6 +383,49 @@ function buildPortAdvisories(dep: Deployment, isCompose: boolean): PendingAction
 
 // ─── Entry points ───────────────────────────────────────────────────────────
 
+type ProjectRow = NonNullable<Awaited<ReturnType<typeof repos.project.findById>>>;
+
+/**
+ * The pure core: rows in, items out, no I/O.
+ *
+ * Split out from the loader so an org-wide caller can BULK-load the same three
+ * things once for every project and reuse this — otherwise a global feed costs
+ * 3 queries per project. Every entry point below funnels through here, which is
+ * what makes it structurally impossible for the project tab, a deployment view
+ * and the global tracker to describe one condition differently.
+ */
+export function collectPendingActions(input: {
+  project: ProjectRow;
+  latest: Deployment | null;
+  active: Deployment | null;
+  domains: DomainRow[];
+}): PendingAction[] {
+  const { project, latest, active, domains } = input;
+  const actions: PendingAction[] = [];
+
+  // Deploy-side, from the LATEST attempt.
+  if (latest) {
+    const prompt = buildPrompt(latest);
+    if (prompt) actions.push(prompt);
+    if (latest.status === "action_required") {
+      const blocked = buildDeployBlocked(latest);
+      if (blocked) actions.push(blocked);
+    }
+  }
+
+  // Release-side, from the LIVE deployment.
+  if (active) {
+    const decision = buildPartialDecision(active);
+    if (decision) actions.push(decision);
+    const routing = buildRoutingUnsynced(project.id, active);
+    if (routing) actions.push(routing);
+    actions.push(...buildPortAdvisories(active, isMultiServiceProject(project)));
+  }
+
+  actions.push(...buildDomainActions(domains));
+  return actions.sort(bySeverity);
+}
+
 /**
  * Everything waiting on a human for one project.
  *
@@ -406,29 +449,51 @@ export async function getProjectPendingActions(
     repos.domain.listByProject(projectId).catch(() => []),
   ]);
 
-  const actions: PendingAction[] = [];
+  return collectPendingActions({ project, latest: latest ?? null, active: active ?? null, domains });
+}
 
-  // Deploy-side, from the LATEST attempt.
-  if (latest) {
-    const prompt = buildPrompt(latest);
-    if (prompt) actions.push(prompt);
-    if (latest.status === "action_required") {
-      const blocked = buildDeployBlocked(latest);
-      if (blocked) actions.push(blocked);
-    }
+/**
+ * The same items for EVERY project in an organization — what the global issue
+ * tracker reads.
+ *
+ * Bulk-loads with repo methods that already exist, so the cost is a fixed handful
+ * of queries no matter how many projects the org has, not 3×N. The per-project
+ * verdict is `collectPendingActions`, unchanged — a condition that shows up on a
+ * project's own tab shows up here, worded identically, or it's a bug.
+ *
+ * Items are returned keyed by project so the caller can attach a target without
+ * re-deriving which project an item's paths belong to.
+ */
+export async function getOrgPendingActions(
+  organizationId: string,
+): Promise<Map<string, PendingAction[]>> {
+  const { rows: projects } = await repos.project.listByOrganization(organizationId, {
+    perPage: 1000,
+  });
+  const out = new Map<string, PendingAction[]>();
+  if (projects.length === 0) return out;
+
+  const ids = projects.map((p) => p.id);
+  const activeIds = projects.map((p) => p.activeDeploymentId).filter((id): id is string => !!id);
+
+  const [latestByProject, activeById, domainsByProject] = await Promise.all([
+    repos.deployment.findLatestByProjects(ids).catch(() => new Map<string, Deployment>()),
+    repos.deployment.findManyById(activeIds).catch(() => new Map<string, Deployment>()),
+    repos.domain.listByProjects(ids).catch(() => new Map<string, DomainRow[]>()),
+  ]);
+
+  for (const project of projects) {
+    const items = collectPendingActions({
+      project,
+      latest: latestByProject.get(project.id) ?? null,
+      active: project.activeDeploymentId
+        ? (activeById.get(project.activeDeploymentId) ?? null)
+        : null,
+      domains: domainsByProject.get(project.id) ?? [],
+    });
+    if (items.length > 0) out.set(project.id, items);
   }
-
-  // Release-side, from the LIVE deployment.
-  if (active) {
-    const decision = buildPartialDecision(active);
-    if (decision) actions.push(decision);
-    const routing = buildRoutingUnsynced(projectId, active);
-    if (routing) actions.push(routing);
-    actions.push(...buildPortAdvisories(active, isMultiServiceProject(project)));
-  }
-
-  actions.push(...buildDomainActions(domains));
-  return actions.sort(bySeverity);
+  return out;
 }
 
 /**

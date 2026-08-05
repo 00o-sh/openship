@@ -3,7 +3,7 @@
  */
 
 import { normalizeRoutingFields, repos, composeSpecDiff, type Project, type Service, type ServicePublicEndpoint } from "@repo/db";
-import { ForbiddenError, getProjectType, isValidCustomHostname, ValidationError, withTimeout, type ComposeAdvanced, type ServiceContainerState, type StackId } from "@repo/core";
+import { aliasConflictsWithSiblings, ForbiddenError, getProjectType, mergeAdvanced, normalizeServiceLabel, normalizeAliasStrict, withTimeout, type ComposeAdvanced, type ServiceContainerState, type StackId } from "@repo/core";
 import {
   BuildLogger,
   DockerRuntime,
@@ -15,6 +15,7 @@ import { scopedVolumeName, type CommandExecutor } from "@repo/adapters";
 import { encrypt, decrypt } from "../../lib/encryption";
 import { ENV_MASK, hasMaskedValue, maskDriftChanges, maskServiceEnv, unmaskEnv } from "../../lib/secret-env";
 import { assertResourceInOrg, platform } from "../../lib/controller-helpers";
+import { assertValidCustomDomains, customHostnamesOf } from "../../lib/custom-domain-guard";
 import type { RequestContext } from "../../lib/request-context";
 import {
   resolveServerExecutor,
@@ -34,7 +35,11 @@ import { deployComposeServices } from "../deployments/compose/deploy.service";
 import { deriveProjectRouteState } from "../domains/project-route.service";
 import { registerStartupHook } from "../../lib/startup";
 import { buildServiceRouteDomains, serviceCustomHostnames } from "../../lib/routing-domains";
-import { resolveServicePublicEndpoints } from "../../lib/public-endpoints";
+import {
+  mergeServiceRoutingPatch,
+  publicEndpointHostname,
+  resolveServicePublicEndpoints,
+} from "../../lib/public-endpoints";
 import { resolveRuntimeResources } from "../../lib/resources";
 import { assertFreeEndpointsAllowed } from "../../lib/free-domain-guard";
 import { ensurePendingServiceDomain, removeServiceDomain, reuseServerCertForDomain } from "../domains/domain.service";
@@ -95,20 +100,9 @@ function normalizeRoutingPatch(input: Parameters<typeof normalizeRoutingFields>[
 } {
   const r = normalizeRoutingFields(input);
   // Reject bogus custom hostnames (path / scheme / port / IP / single-label)
-  // before they're stored — the single-app POST /domains flow has this shape
-  // gate; service custom domains must match it so a bad value can't become an
-  // unservable vhost / unverifiable row.
-  const customHosts = [
-    ...(r.domainType === "custom" && r.customDomain ? [r.customDomain] : []),
-    ...r.publicEndpoints
-      .filter((e) => e.domainType === "custom" && e.customDomain)
-      .map((e) => e.customDomain as string),
-  ];
-  for (const host of customHosts) {
-    if (!isValidCustomHostname(host)) {
-      throw new ValidationError(`"${host}" is not a valid custom domain.`);
-    }
-  }
+  // before they're stored — the shared gate every custom-domain write path calls,
+  // so a bad value can't become an unservable vhost / unverifiable row.
+  assertValidCustomDomains([r]);
   return {
     ...r,
     domainType: r.domainType === "custom" ? "custom" : "free",
@@ -129,34 +123,67 @@ function normalizeRoutingPatch(input: Parameters<typeof normalizeRoutingFields>[
  * treat the sentinel as "keep stored" (see secret-env.ts). The drift diff's
  * `environment` from/to are masked too so the reconcile UI can't leak them.
  */
+// Lives in @repo/core now that the compose sync in @repo/db merges with it too
+// (packages/db cannot import from apps/api). Re-exported so this module's
+// existing importers and tests are unchanged.
+export { mergeAdvanced };
+
 /**
- * Merge an incoming `advanced` patch onto what's stored, so a caller that mentions
- * one key can't erase the others.
- *
- * Semantics, mirroring how a JSON-merge patch behaves:
- *   key absent  → leave the stored value alone
- *   key = null  → remove it
- *   key present → replace that key outright (shallow — see the call site)
- *
- * Exported for tests: this is the only thing standing between a partial PATCH and
- * a silently-wiped readiness gate.
+ * Validate + canonicalize a compose service's custom east-west alias in place.
+ * An empty entry is dropped; a non-empty one is normalized to a DNS label and
+ * rejected when it carries no usable characters or collides with another
+ * service's name/alias on the SAME project network (embedded DNS is first-match,
+ * so a duplicate would resolve ambiguously). No-op when the blob has no `alias`.
  */
-export function mergeAdvanced(
-  stored: ComposeAdvanced | null | undefined,
-  incoming: unknown,
-): ComposeAdvanced {
-  const base: ComposeAdvanced = { ...(stored ?? {}) };
-  // A non-object (or explicit null) `advanced` means "clear it" — the one way to
-  // reset the whole blob, kept because that used to be the only behaviour.
-  if (incoming === null || typeof incoming !== "object" || Array.isArray(incoming)) {
-    return incoming === undefined ? base : {};
+export async function validateServiceAlias(
+  projectId: string,
+  serviceId: string,
+  advanced: ComposeAdvanced,
+  projectInternalAlias?: string | null,
+): Promise<void> {
+  if (!("alias" in advanced)) return;
+  const raw = advanced.alias;
+  if (raw == null || (typeof raw === "string" && !raw.trim())) {
+    delete advanced.alias;
+    return;
   }
-  for (const [key, value] of Object.entries(incoming as Record<string, unknown>)) {
-    if (value === null) delete (base as Record<string, unknown>)[key];
-    else if (value !== undefined) (base as Record<string, unknown>)[key] = value;
+  const alias = normalizeAliasStrict(String(raw));
+  if (!alias) throw new Error("service-alias-invalid");
+
+  const siblings = (await repos.service.listByProject(projectId)).filter((s) => s.id !== serviceId);
+  if (aliasConflictsWithSiblings(alias, siblings, projectInternalAlias)) {
+    throw new Error("service-alias-conflict");
   }
-  return base;
+  advanced.alias = alias;
 }
+
+/**
+ * Reject a new/renamed service NAME that would shadow a hostname already taken on
+ * the project network. Mirrors validateServiceAlias but for the name direction:
+ * the normalized name is checked against sibling names AND their custom aliases
+ * AND the project's single-app internalAlias — because a container answers to all
+ * of those. Normalized (not the old exact `findByName`), so "My DB"/"my-db" are
+ * caught too. Self is excluded via `serviceId`; create passes "" so every existing
+ * row counts.
+ */
+export async function validateServiceName(
+  projectId: string,
+  serviceId: string,
+  name: string,
+  projectInternalAlias?: string | null,
+): Promise<void> {
+  const label = normalizeServiceLabel(name);
+  const siblings = (await repos.service.listByProject(projectId)).filter((s) => s.id !== serviceId);
+  if (aliasConflictsWithSiblings(label, siblings, projectInternalAlias)) {
+    throw new Error("service-name-already-exists");
+  }
+}
+
+// Re-exported for service-alias.test.ts, which imports the pure collision
+// predicate from this module. The implementation now lives in @repo/core (beside
+// the normalize helpers it depends on) so project-crud can reuse it without
+// pulling this module's adapters graph.
+export { aliasConflictsWithSiblings };
 
 function withDrift(svc: Service) {
   return {
@@ -291,8 +318,17 @@ async function materializeAppServiceRow(project: Project): Promise<void> {
   // Reuse the SAME normalizer createService uses so the mirrored project route
   // lands as ServicePublicEndpoint[] (exposed/exposedPort/domain scalars + the
   // per-port endpoints), keeping the unified port→domain mapping.
+  //
+  // `exposed` MIRRORS the project's persisted routes rather than asserting true: a
+  // project with no domain row (the port-only install — the default, since project
+  // create never invents one) has nothing to mirror, and the compose fan-out reads
+  // routes from THIS row, so `exposed: true` with an empty set bought no routing at
+  // all. It only produced a row that claims to be public with no hostname, which is
+  // what let surfaces downstream manufacture a `{slug}-{slug}.<base>` URL nobody
+  // chose. The port is still recorded, so flipping the route on later needs no
+  // re-entry.
   const routing = normalizeRoutingPatch({
-    exposed: true,
+    exposed: routeState.publicEndpoints.length > 0,
     exposedPort: project.port != null ? String(project.port) : null,
     publicEndpoints: routeState.publicEndpoints,
   });
@@ -350,10 +386,11 @@ export async function createService(
     throw new Error("service-name-required");
   }
 
-  const existing = await repos.service.findByName(projectId, name);
-  if (existing) {
-    throw new Error("service-name-already-exists");
-  }
+  // Reject a name colliding with a sibling's name OR custom alias OR the
+  // project's single-app internalAlias — every hostname the network already
+  // resolves. Normalized, so "My DB"/"my-db" collide too (the old exact
+  // findByName missed both aliases and normalization).
+  await validateServiceName(projectId, "", name, project.internalAlias);
 
   // #336: a brand-new service has no stored env to restore from, so any masked
   // sentinel the client sent is dropped (never persist "••••••••"). Warn so a
@@ -387,14 +424,42 @@ export async function createService(
   // `exposed: false` default because most compose rows (databases,
   // caches, queues) genuinely shouldn't be public.
   const monorepoDefaults = kind === "monorepo";
-  const routing = normalizeRoutingPatch({
-    exposed: data.exposed ?? monorepoDefaults,
-    exposedPort: data.exposedPort,
-    domain: data.domain,
-    customDomain: data.customDomain,
-    domainType: data.domainType ?? (monorepoDefaults ? "free" : undefined),
-    publicEndpoints: data.publicEndpoints,
-  });
+  // Same merge rule as updateService — a brand-new row is just the `stored: null`
+  // case, so create and update can't drift apart on what a routing payload means.
+  const routing = normalizeRoutingPatch(
+    mergeServiceRoutingPatch({
+      patch: {
+        exposed: data.exposed ?? monorepoDefaults,
+        exposedPort: data.exposedPort,
+        domain: data.domain,
+        customDomain: data.customDomain,
+        domainType: data.domainType ?? (monorepoDefaults ? "free" : undefined),
+        publicEndpoints: data.publicEndpoints,
+      },
+      stored: null,
+    }),
+  );
+
+  // Atomic gate, same rule and placement as updateService: a free (*.opsh.io)
+  // route only resolves behind the Openship Cloud edge, so refuse BEFORE the
+  // insert. Without this a create could PERSIST a route that is dead by
+  // construction — reachable through the app installer, which seeds every
+  // template service's routes here.
+  await assertFreeEndpointsAllowed(
+    ctx.organizationId,
+    resolveServicePublicEndpoints({ ...routing, ports: data.ports ?? [] }),
+    "managed-compose-domains",
+  );
+
+  // Through mergeAdvanced even on CREATE: there is nothing to preserve, but it
+  // strips the `null`-means-remove sentinels the update path accepts, so a
+  // caller can send one payload shape to both.
+  const advanced = mergeAdvanced(null, data.advanced);
+  // Same alias gate as updateService — normalize + reject invalid/colliding
+  // custom aliases BEFORE the insert, so a create can't persist an alias the
+  // update path would refuse. No serviceId yet, so pass "" — every existing
+  // service counts as a sibling, which is exactly right for a new row.
+  await validateServiceAlias(projectId, "", advanced, project.internalAlias);
 
   const created = await repos.service.create({
     projectId,
@@ -410,10 +475,7 @@ export async function createService(
     command: trimOrNull(data.command),
     commandArgv: data.commandArgv ?? null, // #332
     restart: data.restart ?? "unless-stopped",
-    // Through mergeAdvanced even on CREATE: there is nothing to preserve, but it
-    // strips the `null`-means-remove sentinels the update path accepts, so a
-    // caller can send one payload shape to both.
-    advanced: mergeAdvanced(null, data.advanced),
+    advanced,
     ...routing,
     enabled: data.enabled ?? true,
     sortOrder: data.sortOrder ?? services.length,
@@ -483,6 +545,7 @@ export async function updateService(
   // deep merge would make a partially-specified healthcheck inherit stale fields.
   if ("advanced" in patch) {
     patch.advanced = mergeAdvanced(svc.advanced as ComposeAdvanced | null, patch.advanced);
+    await validateServiceAlias(projectId, serviceId, patch.advanced as ComposeAdvanced, project.internalAlias);
   }
 
   if ("name" in patch && typeof patch.name === "string") {
@@ -492,10 +555,8 @@ export async function updateService(
     }
 
     if (name !== svc.name) {
-      const existing = await repos.service.findByName(projectId, name);
-      if (existing && existing.id !== serviceId) {
-        throw new Error("service-name-already-exists");
-      }
+      // Same normalized, alias-aware gate as create, excluding this row.
+      await validateServiceName(projectId, serviceId, name, project.internalAlias);
     }
 
     patch.name = name;
@@ -534,38 +595,56 @@ export async function updateService(
   const nameChanged = typeof patch.name === "string" && patch.name !== svc.name;
 
   if (touchesRouting) {
-    const normalized = normalizeRoutingPatch({
-      exposed: patch.exposed ?? svc.exposed,
-      exposedPort: patch.exposedPort ?? svc.exposedPort,
-      domain: patch.domain ?? svc.domain,
-      customDomain: patch.customDomain ?? svc.customDomain,
-      domainType: patch.domainType ?? svc.domainType,
-      // Only fall back to the stored array when the caller didn't send one, so an
-      // explicit [] (or a single-route edit) can clear the extra routes.
-      publicEndpoints: "publicEndpoints" in patch ? patch.publicEndpoints : svc.publicEndpoints,
-    });
+    // A scalar patch is an UPSERT of ONE route into the stored set (keyed by
+    // port), never a write-back of the stored primary and never a collapse — see
+    // mergeServiceRoutingPatch. Before this, an array on the row shadowed the
+    // scalars outright: the user's chosen custom domain was dropped and the gate
+    // below then judged the stored "free" primary instead.
+    const normalized = normalizeRoutingPatch(
+      mergeServiceRoutingPatch({ patch, stored: svc }),
+    );
 
+    // Write the merged routing through VERBATIM, nulls included. `normalized` is
+    // the row's whole intended routing state (unexposing only closes the gate — it
+    // no longer clears the set), so every null here is a real clear: switching to a
+    // custom domain must null `domain`, and switching back must null `customDomain`
+    // or the row keeps a stale hostname under the other type. Collapsing null →
+    // undefined to make drizzle skip the column left exactly that inconsistency.
     patch.exposed = normalized.exposed;
-    patch.exposedPort = normalized.exposedPort ?? undefined;
-    patch.domain = normalized.domain ?? undefined;
-    patch.customDomain = normalized.customDomain ?? undefined;
+    patch.exposedPort = normalized.exposedPort;
+    patch.domain = normalized.domain;
+    patch.customDomain = normalized.customDomain;
     patch.domainType = normalized.domainType;
     patch.publicEndpoints = normalized.publicEndpoints;
 
+    const nextEndpoints = resolveServicePublicEndpoints({
+      exposed: patch.exposed,
+      exposedPort: patch.exposedPort,
+      ports: svc.ports,
+      domain: patch.domain,
+      customDomain: patch.customDomain,
+      domainType: patch.domainType,
+      publicEndpoints: patch.publicEndpoints,
+    });
+    // Already-configured hostnames are exempt: read the stored routes with
+    // `exposed: true` so the CONFIG (not the paused/exposed state) is the
+    // baseline — an expose toggle must not read as introducing a route.
+    const priorHosts = new Set(
+      resolveServicePublicEndpoints({ ...svc, exposed: true })
+        .map((endpoint) => publicEndpointHostname(endpoint)?.toLowerCase())
+        .filter((hostname): hostname is string => !!hostname),
+    );
     // Atomic gate: a free (*.opsh.io) route only resolves behind the Openship
     // Cloud edge. Refuse before the DB write so a disconnected instance can't
-    // persist a dead "Pending" route. resolveServicePublicEndpoints is the same
-    // resolver the deploy loop uses, so the gate sees the exact routes to apply.
+    // persist a dead "Pending" route. Only NET-NEW free routes gate — same rule
+    // as the project path: re-validating the whole set made a service that
+    // already carries a free sibling (an app template's second port) impossible
+    // to edit at all, including switching it to a custom domain.
     await assertFreeEndpointsAllowed(
       ctx.organizationId,
-      resolveServicePublicEndpoints({
-        exposed: patch.exposed,
-        exposedPort: patch.exposedPort,
-        ports: svc.ports,
-        domain: patch.domain,
-        customDomain: patch.customDomain,
-        domainType: patch.domainType,
-        publicEndpoints: patch.publicEndpoints,
+      nextEndpoints.filter((endpoint) => {
+        const hostname = publicEndpointHostname(endpoint)?.toLowerCase();
+        return hostname ? !priorHosts.has(hostname) : false;
       }),
       "managed-compose-domains",
     );
@@ -876,6 +955,9 @@ export async function syncComposeServices(
     domain?: string;
     customDomain?: string;
     domainType?: "free" | "custom";
+    /** Multi-route services. `syncFromCompose` persists these (service.repo
+     *  normalizeRoutingFields), so they're declared here to be gated below. */
+    publicEndpoints?: Array<{ customDomain?: string; domainType?: string }>;
   }[],
 ) {
   const project = await repos.project.findById(projectId);
@@ -888,6 +970,14 @@ export async function syncComposeServices(
   const storedEnvByName = new Map(
     stored.map((s) => [s.name, (s.environment as Record<string, string> | null) ?? {}]),
   );
+
+  // Import path, but the hostnames are still client-authored — same gate as the
+  // create/update editors (normalizeRoutingPatch); `syncFromCompose` writes the
+  // routing columns directly, so this is the only place that can refuse them.
+  // Hostnames the stored rows already carry are exempt: a re-sync of a project
+  // holding a bad one (persisted before #342) must not be refused wholesale.
+  assertValidCustomDomains(parsed, { known: customHostnamesOf(stored) });
+
   const reconciled = parsed.map((svc) =>
     svc.environment
       ? { ...svc, environment: unmaskEnv(svc.environment, storedEnvByName.get(svc.name) ?? null) }

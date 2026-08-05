@@ -42,7 +42,15 @@ function box(opts: BoxOpts = {}) {
     commands.push(cmd);
     if (cmd.startsWith("docker ps --filter name=openship-edge")) return opts.edgeContainer ?? "";
     if (cmd.startsWith("docker ps --format")) return "";
-    if (cmd.startsWith("docker inspect")) return opts.edgeContainerImage ?? "";
+    // `containerState` asks for run state AND image in one inspect, TAB-separated —
+    // answering with a bare image ref parses as `running:"<ref>", image:undefined`,
+    // which reads as "no image" and silently skips the update branch.
+    if (cmd.startsWith("docker inspect")) {
+      if (!opts.edgeContainerImage) return "";
+      return cmd.includes("{{.State.Running}}")
+        ? `true\t${opts.edgeContainerImage}`
+        : opts.edgeContainerImage;
+    }
     if (cmd.startsWith("docker version")) return opts.dockerMissing ? "" : "27.0.0";
     if (cmd.includes("site_logger.lua")) return opts.bareIsOurs ? "ok" : "";
     // The carried-vhost sanitize pass (one shell loop over sites-enabled).

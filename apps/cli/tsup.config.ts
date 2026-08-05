@@ -30,17 +30,20 @@ export default defineConfig({
   // builtin at once.
   //
   // The first two lines are a sh/JS POLYGLOT launcher, not a plain shebang.
-  // The official installer is Bun-only (no Node), while `npm i -g openship`
-  // gives Node with no Bun — a single `#!/usr/bin/env node` or `bun` shebang
-  // breaks one of those documented paths (#261). Under `sh` the second line
-  // execs the CLI with whichever runtime exists (Bun preferred, else Node);
-  // under Node/Bun that line is a harmless string + comment. `#!/usr/bin/env
-  // sh` (not `#!/bin/sh`) is deliberate — install.sh's #21 heal matches the
-  // first line EXACTLY against `#!/bin/sh`, so this never trips it.
+  // `npm i -g openship` gives Node, the curl installer gives Node too now, but
+  // a box may have only Bun — a single `#!/usr/bin/env node` or `bun` shebang
+  // breaks one of those paths (#261). Under `sh` the second line execs the CLI
+  // with whichever runtime exists; under Node/Bun that line is a harmless
+  // string + comment. NODE is preferred over Bun: Bun >= 1.3.4 aborts on
+  // startup loading ssh2's native cpu-features addon (oven-sh/bun#18546, #390),
+  // and Node is the tested/shipped runtime — Bun is only a last-resort fallback
+  // on a Bun-only box. `#!/usr/bin/env sh` (not `#!/bin/sh`) is deliberate —
+  // install.sh's #21 heal matched the first line EXACTLY against `#!/bin/sh`,
+  // so this never trips it.
   banner: {
     js: [
       "#!/usr/bin/env sh",
-      '":" //# ; exec "$(command -v bun || command -v node)" "$0" "$@"',
+      '":" //# ; exec "$(command -v node || command -v bun)" "$0" "$@"',
       'import { createRequire as __ospCreateRequire } from "node:module";',
       "const require = __ospCreateRequire(import.meta.url);",
     ].join("\n"),

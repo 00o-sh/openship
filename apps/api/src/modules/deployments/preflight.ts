@@ -20,8 +20,6 @@ import {
 import {
   resolveServiceHostnameLabel,
   normalizeCustomHostname,
-  endpointsNeedCloud,
-  servicesNeedCloud,
   cloudRequiredCode,
   CLOUD_UNREACHABLE_CODE,
   stackExpectsBuildCommand,
@@ -37,7 +35,11 @@ import { hasLocalGitIdentity } from "../github/github.local-auth";
 import { isPublicRepo } from "../github/github.http";
 import { getRoutingBaseDomain } from "../../lib/routing-domains";
 import { resolveServerHost } from "../../lib/server-target";
-import { normalizeTargetPath } from "../../lib/public-endpoints";
+import {
+  normalizeTargetPath,
+  storedPublicEndpointsNeedCloud,
+  isCloudManagedHostname,
+} from "../../lib/public-endpoints";
 import {
   getInstallationId,
   getInstallationIdByOrg,
@@ -662,7 +664,14 @@ async function checkComposeServiceDomains(
   for (const service of composeServices) {
     if (!service.exposed) continue;
 
-    if (service.domainType === "custom" && service.customDomain?.trim()) {
+    // Classify by hostname truth, not the (possibly stale/mislabeled) domainType
+    // label: any service carrying a custom hostname routes as a custom domain and
+    // is checked by DNS — never Cloud-gated as if it were a free subdomain
+    // (#427 follow-up; mirrors storedPublicEndpointsNeedCloud's customDomain-first
+    // priority). A `domainType:"free"` row that still holds a real customDomain
+    // used to fall through to the free-subdomain branch below and 403 on a
+    // self-hosted server.
+    if (service.customDomain?.trim()) {
       const domain = normalizeCustomHostname(service.customDomain);
       if (seen.has(domain)) {
         checks.push({
@@ -692,8 +701,14 @@ async function checkComposeServiceDomains(
     );
     const fqdn = `${subdomain}.${baseDomain}`;
 
-    // Free subdomains require cloud - fail early if not connected
-    if (!cloud) {
+    // A free subdomain needs Cloud ONLY when it resolves under the real Cloud
+    // domain (*.opsh.io) — the one suffix whose edge/DNS we operate. On a box
+    // with its own HOST_DOMAIN the same slug composes to <slug>.<HOST_DOMAIN>,
+    // served by the operator's OWN edge, so it must NOT be Cloud-gated
+    // (#427 follow-up — mirrors storedPublicEndpointsNeedCloud / the runtime-level
+    // predicate, and closes the divergence where the top-level check said "no
+    // cloud needed" while this per-service check still 403'd the same route).
+    if (isCloudManagedHostname(fqdn) && !cloud) {
       checks.push({
         id: `service-domain-${service.name}`,
         label: `Service subdomain (${service.name})`,
@@ -749,6 +764,22 @@ async function requestCloudPreflight(
   return cloudClient({ organizationId: snapshot.organizationId }).preflight(input);
 }
 
+// #427 follow-up — preflight must decide "needs Cloud" by HOSTNAME truth, exactly
+// like the create/update write gates (assertFreeEndpointsAllowed → storedPublicEndpointsNeedCloud).
+// Only a subdomain of the real Cloud domain (*.opsh.io) actually routes through the
+// Cloud edge; a managed subdomain of the operator's OWN HOST_DOMAIN, a custom host,
+// and a stale row with an absent/wrong domainType all route on their own edge and
+// must NOT be gated. The coarse `domainType !== "custom"` predicate this replaces
+// 403'd exactly those self-hosted cases at deploy time — even though create/update
+// had already let them through.
+function composeServicesNeedCloud(services?: DeployableService[] | null): boolean {
+  return storedPublicEndpointsNeedCloud(
+    (services ?? [])
+      .filter((s) => s.exposed)
+      .map((s) => ({ domainType: s.domainType, domain: s.domain, customDomain: s.customDomain })),
+  );
+}
+
 async function resolveCloudPreflight(
   snapshot: DeploymentConfigSnapshot,
   opts?: PreflightOptions,
@@ -768,7 +799,7 @@ async function resolveCloudPreflight(
   // too (cloud IS doing the deploy). Single authority shared with the pipeline.
   const usesManagedRouting = usesManagedRoutingFor(plat.target, effectiveTarget);
   const hasManagedPublicEndpoints =
-    endpointsNeedCloud(opts?.publicEndpoints);
+    storedPublicEndpointsNeedCloud(opts?.publicEndpoints);
   // The project-level free-domain slug is a routable web hostname only for a
   // single-app project. In services mode there is no project domain — each
   // service routes via its own endpoint (needsManagedComposeDomains), so an
@@ -779,7 +810,7 @@ async function resolveCloudPreflight(
     (!opts?.multiService && !!opts?.slug && !opts?.customDomain && usesManagedRouting) ||
     (usesManagedRouting && hasManagedPublicEndpoints);
   const needsManagedComposeDomains =
-    servicesNeedCloud(opts?.composeServices);
+    composeServicesNeedCloud(opts?.composeServices);
   const needsCloudPreflight =
     effectiveTarget === "cloud" || needsManagedProjectDomain || needsManagedComposeDomains;
   const requestInput = opts?.publicEndpoints?.length
@@ -1322,9 +1353,9 @@ export async function runPreflightChecks(
     !opts?.multiService &&
     !hasEndpointRouting && !!opts?.slug && !opts?.customDomain && usesManagedRouting;
   const hasManagedPublicEndpoints =
-    endpointsNeedCloud(opts?.publicEndpoints);
+    storedPublicEndpointsNeedCloud(opts?.publicEndpoints);
   const hasManagedComposeDomains =
-    servicesNeedCloud(opts?.composeServices);
+    composeServicesNeedCloud(opts?.composeServices);
   const cloudRequirement =
     effectiveTarget === "cloud"
       ? "cloud-runtime"

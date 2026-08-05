@@ -13,6 +13,8 @@
  *     otherwise require interactive input (ACME email, domain, etc.)
  */
 
+import type { ProxySettings } from "@repo/core";
+
 import type { PromptUserFn } from "../runtime/deploy-pipeline";
 
 // ─── Log streaming ───────────────────────────────────────────────────────────
@@ -212,6 +214,20 @@ export interface ImportedSite {
   routes?: { path: string; url: string }[];
   /** Existing certificate paths, if the source terminated TLS itself (reusable). */
   tls?: { certPath: string; keyPath: string };
+  /**
+   * Curated reverse-proxy tunables read off the live vhost, ADOPTABLE — every value
+   * survived `sanitizeProxySettings`, so storing it on `routingConfig.proxy` renders
+   * back byte-identically. Migrating a foreign site carries these over instead of
+   * silently resetting it to nginx's 1 MB / 60 s defaults.
+   */
+  proxy?: ProxySettings;
+  /**
+   * The same directives exactly as the config declares them, INCLUDING values our
+   * validators reject (`20M`, `1d`, an nginx variable). Display-only: this is what
+   * the box serves, so the UI shows it rather than reporting "not set" for a limit
+   * that is very much set. Keyed by `ProxySettings` key, not directive name.
+   */
+  proxyRaw?: Record<string, string>;
   /** Source config file, for traceability. */
   source?: string;
 }

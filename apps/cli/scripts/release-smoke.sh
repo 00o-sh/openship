@@ -131,10 +131,49 @@ else
   rm -rf "$WORK"
 fi
 
+# ── C6: extracted payload resolves all externals by parent-walk (tarball install) ─
+# The published tarball ships its OWN node_modules beside dist/. Extract it to a
+# temp dir with NO ambient node_modules above it and load the full import graph
+# under node — proves ssh2/dockerode/commander/etc. resolve exactly as they will
+# on a user's box, and that the payload carries zero native .node addons (the
+# reason the payload is arch-independent and built once).
+group "C6 — extracted payload (tarball install layout)"
+PAYLOAD="$(ls -1t "$CLI_DIR"/.cli-payload/openship-cli-*.tar.gz 2>/dev/null | head -n1)"
+if [ -z "$PAYLOAD" ] && [ "${SMOKE_PAYLOAD:-}" = "1" ]; then
+  (cd "$CLI_DIR" && bun run build:payload) >/dev/null 2>&1 || fail "build:payload failed"
+  PAYLOAD="$(ls -1t "$CLI_DIR"/.cli-payload/openship-cli-*.tar.gz 2>/dev/null | head -n1)"
+fi
+if [ -z "$PAYLOAD" ]; then
+  printf '  \033[33m—\033[0m %s\n' "no payload tarball — build it with: bun run --cwd apps/cli build:payload (or SMOKE_PAYLOAD=1)"
+elif ! command -v node >/dev/null 2>&1; then
+  fail "node not on PATH — cannot verify the payload"
+else
+  PWORK="$(mktemp -d)"
+  tar -xzf "$PAYLOAD" -C "$PWORK"
+  NODES="$(find "$PWORK" -name '*.node' 2>/dev/null | head -n1)"
+  if [ -n "$NODES" ]; then
+    fail "payload contains a native .node addon → $NODES (breaks arch-independence)"
+  else
+    pass "payload carries zero native .node addons (arch-independent)"
+  fi
+  v="$(node "$PWORK/dist/index.js" --version 2>&1)"
+  if [ "$?" -eq 0 ] && printf '%s' "$v" | grep -qE "$VER_RE"; then
+    pass "extracted payload: --version → $v"
+  else
+    fail "extracted payload: --version failed → $v"
+  fi
+  if node "$PWORK/dist/index.js" up --help 2>&1 | grep -qF -- "--compose"; then
+    pass "extracted payload: up --help renders (all externals resolve by parent-walk)"
+  else
+    fail "extracted payload: up --help failed (an external didn't resolve)"
+  fi
+  rm -rf "$PWORK"
+fi
+
 # ── verdict ─────────────────────────────────────────────────────────────
 echo
 if [ "$FAILED" -eq 0 ]; then
-  printf '\033[32m✔ release smoke passed — the built CLI launches (node/bun/shebang/no-node) and the server boots.\033[0m\n'
+  printf '\033[32m✔ release smoke passed — the built CLI launches (node/bun/shebang/no-node), the payload resolves standalone, and the server boots.\033[0m\n'
 else
   printf '\033[31m✗ release smoke FAILED — do not publish.\033[0m\n'
   exit 1

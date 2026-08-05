@@ -27,15 +27,31 @@ import {
 import { execFile as cpExecFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { promisify } from "node:util";
-import { dirname, join } from "node:path";
+import { posix as edgePath } from "node:path";
 
 import type { CommandExecutor, ManualCert, RouteConfig, SslResult } from "../types";
 import type { RoutingProvider, SslProvider } from "./types";
-import { LUA_LOGGER_PATH, RULES_GUARD_PATH, luaSourceAvailable, buildReloadCommand, detectOpenRestyPaths, ACME_HTTP01_PORT, ACME_CHALLENGE_LOCATION, type OpenRestyPaths } from "./openresty-lua";
-import { safeErrorMessage, sanitizeProxySettings, resolveRedirectStatus, PROXY_GZIP_TYPES, type ProxySettings } from "@repo/core";
+import { LUA_LOGGER_PATH, RULES_GUARD_PATH, luaSourceAvailable, buildReloadCommand, detectOpenRestyPaths, ACME_HTTP01_PORT, ACME_CHALLENGE_LOCATION, EDGE_CHALLENGE_DIR, EDGE_CHALLENGE_LOCATION, EDGE_CHALLENGE_URL_PREFIX, type OpenRestyPaths } from "./openresty-lua";
+import { safeErrorMessage, sanitizeProxySettings, resolveRedirectStatus, PROXY_DIRECTIVES, parseProxyValue, resolveProxyDirectives, type NginxVersion, type ProxySettings } from "@repo/core";
 import { sq } from "../system/local-shell";
+import { edgeDownExplanation } from "../system/edge-exec-error";
 import { BOOTSTRAP_CERT_SEGMENT, validateCertFor } from "../system/proxy/cert-material";
 import { probeStaticOutput, type OutputProbeResult } from "../system/output-exists";
+
+/**
+ * POSIX joining, deliberately shadowing node:path's platform default.
+ *
+ * Every path in this file names a location on the EDGE host — a Linux box or
+ * container, reached over SSH or a local Linux filesystem — so it must never be
+ * built with the control plane's native separators. On Windows it was, and all
+ * three consequences were silent: the vhost went to the SSH session's home
+ * directory as a file literally named `\var\lib\…\<site>.conf` (nginx never saw
+ * it), `ssl_certificate \etc\letsencrypt\…` went into the config, and the
+ * post-issuance read of `\etc\letsencrypt\live\<domain>` missed a certificate
+ * certbot had really written — leaving the domain row `provisioning` with a null
+ * sslExpiresAt, the one shape the renewal sweep skips. TLS expired unrenewed.
+ */
+const { dirname, join } = edgePath;
 
 /**
  * Reverse-proxy headers shared by every proxy_pass location.
@@ -149,31 +165,52 @@ function renderServerHeaders(route: RouteConfig): string {
 }
 
 /**
- * Render the curated reverse-proxy tunables (client_max_body_size, proxy/body
- * timeouts, buffering, gzip) as server-scope directives. Re-validates every
- * value via `sanitizeProxySettings` before emitting — a malformed value is
- * DROPPED, never interpolated raw into the config (defense-in-depth over the
- * API schema; keeps `nginx -t` safe). gzip emits a FIXED, safe type set.
+ * Shared body of the two proxy-option renderers below. The set of lines — kinds,
+ * scope, version floor, companion defaults — is resolved by `resolveProxyDirectives`
+ * in @repo/core, so this function only turns them into text and the live read-back
+ * can expect EXACTLY what we write here.
  */
-export function renderProxyOptions(proxy?: ProxySettings | null): string {
-  const p = sanitizeProxySettings(proxy);
-  if (!p) return "";
-  const lines: string[] = [];
-  if (p.clientMaxBodySize) lines.push(`    client_max_body_size ${p.clientMaxBodySize};`);
-  if (p.proxyReadTimeout) lines.push(`    proxy_read_timeout ${p.proxyReadTimeout};`);
-  if (p.proxySendTimeout) lines.push(`    proxy_send_timeout ${p.proxySendTimeout};`);
-  if (p.clientBodyTimeout) lines.push(`    client_body_timeout ${p.clientBodyTimeout};`);
-  if (p.proxyBuffering !== undefined) {
-    lines.push(`    proxy_buffering ${p.proxyBuffering ? "on" : "off"};`);
-  }
-  if (p.gzip !== undefined) {
-    lines.push(`    gzip ${p.gzip ? "on" : "off"};`);
-    if (p.gzip) {
-      lines.push(`    gzip_types ${PROXY_GZIP_TYPES};`);
-      lines.push(`    gzip_min_length 1024;`);
-    }
-  }
+function renderProxyDirectives(
+  proxy: ProxySettings | null | undefined,
+  opts: { tlsOnly: boolean; nginxVersion?: NginxVersion | null },
+): string {
+  const lines = resolveProxyDirectives(proxy, {
+    scope: opts.tlsOnly ? "tls" : "shared",
+    ...(opts.nginxVersion !== undefined ? { nginxVersion: opts.nginxVersion } : {}),
+  }).map((d) => `    ${d.directive} ${d.text};`);
   return lines.length > 0 ? `\n${lines.join("\n")}` : "";
+}
+
+/**
+ * Render the curated reverse-proxy tunables (client_max_body_size, proxy/body
+ * timeouts, buffering, gzip, …) as server-scope directives, driven by
+ * `PROXY_DIRECTIVES` in @repo/core — the one place the set is declared, so the
+ * renderer, the API schema and the config parser cannot drift apart.
+ *
+ * Re-validates every value via `sanitizeProxySettings` before emitting — a
+ * malformed value is DROPPED, never interpolated raw into the config
+ * (defense-in-depth over the API schema; keeps `nginx -t` safe). Bool directives
+ * render nginx `on`/`off`; gzip's companion lines are fixed literals, never input.
+ *
+ * TLS-only directives are excluded here and emitted by
+ * {@link renderProxyTlsOptions} — this text goes into the :80 block too.
+ */
+export function renderProxyOptions(
+  proxy?: ProxySettings | null,
+  nginxVersion?: NginxVersion | null,
+): string {
+  return renderProxyDirectives(proxy, { tlsOnly: false, nginxVersion });
+}
+
+/**
+ * The slice of the tunables that belongs ONLY in a `listen 443 ssl` block —
+ * currently `http2`, which in a :80 block would enable cleartext h2c instead.
+ */
+export function renderProxyTlsOptions(
+  proxy?: ProxySettings | null,
+  nginxVersion?: NginxVersion | null,
+): string {
+  return renderProxyDirectives(proxy, { tlsOnly: true, nginxVersion });
 }
 
 // ─── Rate Limit Config ──────────────────────────────────────────────────────
@@ -252,6 +289,20 @@ export interface NginxProviderOptions {
    * means a failed reload kills the container and 502s every site.
    */
   containerEdge?: boolean;
+  /**
+   * Directory edge-target challenge tokens are WRITTEN to, as seen by whatever
+   * performs the write. Default = the container path (`EDGE_CHALLENGE_DIR`), which
+   * is also the real path on a bare edge and inside the compose `api` container
+   * (both have the ACME dir mounted at `/var/www/acme`).
+   *
+   * Overridden to `EDGE_CHALLENGE_HOST_DIR` by `containerEdgeProvider` ALONE, for
+   * the same reason it overrides `sitesDir`: that provider's file ops land on the
+   * HOST while commands run inside the container. This mount is the one that does
+   * not keep the same path on both sides (`/var/lib/openship/edge/acme` →
+   * `/var/www/acme`), so the write path and the `root` directive genuinely differ —
+   * `root` is always the container path.
+   */
+  challengeDir?: string;
 }
 
 const DEFAULT_CERT_DIR = "/etc/letsencrypt/live";
@@ -284,6 +335,22 @@ function assertValidUpstream(targetUrl: string): void {
   assertNoNginxInjection(targetUrl, "proxy target");
   if (!/^https?:\/\/.+/.test(targetUrl)) {
     throw new Error(`Invalid proxy target (must be http/https URL): ${targetUrl}`);
+  }
+}
+
+/**
+ * An edge-target challenge token becomes a FILENAME, so this is stricter than
+ * `assertNoNginxInjection` — that one guards nginx syntax, this one guards the
+ * filesystem. A `/` would write outside the challenge dir and `..` would traverse
+ * out of it, and neither contains a character nginx would object to.
+ *
+ * Accepts hex / base64url / dotted tokens, which is every shape Oblien issues.
+ */
+const CHALLENGE_TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/;
+
+export function assertValidChallengeToken(token: string): void {
+  if (!CHALLENGE_TOKEN_RE.test(token) || token.includes("..")) {
+    throw new Error(`Invalid edge-target challenge token: ${token}`);
   }
 }
 
@@ -334,6 +401,34 @@ const execFileAsync = promisify(cpExecFile);
  * :80 — instead of the opaque opener.
  */
 export function summarizeCertbotFailure(output: string, domain: string): string {
+  // certbot never ran: the `docker exec` that would have started it was refused
+  // because the edge container is down, and the executor already explained why. No
+  // certbot lens applies — and the "last three lines" fallback below would chop that
+  // explanation into fragments joined by " · ". Surface it whole.
+  const edgeDown = edgeDownExplanation(output);
+  if (edgeDown) return edgeDown;
+
+  const structured = certbotDiagnosis(output, domain);
+  if (structured) return structured;
+
+  // Nothing structured matched — surface the last non-empty lines (the tail holds
+  // the real error) rather than the "Saving debug log" opener.
+  //
+  // Only sound when certbot ACTUALLY failed: on a zero-exit run the tail is the
+  // donation footer, which reads as an error message. Callers that haven't seen a
+  // non-zero exit must use {@link certbotDiagnosis} instead.
+  const lines = (output || "").split("\n").map((l) => l.trim()).filter(Boolean);
+  return lines.slice(-3).join(" · ") || `certbot failed to issue a certificate for ${domain}`;
+}
+
+/**
+ * The structured half of {@link summarizeCertbotFailure}: certbot's own
+ * `Detail:` / `Hint:` lines plus a mapped diagnosis, or undefined when the output
+ * matches no known failure shape. Never falls back to "the last few lines" — so a
+ * caller holding a SUCCESSFUL certbot run can ask "did certbot report a known
+ * problem?" without a clean run's footer being dressed up as the cause.
+ */
+function certbotDiagnosis(output: string, domain: string): string | undefined {
   const text = output || "";
   const pick = (re: RegExp) => text.match(re)?.[0]?.replace(/\s+/g, " ").trim();
   const detail = pick(/Detail:\s*[^\n]+/i);
@@ -373,12 +468,7 @@ export function summarizeCertbotFailure(output: string, domain: string): string 
   }
 
   const parts = [diagnosis, detail, hint].filter(Boolean);
-  if (parts.length > 0) return parts.join(" — ");
-
-  // Nothing structured matched — surface the last non-empty lines (the tail holds
-  // the real error) rather than the "Saving debug log" opener.
-  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-  return lines.slice(-3).join(" · ") || `certbot failed to issue a certificate for ${domain}`;
+  return parts.length > 0 ? parts.join(" — ") : undefined;
 }
 
 interface FileSnapshot {
@@ -397,15 +487,24 @@ export class NginxProvider implements RoutingProvider, SslProvider {
   private reloadCommand: string;
   private readonly pinPaths: boolean;
   private readonly containerEdge: boolean;
+  private readonly challengeDir: string;
+  /**
+   * nginx version of the edge, when `detectOpenRestyPaths` could read it. Gates the
+   * one directive whose syntax is version-dependent (`http2`); undefined = unknown,
+   * which `proxyDirectiveAllowed` treats as allow.
+   */
+  private nginxVersion: NginxVersion | undefined;
 
   constructor(opts: NginxProviderOptions) {
     this.sitesDir = opts.paths.sitesDir;
+    this.nginxVersion = opts.paths.nginxVersion;
     this.acmeEmail = opts.acmeEmail;
     this.certDir = opts.certDir ?? DEFAULT_CERT_DIR;
     this.executor = opts.executor ?? null;
     this.containerEdge = opts.containerEdge ?? false;
     this.reloadCommand = buildReloadCommand(opts.paths, { containerEdge: this.containerEdge });
     this.pinPaths = opts.pinPaths ?? false;
+    this.challengeDir = opts.challengeDir ?? EDGE_CHALLENGE_DIR;
   }
 
   // ── File operation helpers (dual-path: local or remote) ──────────────
@@ -750,8 +849,11 @@ export class NginxProvider implements RoutingProvider, SslProvider {
     const serverHeaders = hostRedirect ? "" : renderServerHeaders(route);
     // Curated reverse-proxy tunables (client_max_body_size, timeouts, gzip, …).
     // Server-scope so they cover `location /` + every extra location, and
-    // override the server-wide http default for this vhost.
-    const proxyOpts = renderProxyOptions(route.proxy);
+    // override the server-wide http default for this vhost. The version gate only
+    // matters for `http2`, whose server-scope syntax landed in nginx 1.25.1.
+    const proxyOpts = renderProxyOptions(route.proxy, this.nginxVersion);
+    // The :443-only slice, appended inside the TLS blocks alone.
+    const proxyTlsOpts = renderProxyTlsOptions(route.proxy, this.nginxVersion);
 
     // Optional: webhook proxy location for GitHub push delivery. Never on a
     // redirecting host — a 30x would drop the delivery's POST body.
@@ -819,6 +921,8 @@ ${FORWARD_VARS}
 ${luaProxy}
 
 ${ACME_CHALLENGE_LOCATION}
+
+${EDGE_CHALLENGE_LOCATION}
 ${sharedBody}
 ${serveLocation}
 }
@@ -844,6 +948,8 @@ ${FORWARD_VARS}
 ${luaProxy}
 
 ${ACME_CHALLENGE_LOCATION}
+
+${EDGE_CHALLENGE_LOCATION}
 ${sharedBody}
 ${redirectOrServeLocation}
 }
@@ -857,7 +963,7 @@ ${FORWARD_VARS}
 ${luaProxy}
 
     ssl_certificate ${certPath};
-    ssl_certificate_key ${keyPath};
+    ssl_certificate_key ${keyPath};${proxyTlsOpts}
 ${sharedBody}
 ${serveLocation}
 }
@@ -886,6 +992,8 @@ ${FORWARD_VARS}
 ${luaProxy}
 
 ${ACME_CHALLENGE_LOCATION}
+
+${EDGE_CHALLENGE_LOCATION}
 ${sharedBody}
 ${serveLocation}
 }
@@ -899,7 +1007,7 @@ ${FORWARD_VARS}
 ${luaProxy}
 
     ssl_certificate ${bootstrap.certPath};
-    ssl_certificate_key ${bootstrap.keyPath};
+    ssl_certificate_key ${bootstrap.keyPath};${proxyTlsOpts}
 ${sharedBody}
 ${serveLocation}
 }
@@ -950,6 +1058,25 @@ ${serveLocation}
   }
 
   /**
+   * Recover the proxy tunables from a vhost we already wrote, for the legacy
+   * no-sidecar re-register below. Rewriting the conf without them would silently
+   * revert a site to nginx's 1 MB / 60 s defaults as a side effect of issuing a
+   * certificate — the one moment an operator is least likely to look for it.
+   *
+   * Same table as the renderer, read backwards, so the two cannot drift.
+   */
+  private scrapeProxySettings(conf: string): ProxySettings | undefined {
+    const found: Record<string, string | number | boolean> = {};
+    for (const spec of PROXY_DIRECTIVES) {
+      const m = conf.match(new RegExp(`^\\s*${spec.directive}\\s+([^;\\n]+);`, "m"));
+      if (!m?.[1]) continue;
+      const parsed = parseProxyValue(spec, m[1].trim());
+      if (parsed !== undefined) found[spec.key] = parsed;
+    }
+    return sanitizeProxySettings(found);
+  }
+
+  /**
    * Remove a route by deleting its conf + route-state files, then reload.
    *
    * Self-rollback (same pattern as registerRoute): snapshot both files first, and
@@ -981,6 +1108,118 @@ ${serveLocation}
     // in certbot's tree are deliberately left alone (a re-add reuses them); this
     // material is disposable by construction.
     await this._rm(this.bootstrapCertDir(domain)).catch(() => undefined);
+  }
+
+  // ── Edge-target challenge ────────────────────────────────────────────
+
+  /** Filename for a host's challenge vhost. The leading `_` is a namespace
+   *  `resolveSlug` can never produce (`domainSlug` emits only `[A-Za-z0-9-]`), so no
+   *  `registerRoute`/`removeRoute` for any domain can overwrite or delete it —
+   *  matching the existing `_default.conf` / `_management.conf` convention. */
+  private challengeVhostPath(host: string): string {
+    return join(this.sitesDir, `_oblien-challenge-${this.domainSlug(host)}.conf`);
+  }
+
+  /**
+   * Make `host` able to answer edge-target challenges, and serve any tokens given.
+   *
+   * Called TWO ways, and the split is the point:
+   *   - `{ host }` alone, from edge-ensure (install + every deploy) — writes only the
+   *     vhost, so the box can answer before any verification exists.
+   *   - `{ host, tokens }`, from the verify flow — writes the token files too.
+   *
+   * That the first form is possible at all is what makes this ready from first
+   * install rather than only once a challenge is in flight: the location serves a
+   * DIRECTORY, so it is valid with nothing in it (a missing token is a 404, which is
+   * the right answer). And because the vhost lands in the bind-mounted sites-enabled
+   * written by our own code, it works on ANY edge image — including one predating
+   * this feature, and including a rollback. The baked image's catch-all cannot make
+   * that claim, which is why it is not the mechanism.
+   *
+   * Idempotent: skips the vhost write AND the reload when what is on disk already
+   * matches, so re-asserting on every deploy costs a couple of stats.
+   *
+   * `tokens` is a list because a re-issued verification resets the token while an
+   * older record may still be probed, and because two orgs can target one box. All
+   * are served; none is ever removed — Oblien re-probes the SAME token near its
+   * 90-day expiry, so dropping one silently kills that route ~83 days later.
+   */
+  async serveEdgeChallenge(input: {
+    host: string;
+    tokens?: readonly string[];
+  }): Promise<{ served: boolean; via: "existing-vhost" | "challenge-vhost" | null; claimedBy?: string; reason?: string }> {
+    const host = input.host.trim().toLowerCase().replace(/\.$/, "");
+    assertValidDomain(host);
+    const tokens = input.tokens ?? [];
+    for (const token of tokens) assertValidChallengeToken(token);
+
+    // 1. The tokens themselves. Written to `challengeDir` (host path on a container
+    //    edge, container path everywhere else) while the vhost's `root` is always
+    //    the container path — this mount is the one whose two sides differ.
+    //    `_writeFile` creates the parent dir on both the local and executor paths.
+    for (const token of tokens) {
+      await this._writeFile(join(this.challengeDir, token), token);
+    }
+
+    // 2. Is some Openship-managed vhost already answering for this host? Only the
+    //    two paths resolveSlug considers can be one.
+    //
+    //    File ops ONLY — never `_exec`. On a container edge `_exec` runs INSIDE the
+    //    container while `sitesDir` is a HOST path, so a `grep`/`ls` there would
+    //    confidently answer for the wrong filesystem.
+    const base = this.domainSlug(host);
+    for (const stem of [base, `${base}-${this.slugSuffix(host)}`]) {
+      const path = join(this.sitesDir, `${stem}.conf`);
+      const conf = await this._readFile(path).catch(() => "");
+      if (!conf || !this.serverNamesIn(conf).includes(host)) continue;
+      // It claims the host. If it already carries the challenge location (written by
+      // a build with this support) there is nothing to do — and crucially we must NOT
+      // add a second vhost for the same server_name: nginx only WARNS on a conflict
+      // (so `openresty -t` passes and no rollback fires) and then serves whichever
+      // loaded first — `_` sorts before lowercase, so ours would win and reduce the
+      // real site to 404s.
+      if (conf.includes(`location ${EDGE_CHALLENGE_URL_PREFIX}`)) {
+        return { served: true, via: "existing-vhost" };
+      }
+      return {
+        served: false,
+        via: null,
+        claimedBy: path,
+        reason:
+          `${host} is already served by ${path}, which predates edge-target challenge support. ` +
+          `Re-register that domain (a deploy or a Domains-tab save) to refresh its vhost, then retry.`,
+      };
+    }
+
+    // 3. Nothing claims it — our own single-purpose vhost. Deliberately has NO
+    //    `location /`: an unmatched URI already 404s, and adding one would make the
+    //    proxy scanner read this as a static site rooted at the challenge dir and
+    //    surface it in the orphan sweep / migrate import.
+    const vhost = `# Auto-generated by Openship - do not edit manually
+# openship-oblien-challenge: answers ONLY ${EDGE_CHALLENGE_URL_PREFIX}<token> for
+# Host: ${host}, so Openship Cloud's shared edge can prove this box controls that
+# routing target. No location // on purpose — this is scaffolding, not a site.
+server {
+    listen 80;
+    server_name ${host};
+
+${EDGE_CHALLENGE_LOCATION}
+}
+`;
+    const path = this.challengeVhostPath(host);
+    const existing = await this._readFile(path).catch(() => "");
+    if (existing === vhost) return { served: true, via: "challenge-vhost" };
+
+    const snapshot = await this._captureFile(path);
+    await this._writeFile(path, vhost);
+    try {
+      await this.reload();
+    } catch (err) {
+      await this._restoreFile(path, snapshot);
+      await this.reload().catch(() => undefined);
+      throw err;
+    }
+    return { served: true, via: "challenge-vhost" };
   }
 
   // ── SSL ──────────────────────────────────────────────────────────────
@@ -1069,9 +1308,15 @@ ${serveLocation}
 
     try {
       const existing = await this._readFile(configPath);
+      const scraped = this.scrapeProxySettings(existing);
       const targetMatch = existing.match(/proxy_pass\s+([^;]+);/);
       if (targetMatch) {
-        await this.registerRoute({ domain, targetUrl: targetMatch[1], tls: true });
+        await this.registerRoute({
+          domain,
+          targetUrl: targetMatch[1],
+          tls: true,
+          ...(scraped ? { proxy: scraped } : {}),
+        });
         return this.ensureIssued(domain, certonlyOut);
       }
 
@@ -1085,6 +1330,7 @@ ${serveLocation}
           staticRoot: rootMatch[1],
           staticRootAdopted: true,
           tls: true,
+          ...(scraped ? { proxy: scraped } : {}),
         });
         return this.ensureIssued(domain, certonlyOut);
       }
@@ -1099,17 +1345,32 @@ ${serveLocation}
    * After a certbot run that DIDN'T throw, confirm a usable cert actually landed
    * at the expected path. certbot can exit 0 while producing nothing readable
    * there (a lineage written elsewhere, "not due for renewal", 0 domains
-   * authenticated) — a silent `{missing}` hides why. Surface certbot's real
-   * output so the operator sees the actual reason instead of a generic message.
+   * authenticated) — a silent `{missing}` hides why.
+   *
+   * The exit code plus this read of `live/<domain>` is the WHOLE verdict. certbot's
+   * stdout is evidence for the operator, never the test: a zero-exit run ends with
+   * the donation footer, and running the failure summarizer over it reported
+   * "Donating to ISRG / Let's Encrypt: …" as the cause of a cert that had in fact
+   * been issued. Only a diagnosis that matches a KNOWN failure shape is quoted.
    */
   private async ensureIssued(domain: string, certbotOutput: string): Promise<SslResult> {
     const result = await this.readCertInfo(domain);
     if (result.verified) return result;
+
+    const dir = join(this.certDir, domain);
+    const onDisk =
+      result.reason === "read_error"
+        ? `a certificate is at ${dir} but couldn't be read (permissions, or a partial write)`
+        : result.reason === "invalid"
+        ? `the certificate at ${dir} isn't usable for ${domain} (expired, wrong hostname, or the key doesn't match)`
+        : `no certificate is at ${dir}`;
+
+    const diagnosis = certbotDiagnosis(certbotOutput, domain);
     const tail = certbotOutput.trim().slice(-1200);
     throw new Error(
-      summarizeCertbotFailure(certbotOutput, domain) +
-        (tail ? `\n\ncertbot exited without an error but no readable certificate is at ` +
-          `${join(this.certDir, domain)}. certbot said:\n${tail}` : ""),
+      `certbot exited without an error but ${onDisk}.` +
+        (diagnosis ? ` ${diagnosis}` : "") +
+        (tail ? `\n\ncertbot said:\n${tail}` : ""),
     );
   }
 
@@ -1315,6 +1576,10 @@ ${serveLocation}
         try {
           const freshPaths = await detectOpenRestyPaths(this.executor);
           this.sitesDir = freshPaths.sitesDir;
+          // Keep the last known version if this probe couldn't read one — an
+          // upgrade moves the version forward, so forgetting it can only ever
+          // re-gate a directive the box already supports.
+          this.nginxVersion = freshPaths.nginxVersion ?? this.nginxVersion;
           this.reloadCommand = buildReloadCommand(freshPaths, {
             containerEdge: this.containerEdge,
           });

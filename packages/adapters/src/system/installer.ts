@@ -13,24 +13,11 @@ import { resolveEnvironment, type EnvironmentProfile } from "./environment";
 import { elevatedExecutor } from "./elevated-executor";
 import { safeErrorMessage } from "@repo/core";
 import {
-  deployLuaScripts,
-  detectOpenRestyPaths,
-  buildReloadCommand,
-  ensureOpenRestyConfig,
-  OPENRESTY_DEFAULT_PATHS,
-  type OpenRestyPaths,
-} from "../infra/openresty-lua";
-import {
   EdgeMigrateRequested,
-  freeEdgeTargets,
   invalidateEdgeContainer,
-  ourLuaOnHost,
-  probeEdge,
   resolveOurEdgeContainer,
-  stopTargetsForStatus,
 } from "./proxy/detect";
 import { probeListeningPort } from "../runtime/port-conflict";
-import { ensureEdgeClear } from "./proxy/consent";
 import { dockerAvailable, ensureContainerEdge } from "./proxy/ensure-container-edge";
 import { containerCommand } from "./edge-container-executor";
 import { sq } from "./local-shell";
@@ -211,178 +198,6 @@ export async function installRsync(
   }
 }
 
-// ─── Certbot ─────────────────────────────────────────────────────────────────
-
-export async function installCertbot(
-  executor: CommandExecutor,
-  onLog: SystemLogCallback,
-): Promise<InstallResult> {
-  // The edge image already carries certbot, and TLS is issued through it. Installing
-  // a second one on the host would be a package nothing invokes — and on a box with
-  // no package manager for it, a spurious failure next to a working edge.
-  const edge = await resolveOurEdgeContainer(executor).catch(() => null);
-  if (edge) {
-    const inEdge = await executor
-      .exec(containerCommand(edge, "certbot --version"))
-      .catch(() => "");
-    if (inEdge.trim()) {
-      const parsed = systemCatalog.checks.certbot.parseVersion(inEdge.trim());
-      onLog(log(`Certbot ${parsed} provided by the edge container — nothing to install`));
-      return { component: "certbot", success: true, version: parsed };
-    }
-  }
-
-  const prep = await prepareExecutor(executor, "certbot");
-  if (!prep.ok) return prep.result;
-  executor = prep.executor;
-  const profile = prep.profile;
-  const plan = systemCatalog.installs.certbot(profile);
-  if (!plan.supported || !plan.installCommand || !plan.verifyCommand) {
-    return { component: "certbot", success: false, error: plan.unsupportedReason ?? "Certbot install not supported" };
-  }
-
-  onLog(log("Installing certbot..."));
-  try {
-    const { code } = await executor.streamExec(plan.installCommand, onLog as (log: LogEntry) => void);
-    if (code !== 0) return { component: "certbot", success: false, error: "Certbot installation failed" };
-
-    const version = await executor.exec(plan.verifyCommand);
-    const parsed = systemCatalog.checks.certbot.parseVersion(version);
-    onLog(log(`Certbot ${parsed} installed`));
-    return { component: "certbot", success: true, version: parsed };
-  } catch (err) {
-    const msg = safeErrorMessage(err);
-    onLog(log(`Certbot installation failed: ${msg}`, "error"));
-    return { component: "certbot", success: false, error: msg };
-  }
-}
-
-// ─── OpenResty ───────────────────────────────────────────────────────────────
-
-
-export async function installOpenResty(
-  executor: CommandExecutor,
-  onLog: SystemLogCallback,
-  config?: InstallerConfig,
-): Promise<InstallResult> {
-  // The edge CONTAINER already IS OpenResty, and it holds :80/:443 in host
-  // network mode. Installing the host package on top of it is not merely
-  // redundant — the Debian postinst STARTS openresty.service, the bind fails with
-  // "Address already in use", and dpkg is left half-configured, which breaks every
-  // later apt operation on the box (#288). Same guard `installCertbot` already
-  // has, for the same reason: the edge provides the component.
-  const edge = await resolveOurEdgeContainer(executor).catch(() => null);
-  if (edge) {
-    const inEdge = await executor
-      .exec(containerCommand(edge, "openresty -v 2>&1"))
-      .catch(() => "");
-    if (inEdge.trim()) {
-      const parsed = systemCatalog.checks.openresty.parseVersion(inEdge.trim());
-      onLog(log(`OpenResty ${parsed} provided by the edge container — nothing to install`));
-      return { component: "openresty", success: true, version: parsed };
-    }
-  }
-
-  // Gate on privilege BEFORE touching the box, so a non-privileged run bails
-  // out cleanly instead of stopping a running OpenResty and then failing at apt.
-  const prep = await prepareExecutor(executor, "openresty");
-  if (!prep.ok) return prep.result;
-  executor = prep.executor;
-  const profile = prep.profile;
-  onLog(log(describeEnvironment(profile)));
-  const plan = systemCatalog.installs.openresty(profile);
-  if (!plan.supported || !plan.installCommand || !plan.verifyCommand) {
-    return { component: "openresty", success: false, error: plan.unsupportedReason ?? "OpenResty install not supported" };
-  }
-
-  onLog(log("Installing OpenResty..."));
-  try {
-    // Resolve the edge conflict FIRST — before touching any process — so we
-    // never kill a foreign proxy (even a foreign OpenResty) without consent.
-    // May stop the foreign owner (takeover), throw EdgeMigrateRequested
-    // (migrate → caller runs the takeover orchestration), or throw
-    // EdgeConflictError (no consent).
-    const { tookOver } = await ensureEdgeClear(executor, config, onLog);
-
-    // Stop an existing HOST OpenResty only if it's OUR bare-host edge
-    // (reinstall/upgrade). A foreign OpenResty was already handled by the consent
-    // gate above. Key on ourLuaOnHost, NOT a running container: the pkill below
-    // matches by process name and would kill a host-networked container edge too.
-    const hasIt = await executor.exec("command -v openresty >/dev/null 2>&1 && echo y || echo n").then((r) => r.trim() === "y");
-    if (hasIt && (await ourLuaOnHost(executor))) {
-      onLog(log("Stopping existing OpenResty..."));
-      await execSafe(executor, "systemctl stop openresty 2>/dev/null || true");
-      await execSafe(executor, "pkill -f '[o]penresty' 2>/dev/null || true");
-    }
-
-    if (profile.packageManager === "apt") {
-      await ensureAptReady(executor, onLog);
-    }
-
-    // Install package
-    const { code } = await executor.streamExec(plan.installCommand, onLog as (log: LogEntry) => void);
-    if (code !== 0) return { component: "openresty", success: false, error: "OpenResty installation failed" };
-
-    // Stop auto-started instance, write our config, then start
-    await execSafe(executor, "systemctl stop openresty 2>/dev/null || true");
-    await execSafe(executor, "pkill -f '[o]penresty' 2>/dev/null || true");
-    await execSafe(executor, "systemctl reset-failed openresty 2>/dev/null || true");
-
-    const paths = await detectOpenRestyPaths(executor);
-    await ensureOpenRestyConfig(executor, paths);
-
-    // Validate config
-    onLog(log("Validating config..."));
-    const { code: testCode } = await executor.streamExec(`${paths.bin} -t 2>&1`, onLog as (log: LogEntry) => void);
-    if (testCode !== 0) {
-      return { component: "openresty", success: false, error: "OpenResty config invalid - see logs above" };
-    }
-
-    // Start service
-    if (plan.startCommand) {
-      onLog(log("Starting OpenResty..."));
-      let start = await executor.streamExec(plan.startCommand, onLog as (log: LogEntry) => void);
-
-      // If it failed and a takeover was authorized (policy or prompt), reclaim
-      // the identified ports and retry once.
-      if (start.code !== 0 && tookOver) {
-        onLog(log("Start failed - reclaiming authorized ports...", "warn"));
-        const targets = config?.edgePolicy?.stopTargets?.length
-          ? config.edgePolicy.stopTargets
-          : stopTargetsForStatus(await probeEdge(executor));
-        await freeEdgeTargets(executor, targets, (m, l) => onLog(log(m, l)));
-        await execSafe(executor, "systemctl reset-failed openresty 2>/dev/null || true");
-        start = await executor.streamExec(plan.startCommand, onLog as (log: LogEntry) => void);
-      }
-
-      if (start.code !== 0) {
-        const journal = await executor.exec(
-          "journalctl -xeu openresty.service --no-pager -n 30 2>/dev/null || echo '(unavailable)'",
-        ).catch(() => "(could not read journal)");
-        onLog(log(`Service journal:\n${journal}`, "error"));
-        return { component: "openresty", success: false, error: "OpenResty installed but failed to start" };
-      }
-    }
-
-    // Reload, deploy scripts, verify
-    await executor.exec(buildReloadCommand(paths));
-    onLog(log("Deploying analytics scripts..."));
-    await deployLuaScripts(executor, paths);
-
-    const version = await executor.exec(plan.verifyCommand);
-    const parsed = systemCatalog.checks.openresty.parseVersion(version);
-    onLog(log(`OpenResty ${parsed} installed`));
-    return { component: "openresty", success: true, version: parsed };
-  } catch (err) {
-    // The migrate signal must reach the caller (which runs the takeover
-    // orchestration) — don't swallow it into a failed InstallResult.
-    if (err instanceof EdgeMigrateRequested) throw err;
-    const msg = safeErrorMessage(err);
-    onLog(log(`OpenResty installation failed: ${msg}`, "error"));
-    return { component: "openresty", success: false, error: msg };
-  }
-}
-
 /**
  * Install the edge — the `edge` component. It is a CONTAINER, always.
  *
@@ -390,8 +205,14 @@ export async function installOpenResty(
  * networking, host bind mounts for vhosts/certs/ACME). There is deliberately NO
  * host-package fallback: a Docker-less box gets an explicit, actionable failure
  * instead of a second, divergent edge implementation that then has to be migrated.
- * {@link installOpenResty} stays for the mail server's own proxy and to convert a
- * pre-existing host edge, but it is no longer reachable as "install the edge".
+ *
+ * THE only way to install an edge. There is no `installOpenResty`/`installCertbot`
+ * any more — both apt-installed a host-side edge, and the mail wizard was the last
+ * caller keeping them alive. That left one box able to end up with two edge
+ * implementations, a certbot on the host that only mail's cert step used, and a
+ * second copy of the conflict handling. `ensureContainerEdge` below still converts
+ * a PRE-EXISTING host OpenResty (bare→container), which is how boxes installed
+ * before this move come across.
  */
 export async function installContainerEdge(
   executor: CommandExecutor,
@@ -516,9 +337,8 @@ type InstallerFn = (
 
 export const COMPONENT_INSTALLERS: Record<string, InstallerFn> = {
   docker: (exec, log) => installDocker(exec, log),
-  // The edge is ONE component and it is a container image. `installOpenResty` /
-  // `installCertbot` are NOT reachable from here — they remain only for the mail
-  // server's own proxy (mail.service.ts) and for converting a legacy host edge.
+  // The edge is ONE component and it is a container image — there is no
+  // host-OpenResty or host-certbot installer to reach for any more.
   edge: (exec, log, config) => installContainerEdge(exec, log, config),
   git: (exec, log) => installGit(exec, log),
   rsync: (exec, log) => installRsync(exec, log),

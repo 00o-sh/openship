@@ -49,7 +49,8 @@ import {
 import { getMailServerStats } from "./stats.service";
 import { scanDns } from "./dns-scan.service";
 import { sendTestEmail, TestEmailError } from "./test-email.service";
-import { safeErrorMessage } from "@repo/core";
+import { AppError, safeErrorMessage } from "@repo/core";
+import { handleApiError } from "../../../middleware/error-handler";
 import {
   getComponentLogs,
   restartAllComponents,
@@ -791,6 +792,14 @@ export async function getComponentLogsHandler(c: Context) {
 // ─── Error mapping ───────────────────────────────────────────────────────────
 
 function errorJson(c: Context, err: unknown) {
+  // A typed AppError already carries its status + code — MailEngineUnavailableError
+  // is the one every read here can raise (a stopped engine / a legacy box whose
+  // container never existed), and it must reach the panel as 409 +
+  // MAIL_ENGINE_NOT_{INSTALLED,RUNNING} so the UI can offer the fix. Flattening it
+  // to 500 is exactly what turned "your mail engine is stopped" into "API 500".
+  // The central mapper owns that translation; don't restate it per error type.
+  if (err instanceof AppError) return handleApiError(err, c);
+
   const message = safeErrorMessage(err);
   // The SSH+psql layer throws plain Error for any non-shape error
   // (connection failure, SQL syntax, validation). 500 is the right default;

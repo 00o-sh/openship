@@ -4,6 +4,25 @@ on:
   pull_request: {}
   push:
     branches: [main]
+    # A tag is what actually ships; the image-build E2E runs here (see the
+    # e2e-docker matrix) so a release is proven restorable before it goes out.
+    tags: ["v*"]
+  # Off-the-hour on purpose: shared-runner Docker Hub pulls are rate-limited by
+  # IP, and :00 is when everyone else's nightly fires.
+  schedule:
+    - cron: "37 4 * * *"
+  workflow_dispatch: {}
+
+# One in-flight run per ref. PR pushes cancel their predecessor — nobody reads
+# the result of a superseded commit — while main and tags run to completion so
+# their history stays complete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Deliberately NO `paths:` filter. These jobs are required status checks, and a
+# path-filtered required check never reports on a PR it excluded — the PR is then
+# unmergeable forever with no visible reason.
 
 jobs:
   typecheck:
@@ -70,5 +89,83 @@ jobs:
       # Runs `turbo run test` → vitest across every package that defines a test
       # script (@repo/core, @repo/adapters, @repo/db [PGlite — no external DB],
       # apps/api, apps/dashboard). Packages resolve to src, so no build needed.
+      # apps/api excludes test/e2e/** here — those need a daemon and run in the
+      # e2e-docker job below.
       - name: Run tests
         run: bun run test
+
+  # Rollback and restore against a REAL Docker daemon. This is the only job that
+  # proves those paths work at all; every other test in the repo mocks the runtime.
+  #
+  # `RUN_DOCKER_E2E=1` is what makes it honest: without it the suite skips when no
+  # daemon answers, which is exactly how these cases sat green-and-unrun for months.
+  # With it, an unreachable daemon fails in `beforeAll` instead of reporting skipped.
+  #
+  # Split by cost rather than trigger-gated as a whole, because "run the cheap
+  # proof on every PR" and "don't pull a Node base image and run a real docker
+  # build on every push" are both true. `fast` is every daemon-level and
+  # full-cycle case (~5 min); `heavy` is rollback-build-restore alone (~225s cold,
+  # and fileParallelism is off, so it holds the whole suite up). One job
+  # definition, two parallel runs when heavy is warranted — see E2E_SCOPE in
+  # apps/api/vitest.e2e.config.ts.
+  #
+  # If main is ever branch-protected, require "E2E (real Docker, fast)" and NOT
+  # the heavy one: heavy doesn't run on PRs, and a required check that never
+  # reports is the same deadlock as a path-filtered one.
+  e2e-docker:
+    name: E2E (real Docker, ${{ matrix.scope }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Kept on one line: the whole scalar has to be a single expression for
+        # the matrix to receive an array rather than a string.
+        scope: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) && fromJSON('["fast","heavy"]') || fromJSON('["fast"]') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cache bun install
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock', '**/bun.lockb') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Fail here rather than inside vitest, so "the runner lost Docker" is
+      # distinguishable at a glance from "a rollback assertion broke".
+      - name: Check the Docker daemon
+        run: |
+          docker info
+          docker version
+
+      # These tests pull alpine/busybox/node from Docker Hub, and hosted runners
+      # share outbound IPs — anonymous pulls hit `toomanyrequests` as a function
+      # of other people's traffic, which reads as a flaky rollback test. An
+      # authenticated pull is quota'd per account instead.
+      #
+      # No such secret exists in this repo yet (docker-images.yml only logs into
+      # GHCR), so today this step skips and nothing changes; set
+      # DOCKERHUB_USERNAME/DOCKERHUB_TOKEN and the flake class disappears.
+      - name: Log in to Docker Hub (raises the pull rate limit)
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Run real-daemon E2E
+        env:
+          RUN_DOCKER_E2E: "1"
+          E2E_SCOPE: ${{ matrix.scope }}
+        run: bun run --cwd apps/api test:e2e

@@ -102,6 +102,19 @@
         "saved": "Enrutamiento establecido en {mode}",
         "failed": "No se pudo actualizar el enrutamiento"
       }
+    },
+    "internalAlias": {
+      "title": "Nombre de host interno",
+      "description": "Nombre personalizado que otros servicios usan para llegar a esta app de forma privada",
+      "intro": "Define un nombre DNS adicional para esta app en su red de proyecto privada. Se resuelve junto al predeterminado (el slug del proyecto); otros servicios vinculados pueden usar cualquiera de los dos. El acceso público no cambia; esto nunca expone un puerto.",
+      "label": "Alias de nombre de host",
+      "hint": "Solo letras, dígitos y guiones. Déjalo vacío para usar el slug del proyecto.",
+      "save": "Guardar",
+      "toast": {
+        "saved": "Nombre de host interno actualizado",
+        "failed": "No se pudo actualizar el nombre de host interno",
+        "invalid": "Escribe al menos una letra o dígito"
+      }
     }
   },
   "backup": {

@@ -4,13 +4,20 @@
  *
  * Talks to GitHub (releases/latest), NOT the Openship API. The version gate +
  * install-command are pure functions in @repo/core (`resolveCliUpdatePlan` /
- * `cliInstallCommand`), unit-tested there. This command just detects the
- * package manager and re-installs the global package, then tells the operator
- * to restart `openship up`.
+ * `cliInstallCommand`), unit-tested there. The command dispatches on how the CLI
+ * was delivered (tarball / from-source / npm-package — see the branches below),
+ * applies the matching update, then tells the operator to restart `openship up`.
  *
  *   openship update            update if a newer release exists
  *   openship update --check    report current/latest only (no install)
- *   openship update --via npm  force the package manager (default: bun if present, else npm)
+ *   openship update --via npm  force the package manager (npm-package installs only)
+ *
+ * TARBALL installs (scripts/install.sh / install.ps1, marked by
+ * ~/.openship/cli-install.json) take yet another path: instead of `bun add -g`/
+ * `npm i -g`, `openship update` re-downloads the verified payload tarball and
+ * repoints cli/current (lib/cli-payload.ts), refreshing the Node runtime first
+ * so a release that raises the Node floor self-heals. This is the default
+ * `curl … | sh` distribution — Node is the runtime, never the user's global Bun.
  *
  * FROM-SOURCE installs (scripts/install-source.sh, marked by
  * ~/.openship-dev/source-install.json) take a different path: instead of
@@ -26,6 +33,9 @@ import { restart as restartService } from "../lib/service";
 import { readInstallMethod, composeUpdate } from "../lib/compose";
 import { err, info, isJsonMode, ok, printJson } from "../lib/output";
 import { shortSha } from "../lib/from-source";
+import { readCliInstall, writeCliInstall, type CliInstall } from "../lib/cli-install";
+import { ensureCliPayload } from "../lib/cli-payload";
+import { ensureNodeRuntime, writeLauncher } from "../lib/node-runtime";
 import {
   readSourceInstall,
   rebuildFromSource,
@@ -89,6 +99,94 @@ async function runSourceUpdate(source: SourceInstall, opts: UpdateOpts): Promise
   }
 }
 
+const REINSTALL_HINT = "curl -fsSL https://get.openship.io | sh";
+
+/**
+ * Update a tarball install: re-download the verified payload for the latest tag
+ * and repoint cli/current, refreshing the Node runtime + launcher first so a
+ * release that raises the Node floor self-heals. Mirrors the release path's
+ * check/plan/reconcile, swapping `bun add -g`/`npm i -g` for the payload fetch —
+ * the CLI never touches the user's global runtime.
+ */
+async function runTarballUpdate(install: CliInstall, opts: UpdateOpts): Promise<void> {
+  const current = __CLI_VERSION__;
+
+  let latest: string;
+  try {
+    latest = (await resolveLatestTag()).replace(/^v/, "");
+  } catch {
+    err(`Could not reach GitHub to check for updates. Try again, or reinstall: ${REINSTALL_HINT}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const plan = resolveCliUpdatePlan(current, latest);
+
+  if (opts.check) {
+    if (isJsonMode()) {
+      printJson({ current, latest, updateAvailable: plan.action === "install", method: "tarball" });
+    } else if (plan.action === "install") {
+      info(`Update available: v${current} → v${latest}. Run \`openship update\`.`);
+    } else {
+      ok(`Up to date (v${current}).`);
+    }
+    return;
+  }
+
+  if (plan.action === "up-to-date") {
+    ok(`Already on the latest version (v${current}).`);
+    return;
+  }
+
+  const tag = `v${latest}`;
+  info(`Updating v${current} → v${latest} (verified payload)…`);
+
+  // Refresh Node first so the new bundle lands on a runtime that satisfies it.
+  // Best-effort: a satisfying system node is a no-op; a vendor failure (offline,
+  // or Windows where provisioning lives in install.ps1) keeps the current
+  // runtime rather than aborting an otherwise-valid CLI update.
+  let runtime = install.runtime;
+  try {
+    runtime = (await ensureNodeRuntime((m) => info(m))).source;
+  } catch (e) {
+    info(`Keeping the current Node runtime (couldn't refresh it: ${(e as Error).message}).`);
+  }
+
+  try {
+    await ensureCliPayload(tag);
+    if (process.platform !== "win32") writeLauncher();
+  } catch (e) {
+    err(`Update failed: ${(e as Error).message} Reinstall: ${REINSTALL_HINT}`);
+    process.exitCode = 1;
+    return;
+  }
+  writeCliInstall({ ...install, tag, runtime });
+
+  // Same service reconcile as the release path: compose stack regen, or restart
+  // the process service onto the freshly-repointed cli/current bundle.
+  if (readInstallMethod() === "compose") {
+    const applied = await composeUpdate(latest);
+    if (isJsonMode()) {
+      printJson({ updated: true, from: current, to: latest, method: "compose", applied });
+    } else if (applied) {
+      ok(`Updated to v${latest} — compose stack regenerated, images pulled, services recreated.`);
+    } else {
+      err(`Updated the CLI to v${latest}, but bringing the compose stack up failed. Re-run \`openship update\`, or \`openship up\` to retry.`);
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  const { restarted } = restartService();
+  if (isJsonMode()) {
+    printJson({ updated: true, from: current, to: latest, method: "tarball", restarted });
+  } else if (restarted) {
+    ok(`Updated to v${latest} and restarted the service — you're on the new version.`);
+  } else {
+    ok(`Updated to v${latest}. Restart the server to run the new version: openship up`);
+  }
+}
+
 /** Prefer bun (the curl installer uses `bun add -g`); fall back to npm. */
 function detectPackageManager(override?: string): CliPackageManager {
   if (override === "bun" || override === "npm") return override;
@@ -102,10 +200,14 @@ export const updateCommand = new Command("update")
   .option("--via <manager>", "Package manager to update with: bun | npm")
   .option("--rebuild", "From-source installs: rebuild even if already at the remote tip")
   .action(async (opts: UpdateOpts) => {
-    // From-source installs rebuild from git in place; the release path below is
-    // for the published npm package.
+    // From-source installs rebuild from git in place; tarball installs (the
+    // default curl|sh distribution) re-download the verified payload. The pm
+    // path below is only for genuine npm/bun global installs.
     const source = readSourceInstall();
     if (source) return runSourceUpdate(source, opts);
+
+    const cliInstall = readCliInstall();
+    if (cliInstall?.method === "tarball") return runTarballUpdate(cliInstall, opts);
 
     const current = __CLI_VERSION__;
 

@@ -6,6 +6,13 @@
  * can't interpret is returned as a warning, never silently dropped.
  */
 
+import {
+  PROXY_DIRECTIVES,
+  parseProxyValue,
+  sanitizeProxySettings,
+  type ProxySettings,
+} from "@repo/core";
+
 import type { CommandExecutor } from "../../../types";
 import type { ImportedSite, ProxyScanResult } from "../../types";
 import { EDGE_HOST_PATHS, OPENRESTY_DEFAULT_PATHS } from "../../../infra/openresty-lua";
@@ -136,7 +143,7 @@ function isHttpsUpgradeForSelf(body: string, names: string[]): boolean {
 }
 
 /**
- * Does every `location` in this block exist only to answer ACME challenges?
+ * Does every `location` in this block exist only to answer a CHALLENGE?
  *
  * certbot's `--webroot` leaves blocks whose sole content is
  * `location /.well-known/acme-challenge/ { root /var/www/certbot; }` — and
@@ -145,7 +152,16 @@ function isHttpsUpgradeForSelf(body: string, names: string[]): boolean {
  * static vhost for a directory with no index, which the edge answers with a 500
  * (`try_files` → `/index.html` → redirect cycle). Our edge answers ACME itself,
  * so these carry nothing to migrate.
+ *
+ * The same reasoning covers Openship's own edge-target challenge vhost
+ * (`_oblien-challenge-<slug>.conf`): a block whose only location answers
+ * `/.well-known/oblien-proxy-challenge/` is scaffolding proving we control a
+ * routing target, not a site. Recognising it HERE rather than in each consumer is
+ * what keeps it out of the orphan sweep, the domain-claim warning
+ * (`untrackedSiteFor`) and the migrate importer at once — all three read this.
  */
+const CHALLENGE_LOCATION_RE = /\.well-known\/(acme-challenge|oblien-proxy-challenge)/i;
+
 function isAcmeWebrootOnly(body: string): boolean {
   const paths = [...body.matchAll(/(?:^|[\s;}])location\s+([^{]+?)\s*\{/g)].map((m) =>
     m[1].trim(),
@@ -156,7 +172,42 @@ function isAcmeWebrootOnly(body: string): boolean {
     const root = firstDirective(body, "root") ?? "";
     return /letsencrypt|acme|certbot/i.test(root);
   }
-  return paths.every((p) => /\.well-known\/acme-challenge/i.test(p));
+  return paths.every((p) => CHALLENGE_LOCATION_RE.test(p));
+}
+
+/**
+ * Read the curated reverse-proxy tunables back out of a `server {}` body.
+ *
+ * The inverse of `renderProxyOptions`, driven by the SAME `PROXY_DIRECTIVES` table,
+ * so the two cannot describe different directive sets. Two results, because they
+ * answer different questions:
+ *
+ *   `raw`   — every declared directive present in the block, verbatim. This is what
+ *             the box is actually serving, and it's what the UI must show. A vhost
+ *             we didn't write can legally hold `client_max_body_size 20M` or
+ *             `proxy_read_timeout 1d`; rendering "not set" for a value that IS set
+ *             would be a lie, and the operator would chase a limit that isn't there.
+ *   `settings` — the subset that survives `sanitizeProxySettings`, i.e. what can be
+ *             adopted into `routingConfig.proxy` and re-rendered unchanged.
+ */
+function parseProxyDirectives(body: string): {
+  settings?: ProxySettings;
+  raw?: Record<string, string>;
+} {
+  const raw: Record<string, string> = {};
+  const candidate: Record<string, string | number | boolean> = {};
+  for (const spec of PROXY_DIRECTIVES) {
+    const found = firstDirective(body, spec.directive);
+    if (found === undefined) continue;
+    raw[spec.key] = found;
+    const parsed = parseProxyValue(spec, found);
+    if (parsed !== undefined) candidate[spec.key] = parsed;
+  }
+  const settings = sanitizeProxySettings(candidate);
+  return {
+    ...(settings ? { settings } : {}),
+    ...(Object.keys(raw).length > 0 ? { raw } : {}),
+  };
 }
 
 function parseServer(
@@ -230,6 +281,9 @@ function parseServer(
   const site: ImportedSite = { serverNames: names, ssl, target, source };
   if (routes) site.routes = routes;
   if (certPath && keyPath) site.tls = { certPath, keyPath };
+  const tunables = parseProxyDirectives(body);
+  if (tunables.settings) site.proxy = tunables.settings;
+  if (tunables.raw) site.proxyRaw = tunables.raw;
   return { site, warnings };
 }
 

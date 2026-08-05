@@ -106,6 +106,7 @@ import type {
   DockerPortBinding,
   DockerVolumeInfo,
   DockerNetworkInfo,
+  ContainerLifecycleEvent,
 } from "./types";
 import { BuildLogger, parseLogLevel, sq, assembleGitClone } from "./build-pipeline";
 import { materializeGitSsh, shellGitSshWriter, type GitSshMaterial } from "./git-ssh-material";
@@ -149,8 +150,107 @@ const RESTART_POLICIES: Record<string, { Name: string; MaximumRetryCount: number
 
 const DOCKER_BUILD_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
+/** Last-resort cap for a one-shot in-container exec. Every caller passes its own
+ *  (5s probe / 15s prepare step); this only guards a stream that connects and
+ *  then never ends, which would otherwise hang a deploy forever. */
+const DEFAULT_IN_CONTAINER_EXEC_TIMEOUT_MS = 120_000;
+
+/** Exit status of a process killed by SIGTERM — what the watchdog below produces. */
+const SIGTERM_EXIT_CODE = 143;
+
+/**
+ * Watchdog wrapper so the CONTAINER enforces the deadline, not just our end of
+ * the socket.
+ *
+ * There is no Docker API to kill a running exec (moby#9098): destroying the local
+ * stream leaves the process running inside the container, so a prepare step that
+ * retries 5× used to leave 5 live `sh` processes behind. Here the wrapper shell
+ * arms a `sleep`+`kill` against its own child and reports the child's status, so
+ * a timeout ends the remote process too.
+ *
+ * Two details are load-bearing:
+ *  - the command is a POSITIONAL ARGUMENT (`$1`), never spliced into this script,
+ *    so `sh -c <command>` semantics stay byte-identical to the unwrapped call and
+ *    there is no new quoting surface;
+ *  - the watchdog's fds go to /dev/null. A backgrounded `sleep` holding a copy of
+ *    the exec's stdout pipe keeps that pipe from reaching EOF, which would make
+ *    every fast command block for the whole timeout instead of returning at once.
+ *
+ * `sleep && kill` (not `;`) so an image with no `sleep` simply has no watchdog
+ * instead of killing the command instantly.
+ */
+const IN_CONTAINER_EXEC_WATCHDOG = [
+  'sh -c "$1" &',
+  "__osc=$!",
+  '{ sleep "$2" && kill -TERM $__osc 2>/dev/null; } >/dev/null 2>&1 &',
+  "__osw=$!",
+  "wait $__osc 2>/dev/null",
+  "__osr=$?",
+  "kill -TERM $__osw 2>/dev/null",
+  "exit $__osr",
+].join("\n");
+
+/** argv for a one-shot in-container exec that kills itself after `timeoutMs`. */
+export function buildInContainerExecCmd(command: string, timeoutMs: number): string[] {
+  const seconds = Math.max(1, Math.ceil(timeoutMs / 1000));
+  return [
+    "sh",
+    "-c",
+    IN_CONTAINER_EXEC_WATCHDOG,
+    "openship-exec",
+    command,
+    String(seconds),
+  ];
+}
+
+/** Just the `inspect()` surface the exit-code poll needs, so both a dockerode
+ *  `Exec` handle and `docker.getExec(id)` satisfy it. */
+type ExecInspectable = { inspect(): Promise<Dockerode.ExecInspectInfo> };
+
+/**
+ * The exec's REAL exit code — never a guess.
+ *
+ * dockerode still reports `Running:true / ExitCode:null` in the window right
+ * after the output stream ends, and reading that window as `?? 0` turns a FAILED
+ * command into an apparent success: a truncated `pg_dump` gets stored and marked
+ * good (discovered only at restore), and `./gen_key.sh` exiting 2 with "boom" on
+ * stdout gets persisted AS the key. Poll for the real exit (bounded ~5s), then
+ * FAIL rather than assume — an undeterminable exit code is not a success.
+ *
+ * Shared by `execInContainer` here and the backup dump/restore executors so the
+ * "don't trust the null window" rule can't drift between them. `label` names the
+ * exec in the error when the caller has an id to give (the backup path does).
+ */
+export async function resolveExecExitCode(exec: ExecInspectable, label?: string): Promise<number> {
+  let info = await exec.inspect();
+  for (let i = 0; info.Running && i < 50; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    info = await exec.inspect();
+  }
+  const who = label ? `exec ${label}` : "exec";
+  if (typeof info.ExitCode !== "number") {
+    throw new Error(
+      info.Running
+        ? `${who} still running 5s after its output ended — exit code unknown`
+        : `${who} reported no exit code`,
+    );
+  }
+  return info.ExitCode;
+}
+
 function resolveRestartPolicy(policy?: string) {
   return RESTART_POLICIES[policy ?? "always"] ?? RESTART_POLICIES.always;
+}
+
+/**
+ * The east-west DNS aliases a container answers to on its project network: the
+ * primary name (service name / project slug) plus any operator-chosen extras,
+ * with falsy entries and duplicates (incl. an extra equal to the primary)
+ * dropped so Docker's `EndpointsConfig.Aliases` never carries a dead or repeated
+ * name. Order-stable, primary first. Pure — unit-tested in docker-aliases.test.ts.
+ */
+export function buildNetworkAliases(primary: string, extras?: string[]): string[] {
+  return [primary, ...(extras ?? [])].filter((a, i, arr) => Boolean(a) && arr.indexOf(a) === i);
 }
 
 // ── Docker discovery normalizers (label-agnostic inspection) ─────────────────
@@ -249,9 +349,20 @@ function normalizeInspectPorts(data: Dockerode.ContainerInspectInfo): DockerPort
   return out;
 }
 
+/**
+ * Interface an extra compose port binds when its spec pins none. Loopback, NOT
+ * Docker's all-interfaces default: a compose service's ports the edge does not
+ * front would otherwise land directly on the public network, bypassing the
+ * edge's TLS/rate-limit/rules — and because Docker inserts its publish rules as
+ * nat-table DNAT (evaluated before the filter INPUT chain), a host ufw/nftables
+ * allow-list does NOT block them. Publishing publicly must be a deliberate
+ * choice: write the interface into the spec ("0.0.0.0:8080:80"), preserved below.
+ */
+const DEFAULT_EXTRA_PORT_HOST_IP = "127.0.0.1";
+
 /** Parse port specs ("8080:3000", "3000", "127.0.0.1:8080:80") into Docker
- *  ExposedPorts + PortBindings */
-function parsePortBindings(portSpecs: string[]): {
+ *  ExposedPorts + PortBindings. Exported for unit tests. */
+export function parsePortBindings(portSpecs: string[]): {
   exposedPorts: Record<string, object>;
   portBindings: Record<string, { HostIp?: string; HostPort: string }[]>;
 } {
@@ -268,10 +379,11 @@ function parsePortBindings(portSpecs: string[]): {
 
     const parts = mapping.split(":");
     if (parts.length === 1) {
-      // containerPort only → Docker assigns a random host port
+      // containerPort only → Docker assigns a random host port, bound to
+      // loopback (see DEFAULT_EXTRA_PORT_HOST_IP).
       const key = `${parts[0]}/${protocol}`;
       exposedPorts[key] = {};
-      portBindings[key] = [{ HostPort: "" }];
+      portBindings[key] = [{ HostIp: DEFAULT_EXTRA_PORT_HOST_IP, HostPort: "" }];
     } else {
       // [hostIp:]hostPort:containerPort. Parse from the RIGHT so both the
       // 2-part (hostPort:containerPort) and 3-part IP-scoped form
@@ -282,7 +394,10 @@ function parsePortBindings(portSpecs: string[]): {
       const hostIp = parts.length > 2 ? parts.slice(0, -2).join(":") : undefined;
       const key = `${containerPort}/${protocol}`;
       exposedPorts[key] = {};
-      portBindings[key] = [hostIp ? { HostIp: hostIp, HostPort: hostPort } : { HostPort: hostPort }];
+      // An explicit interface (including "0.0.0.0" to publish deliberately) is
+      // preserved verbatim; only a spec with no pinned interface falls back to
+      // loopback rather than Docker's all-interfaces default.
+      portBindings[key] = [{ HostIp: hostIp || DEFAULT_EXTRA_PORT_HOST_IP, HostPort: hostPort }];
     }
   }
   return { exposedPorts, portBindings };
@@ -367,21 +482,39 @@ function hasDockerFrameHeader(buf: Buffer, offset = 0): boolean {
   );
 }
 
-/** Strip Docker multiplexed frame headers from a complete log buffer. */
-function stripDockerHeaders(buf: Buffer): string {
-  const lines: string[] = [];
+/**
+ * Split a COMPLETE Docker multiplexed buffer into its frames, keeping which
+ * stream each one came from (1 = stdout, 2 = stderr).
+ *
+ * Parsing the whole buffer at once (rather than per chunk) is what makes this
+ * correct when a frame straddles a chunk boundary. A buffer that isn't framed at
+ * all — Tty:true output, or a daemon that didn't multiplex — yields a single
+ * stdout frame, so callers can run it unconditionally.
+ */
+export function splitDockerFrames(buf: Buffer): Array<{ stdout: boolean; data: Buffer }> {
+  const frames: Array<{ stdout: boolean; data: Buffer }> = [];
   let offset = 0;
   while (offset < buf.length) {
     if (hasDockerFrameHeader(buf, offset)) {
       const size = buf.readUInt32BE(offset + 4);
-      lines.push(buf.subarray(offset + 8, offset + 8 + size).toString("utf-8"));
+      frames.push({
+        stdout: buf[offset] !== 2,
+        data: buf.subarray(offset + 8, offset + 8 + size),
+      });
       offset += 8 + size;
     } else {
-      lines.push(buf.subarray(offset).toString("utf-8"));
+      frames.push({ stdout: true, data: buf.subarray(offset) });
       break;
     }
   }
-  return lines.join("");
+  return frames;
+}
+
+/** Strip Docker multiplexed frame headers from a complete log buffer. */
+function stripDockerHeaders(buf: Buffer): string {
+  return splitDockerFrames(buf)
+    .map((f) => f.data.toString("utf-8"))
+    .join("");
 }
 
 /** Strip a single Docker frame header from one streaming chunk. */
@@ -438,6 +571,97 @@ function parseLoadedImageRef(output: string): string | undefined {
   return matches.length ? matches[matches.length - 1][1].trim() : undefined;
 }
 
+/**
+ * Deadline for OPENING the event stream — never for the stream itself.
+ *
+ * `timeout: 0` below removes docker-modem's inactivity timeout, which a long-lived
+ * stream must not have, and with it the only bound on the request that opens one. A
+ * half-open SSH bridge accepts the connection and answers nothing, so without this
+ * the `getEvents` promise never settles: the caller's connect attempt is wedged for
+ * the life of the process, holding a bridge, never reconnecting, and — since it is an
+ * accelerator — failing silently.
+ */
+const EVENT_CONNECT_TIMEOUT_MS = 20_000;
+
+/** Container actions we ask the daemon for; `health_status` arrives suffixed. */
+const CONTAINER_EVENT_ACTIONS = [
+  "die",
+  "oom",
+  "kill",
+  "stop",
+  "restart",
+  "start",
+  "destroy",
+  "health_status",
+] as const;
+
+/**
+ * One line of Docker's `/events` NDJSON → a normalized event, or `null` when the
+ * line carries nothing a consumer acts on: an action we never asked for, a
+ * `health_status` that is neither `healthy` nor `unhealthy` (`starting` is the
+ * grace period the healthcheck author asked for), or a malformed frame. Returning
+ * null rather than throwing is deliberate — one garbage line must not kill a
+ * long-lived subscription.
+ *
+ * BOTH healthcheck edges are kept. `unhealthy` is the fault; `healthy` is the
+ * recovery, and it is the only signal that one happened — a container whose
+ * healthcheck starts passing again never stopped, so no `start` event follows it.
+ * Dropping it left recovery from an unhealthy incident on the 60s poll while the
+ * fault itself was detected in seconds.
+ *
+ * Pure, so the wire format is testable without a daemon.
+ */
+export function parseContainerEventLine(line: string): ContainerLifecycleEvent | null {
+  let raw: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(line);
+    // Valid JSON that isn't an object — `null` most of all, which is truthy-checked
+    // into a property read below and would throw inside the stream's data handler,
+    // taking the whole subscription down with it.
+    if (!parsed || typeof parsed !== "object") return null;
+    raw = parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+
+  const actor = raw.Actor as { ID?: unknown } | undefined;
+  const containerId =
+    typeof actor?.ID === "string" && actor.ID
+      ? actor.ID
+      : typeof raw.id === "string" && raw.id
+        ? raw.id
+        : "";
+  if (!containerId) return null;
+
+  // Modern daemons send `Action`; pre-1.22 payloads send `status`.
+  const rawAction = (
+    typeof raw.Action === "string" ? raw.Action : typeof raw.status === "string" ? raw.status : ""
+  ).trim();
+  if (!rawAction) return null;
+
+  let action: ContainerLifecycleEvent["action"];
+  if (rawAction.startsWith("health_status")) {
+    // "health_status: unhealthy" — the colon-suffixed form is the only shape.
+    const status = rawAction.split(":")[1]?.trim();
+    if (status !== "unhealthy" && status !== "healthy") return null;
+    action = status;
+  } else if ((CONTAINER_EVENT_ACTIONS as readonly string[]).includes(rawAction)) {
+    action = rawAction as ContainerLifecycleEvent["action"];
+  } else {
+    return null;
+  }
+
+  const timeNano = typeof raw.timeNano === "number" ? raw.timeNano : null;
+  const atSeconds =
+    typeof raw.time === "number"
+      ? raw.time
+      : timeNano !== null
+        ? Math.floor(timeNano / 1e9)
+        : Math.floor(Date.now() / 1000);
+
+  return { containerId, action, atSeconds };
+}
+
 // ─── Docker runtime ──────────────────────────────────────────────────────────
 
 export class DockerRuntime implements RuntimeAdapter {
@@ -461,6 +685,7 @@ export class DockerRuntime implements RuntimeAdapter {
     "deploymentContainerQuery",
     "hostContainerQuery",
     "stabilityProbe",
+    "containerEvents",
   ]);
 
   /** Docker honors every extended compose key we currently support. */
@@ -568,12 +793,21 @@ export class DockerRuntime implements RuntimeAdapter {
   }
 
   /** Labels applied to both build images and deploy containers. */
-  private labels(config: { deploymentId?: string; projectId: string; sessionId?: string }) {
+  private labels(config: {
+    deploymentId?: string;
+    projectId: string;
+    sessionId?: string;
+    service?: string;
+  }) {
     const l: Record<string, string> = {
       "openship.project": config.projectId,
     };
     if (config.deploymentId) l["openship.deployment"] = config.deploymentId;
     if (config.sessionId) l["openship.build"] = config.sessionId;
+    // Present on single-app containers that joined the project network; lets the
+    // label-scoped reconcileNetworkMembership re-alias them after an out-of-band
+    // network rebuild, exactly like a compose service.
+    if (config.service) l["openship.service"] = config.service;
     return l;
   }
 
@@ -1897,19 +2131,60 @@ export class DockerRuntime implements RuntimeAdapter {
       level: "info",
     });
 
+    // Internal reachability (east-west): when an alias is set, join the project's
+    // own `openship-<slug>` bridge network so another project explicitly linked to
+    // this one (attachLinkedNetworks) can resolve it by name — the same DNS a
+    // compose service gets. The alias existing is NOT public exposure: the network
+    // is the project's boundary and stays empty until an explicit link joins a
+    // consumer; loopback-only publishing below is untouched. Best-effort — a
+    // network failure must not fail the deploy (the app still works via the edge).
+    const aliasSlug = config.slug || config.runtimeName || config.projectId;
+    let networkId: string | undefined;
+    let aliases: string[] = [];
+    if (config.networkAlias) {
+      aliases = buildNetworkAliases(config.networkAlias, config.extraAliases);
+      try {
+        // ensureNetwork returns the network ID; the compose/service path also keys
+        // EndpointsConfig + NetworkMode by the id, so mirror it here.
+        networkId = await this.ensureNetwork(aliasSlug);
+      } catch (err) {
+        log({
+          timestamp: new Date().toISOString(),
+          message: `Warning: internal network setup failed (app still served via edge): ${
+            err instanceof Error ? err.message : String(err)
+          }\n`,
+          level: "warn",
+        });
+      }
+    }
+
     const container = await this.docker.createContainer({
       name: containerName,
       Image: imageRef,
+      // Hostname mirrors the primary alias so the container's own $HOSTNAME and
+      // its network name agree (matches the compose/service path).
+      ...(networkId ? { Hostname: config.networkAlias } : {}),
       Cmd: cmd,
       Env: env,
       Labels: this.labels({
         deploymentId: config.deploymentId,
         projectId: config.projectId,
+        // Marks this single-app container as a network member so the label-scoped
+        // reconcileNetworkMembership re-attaches it after an out-of-band network
+        // rebuild, exactly like a compose service.
+        ...(networkId ? { service: config.networkAlias } : {}),
       }),
       ExposedPorts: { [`${config.port}/tcp`]: {} },
+      ...(networkId
+        ? { NetworkingConfig: { EndpointsConfig: { [networkId]: { Aliases: aliases } } } }
+        : {}),
       HostConfig: {
         RestartPolicy: restartPolicy,
         Binds: binds,
+        // Join the project's own bridge network as the primary network (mirrors
+        // the compose path's NetworkMode: group.id). Egress + loopback publish are
+        // unaffected; this only gives the container an in-network DNS identity.
+        ...(networkId ? { NetworkMode: networkId } : {}),
         // Omitted entirely when the project has no cap (self-hosted default) —
         // see dockerResourceLimits. Never substitute a tier here.
         ...dockerResourceLimits(config.resources),
@@ -2533,6 +2808,104 @@ export class DockerRuntime implements RuntimeAdapter {
     };
   }
 
+  /**
+   * Host-wide container event subscription (`GET /events`, filtered server-side).
+   *
+   * Runs on a DEDICATED dockerode instance rather than `this.docker`, for two
+   * reasons that both bite silently:
+   *   1. docker-modem applies its per-instance `timeout` as an *inactivity*
+   *      `req.setTimeout` on every request, streams included (modem.js) — and the
+   *      SSH transport sets 600s, TCP 30s. A quiet box would have its event
+   *      stream destroyed on a schedule. `timeout: 0` opts out — and the connect gets
+   *      its own bound instead (`EVENT_CONNECT_TIMEOUT_MS`), as a real abort rather
+   *      than a promise walked away from, since docker-modem 5 forwards an
+   *      `abortSignal` to the underlying request.
+   *   2. The details come from `daemonConnectionFrom` (the modem the runtime is
+   *      already talking to) and NOT from a second `transport.establish()`: the
+   *      SSH branch mints a new bridge per call while `close()` only closes the
+   *      latest, so re-establishing would leak one per subscription.
+   *
+   * No `since` cursor: the consumer re-reads state on every (re)connect anyway,
+   * which covers gaps the daemon has nothing left to replay for (box reboot).
+   */
+  async watchContainerEvents(handlers: {
+    onEvent: (event: ContainerLifecycleEvent) => void;
+    onClose: (err: Error | null) => void;
+  }): Promise<() => void> {
+    const conn = daemonConnectionFrom(this.docker);
+    const events = new Dockerode({
+      socketPath: conn.socketPath,
+      host: conn.host,
+      port: conn.port,
+      protocol: conn.protocol,
+      ca: conn.ca,
+      cert: conn.cert,
+      key: conn.key,
+      timeout: 0,
+    } as Dockerode.DockerOptions);
+
+    const opening = new AbortController();
+    let openTimedOut = false;
+    const openDeadline = setTimeout(() => {
+      openTimedOut = true;
+      opening.abort();
+    }, EVENT_CONNECT_TIMEOUT_MS);
+    (openDeadline as unknown as { unref?: () => void }).unref?.();
+
+    let stream: NodeJS.ReadableStream;
+    try {
+      stream = (await events.getEvents({
+        filters: { type: ["container"], event: [...CONTAINER_EVENT_ACTIONS] },
+        // Not in @types/dockerode's GetEventsOptions, but docker-modem 5 reads it
+        // (modem.js: `optionsf.signal = options.abortSignal`).
+        abortSignal: opening.signal,
+      } as Dockerode.GetEventsOptions)) as unknown as NodeJS.ReadableStream;
+    } catch (err) {
+      // The abort surfaces as a generic AbortError; say what actually happened.
+      throw openTimedOut
+        ? new Error(
+            `no answer from the docker event stream within ${Math.round(
+              EVENT_CONNECT_TIMEOUT_MS / 1000,
+            )}s`,
+          )
+        : err;
+    } finally {
+      // Disarmed once the stream is up: from here on the subscription is long-lived
+      // and `destroy()` below is what ends it.
+      clearTimeout(openDeadline);
+    }
+
+    let closed = false;
+    /** Fire onClose at most once, and never after cleanup. */
+    const finish = (err: Error | null) => {
+      if (closed) return;
+      closed = true;
+      handlers.onClose(err);
+    };
+
+    let buffer = "";
+    stream.on("data", (chunk: Buffer) => {
+      if (closed) return;
+      buffer += chunk.toString("utf-8");
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const event = parseContainerEventLine(line);
+        if (event) handlers.onEvent(event);
+      }
+    });
+    stream.on("error", (err: Error) => finish(err));
+    stream.on("close", () => finish(null));
+    stream.on("end", () => finish(null));
+
+    return () => {
+      if (closed) return;
+      closed = true;
+      (stream as unknown as { destroy?: () => void }).destroy?.();
+    };
+  }
+
   async getRuntimeLogs(containerId: string, tail?: number): Promise<LogEntry[]> {
     const container = this.docker.getContainer(containerId);
     const buffer = await container.logs({
@@ -2801,16 +3174,16 @@ export class DockerRuntime implements RuntimeAdapter {
   }
 
   /**
-   * Non-interactive one-shot exec INSIDE a container (Tty:false ⇒ dockerode
-   * multiplexes stdout/stderr, so demux the frames). Sibling of
-   * `openServiceShell` for the advisory port probe — reads stdout + the exit
-   * code. Runs in the CONTAINER, not on the daemon host (never use
-   * `this.executor` here).
+   * Non-interactive one-shot exec INSIDE a container. Sibling of
+   * `openServiceShell` for the advisory port probe and app prepare steps — reads
+   * stdout, stderr and the exit code. Runs in the CONTAINER, not on the daemon
+   * host (never use `this.executor` here).
    */
   private async execInContainer(
     containerId: string,
     command: string,
-  ): Promise<{ exitCode: number | null; stdout: string }> {
+    opts?: { timeout?: number },
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
     const container = this.docker.getContainer(containerId);
     const inspect = await container.inspect().catch(() => null);
     if (!inspect?.State.Running) {
@@ -2819,49 +3192,92 @@ export class DockerRuntime implements RuntimeAdapter {
       );
     }
 
+    const timeoutMs = opts?.timeout ?? DEFAULT_IN_CONTAINER_EXEC_TIMEOUT_MS;
+    const watchdogCmd = buildInContainerExecCmd(command, timeoutMs);
+    const watchdogMs = Number(watchdogCmd[watchdogCmd.length - 1]) * 1000;
+    const startedAt = Date.now();
+
     const exec = await container.exec({
       AttachStdout: true,
       AttachStderr: true,
       Tty: false,
-      Cmd: ["sh", "-c", command],
+      Cmd: watchdogCmd,
     });
 
-    const stream = await exec.start({ hijack: true, stdin: false });
+    // NO `hijack`, and it must stay that way — same trap DockerEdgeExecutor.run()
+    // documents. Hijack makes docker-modem ask for a connection upgrade; the daemon
+    // answers `101 Switching Protocols`, and under Bun node:http reports that as a
+    // plain `response` instead of an `upgrade`, so modem turned every SUCCESSFUL
+    // exec into `(HTTP code 101) unexpected - <the command's own stdout>`. The api
+    // runs Bun (image + compiled desktop binary), so every app prepare step
+    // (Convex `adminKey`) "failed" while actually succeeding, and a `mustSucceed`
+    // step would have failed the whole deploy. Only interactive stdin needs the raw
+    // socket — see `openServiceShell`, which hand-rolls the upgrade instead.
+    const stream = await exec.start({ stdin: false });
 
-    const stdoutChunks: Buffer[] = [];
-    const stdoutSink = new Writable({
-      write(chunk: Buffer, _enc, cb) {
-        stdoutChunks.push(Buffer.from(chunk));
-        cb();
-      },
-    });
-    const stderrSink = new Writable({
-      write(_chunk, _enc, cb) {
-        cb();
-      },
-    });
-    this.docker.modem.demuxStream(stream, stdoutSink, stderrSink);
-
+    // Buffer raw bytes and frame-split at the end rather than piping through
+    // modem.demuxStream: Tty:false output is multiplexed, frames straddle chunk
+    // boundaries, and a whole-buffer parse also tolerates unframed output.
+    const chunks: Buffer[] = [];
     await new Promise<void>((resolve, reject) => {
-      stream.on("end", resolve);
-      stream.on("close", resolve);
-      stream.on("error", reject);
+      // Deliberately the SAME deadline the container-side watchdog enforces, so
+      // having one doesn't lengthen the caller's timeout. Whichever fires first,
+      // the remote process still gets killed — this side only stops waiting.
+      const timer = setTimeout(() => {
+        stream.destroy?.();
+        reject(new Error(`exec timed out after ${timeoutMs}ms`));
+      }, watchdogMs);
+      const settle = (err?: Error) => {
+        clearTimeout(timer);
+        if (err) reject(err);
+        else resolve();
+      };
+      stream.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+      stream.on("end", () => settle());
+      stream.on("close", () => settle());
+      stream.on("error", (err: Error) => settle(err));
     });
 
-    const info = await exec.inspect().catch(() => null);
-    return {
-      exitCode: info?.ExitCode ?? null,
-      stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-    };
+    let stdout = "";
+    let stderr = "";
+    for (const frame of splitDockerFrames(Buffer.concat(chunks))) {
+      if (frame.stdout) stdout += frame.data.toString("utf8");
+      else stderr += frame.data.toString("utf8");
+    }
+
+    // The output stream can end while the exec is still marked Running with a
+    // null ExitCode; resolveExecExitCode polls that window out and fails rather
+    // than reading it as a success (see its doc).
+    const exitCode = await resolveExecExitCode(exec);
+
+    // The in-container watchdog fired: report it as the timeout it is, not as a
+    // bare 143 (whose "output" would be a half-finished command's).
+    if (exitCode === SIGTERM_EXIT_CODE && Date.now() - startedAt >= watchdogMs) {
+      throw new Error(`exec timed out after ${timeoutMs}ms`);
+    }
+
+    return { exitCode, stdout, stderr };
   }
 
-  /** Command runner scoped to the inside of the container (advisory port probe). */
+  /** Command runner scoped to the inside of the container (advisory port probe,
+   *  app prepare steps). Throws on a non-zero exit with the command's own output
+   *  as the message. */
   async inContainerExecutor(containerId: string): Promise<PortProbeExecutor> {
     return {
-      exec: async (command: string) => {
-        const { exitCode, stdout } = await this.execInContainer(containerId, command);
-        if (exitCode && exitCode !== 0) {
-          throw new Error(stdout || `exec exited with code ${exitCode}`);
+      exec: async (command: string, opts?: { timeout?: number }) => {
+        const { exitCode, stdout, stderr } = await this.execInContainer(
+          containerId,
+          command,
+          opts,
+        );
+        // `exitCode &&` would have let 0 AND null through — and null is exactly
+        // the "couldn't read the exit code" case, so a failed command's stdout
+        // came back as its captured value. execInContainer no longer returns
+        // null; this stays strict so it can't come back.
+        if (exitCode !== 0) {
+          throw new Error(
+            stdout.trim() || stderr.trim() || `exec exited with code ${exitCode}`,
+          );
         }
         return stdout;
       },
@@ -3232,7 +3648,9 @@ export class DockerRuntime implements RuntimeAdapter {
       NetworkingConfig: {
         EndpointsConfig: {
           [group.id]: {
-            Aliases: [config.serviceName],
+            // Default service name plus any operator-chosen aliases; both
+            // resolve to this container on the project network.
+            Aliases: buildNetworkAliases(config.serviceName, config.extraAliases),
           },
         },
       },

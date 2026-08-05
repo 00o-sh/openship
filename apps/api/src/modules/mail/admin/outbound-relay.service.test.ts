@@ -37,11 +37,51 @@ import {
   withoutSesInclude,
 } from "./outbound-relay.service";
 
-function makeExec() {
+type Flavor = "container" | "host";
+
+/**
+ * Where the SASL map lives on each topology — the contract `mailConfigFile`
+ * encodes. Spelled out literally (not imported) because `write` names a path with
+ * LIVE relay credentials under it on every containerized box: if that constant
+ * moves, this test should fail and make someone decide, not follow along.
+ */
+const SASL_MAP: Record<Flavor, { write: string; engine: string }> = {
+  container: {
+    write: "/var/lib/openship/mail/config/postfix/sasl_passwd",
+    engine: "/etc/postfix/sasl_passwd",
+  },
+  host: { write: "/etc/postfix/sasl_passwd", engine: "/etc/postfix/sasl_passwd" },
+};
+
+const HOST_UNITS_ACTIVE = [
+  "## postfix",
+  "LoadState=loaded",
+  "ActiveState=active",
+  "## dovecot",
+  "LoadState=loaded",
+  "ActiveState=active",
+].join("\n");
+
+/**
+ * Fake executor that ALSO answers the mail-topology probe, so these tests drive the
+ * real `detectMailEngine` → flavor → command-shape path instead of stubbing it:
+ *   - `container` → the engine container inspects as running,
+ *   - `host`      → no container, legacy systemd postfix + dovecot both active.
+ *
+ * Probe commands are answered but kept out of `execCalls`, which therefore holds
+ * only the commands the SERVICE issued.
+ */
+function makeExec(flavor: Flavor | "none" = "container") {
   const execCalls: string[] = [];
   const writes: { path: string; content: string }[] = [];
   const exec = {
     exec: async (cmd: string) => {
+      if (cmd.includes("docker inspect")) {
+        return flavor === "container" ? "true\topenship/mail:test" : "";
+      }
+      if (cmd.includes("systemctl show")) {
+        return flavor === "host" ? HOST_UNITS_ACTIVE : "";
+      }
       execCalls.push(cmd);
       return "";
     },
@@ -64,31 +104,49 @@ beforeEach(() => {
 describe("configureOutboundRelay", () => {
   const base = { provider: "ses" as const, region: "us-east-1", port: 587, username: "AKIASMTPUSER", password: "s3cr3tPass" };
 
-  test("writes creds via SFTP writeFile, NEVER through a shell command", async () => {
-    const { exec, execCalls, writes } = makeExec();
-    await configureOutboundRelay(exec, base);
+  for (const flavor of ["container", "host"] as Flavor[]) {
+    test(`[${flavor}] writes creds via SFTP writeFile, NEVER through a shell command`, async () => {
+      const { exec, execCalls, writes } = makeExec(flavor);
+      await configureOutboundRelay(exec, base);
 
-    expect(writes[0].path).toBe("/etc/postfix/sasl_passwd");
-    expect(writes[0].content).toContain("[email-smtp.us-east-1.amazonaws.com]:587 AKIASMTPUSER:s3cr3tPass");
+      expect(writes[0].path).toBe(SASL_MAP[flavor].write);
+      expect(writes[0].content).toContain("[email-smtp.us-east-1.amazonaws.com]:587 AKIASMTPUSER:s3cr3tPass");
 
-    // SECURITY INVARIANT: no shell command may contain the password or username.
-    for (const cmd of execCalls) {
-      expect(cmd).not.toContain("s3cr3tPass");
-      expect(cmd).not.toContain("AKIASMTPUSER");
-    }
-  });
+      // SECURITY INVARIANT: no shell command may contain the password or username.
+      for (const cmd of execCalls) {
+        expect(cmd).not.toContain("s3cr3tPass");
+        expect(cmd).not.toContain("AKIASMTPUSER");
+      }
+    });
 
-  test("emits postmap + postconf relay directives + reload", async () => {
-    const { exec, execCalls } = makeExec();
-    await configureOutboundRelay(exec, base);
-    const joined = execCalls.join("\n");
-    expect(joined).toContain("postmap /etc/postfix/sasl_passwd");
-    expect(joined).toContain("postconf -e");
-    expect(joined).toContain("relayhost=[email-smtp.us-east-1.amazonaws.com]:587");
-    expect(joined).toContain("smtp_sasl_auth_enable=yes");
-    expect(joined).toContain("smtp_sasl_password_maps=hash:/etc/postfix/sasl_passwd");
-    expect(joined).toMatch(/reload postfix|postfix reload/);
-  });
+    test(`[${flavor}] emits postmap + postconf relay directives + reload`, async () => {
+      const { exec, execCalls } = makeExec(flavor);
+      await configureOutboundRelay(exec, base);
+      const joined = execCalls.join("\n");
+      // Postfix reads (and postmap must hash) the path the ENGINE sees.
+      expect(joined).toContain(`postmap ${SASL_MAP[flavor].engine}`);
+      expect(joined).toContain("postconf -e");
+      expect(joined).toContain("relayhost=[email-smtp.us-east-1.amazonaws.com]:587");
+      expect(joined).toContain("smtp_sasl_auth_enable=yes");
+      expect(joined).toContain(`smtp_sasl_password_maps=hash:${SASL_MAP[flavor].engine}`);
+      expect(joined).toMatch(/reload postfix|postfix reload/);
+      // chmod targets the path we WROTE (the host side of the bind mount).
+      expect(joined).toContain(`chmod 600 ${SASL_MAP[flavor].write}`);
+    });
+
+    test(`[${flavor}] runs Postfix commands where that flavor's Postfix lives`, async () => {
+      const { exec, execCalls } = makeExec(flavor);
+      await configureOutboundRelay(exec, base);
+      const postfixCmds = execCalls.filter((c) => /postmap|postconf|postfix reload/.test(c));
+      expect(postfixCmds.length).toBeGreaterThan(0);
+      for (const cmd of postfixCmds) {
+        if (flavor === "container") expect(cmd).toContain("docker exec openship-mail ");
+        // A legacy box has no engine container — a stray `docker exec` there is the
+        // exact bug this split exists to prevent.
+        else expect(cmd).not.toContain("docker exec");
+      }
+    });
+  }
 
   test("persists an ENCRYPTED password + patches SPF include", async () => {
     const { exec } = makeExec();
@@ -135,7 +193,9 @@ describe("configureOutboundRelay", () => {
 });
 
 describe("disableOutboundRelay", () => {
-  test("removes directives + sasl files, clears state + reverts DNS", async () => {
+  test.each(["container", "host"] as Flavor[])(
+    "[%s] removes directives + sasl files, clears state + reverts DNS",
+    async (flavor) => {
     fakeState = {
       serverId: "srv1",
       domain: "example.com",
@@ -145,16 +205,25 @@ describe("disableOutboundRelay", () => {
         extraRecords: [{ type: "CNAME", name: "abc._domainkey.example.com", value: "abc.dkim.amazonses.com" }],
       },
     };
-    const { exec, execCalls } = makeExec();
+    const { exec, execCalls } = makeExec(flavor);
     await disableOutboundRelay(exec);
     const joined = execCalls.join("\n");
     expect(joined).toContain("postconf -X relayhost");
-    expect(joined).toContain("rm -f /etc/postfix/sasl_passwd");
+    expect(joined).toContain(`rm -f ${SASL_MAP[flavor].write}`);
     expect(joined).toMatch(/reload postfix|postfix reload/);
     expect((fakeState as { outboundRelay?: unknown }).outboundRelay).toBeUndefined();
     const dns = (fakeState as { dnsRecords: { spf: { value: string }; extraRecords?: unknown } }).dnsRecords;
     expect(dns.spf.value).not.toContain("amazonses.com");
     expect(dns.extraRecords).toBeUndefined();
+    },
+  );
+
+  test("refuses when the box has no mail engine at all", async () => {
+    // Neither a container nor host units → a typed 409, not a shell error. Nothing
+    // may be executed: rm -f'ing a path on a box with no mail is not a no-op.
+    const { exec, execCalls } = makeExec("none");
+    await expect(disableOutboundRelay(exec)).rejects.toThrow(/no mail engine/i);
+    expect(execCalls).toEqual([]);
   });
 });
 

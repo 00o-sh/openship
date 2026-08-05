@@ -581,9 +581,9 @@ export async function installStream(c: Context) {
 
         updateComponentProgress(session.id, name, "installing");
 
-        // Bind the interactive "hold" to this session so installOpenResty can
-        // pause on an edge (80/443) conflict and surface the SAME prompt modal
-        // the deploy pipeline uses. Non-openresty installers ignore it.
+        // Bind the interactive "hold" to this session so the edge installer can
+        // pause on an 80/443 conflict and surface the SAME prompt modal the deploy
+        // pipeline uses. Installers other than `edge` ignore it.
         const promptUser: PromptUserFn = (prompt) => promptSetupUser(session.id, prompt);
 
         const onLog = (log: { message: string; level: "info" | "warn" | "error" }) =>

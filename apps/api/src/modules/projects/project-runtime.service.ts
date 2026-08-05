@@ -4,11 +4,14 @@
 
 import { repos } from "@repo/db";
 import { NotFoundError, ValidationError } from "@repo/core";
-import type { LogEntry } from "@repo/adapters";
+import { edgeProxy } from "@repo/adapters";
+import type { LogEntry, ImportedSite } from "@repo/adapters";
 import { resolveDeploymentRuntime } from "../../lib/deployment-runtime";
 import { assertResourceInOrg } from "../../lib/controller-helpers";
 import { syncManagedEdgeRoutes, edgeUnsyncedWarning } from "../../lib/managed-edge-proxy";
 import { resolveManagedHostname } from "../../lib/routing-domains";
+import { sshManager } from "../../lib/ssh-manager";
+import { applyProjectRouting } from "../domains/routing-apply.service";
 
 // ─── Runtime logs ────────────────────────────────────────────────────────────
 
@@ -73,9 +76,22 @@ export async function enableProject(projectId: string, organizationId: string) {
 
   const { runtime } = await resolveDeploymentRuntime(dep);
   await runtime.start(dep.containerId);
+  // Cleared AFTER the start succeeded — the mirror of disableProject's ordering.
+  // Clearing first would tell the health watch to expect a container that hasn't
+  // come up yet.
+  await repos.project.update(projectId, { disabledAt: null });
   return { success: true, message: "Project enabled" };
 }
 
+/**
+ * Stop a project's container and RECORD that a human meant to.
+ *
+ * The `disabled_at` write is not bookkeeping — it is the only place that
+ * intent exists. Docker cannot tell "the operator turned this off" from "it
+ * crashed and stayed down": both are an exited container. This used to write
+ * nothing at all, which left the health watch structurally unable to stay quiet
+ * about a deliberately-stopped project.
+ */
 export async function disableProject(projectId: string, organizationId: string) {
   const p = await repos.project.findById(projectId);
   assertResourceInOrg(p, "Project", organizationId, projectId);
@@ -89,21 +105,35 @@ export async function disableProject(projectId: string, organizationId: string) 
     return { success: true, message: "No container to stop" };
   }
 
+  // Marked BEFORE the stop, deliberately: a poll that lands between the two must
+  // see the intent, not a container that just went down for no recorded reason.
+  await repos.project.update(projectId, { disabledAt: new Date() });
   const { runtime } = await resolveDeploymentRuntime(dep);
   await runtime.stop(dep.containerId);
   return { success: true, message: "Project disabled" };
 }
 
 /**
- * Retry the managed free-domain (*.opsh.io) edge-proxy sync WITHOUT a rebuild.
+ * Retry ("Reroute") routing WITHOUT a rebuild — a real repair, not just a
+ * free-domain re-sync.
  *
- * A deploy can come up live on the server yet fail to wire its free .opsh.io
- * URL through Openship Cloud's edge (target unreachable on :80, ownership not
- * yet verified, slug taken). That's surfaced as "Action Required"
- * (`meta.edgeUnsynced`); this re-runs just the edge sync for the project's
- * managed domains and, on full success, clears the warning so the project reads
- * "Live" again. Best-effort per domain — returns the failures instead of
- * throwing so the UI can re-surface the same guidance.
+ * A deploy that mis-resolved its target (e.g. a fresh/partial snapshot that fell
+ * back to "local") both fails to wire the project's routes AND nulls its verified
+ * custom-domain ports, which regressed the Access URL to localhost. This action
+ * heals that in place:
+ *
+ *   1. Re-point the active deployment at the DURABLE server binding
+ *      (`project.serverId`) — a snapshot missing `meta.serverId` is what let
+ *      routing resolve to "local".
+ *   2. Restore any verified custom domain whose port was nulled, reading the port
+ *      from what the edge is ACTUALLY serving. Safe-only: no live upstream ⇒ the
+ *      row is left unchanged (a genuinely domain-less project stays "Local").
+ *   3. Re-apply the project's LIVE routes (custom + free) reload-free.
+ *   4. Reconcile managed `*.opsh.io` edge routes and clear the "Action Required"
+ *      warning — only on full success.
+ *
+ * Best-effort throughout; returns the failure instead of throwing so the UI can
+ * re-surface the same guidance.
  */
 export async function retryProjectRouting(
   projectId: string,
@@ -112,9 +142,102 @@ export async function retryProjectRouting(
   const p = await repos.project.findById(projectId);
   assertResourceInOrg(p, "Project", organizationId, projectId);
 
+  // Cloud manages its own ingress — there is no server edge to repair here.
+  if (p.cloudWorkspaceId) return { ok: true };
+
+  const dep = p.activeDeploymentId
+    ? await repos.deployment.findById(p.activeDeploymentId)
+    : null;
+
+  await repairDeploymentServerBinding(p, dep).catch(() => {});
+
+  const serverId = p.serverId ?? (dep?.meta as { serverId?: string } | null)?.serverId ?? undefined;
+  await restoreCustomPortsFromEdge(p, serverId).catch(() => {});
+
+  // Live re-apply is best-effort, but its failure must NOT clear the warning.
+  let applyOk = true;
+  await applyProjectRouting(projectId).catch(() => {
+    applyOk = false;
+  });
+
+  // Reconciles *.opsh.io and clears the warning on its own success (including the
+  // no-managed-domains case). syncProjectManagedEdge re-reads the deployment, so
+  // it sees the serverId we just repaired.
   const { ok, failures } = await syncProjectManagedEdge(p, organizationId);
   if (!ok) return { ok: false, warning: edgeUnsyncedWarning(failures, "retry") };
+
+  if (!applyOk) {
+    const warning = "Couldn't re-apply the project's routes at the edge — retry once the server is reachable.";
+    const fresh = p.activeDeploymentId ? await repos.deployment.findById(p.activeDeploymentId) : null;
+    await markRoutingWarning(fresh, warning).catch(() => {});
+    return { ok: false, warning };
+  }
   return { ok: true };
+}
+
+/** The upstream host port a live vhost forwards to — the root ("/") location's
+ *  when present (the app port), else the first parseable upstream. Null for a
+ *  static docroot or an unparseable upstream, i.e. no safe port to restore. */
+function liveUpstreamPort(site: ImportedSite): number | null {
+  const upstreams =
+    site.routes ?? (site.target.kind === "proxy" ? [{ path: "/", url: site.target.url }] : []);
+  const ordered = [
+    ...upstreams.filter((u) => u.path === "/"),
+    ...upstreams.filter((u) => u.path !== "/"),
+  ];
+  for (const up of ordered) {
+    try {
+      const port = Number(new URL(up.url).port);
+      if (Number.isFinite(port) && port > 0) return port;
+    } catch {
+      // Unparseable upstream — skip, try the next.
+    }
+  }
+  return null;
+}
+
+/** Re-point the active deployment's snapshot at the durable server binding when
+ *  it drifted. A missing `meta.serverId`/`deployTarget` is what let a redeploy
+ *  resolve to "local"; stamping them makes resolveEffectiveTarget agree again. */
+async function repairDeploymentServerBinding(
+  project: NonNullable<Awaited<ReturnType<typeof repos.project.findById>>>,
+  dep: Awaited<ReturnType<typeof repos.deployment.findById>> | null,
+): Promise<void> {
+  if (!dep || !project.serverId) return;
+  const meta = { ...((dep.meta as Record<string, unknown> | null) ?? {}) };
+  if (meta.serverId === project.serverId && meta.deployTarget) return;
+  meta.serverId = project.serverId;
+  if (!meta.deployTarget) meta.deployTarget = "server";
+  await repos.deployment.updateStatus(dep.id, dep.status, { meta });
+}
+
+/** Restore verified custom domains whose port was nulled, from what the edge is
+ *  actually serving. Safe-only: a row with no live upstream (or no server) is
+ *  left untouched — we never fabricate a port. */
+async function restoreCustomPortsFromEdge(
+  project: NonNullable<Awaited<ReturnType<typeof repos.project.findById>>>,
+  serverId: string | undefined,
+): Promise<void> {
+  if (!serverId) return;
+  const candidates = (await repos.domain.listByProject(project.id)).filter(
+    (d) =>
+      !d.serviceId &&
+      d.domainType === "custom" &&
+      d.verified &&
+      (d.targetPort ?? null) === null &&
+      !d.targetPath,
+  );
+  if (candidates.length === 0) return;
+
+  await sshManager.withExecutor(serverId, async (executor) => {
+    const proxy = await edgeProxy(executor);
+    if (!proxy) return;
+    for (const row of candidates) {
+      const site = await proxy.siteFor(row.hostname).catch(() => null);
+      const port = site ? liveUpstreamPort(site) : null;
+      if (port != null) await repos.domain.update(row.id, { targetPort: port });
+    }
+  });
 }
 
 /**

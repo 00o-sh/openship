@@ -5,13 +5,15 @@
  * scroll tabs (mobile). Mirrors the project-detail page pattern.
  *
  * Tabs:
- *   - general   → GitHub connection, deploy defaults, build preferences
- *   - tokens    → clone credentials, API access tokens
- *   - mcp        → MCP connection (endpoint + client config)
- *   - team      → organization members + invitations (moved from /members)
- *   - audit     → audit log feed (moved from /audit), admin+ only
- *   - cloud     → cloud connection (self-hosted only)
- *   - instance  → instance info + data export/import (self-hosted, owner-gated)
+ *   - general        → GitHub connection, deploy defaults, build preferences
+ *   - tokens         → clone credentials, API access tokens
+ *   - mcp             → MCP connection (endpoint + client config)
+ *   - team           → organization members + invitations (moved from /members)
+ *   - audit          → audit log feed (moved from /audit), admin+ only
+ *   - cloud          → cloud connection (self-hosted only)
+ *   - infrastructure → edge/mail container versions + scan, untracked edge
+ *                      routes (self-hosted/desktop)
+ *   - instance       → instance info, updates, data export/import
  */
 
 import { Suspense, useEffect } from "react";
@@ -34,6 +36,7 @@ import { UntrackedEdgeRoutes } from "./_components/UntrackedEdgeRoutes";
 import { LanguageSetting } from "./_components/LanguageSetting";
 import { PreferencesSetting } from "./_components/PreferencesSetting";
 import { UpdatesTab } from "./_components/UpdatesTab";
+import { InfrastructureTab } from "./_components/InfrastructureTab";
 import { TeamTab } from "./_components/TeamTab";
 import { NotificationsTab } from "./_components/NotificationsTab";
 import { EmailSettings } from "./_components/EmailSettings";
@@ -143,18 +146,26 @@ function SettingsPageInner() {
 
           {activeTab === "cloud" && selfHosted && <CloudConnection />}
 
+          {/* Infrastructure — the servers this install runs: edge/mail container
+              versions across the fleet + scan + auto-update toggle, and the
+              leftover edge routes. Self-hosted/desktop only. */}
+          {activeTab === "infrastructure" && (selfHosted || deployMode === "desktop") && (
+            <>
+              <InfrastructureTab />
+              {/* Hostnames the local edge still serves with no Openship record —
+                  the leftovers a record-only delete deliberately keeps running.
+                  Owner-gated inside the component, renders nothing when clean.
+                  Self-hosted only: on the SaaS the edge isn't the operator's. */}
+              {selfHosted && <UntrackedEdgeRoutes />}
+            </>
+          )}
+
           {activeTab === "instance" && (
             <>
               <InstanceInfo />
-              {/* Updates live under Instance (the "this install" home). Not on
-                  the SaaS — the managed cloud has nothing for the user to update. */}
+              {/* Updates to this install — not on the SaaS, where the managed
+                  cloud has nothing for the user to update. */}
               {(selfHosted || deployMode === "desktop") && <UpdatesTab />}
-              {/* Hostnames the local edge still serves with no Openship record —
-                  the leftovers a record-only delete deliberately keeps running.
-                  Owner-gated inside the component, and it renders nothing when the
-                  sweep comes back clean. Self-hosted only: on the SaaS the edge
-                  isn't the operator's to reconcile. */}
-              {selfHosted && <UntrackedEdgeRoutes />}
               {/* Full-DB export/import (owner-gated inside the component);
                   self-hosted only — SaaS has no portable DB. */}
               {selfHosted && <DataTransferTab />}
