@@ -117,6 +117,31 @@ openship deploy
 Full server guide + complete CLI reference: **[openship.io/docs](https://openship.io/docs)**.
 
 <details>
+<summary>Shell completion (bash/zsh/fish)</summary>
+
+Two ways to enable Tab-completion for `openship`:
+
+| | Setup | Trade-off |
+|---|---|---|
+| **Static file** (recommended) | `openship completion <shell> > <path>` | Instant shell startup. Regenerate after upgrading to pick up newly added commands. |
+| **Live-sourced** | add `source <(openship completion <shell>)` to your shell config | Always reflects the currently installed version. Adds a small delay to every new shell session. |
+
+**Static file:**
+```bash
+openship completion bash > /etc/bash_completion.d/openship
+openship completion zsh  > ~/.zsh/completions/_openship
+openship completion fish > ~/.config/fish/completions/openship.fish
+```
+Open a new terminal — done.
+
+**Live-sourced** (zsh example):
+```bash
+echo 'source <(openship completion zsh)' >> ~/.zshrc
+```
+
+</details>
+
+<details>
 <summary>Self-host with raw Docker Compose (no CLI)</summary>
 
 The self-hosted stack lives in **`docker/docker-compose.yml`** and **pulls** published images from GitHub Container Registry (`ghcr.io/oblien/*`) — no build tooling, no monorepo compile. Run it from the repo root:

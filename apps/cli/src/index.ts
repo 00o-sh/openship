@@ -47,6 +47,9 @@ import { runWizard, runControl, isSetupInProgress } from "./commands/wizard";
 import { serviceStatus } from "./lib/service";
 import { readInstallMethod } from "./lib/compose";
 
+//completion
+import { attachCompletion } from "./commands/completion";
+
 // Injected at build time by tsup (define). Always present in the built binary.
 declare const __CLI_VERSION__: string;
 
@@ -115,5 +118,8 @@ program.addCommand(resetAdminCommand);
 
 // `cache` is a maintenance concern of `install`, not a top-level verb.
 installCommand.addCommand(cacheCommand);
+
+// for autocomplete
+attachCompletion(program);
 
 program.parse();
