@@ -1,5 +1,6 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "openship",
@@ -16,7 +17,7 @@
     },
     "apps/api": {
       "name": "@repo/api",
-      "version": "0.3.0",
+      "version": "0.5.0",
       "dependencies": {
         "@better-auth/drizzle-adapter": "^1.5.4",
         "@hono/node-server": "^1.19.15",
@@ -50,11 +51,12 @@
     },
     "apps/cli": {
       "name": "openship",
-      "version": "0.3.0",
+      "version": "0.5.0",
       "bin": {
         "openship": "./dist/index.js",
       },
       "dependencies": {
+        "@bomb.sh/tab": "^0.0.22",
         "@clack/prompts": "^0.11.0",
         "@repo/adapters": "workspace:*",
         "@repo/core": "workspace:*",
@@ -63,6 +65,7 @@
         "commander": "^14.0.3",
         "dockerode": "^4.0.9",
         "open": "^10.2.0",
+        "openship": "^0.5.0",
         "ora": "^9.3.0",
         "ssh2": "^1.17.0",
       },
@@ -115,7 +118,7 @@
     },
     "apps/desktop": {
       "name": "@repo/desktop",
-      "version": "0.3.0",
+      "version": "0.5.0",
       "dependencies": {
         "@repo/core": "workspace:*",
         "@repo/onboarding": "workspace:*",
@@ -138,11 +141,11 @@
     },
     "apps/email": {
       "name": "@repo/email",
-      "version": "0.3.0",
+      "version": "0.5.0",
     },
     "apps/web": {
       "name": "@repo/web",
-      "version": "0.3.0",
+      "version": "0.5.0",
       "dependencies": {
         "@repo/core": "workspace:*",
         "@repo/ui": "workspace:*",
@@ -275,6 +278,7 @@
   },
   "trustedDependencies": [
     "esbuild",
+    "electron",
   ],
   "packages": {
     "@alloc/quick-lru": ["@alloc/quick-lru@5.2.0", "", {}, "sha512-UrcABB+4bUrFABwbluTIBErXwvbsU/V7TZWfmbgJfbkwiBuziS9gxdODUyuiecfdGQ85jglMW6juS3+z5TsKLw=="],
@@ -364,6 +368,8 @@
     "@better-auth/utils": ["@better-auth/utils@0.3.1", "", {}, "sha512-+CGp4UmZSUrHHnpHhLPYu6cV+wSUSvVbZbNykxhUDocpVNTo9uFFxw/NqJlh1iC4wQ9HKKWGCKuZ5wUgS0v6Kg=="],
 
     "@better-fetch/fetch": ["@better-fetch/fetch@1.1.21", "", {}, "sha512-/ImESw0sskqlVR94jB+5+Pxjf+xBwDZF/N5+y2/q4EqD7IARUTSpPfIo8uf39SYpCxyOCtbyYpUrZ3F/k0zT4A=="],
+
+    "@bomb.sh/tab": ["@bomb.sh/tab@0.0.22", "", { "peerDependencies": { "cac": "^6.7.14 || ^7.0.0", "citty": "^0.1.6 || ^0.2.0", "commander": "^13.1.0 || ^14.0.0 || ^15.0.0" }, "optionalPeers": ["cac", "citty", "commander"], "bin": { "tab": "dist/bin/cli.mjs" } }, "sha512-l5IuWpV7szqG4MM6A7I+qPMmP2qPMq2TD4veIXaOH0sD53dV0Tv8WZPARp5O5Kp4+y4fnVCl3VL1HZKNghO1yg=="],
 
     "@chevrotain/cst-dts-gen": ["@chevrotain/cst-dts-gen@10.5.0", "", { "dependencies": { "@chevrotain/gast": "10.5.0", "@chevrotain/types": "10.5.0", "lodash": "4.17.21" } }, "sha512-lhmC/FyqQ2o7pGK4Om+hzuDrm9rhFYIJ/AXoQBeongmn870Xeb0L6oGEiuR8nohFNL5sMaQEJWCxr1oIVIVXrw=="],
 
@@ -3274,6 +3280,8 @@
     "oas-resolver/yaml": ["yaml@1.10.2", "", {}, "sha512-r3vXyErRCYJ7wg28yvBY5VSoAF8ZvlcW9/BwUzEtUsjvX/DKs24dIkuwjtuprwJJHsbyUbLApepYTR1BN4uHrg=="],
 
     "oas-validator/yaml": ["yaml@1.10.2", "", {}, "sha512-r3vXyErRCYJ7wg28yvBY5VSoAF8ZvlcW9/BwUzEtUsjvX/DKs24dIkuwjtuprwJJHsbyUbLApepYTR1BN4uHrg=="],
+
+    "openship/openship": ["openship@0.5.0", "", { "dependencies": { "@clack/prompts": "^0.11.0", "chalk": "^5.6.2", "commander": "^14.0.3", "dockerode": "^4.0.9", "open": "^10.2.0", "ora": "^9.3.0", "ssh2": "^1.17.0" }, "bin": { "openship": "dist/index.js" } }, "sha512-1x0kT1OKQpZ0R+7BCLII41TscVHw1gGlyLbHGaHBZ9Flfzmp0IsaTuq0WtkOBNVRo/3Mtb7II5+yiMeiRv9mIQ=="],
 
     "ora/log-symbols": ["log-symbols@7.0.1", "", { "dependencies": { "is-unicode-supported": "^2.0.0", "yoctocolors": "^2.1.1" } }, "sha512-ja1E3yCr9i/0hmBVaM0bfwDjnGy8I/s6PP4DFp+yP+a+mrHO4Rm7DtmnqROTUkHIkqffC84YY7AeqX6oFk0WFg=="],
 
