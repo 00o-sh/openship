@@ -1117,6 +1117,27 @@ export function getProjectType(stackId: StackId): ProjectType {
 }
 
 /**
+ * Normalizes a framework input (stack ID or display name like "Static Site", "Next.js")
+ * to its canonical stack ID ("static", "nextjs", etc.).
+ */
+export function normalizeFramework(framework?: string | null): string {
+  if (!framework) return "unknown";
+  const trimmed = framework.trim();
+  if (!trimmed) return "unknown";
+  const lower = trimmed.toLowerCase();
+  if (lower in STACKS) return lower;
+  for (const [id, def] of Object.entries(STACKS)) {
+    if (def.name.toLowerCase() === lower) return id;
+  }
+  // Common display aliases
+  if (lower === "static site" || lower === "plain html" || lower === "html/js") return "static";
+  if (lower === "nextjs" || lower === "next.js" || lower === "next") return "nextjs";
+  if (lower === "nuxtjs" || lower === "nuxt.js" || lower === "nuxt") return "nuxt";
+  if (lower === "dockerfile" || lower === "docker compose") return "docker";
+  return lower;
+}
+
+/**
  * Is a project SERVICE-FIRST — i.e. the project itself IS a set of services
  * (a docker-compose / "services" stack), NOT a single/static app that merely
  * had sidecar services added to it? Keyed on the project's own framework, so
