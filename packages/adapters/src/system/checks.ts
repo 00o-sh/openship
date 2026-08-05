@@ -14,6 +14,9 @@ import type { CommandExecutor } from "../types";
 import type { ComponentStatus } from "./types";
 import { containerCommand } from "./edge-container-executor";
 import { resolveOurEdgeContainer } from "./proxy/detect";
+// Direct module, not the `./proxy` barrel: that barrel pulls in the takeover path,
+// which imports this file.
+import { verifyEdgeServing } from "./proxy/ensure-container-edge";
 import { systemCatalog } from "./catalog";
 import { resolveEnvironment } from "./environment";
 import { enrichAvailableVersions } from "./available-version";
@@ -197,12 +200,21 @@ export async function checkRsync(
 }
 
 /**
- * The edge: is our openship-edge container up.
+ * The edge: is our openship-edge container SERVING.
  *
- * That is the whole check. The edge is a Docker image whose serving path is
- * host-side (host networking, host bind mounts for vhosts/certs/ACME), so there is
- * no host binary, no unit and no Lua on the box to probe — and nothing to fall back
- * to. A box without the container has no edge; installing one is a container pull.
+ * The edge is a Docker image whose serving path is host-side (host networking, host
+ * bind mounts for vhosts/certs/ACME), so there is no host binary, no unit and no Lua
+ * on the box to probe — and nothing to fall back to. A box without the container has
+ * no edge; installing one is a container pull.
+ *
+ * "Resolved" is deliberately NOT the verdict. `resolveOurEdgeContainer` reads plain
+ * `docker ps`, and docker reports a container crash-looping on
+ * `bind() … (98: Address already in use)` as running — so a box whose edge had never
+ * bound :80 could answer this check with a version and render healthy, because a
+ * `docker exec` landing in the brief up-window between restarts succeeds. The serving
+ * question therefore goes to `verifyEdgeServing`, the ONE definition every other edge
+ * path uses, so all of them name the same cause instead of this surface guessing
+ * "running but not responding" and sending the operator to the wrong place.
  */
 export async function checkEdge(executor: CommandExecutor): Promise<ComponentStatus> {
   const startedAt = Date.now();
@@ -216,13 +228,23 @@ export async function checkEdge(executor: CommandExecutor): Promise<ComponentSta
     );
   }
 
+  const verdict = await verifyEdgeServing(executor, container);
+  if (!verdict.serving) {
+    systemDebug("checks", `edge:not-serving (${formatDuration(startedAt)})`);
+    return unhealthy(
+      "edge",
+      `The edge container ${container} is not serving — ${verdict.reason ?? "it is not listening on :80"}`,
+      { running: false },
+    );
+  }
+
   const version = await tryExec(executor, containerCommand(container, "openresty -v 2>&1"));
   if (!version.output) {
     systemDebug("checks", `edge:container-unresponsive (${formatDuration(startedAt)})`);
     return unhealthy(
       "edge",
       withReason(
-        `The edge container ${container} is running but not responding — check \`docker logs ${container}\``,
+        `The edge container ${container} is serving on :80 but not answering — check \`docker logs ${container}\``,
         version.error,
       ),
       { running: false },

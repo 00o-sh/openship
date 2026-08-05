@@ -24,7 +24,6 @@ import {
   EDGE_CONTAINER_MOUNTS,
   EDGE_HOST_PATHS,
   EDGE_CHALLENGE_HOST_DIR,
-  detectOpenRestyPaths,
   OPENRESTY_DEFAULT_PATHS,
 } from "../../infra/openresty-lua";
 import { sq } from "../local-shell";
@@ -32,12 +31,14 @@ import { containerCommand, edgeContainerExecutor } from "../edge-container-execu
 import { waitForPortListening } from "../port-listen";
 import {
   EDGE_CONTAINER_NAME,
+  edgeCrashReason,
   edgeFailureReason,
+  edgeIsBroken,
   sanitizeEdgeVhosts,
   invalidateEdgeContainer,
-  ourLuaOnHost,
   resolveOurEdgeContainer,
 } from "./detect";
+import { completeEdgeTakeover, rollbackEdgeTakeover } from "./takeover-journal";
 import { ensureEdgeClear } from "./consent";
 
 function log(message: string, level: SystemLog["level"] = "info"): SystemLog {
@@ -291,10 +292,15 @@ async function swapEdgeImage(
 
   const start = async (image: string) => {
     if (!(await startEdgeContainer(executor, container, image, onLog))) return false;
-    const listening = await waitForPortListening(executor, 80, {
+    // The SAME verdict the create path uses. An image swap that leaves a
+    // crash-looping container behind must read as a failed swap, not a successful
+    // one — `waitForPortListening` alone said "listening" whenever ANY proxy held
+    // :80, including the one we were replacing.
+    const verdict = await verifyEdgeServing(executor, container, {
       timeoutMs: opts.verifyTimeoutMs ?? 30_000,
     });
-    return !(listening.checked && !listening.listening);
+    if (!verdict.serving && verdict.reason) onLog(log(`Edge ${image}: ${verdict.reason}`, "warn"));
+    return verdict.serving;
   };
 
   if (await start(to)) {
@@ -313,18 +319,64 @@ async function swapEdgeImage(
   return { swapped: false, edgeDown: true };
 }
 
-/** Entry names in a directory, or null when it can't be listed. */
-async function listDir(
+/** Verdict of {@link verifyEdgeServing}. `reason` is set iff `serving` is false. */
+export interface EdgeServingVerdict {
+  serving: boolean;
+  reason?: string;
+}
+
+/**
+ * Is this edge container ACTUALLY SERVING? The one definition, used by every path
+ * in this module that needs to answer that.
+ *
+ * It exists because "the container is running" is not the same claim, and docker
+ * makes them look identical: a container crash-looping on
+ * `bind() … (98: Address already in use)` reports `.State.Running == true`, appears
+ * in plain `docker ps`, and therefore satisfies `resolveOurEdgeContainer`. Every
+ * caller that keyed on that answered yes about a box serving nothing — which is how
+ * "Fix edge" logged `edge installed successfully`, returned a green banner, and left
+ * the "Edge down" issue on screen forever.
+ *
+ * Three checks, cheapest first, each answering something the others can't:
+ *   1. `.State.Status` — the only signal that distinguishes crash-looping from up.
+ *   2. `openresty -t` (opt-in) — a config the edge would refuse to reload later.
+ *   3. a listener on :80 — the end-to-end fact; everything else is a proxy for it.
+ *
+ * `timeoutMs: 0` makes it a single-shot probe for the idempotent read path (this
+ * runs per deploy); the create/convert path passes a real timeout because a fresh
+ * container binds a beat after `docker run` returns.
+ */
+export async function verifyEdgeServing(
   executor: CommandExecutor,
-  dir: string,
-): Promise<Set<string>> {
-  const out = await executor.exec(`ls -1 ${sq(dir)} 2>/dev/null || true`).catch(() => "");
-  return new Set(
-    out
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean),
-  );
+  container: string,
+  opts: { timeoutMs?: number; configTest?: boolean } = {},
+): Promise<EdgeServingVerdict> {
+  if (await edgeIsBroken(executor, container)) {
+    const reason = await edgeCrashReason(executor, container);
+    return { serving: false, reason: reason ?? "the edge container is not running" };
+  }
+
+  if (opts.configTest) {
+    try {
+      await executor.exec(containerCommand(container, "openresty -t 2>&1"));
+    } catch (err) {
+      const out = safeErrorMessage(err);
+      return { serving: false, reason: edgeFailureReason(out) ?? out };
+    }
+  }
+
+  const listening = await waitForPortListening(executor, 80, { timeoutMs: opts.timeoutMs ?? 0 });
+  if (listening.checked && !listening.listening) {
+    // Prefer the container's own `[emerg]`: "nothing is listening" is the symptom,
+    // `bind() … Address already in use` is the thing the operator can act on.
+    const reason = await edgeCrashReason(executor, container);
+    return {
+      serving: false,
+      reason: reason ?? "the edge container is up but nothing is listening on :80",
+    };
+  }
+
+  return { serving: true };
 }
 
 /**
@@ -347,26 +399,40 @@ export async function ensureContainerEdge(
   // the container is gone skips the install and leaves the box with no proxy.
   const existing = await resolveOurEdgeContainer(executor, { fresh: true });
   if (existing) {
-    // Already ours. The only thing left to reconcile is the IMAGE: the edge's Lua
-    // and nginx.conf are baked in, so an edge left on an old tag keeps serving
-    // rules a newer API assumes it rewrote. Upgrading the API upgrades the edge.
-    const current = await containerImageRef(executor, existing);
-    if (current && current !== image) {
-      const swap = await swapEdgeImage(executor, existing, current, image, opts);
-      return {
-        container: existing,
-        image,
-        converted: false,
-        updated: swap.swapped,
-        edgeDown: swap.edgeDown,
-      };
+    // "Ours" is not "working". `resolveOurEdgeContainer` is a RUNNING-only probe and
+    // docker calls a crash-looping container running, so this branch used to return
+    // success for a box whose edge had never once bound :80 — the caller logged
+    // "edge installed successfully" while the "Edge down" issue stayed on screen,
+    // and no amount of pressing Fix could change that. Verified before we return.
+    const verdict = await verifyEdgeServing(executor, existing);
+    if (!verdict.serving) {
+      onLog(log(`The edge container exists but isn't serving: ${verdict.reason}`, "warn"));
+      onLog(log("Recreating it...", "warn"));
+      // Fall through to the full create path. That path runs the consent gate, which
+      // is what actually resolves the usual cause of a crash loop — another proxy
+      // holding :80 — and `startEdgeContainer` `docker rm -f`s the flapper on the way
+      // in. Returning success here (as this branch used to) is what made the crash
+      // loop permanent: the one code path that could have fixed it was skipped
+      // because the flapper counted as "already installed".
+    } else {
+      // Already ours and serving. The only thing left to reconcile is the IMAGE: the
+      // edge's Lua and nginx.conf are baked in, so an edge left on an old tag keeps
+      // serving rules a newer API assumes it rewrote. Upgrading the API upgrades the
+      // edge.
+      const current = await containerImageRef(executor, existing);
+      if (current && current !== image) {
+        const swap = await swapEdgeImage(executor, existing, current, image, opts);
+        return {
+          container: existing,
+          image,
+          converted: false,
+          updated: swap.swapped,
+          edgeDown: swap.edgeDown,
+        };
+      }
+      return { container: existing, image, converted: false };
     }
-    return { container: existing, image, converted: false };
   }
-
-  // Foreign proxy on 80/443 → unchanged consent/takeover gate. Runs BEFORE we
-  // touch anything, exactly as the bare installer did.
-  await ensureEdgeClear(executor, opts.config, onLog);
 
   if (!(await dockerAvailable(executor))) {
     throw new Error(
@@ -375,13 +441,10 @@ export async function ensureContainerEdge(
     );
   }
 
-  // Capture this BEFORE stopping anything: it decides both whether we migrate
-  // vhosts across and whether a rollback has something to restore.
-  const bareWasOurs = await ourLuaOnHost(executor);
-
-  // 1. Pull first. A registry failure must land here, while the current edge is
-  //    still serving — this is the one failure mode that would otherwise leave a
-  //    live box with no proxy.
+  // 1. Pull, and make the host state dirs, BEFORE anything stops serving. A
+  //    registry failure has to land here: past the consent gate the old proxy is
+  //    already down, so "the box is unchanged and still serving" would be a lie and
+  //    a failed pull would leave a live box with no proxy at all.
   onLog(log(`Pulling edge image ${image}...`));
   const pull = await executor.streamExec(`docker pull ${sq(image)}`, onLog as (l: LogEntry) => void);
   if (pull.code !== 0) {
@@ -390,82 +453,52 @@ export async function ensureContainerEdge(
         "Check the server's network access to the registry, then retry.",
     );
   }
-
-  // 2. Host state dirs.
   for (const mount of EDGE_CONTAINER_MOUNTS) {
     await executor.exec(`mkdir -p ${sq(mount.host)}`).catch(() => {});
   }
 
-  // 3. Carry existing vhosts over. They reference the Lua at the same absolute
-  //    path the image bakes it to, and certs at the bind-mounted /etc/letsencrypt,
-  //    so a plain copy keeps every served domain intact.
-  const sitesTarget = EDGE_HOST_PATHS.sitesDir;
-  // What was in the target BEFORE the carry. null = we never looked, so the
-  // rollback must not delete anything (fail safe — never guess at removals in a
-  // directory the edge serves from).
-  let beforeCarry: Set<string> | null = null;
-  if (bareWasOurs) {
-    const barePaths = await detectOpenRestyPaths(executor).catch(() => OPENRESTY_DEFAULT_PATHS);
-    if (barePaths.sitesDir !== sitesTarget && (await executor.exists(barePaths.sitesDir))) {
-      onLog(log(`Carrying vhosts from ${barePaths.sitesDir}...`));
-      beforeCarry = await listDir(executor, sitesTarget);
-      await executor
-        .exec(`cp -a ${sq(`${barePaths.sitesDir}/.`)} ${sq(`${sitesTarget}/`)} 2>/dev/null || true`)
-        .catch(() => {});
-    }
-  }
-
-  const restoreBare = async () => {
-    if (!bareWasOurs) return;
-    // Undo the carry BEFORE handing :80 back. This directory is bind-mounted into
-    // EVERY edge container on this box, so a conf the carry added and the rollback
-    // left behind breaks every future edge start — including the compose stack's
-    // own `edge` service, which has nothing to do with this conversion. That is how
-    // one failed conversion became "Container … is restarting" on every later
-    // `openship up`, with the original cause long out of scroll.
-    if (beforeCarry) {
-      const now = await listDir(executor, sitesTarget);
-      const added = [...now].filter((name) => !beforeCarry!.has(name));
-      if (added.length > 0) {
-        await executor
-          .exec(`rm -f ${added.map((n) => sq(`${sitesTarget}/${n}`)).join(" ")}`)
-          .catch(() => {});
-        onLog(log(`Removed ${added.length} carried vhost(s) so the next edge start is clean.`, "warn"));
-      }
-    }
-    onLog(log("Restoring the host OpenResty edge...", "warn"));
-    await executor.exec("systemctl enable --now openresty 2>/dev/null || true").catch(() => {});
-  };
+  // 2. Whatever holds 80/443 → the ONE consent/takeover gate, which prompts, imports
+  //    the occupant's sites, journals how to restore it, stops it, and waits for the
+  //    sockets to be RELEASED before returning.
+  //
+  //    A DEPRECATED BARE-HOST OpenResty goes through here too, as an ordinary foreign
+  //    proxy — same prompt, same site import, same journaled stop as a distro nginx or
+  //    a Caddy (`canImportProxy("openresty")` is true and `scanOpenshipEdge` reads both
+  //    bare layouts). There is no second "decommission the legacy edge" path, because
+  //    a second path is how the first one got skipped: detect used to call a host
+  //    OpenResty "ours", so this gate returned clean, the host proxy kept :80, and the
+  //    edge container crash-looped forever while every surface reported it installed.
+  const clear = await ensureEdgeClear(executor, opts.config, onLog);
 
   try {
-    // 4. Cut over. Only now does anything stop serving.
-    if (bareWasOurs) {
-      onLog(log("Stopping the host OpenResty edge..."));
-      await executor.exec("systemctl disable --now openresty 2>/dev/null || true").catch(() => {});
-      // Not `pkill -f openresty` on a host-networked box: it matches the
-      // container's master process too. The unit stop above is the durable one.
-      await executor.exec("systemctl reset-failed openresty 2>/dev/null || true").catch(() => {});
-    }
+    // 3. Start. The ports are PROVABLY free by now, so failing to bind here is a real
+    //    failure and not a race we should have waited out.
     onLog(log("Starting the edge container..."));
     if (!(await startEdgeContainer(executor, container, image, onLog))) {
       throw new Error("the edge container failed to start");
     }
 
-    // 5. Prove it: config valid, then actually answering on :80. A container that
-    //    starts and immediately exits passes neither.
-    await executor.exec(containerCommand(container, "openresty -t"));
-    const listening = await waitForPortListening(executor, 80, {
+    // 4. Prove it — the shared verdict, so this path and the idempotent read path
+    //    cannot disagree about what "serving" means. `configTest` because a takeover
+    //    may just have imported foreign vhosts, and that is where a bad one shows up.
+    const verdict = await verifyEdgeServing(executor, container, {
+      configTest: true,
       timeoutMs: opts.verifyTimeoutMs ?? 30_000,
     });
-    if (listening.checked && !listening.listening) {
-      throw new Error("the edge container started but nothing is listening on :80");
+    if (!verdict.serving) {
+      throw new Error(verdict.reason ?? "the edge container started but isn't serving");
     }
+
+    // The takeover is only settled once our edge is proven serving — until this line
+    // the journal stays unfinished on purpose, so a crash between the stop and here is
+    // repaired at next boot by `recoverInterruptedTakeover`.
+    if (clear.tookOver) await completeEdgeTakeover(executor);
 
     const version = await executor
       .exec(containerCommand(container, "openresty -v 2>&1"))
       .catch(() => "");
     onLog(log(`Edge container running${version.trim() ? ` (${version.trim()})` : ""}`));
-    return { container, image, converted: bareWasOurs };
+    return { container, image, converted: clear.tookOver };
   } catch (err) {
     const msg = safeErrorMessage(err);
     onLog(log(`Edge container setup failed: ${msg}`, "error"));
@@ -475,7 +508,11 @@ export async function ensureContainerEdge(
     if (logs.trim()) onLog(log(`Edge container logs:\n${logs}`, "error"));
     await executor.exec(`docker rm -f ${sq(container)} 2>/dev/null || true`).catch(() => {});
     invalidateEdgeContainer(executor);
-    await restoreBare();
+    // Put back exactly what the consent gate stopped, from its journal — the one
+    // rollback implementation, shared with the CLI's two-process takeover and with
+    // boot recovery. Gated on `tookOver` so a plain failed install on a box that was
+    // already free doesn't replay someone else's stale journal.
+    if (clear.tookOver) await rollbackEdgeTakeover(executor, onLog);
     // Lead with the CAUSE, not Docker's symptom. A crash-looping edge surfaces as
     // "Container … is restarting, wait until the container is running", which says
     // nothing; nginx's own `[emerg]` line names the actual problem and is the only

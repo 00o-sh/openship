@@ -43,7 +43,7 @@ export async function reconcileServerMail(
     /** The provisioned base mail domain (from `repos.mailServer`). */
     domain: string;
   },
-): Promise<{ updated: boolean; mailDown: boolean; ran: boolean }> {
+): Promise<{ updated: boolean; mailDown: boolean; ran: boolean; error?: string }> {
   if (!(await dockerAvailable(executor).catch(() => false))) {
     return { updated: false, mailDown: false, ran: false };
   }
@@ -69,14 +69,18 @@ export async function reconcileServerMail(
       ran: true,
     };
   } catch (err) {
+    const error = safeErrorMessage(err);
     opts.onLog({
       timestamp: new Date().toISOString(),
       level: "warn",
       message:
-        `The mail engine stays on its previous image (${safeErrorMessage(err)}) — ` +
+        `The mail engine stays on its previous image (${error}) — ` +
         `the update is retried later.`,
     });
-    return { updated: false, mailDown: false, ran: true };
+    // Reported, not swallowed: all-false is also what an already-current engine
+    // returns, so an operator-initiated update needs `error` to tell a failed swap
+    // apart from "nothing to do" (same rule as the edge — see EdgeReconcileResult).
+    return { updated: false, mailDown: false, ran: true, error };
   }
 }
 

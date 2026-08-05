@@ -62,6 +62,14 @@
     "filteredTitle": "没有匹配项",
     "filteredBody": "没有问题符合此筛选条件。"
   },
+  "summary": {
+    "title": "概览",
+    "subtitle": "健康状况一览",
+    "totalOpen": "待处理",
+    "totalResolved": "已解决",
+    "bySeverity": "按严重程度",
+    "byArea": "按区域"
+  },
   "home": {
     "attentionTitle": "需要处理",
     "attentionSubtitle": "有内容出现故障或在等你决定",

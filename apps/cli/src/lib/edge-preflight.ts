@@ -49,6 +49,12 @@ export type EdgeAction = "migrate" | "takeover" | "cancel";
 export interface EdgePlan {
   /** Proceed to `docker compose up`? False = the user cancelled (proxy left running). */
   proceed: boolean;
+  /**
+   * Why we're not proceeding, when it wasn't the user's choice — currently only
+   * "we stopped the proxy and the ports still didn't come free". Without this the
+   * caller can't tell a cancel from a failed handover and prints the wrong thing.
+   */
+  blockedBy?: string;
   /** What the user chose when a foreign proxy was found (absent when the edge was clean). */
   action?: EdgeAction;
   /** Sites parsed from the foreign proxy — passed to the api's import endpoint (migrate). */
@@ -69,12 +75,19 @@ export interface EdgePreflightDeps {
     executor: CommandExecutor,
     status: EdgeStatus,
   ): Promise<{ sites: ImportedSite[]; warnings: string[] }>;
-  /** Journal-then-free: writes the rollback record BEFORE stopping the proxy. */
+  /**
+   * Journal-then-free: writes the rollback record BEFORE stopping the proxy, then
+   * waits for the sockets to be released and reports whether they were. `freed:false`
+   * means the handover did not happen, so bringing the stack up would just crash-loop
+   * the edge on `bind() … (98: Address already in use)`.
+   */
   beginEdgeTakeover(
     executor: CommandExecutor,
     status: EdgeStatus,
     onLog: (message: string, level?: "info" | "warn" | "error") => void,
-  ): Promise<void>;
+  ): Promise<{ freed: boolean; stillBound: number[] }>;
+  /** Undo a `beginEdgeTakeover` from THIS run. True when something came back up. */
+  rollbackHostEdge(): Promise<boolean>;
   /** Restore a proxy stopped by an earlier (crashed) run before we re-probe. */
   recoverInterruptedTakeover(
     executor: CommandExecutor,
@@ -168,9 +181,23 @@ export async function planAndApplyHostEdge(
     action === "migrate" ? await deps.collectCerts(executor, sites, { status }) : undefined;
   // Journaled stop: if the caller's bring-up fails it calls rollbackHostEdge()
   // and the operator's proxy comes back, instead of the box staying dark.
-  await deps.beginEdgeTakeover(executor, status, (m, l) =>
+  const freed = await deps.beginEdgeTakeover(executor, status, (m, l) =>
     deps.warn(l === "info" ? m : chalk.yellow(m)),
   );
+  // The stop didn't release the ports, so `compose up` would bring up an edge that
+  // crash-loops. Stop here and hand the proxy back rather than reporting a handover
+  // that didn't happen.
+  if (!freed.freed) {
+    const plural = freed.stillBound.length > 1;
+    const restored = await deps.rollbackHostEdge();
+    return {
+      proceed: false,
+      blockedBy:
+        `port${plural ? "s" : ""} ${freed.stillBound.join(" and ")} ${plural ? "are" : "is"} still in use ` +
+        `after stopping ${owner}` +
+        (restored ? " (the previous proxy has been restored)" : ""),
+    };
+  }
   return action === "migrate" ? { proceed: true, action, sites, certPems } : { proceed: true, action };
 }
 
@@ -348,10 +375,11 @@ export interface EdgeDiagnosis {
   occupant: string | null;
   /**
    * The occupant is a competing OPENRESTY/proxy on the HOST while our edge is
-   * containerized. This is the case the takeover flow misses: `ourLuaOnHost`
-   * marks a host OpenResty as "ours", so `foreignProxyOnEdge` reports
-   * blocked=false and nothing stops it — it just squats :80/:443 forever and the
-   * edge container crash-loops on `bind() … Address already in use`.
+   * containerized — a deprecated bare edge, or someone's own nginx. Detect used to
+   * miss the first case by marking a host OpenResty "ours", so `foreignProxyOnEdge`
+   * reported blocked=false, nothing stopped it, and it squatted :80/:443 forever
+   * while the edge container crash-looped on `bind() … Address already in use`.
+   * A host OpenResty is now an ordinary migration source, so this reports it.
    */
   hostProxySquatting: boolean;
   /** Sites parsed off the occupant, when it's an importable proxy. */
@@ -440,7 +468,7 @@ export async function repairEdgeConflict(
     return { ok: false, registered: [], detail: "the containerized edge is Linux-only" };
   }
   const executor = new LocalExecutor();
-  const { status } = await realForeignProxyOnEdge(executor);
+  const { status, owner } = await realForeignProxyOnEdge(executor);
   if (status.occupants.length === 0) {
     spawnSync("docker", ["restart", "openship-edge"], { stdio: "ignore" });
     return { ok: true, registered: [], detail: "ports were already free — restarted the edge" };
@@ -451,7 +479,23 @@ export async function repairEdgeConflict(
     mode === "migrate" ? await collectCertsFromProxy(executor, scan.sites, { status }) : undefined;
 
   // Journaled: if the edge still won't come up, rollbackHostEdge() restores this.
-  await realBeginEdgeTakeover(executor, status, (entry) => onLog(entry.message, entry.level));
+  const freed = await realBeginEdgeTakeover(executor, status, (entry) =>
+    onLog(entry.message, entry.level),
+  );
+  // A stop that didn't release the socket means the edge will just crash-loop again
+  // and we'd report "freed :80/:443" for a box that is still dark. Put the occupant
+  // back instead — the journal is exactly what that's for.
+  if (!freed.freed) {
+    const restored = await rollbackHostEdge();
+    return {
+      ok: false,
+      registered: [],
+      detail:
+        `port${freed.stillBound.length > 1 ? "s" : ""} ${freed.stillBound.join(" and ")} still in use ` +
+        `after stopping ${owner || "the existing proxy"}` +
+        (restored ? " — the previous proxy has been restored" : " — and the restore did NOT bring it back"),
+    };
+  }
   spawnSync("docker", ["restart", "openship-edge"], { stdio: "ignore" });
 
   if (mode === "migrate" && scan.sites.length > 0) {
@@ -597,6 +641,7 @@ function defaultDeps(): EdgePreflightDeps {
     importSites: realImportSites,
     beginEdgeTakeover: (executor, status, onLog) =>
       realBeginEdgeTakeover(executor, status, (entry) => onLog(entry.message, entry.level)),
+    rollbackHostEdge,
     recoverInterruptedTakeover: (executor, onLog, isEdgeHealthy) =>
       realRecoverInterruptedTakeover(
         executor,

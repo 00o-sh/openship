@@ -23,6 +23,7 @@ import {
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { RoutingConfigCard } from "./RoutingConfigCard";
 import { RouteRules } from "./RouteRules";
+import { RoutingUnsyncedCallout } from "./RoutingUnsyncedCallout";
 import { invalidateProjectCaches } from "@/hooks/useProjectEndpoints";
 import { getApiErrorMessage, projectsApi, deployApi, domainsApi, serviceKind, servicesApi, type Service, type ServiceInput } from "@/lib/api";
 import { useToast } from "@/context/ToastContext";
@@ -1820,6 +1821,8 @@ export const DomainSettings = () => {
 
   return (
     <div className="space-y-5">
+      {/* Routes are live-but-unsynced — first, above the domains it's about. */}
+      <RoutingUnsyncedCallout />
       {domainsData.isLoading ? (
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
           {[0, 1].map((i) => (

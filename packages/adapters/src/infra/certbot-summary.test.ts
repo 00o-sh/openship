@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import { summarizeCertbotFailure } from "./nginx";
-import { EDGE_UNROUTED_SENTINEL } from "./edge-not-found";
 
 /**
  * The whole point of the summarizer: turn certbot's opaque opener into the real,
@@ -62,25 +61,39 @@ Certbot failed to authenticate some domains (authenticator: webroot).
     expect(summarizeCertbotFailure(out, "app.example.xyz")).toMatch(/cloudflare/i);
   });
 
-  it("our own not-found page answered → 'not routing that hostname', NOT take-over", () => {
-    // #431 moved this case: the edge used to refuse the handshake for a hostname it has
-    // no vhost for, so a challenge against it came back 525. Now the :443 catch-all
-    // presents a placeholder cert, Cloudflare "Full" accepts it, and the challenge
-    // fetch succeeds — returning our own 404 page. Left to the 40x branch that reads as
-    // "another web server is still serving :80" and offers take-over / migrate, which
-    // would rewrite a working proxy config for a cause it cannot fix. The sentinel in
-    // the page body (echoed back by Let's Encrypt) is what separates the two.
+  it("404 over HTTPS → the request was redirected, NOT take-over", () => {
+    // Same status as the case above, opposite remediation, and the scheme is the only
+    // thing that separates them. Let's Encrypt always REQUESTS http://; an https:// URL
+    // in the failure means something redirected it, so the answer came from :443 and
+    // nothing was learned about :80 — offering take-over / migrate there would rewrite
+    // a working proxy config for a cause it cannot fix.
+    //
+    // #431 is what makes this common: for a hostname the box doesn't route, the :443
+    // catch-all used to refuse the handshake (525, caught by the branch above) and now
+    // completes it and answers with the "service not found" page — a 404.
     const out = `${OPENER}
   Type:   unauthorized
-  Detail: 65.109.55.23: Invalid response from https://app.example.xyz/.well-known/acme-challenge/abc: 404
-  <!doctype html><!--${EDGE_UNROUTED_SENTINEL}--><html lang="en"><head><meta charset=`;
+  Detail: 65.109.55.23: Invalid response from https://app.example.xyz/.well-known/acme-challenge/abc: 404`;
     const s = summarizeCertbotFailure(out, "app.example.xyz");
-    expect(s).toMatch(/service not found|not routing/i);
     expect(s).toContain("app.example.xyz");
+    expect(s).toMatch(/redirected/i);
     // It may NAME take-over, but only to rule it out — never as the remediation the
-    // 40x branch prescribes.
+    // plain-HTTP 404 branch prescribes.
     expect(s).toMatch(/will not help/i);
     expect(s).not.toMatch(/choose take-over/i);
+  });
+
+  it("does NOT prescribe Cloudflare SSL-mode surgery just because the output says cloudflare", () => {
+    // The 52x branch used to match the bare word: certbot's own --dns-cloudflare plugin
+    // text, or a CF page carrying any status at all, got "set SSL/TLS to Full" as the
+    // diagnosis for an unrelated failure. It matches the STATUS now.
+    const out = `${OPENER}
+Plugins selected: Authenticator dns-cloudflare, Installer None
+  Type:   dns
+  Detail: DNS problem: NXDOMAIN looking up A for app.example.xyz`;
+    const s = summarizeCertbotFailure(out, "app.example.xyz");
+    expect(s).toMatch(/doesn't resolve|DNS/i);
+    expect(s).not.toMatch(/Full \(strict\)|orange cloud/i);
   });
 
   it("rate limit → wait-before-retry", () => {

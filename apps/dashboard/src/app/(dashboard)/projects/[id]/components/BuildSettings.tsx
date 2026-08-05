@@ -184,8 +184,14 @@ export const BuildSettings = () => {
   }
 
   // ── Single-app: read-only configuration summary. ──────────────────────
-  const runtimeModeLabel =
-    projectData?.runtimeMode === "docker"
+  // A static site has no runtime process to isolate — the edge serves its files
+  // from the shared static volume. Its `runtimeMode` is still "docker" because it
+  // BUILT in a Docker sandbox, so reporting "Sandboxed (container)" here mislabels a
+  // build detail as a runtime one and contradicts the Start command row's "Static
+  // (no server)". Say plainly there is no runtime instead.
+  const runtimeModeLabel = !buildData.hasServer
+    ? t.projectSettings.build.runtime.modeStatic
+    : projectData?.runtimeMode === "docker"
       ? t.projectSettings.build.runtime.modeSandboxed
       : projectData?.runtimeMode === "bare"
         ? t.projectSettings.build.runtime.modeDirect

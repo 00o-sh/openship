@@ -112,8 +112,10 @@ export async function registerImportedSites(
             tls: site.ssl,
             // An imported site's TLS becomes ours the moment we take :443 over, and
             // its cert may not land until the carry/ACME step below. Keep a :443
-            // listener up throughout, or the domain refuses handshakes mid-takeover
-            // (Cloudflare 525, #308).
+            // listener up throughout: without one the domain falls through to the
+            // edge's 443 catch-all mid-takeover, which since #431 answers with the
+            // placeholder cert and the branded not-found page — so a live site reads
+            // as "no application configured here" (#308).
             terminatesTlsLocally: site.ssl,
             targetUrl: site.target.url,
             ...(proxyLocations.length ? { proxyLocations } : {}),
@@ -236,7 +238,25 @@ export async function runEdgeTakeover(
   // Same snapshot-then-free as beginEdgeTakeover; kept inline because this
   // function holds the journal in memory for its own rollback (a best-effort
   // journal WRITE can fail, and an in-process rollback must still work).
-  await freeEdgeTargets(executor, stopTargetsForStatus(opts.status), (m, l) => onLog(log(m, l)));
+  const freed = await freeEdgeTargets(executor, stopTargetsForStatus(opts.status), (m, l) =>
+    onLog(log(m, l)),
+  );
+  if (!freed.freed) {
+    // "I stopped its owner" is not ":80 is bindable". Installing anyway starts an
+    // edge that loses the race for the socket and crash-loops on
+    // `bind() … (98: Address already in use)` — while `docker run` exits 0, so this
+    // function would report a successful migration of a box serving nothing.
+    const plural = freed.stillBound.length > 1;
+    const rolledBack = await rollback(executor, journal, onLog);
+    await clearJournal(executor);
+    warnings.push(
+      `Stopped the existing proxy, but port${plural ? "s" : ""} ${freed.stillBound.join(" and ")} ` +
+        `${plural ? "are" : "is"} still in use, so the edge can't bind — nothing was installed. ` +
+        "Find what else is holding the port and retry.",
+    );
+    if (!rolledBack) warnings.push("The previous proxy did NOT come back — nothing is serving :80.");
+    return { ok: false, rolledBack, registered: [], warnings };
+  }
 
   // Bring up OUR edge (ports are now free; takeover authorized as a backstop).
   // Goes through the same component installer as every other path, so this is the

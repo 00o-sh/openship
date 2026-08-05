@@ -13,6 +13,13 @@ function host(answers: Array<[string, string]>): CommandExecutor {
   } as unknown as CommandExecutor;
 }
 
+/** A kernel socket table with :80 (0x50) in LISTEN (0A) — what "serving" reads as. */
+const PORT_80_LISTENING: [string, string] = [
+  "/proc/net/tcp",
+  "  0: 00000000:0050 00000000:0000 0A 00000000:00000000 0 0 1 1 ffff 100 0 0 10 0",
+];
+const EDGE_RUNNING: [string, string] = ["docker inspect", "running"];
+
 describe("checkEdge", () => {
   it("reports healthy from the edge CONTAINER", async () => {
     // A converted box has no openresty binary, no unit and no Lua on the host, so
@@ -21,6 +28,8 @@ describe("checkEdge", () => {
     const status = await checkEdge(
       host([
         ["docker ps --filter name=openship-edge", "openship-edge"],
+        EDGE_RUNNING,
+        PORT_80_LISTENING,
         ["openresty -v", "nginx version: openresty/1.27.1.1"],
       ]),
     );
@@ -29,13 +38,54 @@ describe("checkEdge", () => {
     expect(status.version).toBe("1.27.1.1");
   });
 
-  it("flags a running-but-unresponsive edge container", async () => {
+  it("flags an unresponsive edge container that is nonetheless serving :80", async () => {
     const status = await checkEdge(
-      host([["docker ps --filter name=openship-edge", "openship-edge"]]),
+      host([
+        ["docker ps --filter name=openship-edge", "openship-edge"],
+        EDGE_RUNNING,
+        PORT_80_LISTENING,
+      ]),
     );
 
     expect(status.healthy).toBe(false);
     expect(status.message).toMatch(/docker logs openship-edge/);
+  });
+
+  // ── The bug this check existed to miss ──
+  //
+  // Docker keeps `.State.Running == true` across a restart loop, so a container
+  // crash-looping on `bind() … Address already in use` appears in plain `docker ps`
+  // AND answers `openresty -v` whenever the probe lands in the brief up-window
+  // between restarts. This surface therefore rendered "edge 1.27.1.1 - running",
+  // intermittently green, on a box whose edge had never bound :80 — which is how
+  // "Fix edge" could report success while the home page kept its "Edge down" card.
+  it("is NOT healthy for a crash-looping edge, even when it answers a version probe", async () => {
+    const status = await checkEdge(
+      host([
+        ["docker ps --filter name=openship-edge", "openship-edge"],
+        ["docker inspect", "restarting"],
+        ["openresty -v", "nginx version: openresty/1.27.1.1"],
+        ["docker logs", "2026/08/04 nginx: [emerg] bind() to 0.0.0.0:80 failed (98: Address already in use)"],
+      ]),
+    );
+
+    expect(status.healthy).toBe(false);
+    expect(status.running).toBe(false);
+    // The container's own [emerg] is the diagnosis — the operator can act on
+    // "something else holds :80", not on "not responding".
+    expect(status.message).toMatch(/Address already in use/);
+  });
+
+  it("is NOT healthy when the container is up but nothing is listening on :80", async () => {
+    const status = await checkEdge(
+      host([
+        ["docker ps --filter name=openship-edge", "openship-edge"],
+        EDGE_RUNNING,
+      ]),
+    );
+
+    expect(status.healthy).toBe(false);
+    expect(status.message).toMatch(/nothing is listening on :80/);
   });
 
   // No container = no edge. There is no host fallback to probe any more: the edge

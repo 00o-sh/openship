@@ -199,7 +199,8 @@
       "staticNoServer": "Estático (sin servidor)",
       "modeSandboxed": "En sandbox (contenedor)",
       "modeDirect": "Directo (proceso del host)",
-      "modeDefault": "Predeterminado (resuelto en el despliegue)"
+      "modeDefault": "Predeterminado (resuelto en el despliegue)",
+      "modeStatic": "Ninguno: se sirve como archivos estáticos"
     },
     "storage": {
       "title": "Almacenamiento persistente",

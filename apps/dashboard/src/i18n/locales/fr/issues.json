@@ -62,6 +62,14 @@
     "filteredTitle": "Aucun résultat",
     "filteredBody": "Aucun problème ne correspond à ce filtre."
   },
+  "summary": {
+    "title": "Aperçu",
+    "subtitle": "L'état en un coup d'œil",
+    "totalOpen": "ouvertes",
+    "totalResolved": "résolues",
+    "bySeverity": "Par gravité",
+    "byArea": "Par zone"
+  },
   "home": {
     "attentionTitle": "À surveiller",
     "attentionSubtitle": "Quelque chose est cassé ou attend une décision",

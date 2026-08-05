@@ -1,4 +1,5 @@
 import { DeployError, safeErrorMessage, type ProxySettings } from "@repo/core";
+import { edgeDownExplanation } from "../system/edge-exec-error";
 import { resolveServedStaticPath } from "./stack-output";
 
 /**
@@ -9,6 +10,13 @@ import { resolveServedStaticPath } from "./stack-output";
  * #335) when routing resolves its upstream, so this error is TRANSIENT, not a
  * real routing failure. We retry briefly before recording a warning so a settling
  * container doesn't falsely mark the project "Action Required".
+ *
+ * NOT the sole retry gate: a crash-looping EDGE container surfaces the same daemon
+ * phrase, because `explainDown` joins the enriched edge-down explanation to the raw
+ * daemon line in one blob — so this predicate matches edge-down failures too. The
+ * caller checks `edgeDownExplanation` FIRST and never retries those (retrying just
+ * execs into the same dead edge); this predicate then only ever sees a genuine
+ * app-container restart.
  */
 function isContainerRestartingError(message: string): boolean {
   return /is restarting, wait until the container is running/i.test(message);
@@ -201,9 +209,16 @@ export async function registerResolvedRoutes(
         break;
       } catch (err) {
         lastError = safeErrorMessage(err);
-        // Only the "container is restarting" transient is worth waiting on — any
-        // other failure (bad upstream, invalid target, nginx reload error) is
-        // recorded immediately so genuine problems aren't hidden behind a delay.
+        // The EDGE container being down is not a transient this project grows out of:
+        // every registerRoute execs into the edge, so if it is crash-looping, retrying
+        // just execs into the same dead container four more times (6s wasted) and still
+        // fails. Its blob carries the daemon's raw "is restarting" line alongside the
+        // enriched explanation, so isContainerRestartingError alone would false-positive
+        // here — the marker is the discriminator. Stop now; the warning below explains it.
+        if (edgeDownExplanation(lastError)) break;
+        // Only a genuine app-container restart (its post-start stabilization window) is
+        // worth waiting on — any other failure (bad upstream, invalid target, nginx
+        // reload error) is recorded immediately so real problems aren't hidden behind a delay.
         if (attempt < ROUTE_MAX_ATTEMPTS && isContainerRestartingError(lastError)) {
           logger.log(
             `Routing ${domain.hostname}: target container is still starting up — ` +
@@ -218,11 +233,22 @@ export async function registerResolvedRoutes(
     }
     if (lastError) {
       // A failed domain never fails the deploy — the container is already up.
-      logger.log(
-        `Routing failed for ${domain.hostname} (deploy continues; the app is up — fix DNS/routing and retry): ${lastError}\n`,
-        "warn",
-      );
-      warnings.push(`${domain.hostname}: ${lastError}`);
+      const edgeDown = edgeDownExplanation(lastError);
+      if (edgeDown) {
+        // The edge is what's down, not this project — "fix DNS/routing and retry" would
+        // send the operator after the wrong thing (and it reads absurd for a static app
+        // with no container of its own). Surface the one-line explanation (cause +
+        // remedy) instead of the raw daemon blob, and carry the marker into the warning
+        // so downstream (deployWarning, the routing-unsynced flag) recognises edge-down.
+        logger.log(`Routing ${domain.hostname} could not be applied — ${edgeDown}\n`, "warn");
+        warnings.push(`${domain.hostname}: ${edgeDown}`);
+      } else {
+        logger.log(
+          `Routing failed for ${domain.hostname} (deploy continues; the app is up — fix DNS/routing and retry): ${lastError}\n`,
+          "warn",
+        );
+        warnings.push(`${domain.hostname}: ${lastError}`);
+      }
     }
   }
 

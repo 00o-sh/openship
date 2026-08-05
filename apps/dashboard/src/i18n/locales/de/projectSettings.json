@@ -199,7 +199,8 @@
       "staticNoServer": "Statisch (kein Server)",
       "modeSandboxed": "Sandbox (Container)",
       "modeDirect": "Direkt (Host-Prozess)",
-      "modeDefault": "Standard (beim Deploy aufgelöst)"
+      "modeDefault": "Standard (beim Deploy aufgelöst)",
+      "modeStatic": "Keine – als statische Dateien ausgeliefert"
     },
     "storage": {
       "title": "Dauerhafter Speicher",

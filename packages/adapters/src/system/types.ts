@@ -172,7 +172,15 @@ export interface EdgeOccupant {
 
 export interface EdgeStatus {
   classification: EdgeClassification;
-  /** Foreign owners that must be resolved before we can bind 80/443. */
+  /**
+   * Owners that must be resolved before we can bind 80/443 — i.e. everything on
+   * the edge ports EXCEPT our own healthy edge container.
+   *
+   * A bare-host OpenResty belongs here even one an older Openship installed: the
+   * edge is a container now, so a host OpenResty is a proxy to migrate FROM like
+   * any other. Calling it "ours" was what let it keep :80 while the edge container
+   * crash-looped and every surface reported success.
+   */
   occupants: EdgeOccupant[];
   /** true for free | ours */
   canProceedClean: boolean;

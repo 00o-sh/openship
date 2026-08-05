@@ -323,7 +323,8 @@
       "staticNoServer": "Static (no server)",
       "modeSandboxed": "Sandboxed (container)",
       "modeDirect": "Direct (host process)",
-      "modeDefault": "Default (resolved at deploy)"
+      "modeDefault": "Default (resolved at deploy)",
+      "modeStatic": "None — served as static files"
     },
     "storage": {
       "title": "Persistent storage",

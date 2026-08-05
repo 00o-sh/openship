@@ -4,7 +4,7 @@
 
 import { repos } from "@repo/db";
 import { NotFoundError, ValidationError } from "@repo/core";
-import { edgeProxy } from "@repo/adapters";
+import { checkEdge, edgeProxy } from "@repo/adapters";
 import type { LogEntry, ImportedSite } from "@repo/adapters";
 import { resolveDeploymentRuntime } from "../../lib/deployment-runtime";
 import { assertResourceInOrg } from "../../lib/controller-helpers";
@@ -12,6 +12,7 @@ import { syncManagedEdgeRoutes, edgeUnsyncedWarning } from "../../lib/managed-ed
 import { resolveManagedHostname } from "../../lib/routing-domains";
 import { sshManager } from "../../lib/ssh-manager";
 import { applyProjectRouting } from "../domains/routing-apply.service";
+import { reapplyProjectLiveRoutes } from "../domains/project-route.service";
 
 // ─── Runtime logs ────────────────────────────────────────────────────────────
 
@@ -131,6 +132,8 @@ export async function disableProject(projectId: string, organizationId: string) 
  *   3. Re-apply the project's LIVE routes (custom + free) reload-free.
  *   4. Reconcile managed `*.opsh.io` edge routes and clear the "Action Required"
  *      warning — only on full success.
+ *   5. Verify the edge is SERVING what steps 1-4 wrote, so a box whose edge never
+ *      bound :80 can't answer this action with "Live" (see `edgeServingWarning`).
  *
  * Best-effort throughout; returns the failure instead of throwing so the UI can
  * re-surface the same guidance.
@@ -156,6 +159,23 @@ export async function retryProjectRouting(
 
   // Live re-apply is best-effort, but its failure must NOT clear the warning.
   let applyOk = true;
+  // `reapplyProjectLiveRoutes` FIRST, `applyProjectRouting` second — the two cover
+  // different route shapes and retry has to heal all of them:
+  //   - reapply → the per-domain surface: a single app's port target OR a static
+  //     app's `/` served from a doc root (targetPath). `applyProjectRouting` is
+  //     composite-only (`planCompositeRoute` needs 1 static + 1 server), so on its
+  //     own it emitted NOTHING for a lone static app — the free URL 404'd forever
+  //     because retry never rewrote the vhost the failed deploy left unwritten.
+  //   - applyProjectRouting → layers the vercel composite overlay (`/api` → backend)
+  //     back on for a monorepo. A no-op otherwise, and registerRoute is
+  //     last-writer-wins per hostname, so running it after reapply can only add the
+  //     backend location, never drop the frontend reapply just wrote.
+  // `managedEdgeSyncedByCaller`: syncProjectManagedEdge below already covers every
+  // managed hostname; letting reapply sync them too races its own follow-up (two
+  // ACME challenges for one target, the second resetting the first's token).
+  await reapplyProjectLiveRoutes(p, [], { managedEdgeSyncedByCaller: true }).catch(() => {
+    applyOk = false;
+  });
   await applyProjectRouting(projectId).catch(() => {
     applyOk = false;
   });
@@ -172,7 +192,50 @@ export async function retryProjectRouting(
     await markRoutingWarning(fresh, warning).catch(() => {});
     return { ok: false, warning };
   }
+
+  // Last: every step above writes CONFIGURATION, and a written route is not a served
+  // one. An edge crash-looping on `bind() … Address already in use` accepts every
+  // vhost write, answers the cloud-side sync fine, and serves nothing — so this
+  // action reported "Live" while all of the project's URLs were dead, which is the
+  // opposite of what the operator pressed it to find out.
+  const edgeWarning = await edgeServingWarning(p, serverId);
+  if (edgeWarning) {
+    const fresh = p.activeDeploymentId ? await repos.deployment.findById(p.activeDeploymentId) : null;
+    await markRoutingWarning(fresh, edgeWarning).catch(() => {});
+    return { ok: false, warning: edgeWarning };
+  }
   return { ok: true };
+}
+
+/**
+ * "Are this project's routes actually being served?" — null when yes (or when the
+ * question doesn't apply), else the operator-facing reason.
+ *
+ * Deliberately `checkEdge`, not a private probe: it is the one composed verdict
+ * (container present → not crash-looping → listening on :80 → responsive) and it
+ * quotes the container's own `[emerg]`, so this button, the Components tab and the
+ * home attention card all name the same cause instead of three guesses.
+ *
+ * Two gates keep it from inventing failures:
+ *   - no server (local/cloud target) → not our edge's question;
+ *   - no domains → the project has nothing at the edge to lose, so the edge's state
+ *     is irrelevant to whether ITS routing is synced.
+ * An unreachable box also returns null: "couldn't ask" is not "not serving", and the
+ * route-apply steps above already report a server they couldn't reach.
+ */
+async function edgeServingWarning(
+  project: NonNullable<Awaited<ReturnType<typeof repos.project.findById>>>,
+  serverId: string | undefined,
+): Promise<string | null> {
+  if (!serverId) return null;
+  const domains = await repos.domain.listByProject(project.id).catch(() => []);
+  if (domains.length === 0) return null;
+  try {
+    const status = await sshManager.withExecutor(serverId, (executor) => checkEdge(executor));
+    return status.healthy ? null : `Routes are written but not being served: ${status.message}`;
+  } catch {
+    return null;
+  }
 }
 
 /** The upstream host port a live vhost forwards to — the root ("/") location's
