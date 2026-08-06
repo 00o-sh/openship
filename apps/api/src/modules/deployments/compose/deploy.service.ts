@@ -1874,6 +1874,13 @@ export async function deployComposeServices(
     }
   }
 
+  // Services phase closes here (before app-setup) so the stepper never marks
+  // services done AFTER setup ran. successful===0 ⇒ nothing came up ⇒ failed.
+  sessionManager.broadcastInstallPhase(dep.id, {
+    id: "services",
+    status: successful > 0 ? "done" : "failed",
+  });
+
   // ── App prepare steps (in-container lifecycle hooks) ────────────────────────
   // Run template-declared prepare commands INSIDE the target service's container
   // (e.g. Convex mints its admin key from INSTANCE_SECRET+INSTANCE_NAME) and
@@ -1886,7 +1893,11 @@ export async function deployComposeServices(
   let prepareFailure: string | null = null;
   if (project.appTemplateId) {
     const template = await getTemplateForOrg(project.organizationId, project.appTemplateId);
-    for (const step of template ? getAppPrepareSteps(template) : []) {
+    const prepareSteps = template ? getAppPrepareSteps(template) : [];
+    if (prepareSteps.length > 0) {
+      sessionManager.broadcastInstallPhase(dep.id, { id: "app-setup", status: "active" });
+    }
+    for (const step of prepareSteps) {
       const phase = step.phase ?? "post-start";
       if (phase === "pre-deploy") {
         logger.log(
@@ -1983,8 +1994,12 @@ export async function deployComposeServices(
         logger.log(`Warning: app prepare step "${step.capture}" failed: ${detail}\n`, "warn");
       }
     }
+    if (prepareSteps.length > 0 && !prepareFailure) {
+      sessionManager.broadcastInstallPhase(dep.id, { id: "app-setup", status: "done" });
+    }
   }
   if (prepareFailure) {
+    sessionManager.broadcastInstallPhase(dep.id, { id: "app-setup", status: "failed" });
     const failedNow = results.filter((r) => r.status === "failed");
     logger.step("deploy", "failed", prepareFailure);
     return {

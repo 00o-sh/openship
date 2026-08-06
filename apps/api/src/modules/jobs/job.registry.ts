@@ -256,15 +256,20 @@ export const SYSTEM_JOB_DEFS: SystemJobDef[] = [
   {
     key: "updates:scan",
     label: "Update scan",
-    // The one channel for "is anything out of date?" — refreshes the
-    // update_status cache for every app/project/self-app/webmail so the home
-    // Updates block + Apps tab read a table instead of hitting registries/GitHub
-    // per page load. Off-peak, off the :00/:30 marks; not on desktop.
+    // The one channel for "is anything out of date?" — polls what each
+    // app/project/self-app/webmail's SOURCE currently offers and caches it in
+    // update_status, so the home Updates block + Apps tab read a table instead of
+    // hitting registries/GitHub per page load. Off-peak, off the :00/:30 marks;
+    // not on desktop.
+    //
+    // No "behind" count here on purpose: whether a project is behind depends on
+    // what's deployed right now, which is compared at read time — the scan only
+    // refreshes the upstream side.
     defaultCron: "19 */6 * * *",
     available: () => platform().target !== "desktop",
     run: async () => {
       const r = await scanInstanceUpdates();
-      return { scanned: r.scanned, supported: r.supported, behind: r.behind };
+      return { scanned: r.scanned, supported: r.supported };
     },
   },
   {

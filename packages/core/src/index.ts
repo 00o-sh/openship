@@ -32,6 +32,7 @@ export {
   MAX_SUPPORTED_SCHEMA,
   type AppTemplateRejection,
 } from "./apps/schema";
+export * from "./apps/install-phases";
 export * from "./app-settings";
 export * from "./project-source";
 export * from "./updates";

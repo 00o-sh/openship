@@ -23,7 +23,13 @@ const MISSING_BASELINE: Record<string, number> = {
   // Translated in tr (whose appSource block is otherwise complete); English-first
   // in the other 7 locales, which have no appSource block at all and fall back to
   // English via deepMerge, so the row renders correctly in every locale.
-  projectSettings: 1065,
+  //
+  // +63: appInstall stepper — 9 keys for the JSON-mapped install progress view
+  // (phase labels images/services/app-setup/ready + queued, the steps heading, and
+  // the first-login title/username/password). Translated in tr; English-first in
+  // the other 7 locales, which fall back via deepMerge so the stepper is correct
+  // everywhere.
+  projectSettings: 1128,
   jobs: 876,
   migration: 1237,
   // +64: the GitHub card's credential-health strings — 8 English-first keys for

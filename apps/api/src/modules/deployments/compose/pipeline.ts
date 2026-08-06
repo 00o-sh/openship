@@ -41,6 +41,7 @@ import { webhookProxyTarget } from "../../../config";
 import { buildComposeImages } from "./build.service";
 import { deployComposeServices } from "./deploy.service";
 import { safeErrorMessage } from "@repo/core";
+import * as sessionManager from "../session-manager";
 
 export interface ComposePipelineOpts {
   project: Project;
@@ -147,6 +148,7 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
   await setDeploymentStatus(dep.id, "deploying", {
     extra: { buildDurationMs: composeBuild.durationMs },
   });
+  sessionManager.broadcastInstallPhase(dep.id, { id: "services", status: "active" });
 
   const composeResult = await deployComposeServices(project, dep, runtime, logger, {
     builtImages: composeBuild.imageRefs,
@@ -216,6 +218,7 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
     ? routeIssuesWarning(composeResult.routeWarnings)
     : undefined;
   const successWarning = routingWarning ?? composeResult.warning;
+  sessionManager.broadcastInstallPhase(dep.id, { id: "ready", status: "done" });
   await onSuccess(ctx, {
     containerId: primary?.containerId ?? "compose",
     url: composeResult.publicUrl,

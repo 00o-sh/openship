@@ -14,13 +14,13 @@ export interface UpdateStatusItem {
   currentLabel: string | null;
   latestLabel: string | null;
   detail: unknown;
+  /** When the UPSTREAM side was last polled. `behind` itself is computed live. */
   checkedAt: string;
 }
 
 export interface ScanSummary {
   scanned: number;
   supported: number;
-  behind: number;
 }
 
 export const updatesApi = {

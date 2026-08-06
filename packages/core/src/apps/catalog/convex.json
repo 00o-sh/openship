@@ -96,7 +96,10 @@
       "persistAs": {
         "key": "CONVEX_ADMIN_KEY"
       },
-      "once": true
+      "once": true,
+      "title": "Generate admin key",
+      "description": "Mint the dashboard and CLI admin key from the instance secret.",
+      "icon": "key"
     }
   ],
   "connection": {
