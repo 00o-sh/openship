@@ -15,34 +15,39 @@ import { generateIcon } from "@/utils/icons";
 import { deployApi, getApiErrorMessage, type RestorePlanUI } from "@/lib/api";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import { RollbackConfirmDialog } from "./RollbackConfirmDialog";
+import type { Deployment as DeploymentRow } from "../types";
 
-interface Deployment {
-  id: string;
-  status: string;
-  domain: string;
-  owner?: string;
-  repo?: string;
-  commit: {
-    hash: string;
-    /** Full SHA when known — required by "Redeploy this commit". */
-    fullHash?: string | null;
-  };
-  /** Rollback state — flows from the orchestrator-aware listing endpoint. */
-  artifactRetainedAt?: string | null;
-  pinned?: boolean;
-  isActive?: boolean;
-}
+/** Picked from the shared row type rather than re-declared with `status: string`:
+ *  a local structural copy let the status checks below drift onto the API's
+ *  vocabulary (`ready`) while the list mapper hands us the UI one (`success`),
+ *  which silently disabled rollback and hid Pin entirely. */
+type Deployment = Pick<
+  DeploymentRow,
+  | "id"
+  | "status"
+  | "domain"
+  | "owner"
+  | "repo"
+  | "commit"
+  | "artifactRetainedAt"
+  | "pinned"
+  | "isActive"
+>;
 
 interface DeploymentMenuProps {
   deployment: Deployment;
   triggerClassName?: string;
   onStatusChange?: () => void;
+  /** Lets the row lift its stacking context while the menu is open — the
+   *  dropdown's own z-index can't escape the row's. */
+  onOpenChange?: (open: boolean) => void;
 }
 
 export const DeploymentMenu: React.FC<DeploymentMenuProps> = ({
   deployment,
   triggerClassName,
   onStatusChange,
+  onOpenChange,
 }) => {
   const { t } = useI18n();
   const [isOpen, setIsOpen] = useState(false);
@@ -68,6 +73,12 @@ export const DeploymentMenu: React.FC<DeploymentMenuProps> = ({
     };
   }, [isOpen]);
 
+  // Mirrored via effect, not wrapped around each setIsOpen call — there are six
+  // of them and a new one would otherwise forget to report.
+  useEffect(() => {
+    onOpenChange?.(isOpen);
+  }, [isOpen, onOpenChange]);
+
   // `isInFlight` = status-wise busy (the cancel/delete affordances care
   // about this). Distinct from `deployment.isActive` which means
   // "currently the active version" — the chip / rollback gating cares
@@ -82,7 +93,7 @@ export const DeploymentMenu: React.FC<DeploymentMenuProps> = ({
   // "Redeploy this commit" fallback is gone: it was the same operation behind a
   // second label.
   const canRollback =
-    (deployment.status === "ready" || deployment.status === "partial_failure") &&
+    (deployment.status === "success" || deployment.status === "partial_failure") &&
     !deployment.isActive &&
     !isInFlight &&
     (!!deployment.artifactRetainedAt || hasCommit);
@@ -272,9 +283,11 @@ export const DeploymentMenu: React.FC<DeploymentMenuProps> = ({
             </>
           )}
 
-          {/* Pin / Unpin — toggles the artifact's exemption from
-              retention prune. Available for any ready deployment. */}
-          {!isInFlight && deployment.status === "ready" && (
+          {/* Pin / Unpin — toggles the artifact's exemption from retention
+              prune. Successful deploys only: the API rejects a pin on anything
+              but `ready`, so `partial_failure` is excluded even though it can be
+              rolled back to. */}
+          {!isInFlight && deployment.status === "success" && (
             <button
               onClick={handleTogglePin}
               disabled={!deployment.pinned && !deployment.artifactRetainedAt}

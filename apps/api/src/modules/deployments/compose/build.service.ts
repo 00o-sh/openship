@@ -299,12 +299,16 @@ export async function buildComposeImages(opts: {
       "running",
       `Building ${buildable.length} compose service image${buildable.length === 1 ? "" : "s"}...`,
     );
+    sessionManager.broadcastInstallPhase(opts.dep.id, { id: "images", status: "active" });
   } else {
     opts.logger.step(
       "build",
       "completed",
       "Compose services use pre-built images - skipping build phase",
     );
+    // Pull-only app (the common catalog case): no image to build → show the phase
+    // complete instantly rather than briefly "active".
+    sessionManager.broadcastInstallPhase(opts.dep.id, { id: "images", status: "skipped" });
   }
 
   // Prepare a build spec per service: constructs the per-service BuildConfig +
@@ -515,6 +519,7 @@ export async function buildComposeImages(opts: {
         `All ${succeeded} service image${succeeded === 1 ? "" : "s"} built successfully`,
       );
       opts.logger.log("Compose image build phase complete. Preparing deployment phase...\n");
+      sessionManager.broadcastInstallPhase(opts.dep.id, { id: "images", status: "done" });
     } else if (succeeded > 0) {
       opts.logger.step(
         "build",
@@ -525,6 +530,7 @@ export async function buildComposeImages(opts: {
         "Compose image build phase failed. Deployment will not continue.\n",
         "error",
       );
+      sessionManager.broadcastInstallPhase(opts.dep.id, { id: "images", status: "failed" });
     } else {
       opts.logger.step(
         "build",
@@ -532,6 +538,7 @@ export async function buildComposeImages(opts: {
         `All ${buildFailures.size} service image builds failed`,
       );
       opts.logger.log("Compose image build phase failed. Deployment will not continue.\n", "error");
+      sessionManager.broadcastInstallPhase(opts.dep.id, { id: "images", status: "failed" });
     }
   }
 

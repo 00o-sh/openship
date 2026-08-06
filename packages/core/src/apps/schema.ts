@@ -68,6 +68,9 @@ const configField = z.object({
   secret: z.boolean().optional(),
 });
 
+/** A catalog string that may be a plain value OR an inline per-locale map. */
+const localized = z.union([z.string(), z.record(z.string(), z.string())]);
+
 const prepareStep = z.object({
   service: z.string(),
   command: z.string(),
@@ -80,6 +83,11 @@ const prepareStep = z.object({
   readiness: z
     .object({ test: z.string(), interval: z.number().optional(), retries: z.number().optional() })
     .optional(),
+  // Authored display copy for the install stepper's "app-setup" sub-steps. Purely
+  // presentational; absent → the renderer uses a generic label.
+  title: localized.optional(),
+  description: localized.optional(),
+  icon: z.string().optional(),
 });
 
 const outputVariant = z.object({
@@ -117,6 +125,16 @@ const connection = z.object({
       defaultMode: z.enum(["internal", "public"]).optional(),
     })
     .optional(),
+  // Static default credentials the app ships with (e.g. Grafana admin/admin).
+  // These are FIXED values, not derived from a service env, so they can't live in
+  // `outputs` (whose values resolve from running services) — hence their own field.
+  firstLogin: z
+    .object({
+      username: localized.optional(),
+      password: localized.optional(),
+      note: localized.optional(),
+    })
+    .optional(),
 });
 
 const endpointMode = z.enum(["domain", "port", "publish", "internal"]);
@@ -131,7 +149,6 @@ const endpoint = z.object({
   allowedModes: z.array(endpointMode).optional(),
 });
 
-const localized = z.union([z.string(), z.record(z.string(), z.string())]);
 const provides = z.object({
   id: z.string(),
   outputRefs: z.array(z.string()),

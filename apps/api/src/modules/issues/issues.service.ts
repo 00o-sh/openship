@@ -484,6 +484,9 @@ export async function listOrganizationIssues(
 
   for (const row of updates) {
     if (!row.behind) continue;
+    // Already deploying the newest version — there is nothing left to act on, and
+    // an "Update" button here is what made pressing it look like it did nothing.
+    if (row.latestInProgress) continue;
     issues.push(updateIssue(row));
   }
 

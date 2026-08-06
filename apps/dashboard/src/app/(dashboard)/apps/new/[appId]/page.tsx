@@ -16,6 +16,8 @@ import {
   getAppTemplate,
   getAppSettings,
   getAppEndpoints,
+  getAppPrepareSteps,
+  getAppFirstLogin,
   flattenSettingFields,
   envToSettingValue,
   settingToEnvValue,
@@ -29,6 +31,8 @@ import {
   slugify,
   type AppSettingField,
   type AppEndpoint,
+  type InstallPhaseId,
+  type InstallPhaseStatus,
 } from "@repo/core";
 import { appsApi, deployApi, servicesApi, projectsApi } from "@/lib/api";
 import type { InstallAppRoute } from "@/lib/api/apps";
@@ -50,9 +54,10 @@ import { createPublicEndpoint, type PublicEndpoint } from "@/context/deployment/
 import { resolvePublicEndpointHostname } from "@/lib/public-endpoint-payload";
 import {
   CleanDeployProgressCard,
-  labelForStatus,
   firstPublicHost,
 } from "@/components/deploy/CleanDeployProgress";
+import { useBuildStream } from "@/hooks/useSSEConnection";
+import type { ServiceStatusEvent } from "@/lib/sseMessageProcessors";
 import { useToast } from "@/context/ToastContext";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import { usePlatform } from "@/context/PlatformContext";
@@ -71,8 +76,10 @@ import { parseContainerPort } from "@/utils/compose-ports";
  * what to ask (install-step business fields + whether it needs a public URL);
  * the template's known ports drive routing. It's a pure client orchestration of
  * existing endpoints — install → apply settings + domain → buildAccess — with a
- * clean progress view (polling build status, no raw logs). "Advanced" hands off
- * to the technical /deploy wizard.
+ * JSON-mapped progress view: it ATTACHES to the running build over SSE and maps
+ * the real backend phase/service boundaries onto an authored stepper, with logs
+ * demoted to a foldable detail. "Advanced" hands off to the technical /deploy
+ * wizard.
  */
 
 type Phase = "form" | "installing" | "done" | "error";
@@ -243,9 +250,14 @@ export default function AppInstallPage() {
   const { connected: cloudConnected, requireCloud } = useCloud();
 
   const appId = String(params?.appId ?? "");
+  const searchParams = useSearchParams();
   // Reopening a draft app passes its existing project id — adopt it instead of
   // creating a duplicate (the backend also get-or-creates, this avoids the call).
-  const adoptedProjectId = useSearchParams().get("projectId");
+  const adoptedProjectId = searchParams.get("projectId");
+  // A deploy already in flight, carried in the URL (written the moment we enter
+  // `installing`) so a hard refresh mid-install RESUMES the progress view —
+  // re-attaching to the same SSE stream — instead of dropping back to the form.
+  const resumeDeploymentId = searchParams.get("deployment");
   // Bundled template is the instant fallback; the runtime catalog (overlay-fresh
   // from the API) is fetched so a repo-fresh app opens + installs without a redeploy.
   const bundledTemplate = useMemo(() => getAppTemplate(appId), [appId]);
@@ -368,15 +380,20 @@ export default function AppInstallPage() {
   // when reopening an existing draft, which already has its name.
   const [appName, setAppName] = useState(() => template?.name ?? "");
 
-  const [phase, setPhase] = useState<Phase>("form");
+  const [phase, setPhase] = useState<Phase>(resumeDeploymentId ? "installing" : "form");
   const [busy, setBusy] = useState(false);
-  const [deploymentId, setDeploymentId] = useState<string | null>(null);
+  const [deploymentId, setDeploymentId] = useState<string | null>(resumeDeploymentId);
   const [projectId, setProjectId] = useState<string | null>(adoptedProjectId);
   const [progress, setProgress] = useState(0);
   const [phaseLabel, setPhaseLabel] = useState("");
   const [liveUrl, setLiveUrl] = useState<string | null>(null);
   const [logs, setLogs] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
+  // The JSON-mapped install stepper's live state: real backend phase boundaries
+  // (images → services → app-setup → ready) and per-service statuses, both fed by
+  // SSE and replayed on reconnect. Empty object = all-pending preview.
+  const [phases, setPhases] = useState<Partial<Record<InstallPhaseId, InstallPhaseStatus>>>({});
+  const [services, setServices] = useState<ServiceStatusEvent[]>([]);
   // Validity of the install-step business fields (required + per-field rules),
   // reported by AppSettingsForm. Null when there are no install fields.
   const [formValidity, setFormValidity] = useState<FormValidity | null>(null);
@@ -453,69 +470,146 @@ export default function AppInstallPage() {
     return host ? `https://${host}` : null;
   };
 
-  // ── Clean progress poll (status only, never raw logs) ──────────────────────
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // ── Live install progress over SSE (attach to the running build) ───────────
+  // The install phase labels for the stepper header line.
+  const phaseHeaderLabel: Record<InstallPhaseId, string> = {
+    images: w.phaseImages,
+    services: w.phaseServices,
+    "app-setup": w.phaseAppSetup,
+    ready: w.phaseReady,
+  };
+
+  /** Headline URL for the done screen = the primary web endpoint. Port-only →
+   *  host:port (server host / localhost; cloud has no host binding → no link);
+   *  domain → the persisted public host. Reads the SAME derivation the poll used. */
+  const deriveLiveUrl = async (config?: {
+    publicEndpoints?: Array<{ domain?: string; customDomain?: string; domainType?: string }>;
+  }) => {
+    const primaryState = primaryHttp ? expo[endpointKey(primaryHttp)] : undefined;
+    if (primaryState?.kind === "http" && primaryState.mode === "port") {
+      const host =
+        destination?.deployTarget === "server"
+          ? destination.serverHost
+          : destination?.deployTarget === "local"
+            ? "localhost"
+            : null;
+      // Port-only reachability is the PUBLISHED host port, not the container port
+      // (they differ when the template remaps, e.g. 8203:80).
+      const reachablePort = primaryHttp ? hostPortForEndpoint(template?.services, primaryHttp) : 0;
+      setLiveUrl(host && primaryHttp ? `http://${host}:${reachablePort}` : null);
+    } else if (primaryState?.kind === "http" && primaryHttp && projectId) {
+      setLiveUrl(
+        (await persistedRouteUrl(projectId, primaryHttp)) ??
+          firstPublicHost(config?.publicEndpoints, baseDomain),
+      );
+    } else {
+      setLiveUrl(null);
+    }
+  };
+
+  // Terminal detection is resolved ONCE per install with a single authoritative
+  // `getBuildStatus` read — the SSE `complete` collapses `partial_failure` /
+  // `action_required` / `reconciling` into a plain success/failure, so the true
+  // DB status (and the precise liveUrl) comes from the read, not the stream.
+  const settledRef = useRef(false);
+  const resolveTerminal = async (fallback: { ok: boolean; message?: string }) => {
+    if (settledRef.current || !deploymentId) return;
+    settledRef.current = true;
+    let status = "";
+    let s: any = {};
+    try {
+      const res = await deployApi.getBuildStatus(deploymentId);
+      s = res?.data ?? res ?? {};
+      status = s.deploymentStatus ?? s.status ?? "";
+      // Prefer the server's full accumulated log over the streamed fragments.
+      if (typeof s.logs === "string" && s.logs.length >= logs.length) setLogs(s.logs);
+    } catch {
+      /* fall back to the SSE outcome below */
+    }
+    const failed = ["failed", "cancelled", "partial_failure", "action_required", "rejected"];
+    if (status === "ready" || (status === "" && fallback.ok)) {
+      await deriveLiveUrl(s?.config);
+      setPhase("done");
+    } else if (failed.includes(status) || (status === "" && !fallback.ok)) {
+      setErrorMsg(s.failureMessage || fallback.message || w.installFailed);
+      setPhase("error");
+    } else {
+      // Still not settled in the DB but SSE said it's over — trust the stream.
+      if (fallback.ok) {
+        await deriveLiveUrl(s?.config);
+        setPhase("done");
+      } else {
+        setErrorMsg(fallback.message || w.installFailed);
+        setPhase("error");
+      }
+    }
+  };
+
+  const build = useBuildStream({
+    callbacks: {
+      onInstallPhase: (p) => {
+        setPhases((prev) => ({ ...prev, [p.id]: p.status }));
+        if (p.status === "active") setPhaseLabel(p.label || phaseHeaderLabel[p.id]);
+      },
+      onServiceStatus: (svc) => {
+        setServices((prev) => {
+          const key = svc.serviceId || svc.serviceName;
+          const idx = prev.findIndex((x) => (x.serviceId || x.serviceName) === key);
+          if (idx === -1) return [...prev, svc];
+          const next = [...prev];
+          next[idx] = svc;
+          return next;
+        });
+      },
+      onLog: (_message, rawText) => {
+        if (rawText) setLogs((prev) => prev + rawText);
+      },
+      onProgress: (_step, pct) => {
+        if (typeof pct === "number") setProgress(pct);
+      },
+      onSuccess: () => void resolveTerminal({ ok: true }),
+      onFailure: (message) => void resolveTerminal({ ok: false, message }),
+      onCanceled: (message) => void resolveTerminal({ ok: false, message }),
+    },
+  });
+
+  // Attach to the running build whenever we're on the installing screen. A single
+  // upfront `getBuildStatus` read catches an ALREADY-settled deploy (e.g. resuming
+  // via `?deployment=` after it finished) without waiting for a stream that may be
+  // gone; otherwise we attach (startBuild=false — the build was kicked by
+  // `buildAccess`, POSTing again would start a second one) and let the SSE replay
+  // rebuild the stepper + service list + logs.
+  const connect = build.connect;
+  const disconnect = build.disconnect;
   useEffect(() => {
     if (phase !== "installing" || !deploymentId) return;
-    let stopped = false;
-    const tick = async () => {
+    settledRef.current = false;
+    let cancelled = false;
+    void (async () => {
       try {
         const res = await deployApi.getBuildStatus(deploymentId);
         const s = res?.data ?? res ?? {};
-        const status: string = s.deploymentStatus ?? s.status ?? "queued";
-        setProgress(typeof s.progress === "number" ? s.progress : 0);
-        setPhaseLabel(labelForStatus(status, w));
-        if (typeof s.logs === "string") setLogs(s.logs);
-        if (status === "ready") {
-          // Headline URL = the primary web endpoint. Port-only → host:port
-          // (server host / localhost; cloud has no host binding → no link);
-          // domain → the assigned public host.
-          const primaryState = primaryHttp ? expo[endpointKey(primaryHttp)] : undefined;
-          if (primaryState?.kind === "http" && primaryState.mode === "port") {
-            const host =
-              destination?.deployTarget === "server"
-                ? destination.serverHost
-                : destination?.deployTarget === "local"
-                  ? "localhost"
-                  : null;
-            // Port-only reachability is the PUBLISHED host port, not the
-            // container port (they differ when the template remaps, e.g. 8203:80).
-            const reachablePort = primaryHttp
-              ? hostPortForEndpoint(template?.services, primaryHttp)
-              : 0;
-            setLiveUrl(host && primaryHttp ? `http://${host}:${reachablePort}` : null);
-          } else if (primaryState?.kind === "http" && primaryHttp && projectId) {
-            setLiveUrl(
-              (await persistedRouteUrl(projectId, primaryHttp)) ??
-                firstPublicHost(s?.config?.publicEndpoints, baseDomain),
-            );
-          } else {
-            setLiveUrl(null);
-          }
-          setPhase("done");
-        } else if (
-          // Every SETTLED status. `action_required` is a failure we can name
-          // (e.g. the port was taken) — still an error for this wizard, and
-          // omitting it would leave the install polling at 2s forever.
-          ["failed", "cancelled", "partial_failure", "action_required", "rejected"].includes(status)
+        const status: string = s.deploymentStatus ?? s.status ?? "";
+        if (typeof s.progress === "number") setProgress(s.progress);
+        if (
+          ["ready", "failed", "cancelled", "partial_failure", "action_required", "rejected"].includes(
+            status,
+          )
         ) {
-          setErrorMsg(s.failureMessage || w.installFailed);
-          setPhase("error");
+          await resolveTerminal({ ok: status === "ready", message: s.failureMessage });
+          return;
         }
       } catch {
-        /* transient — keep polling */
+        /* live deploy — attach below */
       }
-    };
-    void tick();
-    pollRef.current = setInterval(() => {
-      if (!stopped) void tick();
-    }, 2000);
+      if (!cancelled) void connect(deploymentId, false);
+    })();
     return () => {
-      stopped = true;
-      if (pollRef.current) clearInterval(pollRef.current);
+      cancelled = true;
+      disconnect();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, deploymentId, baseDomain]);
+  }, [phase, deploymentId]);
 
   if (!template) return null;
 
@@ -689,6 +783,12 @@ export default function AppInstallPage() {
     setBusy(true);
     setDeploymentId(null);
     setLogs("");
+    // Reset the live stepper so a re-install starts from a clean slate.
+    setPhases({});
+    setServices([]);
+    setProgress(0);
+    setLiveUrl(null);
+    settledRef.current = false;
     // Flips true the moment a deployment is actually created. A preflight
     // failure rejects buildAccess BEFORE that, so `started` stays false and the
     // catch surfaces a toast instead of the full-screen error card.
@@ -751,7 +851,20 @@ export default function AppInstallPage() {
         dep?.data?.deployment_id ?? dep?.data?.deploymentId ?? dep?.deployment_id ?? null;
       setDeploymentId(depId);
       started = true;
-      setPhaseLabel(w.progressPreparing);
+      // Persist the deployment id in the URL so a hard refresh mid-install
+      // resumes the progress view (re-attaches to the same SSE stream) instead
+      // of dropping back to the form. Client-only; best-effort.
+      if (depId) {
+        try {
+          const url = new URL(window.location.href);
+          url.searchParams.set("deployment", depId);
+          if (pid) url.searchParams.set("projectId", pid);
+          window.history.replaceState(null, "", url.toString());
+        } catch {
+          /* resume just won't survive a reload */
+        }
+      }
+      setPhaseLabel(w.phaseQueued);
       setPhase("installing");
     } catch (err) {
       // Strip the server's "Pre-deploy checks failed:" prefix for a cleaner
@@ -800,6 +913,40 @@ export default function AppInstallPage() {
 
   // ── Progress / done / error states (shared clean progress view) ────────────
   if (phase === "installing" || phase === "done" || phase === "error") {
+    // Authored install-setup step copy for the stepper sub-list, and the app's
+    // default first-login creds for the done screen — both from the app JSON.
+    const appSetupSteps = getAppPrepareSteps(template).map((s) => ({
+      id: s.capture,
+      label: resolveLocalized(s.title, locale) || s.capture,
+    }));
+    const fl = getAppFirstLogin(template);
+    const firstLogin = fl
+      ? {
+          username: resolveLocalized(fl.username, locale) || undefined,
+          password: resolveLocalized(fl.password, locale) || undefined,
+          note: resolveLocalized(fl.note, locale) || undefined,
+        }
+      : undefined;
+    // Leaving the progress view (Retry / Back to form): drop the persisted
+    // deployment id so a subsequent refresh doesn't resume a finished/failed run.
+    const resetToForm = () => {
+      settledRef.current = false;
+      setPhases({});
+      setServices([]);
+      setLogs("");
+      setProgress(0);
+      setLiveUrl(null);
+      setErrorMsg("");
+      setDeploymentId(null);
+      try {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("deployment");
+        window.history.replaceState(null, "", url.toString());
+      } catch {
+        /* non-fatal */
+      }
+      setPhase("form");
+    };
     return (
       <CleanDeployProgressCard
         appId={appId}
@@ -812,9 +959,23 @@ export default function AppInstallPage() {
         logs={logs}
         errorMsg={errorMsg}
         deploymentId={deploymentId}
+        phases={phases}
+        services={services}
+        appSetupSteps={appSetupSteps}
+        firstLogin={firstLogin}
+        connect={
+          projectId
+            ? {
+                projectId,
+                appTemplateId: appId,
+                serverId: destination?.deployTarget === "server" ? destination.serverId : null,
+                deployTarget: destination?.deployTarget ?? null,
+              }
+            : undefined
+        }
         onGoToProject={() => projectId && router.push(`/projects/${projectId}`)}
         onViewBuild={() => deploymentId && router.push(`/build/${deploymentId}`)}
-        onRetry={() => setPhase("form")}
+        onRetry={resetToForm}
       />
     );
   }

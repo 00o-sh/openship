@@ -18,9 +18,10 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, CheckCircle2, AlertCircle, ShieldCheck, Copy, RefreshCw, Circle } from "lucide-react";
+import { Loader2, CheckCircle2, AlertCircle, ShieldCheck, Copy, RefreshCw } from "lucide-react";
 import { useModal } from "@/context/ModalContext";
 import { PromptDetails } from "@/components/import-project/PromptDetails";
+import { InstallStepper } from "@/components/deploy/InstallStepper";
 import { getApiBaseUrl, domainsApi, projectsApi, systemApi } from "@/lib/api";
 import { canReportStreamEnd, reportLostStream } from "./prepare-stream-outcome";
 
@@ -40,7 +41,9 @@ interface StreamStep {
   status: "pending" | "running" | "done" | "error";
 }
 
-/** Percentage bar + per-step checklist, shown only when the stream emits steps. */
+/** Percentage bar + per-step checklist, shown only when the stream emits steps.
+ *  The checklist is the shared `InstallStepper` (StreamStep's status union is a
+ *  subset of its `StepStatus`); the progress bar is this flow's own chrome. */
 function StepProgress({ steps }: { steps: StreamStep[] }) {
   const done = steps.filter((s) => s.status === "done").length;
   const pct = steps.length ? Math.round((done / steps.length) * 100) : 0;
@@ -52,32 +55,7 @@ function StepProgress({ steps }: { steps: StreamStep[] }) {
           style={{ width: `${pct}%` }}
         />
       </div>
-      <div className="space-y-1">
-        {steps.map((s) => (
-          <div key={s.id} className="flex items-center gap-2 text-[13px]">
-            {s.status === "done" ? (
-              <CheckCircle2 className="size-3.5 shrink-0 text-success" />
-            ) : s.status === "error" ? (
-              <AlertCircle className="size-3.5 shrink-0 text-danger" />
-            ) : s.status === "running" ? (
-              <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />
-            ) : (
-              <Circle className="size-3.5 shrink-0 text-muted-foreground/40" />
-            )}
-            <span
-              className={
-                s.status === "pending"
-                  ? "text-muted-foreground/60"
-                  : s.status === "error"
-                    ? "text-danger"
-                    : "text-foreground"
-              }
-            >
-              {s.label}
-            </span>
-          </div>
-        ))}
-      </div>
+      <InstallStepper steps={steps} />
     </div>
   );
 }

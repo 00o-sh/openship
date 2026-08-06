@@ -170,10 +170,35 @@ else
   rm -rf "$PWORK"
 fi
 
+# ── C7: npm `bin` shebang is `node`, not `sh` (Windows launcher — #460) ─────
+# npm reads the shebang of the `bin` file to generate openship.cmd/.ps1 on
+# Windows. dist/index.js is a `#!/usr/bin/env sh` polyglot on purpose; if it
+# were the `bin`, npm emits `sh.exe` calls that break every Windows install.
+# The `bin` must be dist/node-entry.js with a plain `#!/usr/bin/env node`.
+group "C7 — npm bin shebang (Windows launcher regression, #460)"
+NODE_ENTRY="$CLI_DIR/dist/node-entry.js"
+BIN_FIELD="$(cd "$CLI_DIR" && node -e 'process.stdout.write(require("./package.json").bin.openship||"")' 2>/dev/null)"
+if [ "$BIN_FIELD" != "./dist/node-entry.js" ]; then
+  fail "package.json bin.openship is '$BIN_FIELD' (expected ./dist/node-entry.js — npm would read index.js's sh polyglot)"
+elif [ ! -f "$NODE_ENTRY" ]; then
+  fail "no dist/node-entry.js — tsup Bundle 2 didn't emit the npm bin target"
+elif ! head -n1 "$NODE_ENTRY" | grep -qx '#!/usr/bin/env node'; then
+  fail "dist/node-entry.js first line is '$(head -n1 "$NODE_ENTRY")' (expected #!/usr/bin/env node — npm would emit sh.exe launchers)"
+elif head -n1 "$NODE_ENTRY" | grep -q 'env sh'; then
+  fail "dist/node-entry.js carries the sh polyglot shebang — Windows launchers will call sh.exe (#460)"
+else
+  v="$(node "$NODE_ENTRY" --version 2>&1)"
+  if [ "$?" -eq 0 ] && printf '%s' "$v" | grep -qE "$VER_RE"; then
+    pass "bin=dist/node-entry.js, shebang=#!/usr/bin/env node, --version → $v"
+  else
+    fail "node dist/node-entry.js --version failed → $v"
+  fi
+fi
+
 # ── verdict ─────────────────────────────────────────────────────────────
 echo
 if [ "$FAILED" -eq 0 ]; then
-  printf '\033[32m✔ release smoke passed — the built CLI launches (node/bun/shebang/no-node), the payload resolves standalone, and the server boots.\033[0m\n'
+  printf '\033[32m✔ release smoke passed — the built CLI launches (node/bun/shebang/no-node), the npm bin has a node shebang, the payload resolves standalone, and the server boots.\033[0m\n'
 else
   printf '\033[31m✗ release smoke FAILED — do not publish.\033[0m\n'
   exit 1

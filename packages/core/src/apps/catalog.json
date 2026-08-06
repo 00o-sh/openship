@@ -768,7 +768,10 @@
           "persistAs": {
             "key": "CONVEX_ADMIN_KEY"
           },
-          "once": true
+          "once": true,
+          "title": "Generate admin key",
+          "description": "Mint the dashboard and CLI admin key from the instance secret.",
+          "icon": "key"
         }
       ],
       "connection": {
@@ -1163,7 +1166,22 @@
           ],
           "restart": "unless-stopped"
         }
-      ]
+      ],
+      "connection": {
+        "title": "Sign in to Grafana",
+        "outputs": [
+          {
+            "id": "url",
+            "label": "URL",
+            "source": "publicUrl:grafana"
+          }
+        ],
+        "firstLogin": {
+          "username": "admin",
+          "password": "admin",
+          "note": "Change the admin password right after your first login."
+        }
+      }
     },
     {
       "available": false,

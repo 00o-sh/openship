@@ -142,6 +142,12 @@ export interface AppPrepareStep {
   /** For phase:"post-ready" — gate the command on this in-container check
    *  passing: poll `test` (via `sh -c`) every `interval` ms up to `retries`. */
   readiness?: { test: string; interval?: number; retries?: number };
+  /** Authored copy for this step in the install stepper's "app-setup" section.
+   *  Purely presentational; absent → a generic label. */
+  title?: LocalizedString;
+  description?: LocalizedString;
+  /** Optional icon hint (lucide name) for the step row. */
+  icon?: string;
 }
 
 /** An alternative labeled form of an AppOutput's value (e.g. an internal-network
@@ -231,6 +237,14 @@ export interface AppConnectionGuide {
   defaultMode?: "internal" | "public";
 }
 
+/** Static default credentials an app ships with (Grafana admin/admin). FIXED
+ *  values, not resolved from a service — so they're their own field, not outputs. */
+export interface AppFirstLogin {
+  username?: LocalizedString;
+  password?: LocalizedString;
+  note?: LocalizedString;
+}
+
 /** Post-install connection details (URLs, generated keys) shown to the user. */
 export interface AppConnection {
   title?: string;
@@ -238,6 +252,8 @@ export interface AppConnection {
   outputs: readonly AppOutput[];
   /** Opinionated handover guidance for the "Use in a project" flow. */
   guide?: AppConnectionGuide;
+  /** Default credentials to show on the install-done screen. */
+  firstLogin?: AppFirstLogin;
 }
 
 /**
@@ -441,6 +457,11 @@ export function getAppPrepareSteps(template: AppTemplate): readonly AppPrepareSt
 /** Connection details to surface after install (null when the app declares none). */
 export function getAppConnection(template: AppTemplate): AppConnection | null {
   return template.connection ?? null;
+}
+
+/** Static default credentials for the install-done screen (null when none). */
+export function getAppFirstLogin(template: AppTemplate): AppFirstLogin | null {
+  return template.connection?.firstLogin ?? null;
 }
 
 /**

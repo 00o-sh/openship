@@ -1469,176 +1469,221 @@ export async function createProjectEnvironment(
   return environmentSummary(created);
 }
 
-// ─── Git info ────────────────────────────────────────────────────────────────
+// ─── Source drift ────────────────────────────────────────────────────────────
 
 /**
- * Commit-drift check for the "your project is outdated" banner. Compares the
- * branch HEAD on GitHub to the commit the ACTIVE deployment shipped. Fetched
- * on-demand by the project page. Conservative: an unknown HEAD (API failure /
- * rate limit) or a project with no successful deploy yet reports `behind:false`
- * so we never show a false "outdated" nudge.
+ * Drift — "is what's running behind what the source offers?" — has two halves,
+ * and they have nothing in common but the comparison:
+ *
+ *   UPSTREAM ("what does the source offer?")  network. GitHub branch HEAD, the
+ *     newest release tag, a registry digest per service. Rate-limited, slow, and
+ *     no local event tells us when it changes — it can only be POLLED, which is
+ *     why `update_status` caches it and `updates:scan` refreshes it.
+ *
+ *   DEPLOYED ("what is actually running?")  local. The active deployment's row.
+ *     Free to read, and mutated by seven different code paths (deploy success,
+ *     rollback, reconcile, activate, clear, self-deploy, migrate).
+ *
+ * Only the upstream half is cached. Caching the deployed half is what produced
+ * "update available a1b2c3d → e4f5g6h" on a project whose deployment list showed
+ * it shipped e4f5g6h days earlier: the row froze mid-window, and of the seven
+ * writers only one could ever have invalidated it. Deriving it on read makes
+ * that whole class of staleness unrepresentable — no invalidation hook to
+ * forget, because there is nothing local left to invalidate.
+ *
+ * The upstream half is cached UNDER THE SOURCE IDENTITY it was polled for — a
+ * branch key, a release-source key, an image ref. Change the branch or the tag
+ * and the next read simply misses (reported as "upstream unknown", i.e. not
+ * behind) until the scan repopulates it. That's why editing a project's source
+ * needs no invalidation call either: a cache keyed by what it describes cannot
+ * be asked the wrong question.
+ *
+ * So: `resolveUpstreamDrift` (cache this) + `resolveDeployedDrift` (never cache)
+ * + `evaluateDrift` (compare). `getProjectCommitStatus` is the three composed
+ * live, for callers that want a fresh answer regardless of cost.
  */
+
 /**
- * Source-drift status for the "your deploy is behind — redeploy" dashboard
- * nudge. Dispatches on the project's source shape and returns a `mode`-tagged
- * union so the client can render the right banner:
- *   - commit  → git-backed: compares the branch HEAD sha against the deployed sha
- *   - release → release/dist: compares the newest advertised semver against the
- *               deployed release version ("new version available vX→vY")
- * Unsupported sources (local, upload, git project with no owner/repo) return
- * `{ supported:false }` and the banner stays hidden.
+ * The cacheable half. Every variant carries the source identity it was resolved
+ * for, so a cached copy can be matched against the project's current source.
+ * Commit carries the FULL sha, not a display prefix — a truncated value can't be
+ * compared.
  */
-export async function getProjectCommitStatus(
-  // Nullable so the background updates:scan (no user session) can reuse this one
-  // resolver: the git-commit branch needs GitHub auth from ctx and is skipped
-  // when absent (git projects still get checked on-demand from their page); the
-  // release/image/self branches need no ctx.
-  ctx: RequestContext | null,
-  projectId: string,
-  organizationId: string,
-) {
-  const p = await repos.project.findById(projectId);
-  assertResourceInOrg(p, "Project", organizationId, projectId);
+export type UpstreamDrift =
+  | { supported: false }
+  | {
+      supported: true;
+      mode: "commit";
+      /** `owner/repo#branch` this HEAD was read from. */
+      key: string;
+      latestSha: string | null;
+      latestMessage: string | null;
+    }
+  | {
+      supported: true;
+      mode: "release";
+      /** Fingerprint of the release source this version came from. */
+      key: string;
+      latestVersion: string | null;
+      pinned: boolean;
+    }
+  | {
+      supported: true;
+      mode: "image";
+      /** Image ref → the digest that tag resolved to. Keyed by ref, so a retagged
+       *  service is a miss rather than a comparison against another tag's digest. */
+      digestByRef: Record<string, string | null>;
+    };
 
-  if (isReleaseProvider(p.gitProvider)) {
-    return getReleaseDriftStatus(p);
-  }
+/** What `getProjectCommitStatus` (and `evaluateDrift`) hand back to callers. */
+export type DriftStatus = Awaited<ReturnType<typeof evaluateDrift>>;
 
-  // Self-app + webmail: both ship from the oblien/openship release stream but
-  // carry no releaseSource (they deploy via localPath/migration), so they'd
-  // otherwise fall through to {supported:false}. Compare the running version
-  // against the latest published release.
-  if (p.appTemplateId === "openship" || p.appTemplateId === "mail-webmail") {
-    return getSelfReleaseDrift(p);
-  }
+/** Which of the three drift shapes a project has, from local fields only. */
+export function driftMode(p: Project): "commit" | "release" | "image" {
+  if (isReleaseProvider(p.gitProvider)) return "release";
+  if (p.appTemplateId === "openship" || p.appTemplateId === "mail-webmail") return "release";
+  return p.gitOwner && p.gitRepo ? "commit" : "image";
+}
 
-  // Commit-source: only GitHub-backed projects have a remote branch HEAD to compare against.
-  if (!p.gitOwner || !p.gitRepo) {
-    // Repo-less services/app projects (n8n/Convex/…): image-tag/digest drift.
-    // Returns {supported:false} when the project has no image services.
-    return getImageDriftStatus(p);
-  }
+/** Git branch a commit-source project tracks. */
+export function projectBranch(p: Project): string {
+  return p.gitBranch?.trim() || "main";
+}
 
-  const branch = p.gitBranch?.trim() || "main";
-  const head = ctx
-    ? await getLatestCommit(ctx, p.gitOwner, p.gitRepo, branch).catch(() => null)
-    : null;
-
-  let deployedSha: string | null = null;
-  if (p.activeDeploymentId) {
-    const dep = await repos.deployment.findById(p.activeDeploymentId).catch(() => null);
-    deployedSha = dep?.commitSha ?? null;
-  }
-
-  const latestSha = head?.sha ?? null;
-  const behind = Boolean(latestSha && deployedSha && latestSha !== deployedSha);
-
-  // Is the latest commit already being deployed? If so the dashboard suppresses
-  // the "new commit available — redeploy" nudge: there's nothing to redeploy,
-  // it's in flight. (Only worth checking when we're actually behind.)
-  const latestInProgress = behind && latestSha
-    ? Boolean(await repos.deployment.findInProgressByCommit(projectId, latestSha))
-    : false;
-
-  return {
-    supported: true as const,
-    mode: "commit" as const,
-    behind,
-    latestInProgress,
-    branch,
-    latestSha,
-    latestMessage: head?.message ?? null,
-    deployedSha,
-  };
+/** Source identity for a commit project — everything that determines its HEAD. */
+export function commitSourceKey(p: Project): string {
+  return `${p.gitOwner ?? ""}/${p.gitRepo ?? ""}#${projectBranch(p)}`;
 }
 
 /**
- * Release/dist drift: compare the newest advertised version (github latest
- * release tag, or a `versionUrl`) against the deployed release version. A
- * `pinnedVersion` source has no drift — it's fixed. The self-app (openship
- * template) never deploys through the pipeline, so its `current` falls back to
- * the running API's own version.
+ * Source identity for a release project. Only the fields `resolveLatestVersion`
+ * actually consults: change any of them and the cached version is a different
+ * question's answer.
  */
-async function getReleaseDriftStatus(p: Project) {
-  const source = (p.releaseSource as ReleaseSource | null) ?? null;
-  if (!source) return { supported: false as const };
-
-  let current: string | null = null;
-  if (p.activeDeploymentId) {
-    const dep = await repos.deployment.findById(p.activeDeploymentId).catch(() => null);
-    current = dep?.releaseVersion ?? null;
-  }
-  if (!current && p.appTemplateId === "openship") {
-    current = readApiVersion();
-  }
-
-  const latest = source.pinnedVersion
-    ? source.pinnedVersion.replace(/^v/, "")
-    : await resolveLatestVersion(source);
-
-  const behind = Boolean(latest && current && compareSemver(latest, current) > 0);
-
-  const latestInProgress =
-    behind && latest
-      ? Boolean(
-          await repos.deployment
-            .findInProgressByReleaseVersion(p.id, latest)
-            .catch(() => undefined),
-        )
-      : false;
-
-  return {
-    supported: true as const,
-    mode: "release" as const,
-    behind,
-    latestInProgress,
-    latestVersion: latest,
-    currentVersion: current,
-    pinned: Boolean(source.pinnedVersion),
-  };
+export function releaseSourceKey(p: Project): string {
+  if (!isReleaseProvider(p.gitProvider)) return `self:${p.appTemplateId ?? ""}`;
+  const s = (p.releaseSource as ReleaseSource | null) ?? null;
+  if (!s) return "none";
+  return [s.mode, s.repo ?? "", s.versionUrl ?? "", s.pinnedVersion ?? ""].join("|");
 }
 
-/**
- * Self-app / webmail release drift. Both are `isApp` projects that deploy from a
- * prebuilt dist (no releaseSource), but their version tracks the running API
- * (`readApiVersion`) and their upstream is the openship release stream. Compare
- * the running version against the latest published release tag.
- */
-async function getSelfReleaseDrift(p: Project) {
-  const current = readApiVersion();
-  const latest = await resolveLatestReleaseTag(GITHUB_REPO).catch(() => null);
-  const behind = Boolean(latest && current && compareSemver(latest, current) > 0);
-  const latestInProgress =
-    behind && latest
-      ? Boolean(
-          await repos.deployment.findInProgressByReleaseVersion(p.id, latest).catch(() => undefined),
-        )
-      : false;
-  return {
-    supported: true as const,
-    mode: "release" as const,
-    behind,
-    latestInProgress,
-    latestVersion: latest,
-    currentVersion: current,
-    pinned: false,
-  };
-}
-
-/**
- * Image-tag/digest drift for repo-less services/app projects (template apps like
- * n8n/Convex). For each image-only service, compare the content digest actually
- * running (recorded on the active deployment's service_deployment row) against
- * the current digest the tag resolves to in the registry. `behind` if ANY
- * service's tag has moved. Fail-soft: a service whose latest digest can't be
- * resolved (private/unknown registry) simply reports `behind:false`.
- */
-async function getImageDriftStatus(p: Project) {
+/** Image services whose upstream digest is worth resolving (image-only, enabled). */
+async function imageServicesOf(p: Project) {
   const services = await repos.service.listByProject(p.id).catch(() => []);
-  const imageServices = services.filter((s) => s.image && !s.build && (s.enabled ?? true));
-  if (imageServices.length === 0) return { supported: false as const };
+  return services.filter((s) => s.image && !s.build && (s.enabled ?? true));
+}
 
-  const deployedByService = new Map<string, { digest?: string; ref?: string }>();
+/**
+ * Resolve the upstream half. `ctx` is only needed for the git-commit branch
+ * (GitHub auth); release/image sources need none. A null ctx no longer means
+ * "skip the check" — background sweeps pass an org-owner actor, see
+ * `updates.service`.
+ */
+export async function resolveUpstreamDrift(
+  ctx: RequestContext | null,
+  p: Project,
+): Promise<UpstreamDrift> {
+  const mode = driftMode(p);
+
+  if (mode === "release") {
+    // Self-app + webmail ship from the oblien/openship release stream but carry
+    // no releaseSource (they deploy via localPath/migration), so they'd otherwise
+    // fall through to unsupported.
+    if (!isReleaseProvider(p.gitProvider)) {
+      const latestVersion = await resolveLatestReleaseTag(GITHUB_REPO).catch(() => null);
+      return {
+        supported: true,
+        mode: "release",
+        key: releaseSourceKey(p),
+        latestVersion,
+        pinned: false,
+      };
+    }
+    const source = (p.releaseSource as ReleaseSource | null) ?? null;
+    if (!source) return { supported: false };
+    const latestVersion = source.pinnedVersion
+      ? source.pinnedVersion.replace(/^v/, "")
+      : await resolveLatestVersion(source);
+    return {
+      supported: true,
+      mode: "release",
+      key: releaseSourceKey(p),
+      latestVersion,
+      pinned: Boolean(source.pinnedVersion),
+    };
+  }
+
+  if (mode === "image") {
+    // Repo-less services/app projects (n8n/Convex/…): image-tag/digest drift.
+    const imageServices = await imageServicesOf(p);
+    if (imageServices.length === 0) return { supported: false };
+    const refs = [...new Set(imageServices.map((s) => s.image!))];
+    const digestByRef: Record<string, string | null> = {};
+    await Promise.all(
+      refs.map(async (ref) => {
+        digestByRef[ref] = await resolveLatestImageDigest(ref).catch(() => null);
+      }),
+    );
+    return { supported: true, mode: "image", digestByRef };
+  }
+
+  const head = ctx
+    ? await getLatestCommit(ctx, p.gitOwner!, p.gitRepo!, projectBranch(p)).catch(() => null)
+    : null;
+  return {
+    supported: true,
+    mode: "commit",
+    key: commitSourceKey(p),
+    latestSha: head?.sha ?? null,
+    latestMessage: head?.message ?? null,
+  };
+}
+
+/** The live half, per mode. Local reads only — cheap enough to do on every read. */
+type DeployedDrift =
+  | { mode: "commit"; deployedSha: string | null }
+  | { mode: "release"; currentVersion: string | null }
+  | {
+      mode: "image";
+      deployedByService: Map<string, { ref?: string; digest?: string }>;
+    };
+
+/**
+ * What's actually running. Mirrors `resolveUpstreamDrift`'s dispatch so the two
+ * halves always describe the same source shape.
+ */
+export async function resolveDeployedDrift(
+  p: Project,
+  mode: "commit" | "release" | "image",
+): Promise<DeployedDrift> {
+  if (mode === "commit") {
+    let deployedSha: string | null = null;
+    if (p.activeDeploymentId) {
+      const dep = await repos.deployment.findById(p.activeDeploymentId).catch(() => null);
+      deployedSha = dep?.commitSha ?? null;
+    }
+    return { mode: "commit", deployedSha };
+  }
+
+  if (mode === "release") {
+    // Self-app/webmail without a releaseSource track the running API's own
+    // version — they never ship a releaseVersion through the pipeline.
+    if (
+      !isReleaseProvider(p.gitProvider) &&
+      (p.appTemplateId === "openship" || p.appTemplateId === "mail-webmail")
+    ) {
+      return { mode: "release", currentVersion: readApiVersion() };
+    }
+    let currentVersion: string | null = null;
+    if (p.activeDeploymentId) {
+      const dep = await repos.deployment.findById(p.activeDeploymentId).catch(() => null);
+      currentVersion = dep?.releaseVersion ?? null;
+    }
+    if (!currentVersion && p.appTemplateId === "openship") currentVersion = readApiVersion();
+    return { mode: "release", currentVersion };
+  }
+
+  const deployedByService = new Map<string, { ref?: string; digest?: string }>();
   if (p.activeDeploymentId) {
     const sds = await repos.service.listByDeployment(p.activeDeploymentId).catch(() => []);
     for (const sd of sds) {
@@ -1648,40 +1693,138 @@ async function getImageDriftStatus(p: Project) {
       });
     }
   }
+  return { mode: "image", deployedByService };
+}
 
-  const serviceStatuses = await Promise.all(
-    imageServices.map(async (svc) => {
-      const deployed = deployedByService.get(svc.id);
-      const latestDigest = await resolveLatestImageDigest(svc.image!).catch(() => null);
+/**
+ * Compare a (possibly cached) upstream state against the live deployed state.
+ *
+ * Conservative by design: an unresolvable upstream (API failure, rate limit,
+ * private registry) or a project with no successful deploy reports
+ * `behind:false`, so we never show an "outdated" nudge we can't substantiate.
+ */
+export async function evaluateDrift(p: Project, upstream: UpstreamDrift) {
+  if (!upstream.supported) return { supported: false as const };
+  // A cached upstream describes the source it was polled from. If the project has
+  // since been repointed (different repo, branch, release source), it answers a
+  // question we're no longer asking — treat it as unknown, not as drift.
+  if (upstream.mode !== driftMode(p)) return { supported: false as const };
+
+  const deployed = await resolveDeployedDrift(p, upstream.mode);
+
+  if (upstream.mode === "commit" && deployed.mode === "commit") {
+    const latestSha = upstream.key === commitSourceKey(p) ? upstream.latestSha : null;
+    const { deployedSha } = deployed;
+    const behind = Boolean(latestSha && deployedSha && latestSha !== deployedSha);
+    // Is the latest commit already deploying? Then there's nothing to redeploy —
+    // it's in flight, so the nudge is suppressed. Computed live, which is why
+    // pressing Update quiets every surface immediately.
+    const latestInProgress =
+      behind && latestSha
+        ? Boolean(await repos.deployment.findInProgressByCommit(p.id, latestSha).catch(() => undefined))
+        : false;
+    return {
+      supported: true as const,
+      mode: "commit" as const,
+      behind,
+      latestInProgress,
+      branch: projectBranch(p),
+      latestSha,
+      latestMessage: latestSha ? upstream.latestMessage : null,
+      deployedSha,
+    };
+  }
+
+  if (upstream.mode === "release" && deployed.mode === "release") {
+    const latest = upstream.key === releaseSourceKey(p) ? upstream.latestVersion : null;
+    const current = deployed.currentVersion;
+    const behind = Boolean(latest && current && compareSemver(latest, current) > 0);
+    const latestInProgress =
+      behind && latest
+        ? Boolean(
+            await repos.deployment
+              .findInProgressByReleaseVersion(p.id, latest)
+              .catch(() => undefined),
+          )
+        : false;
+    return {
+      supported: true as const,
+      mode: "release" as const,
+      behind,
+      latestInProgress,
+      latestVersion: latest,
+      currentVersion: current,
+      pinned: upstream.pinned,
+    };
+  }
+
+  if (upstream.mode === "image" && deployed.mode === "image") {
+    // The live service list, not the polled one: a service added, removed or
+    // retagged since the poll must be reflected now, not at the next scan.
+    const imageServices = await imageServicesOf(p);
+    if (imageServices.length === 0) return { supported: false as const };
+
+    const services = imageServices.map((svc) => {
+      const ref = svc.image!;
+      const running = deployed.deployedByService.get(svc.id);
+      // Keyed by the service's CURRENT ref — a retag since the poll is a miss.
+      const latestDigest = Object.hasOwn(upstream.digestByRef, ref)
+        ? upstream.digestByRef[ref]
+        : null;
       const current: UpdatableIdentity = {
         kind: "image",
-        ref: deployed?.ref ?? svc.image!,
-        digest: deployed?.digest,
+        ref: running?.ref ?? ref,
+        digest: running?.digest,
       };
       const latest: UpdatableIdentity = {
         kind: "image",
-        ref: svc.image!,
+        ref,
         digest: latestDigest ?? undefined,
       };
       return {
         serviceId: svc.id,
         name: svc.name,
-        ref: svc.image!,
-        deployedDigest: deployed?.digest ?? null,
+        ref,
+        deployedDigest: running?.digest ?? null,
         latestDigest,
+        // Fail-soft: a digest we couldn't resolve is not evidence of drift.
         behind: latestDigest ? isBehind(current, latest) : false,
       };
-    }),
-  );
+    });
+    return {
+      supported: true as const,
+      mode: "image" as const,
+      behind: services.some((s) => s.behind),
+      latestInProgress: false,
+      services,
+    };
+  }
 
-  return {
-    supported: true as const,
-    mode: "image" as const,
-    behind: serviceStatuses.some((s) => s.behind),
-    latestInProgress: false,
-    services: serviceStatuses,
-  };
+  return { supported: false as const };
 }
+
+/**
+ * Live source-drift status for the "your deploy is behind — redeploy" nudge,
+ * fetched on demand by the project page. Both halves resolved fresh; returns a
+ * `mode`-tagged union so the client can render the right banner:
+ *   - commit  → compares the branch HEAD sha against the deployed sha
+ *   - release → compares the newest advertised semver against the deployed version
+ *   - image   → compares each service's registry digest against the running one
+ * Unsupported sources (local, upload, git project with no owner/repo, no image
+ * services) return `{ supported:false }` and the banner stays hidden.
+ */
+export async function getProjectCommitStatus(
+  ctx: RequestContext | null,
+  projectId: string,
+  organizationId: string,
+) {
+  const p = await repos.project.findById(projectId);
+  assertResourceInOrg(p, "Project", organizationId, projectId);
+  const upstream = await resolveUpstreamDrift(ctx, p);
+  return evaluateDrift(p, upstream);
+}
+
+// ─── Git info ────────────────────────────────────────────────────────────────
 
 export async function getGitInfo(projectId: string, organizationId: string) {
   const p = await repos.project.findById(projectId);
@@ -1800,7 +1943,13 @@ export async function listProjectDeployments(
   const p = await repos.project.findById(projectId);
   assertResourceInOrg(p, "Project", organizationId, projectId);
 
-  return repos.deployment.listByProject(projectId, opts);
+  const result = await repos.deployment.listByProject(projectId, opts);
+  // Project favicon → the dashboard uses it as each row's logo instead of the
+  // framework/Docker glyph (twin of deploymentService.listDeployments).
+  return {
+    ...result,
+    rows: result.rows.map((d) => ({ ...d, favicon: p.favicon ?? null })),
+  };
 }
 
 // ─── Deployment session ──────────────────────────────────────────────────────

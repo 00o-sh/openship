@@ -99,7 +99,13 @@ export async function listDeployments(
     const activeId = project.activeDeploymentId;
     return {
       ...result,
-      rows: result.rows.map((d) => ({ ...d, isActive: d.id === activeId })),
+      rows: result.rows.map((d) => ({
+        ...d,
+        isActive: d.id === activeId,
+        // Project favicon → the dashboard uses it as the row's logo instead
+        // of the framework/Docker glyph.
+        favicon: project.favicon ?? null,
+      })),
     };
   }
 
@@ -112,10 +118,18 @@ export async function listDeployments(
   });
 
   const projectIds = [...new Set(result.rows.map((d) => d.projectId))];
-  const projectMap = new Map<string, { name: string; activeDeploymentId: string | null }>();
+  const projectMap = new Map<
+    string,
+    { name: string; activeDeploymentId: string | null; favicon: string | null }
+  >();
   for (const pid of projectIds) {
     const p = await repos.project.findById(pid);
-    if (p) projectMap.set(pid, { name: p.name, activeDeploymentId: p.activeDeploymentId });
+    if (p)
+      projectMap.set(pid, {
+        name: p.name,
+        activeDeploymentId: p.activeDeploymentId,
+        favicon: p.favicon ?? null,
+      });
   }
 
   const enriched = result.rows.map((d) => {
@@ -124,6 +138,8 @@ export async function listDeployments(
       ...d,
       projectName: proj?.name ?? "Unknown",
       isActive: proj?.activeDeploymentId === d.id,
+      // Project favicon → dashboard row logo (see listByProject above).
+      favicon: proj?.favicon ?? null,
     };
   });
 
