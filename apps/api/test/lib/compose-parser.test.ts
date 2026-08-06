@@ -603,8 +603,9 @@ services:
   });
 
   it("throws on invalid YAML (callers wrap in try/catch)", () => {
-    // parseComposeFile is expected to throw on syntax errors. The caller in
-    // prepare.service.ts swallows the error and continues without services.
+    // An unusable FILE is the only thing parseComposeFile throws for — a missing
+    // variable value is reported, not thrown (#472). prepare.service.ts turns this
+    // one into "Could not parse the Docker Compose file: …".
     expect(() => parseComposeFile(`this: is: not: valid: yaml`)).toThrow();
   });
 
@@ -641,54 +642,102 @@ services:
 });
 
 describe("parseComposeFile - mandatory variable operators (:? and ?)", () => {
-  // Compose treats these as a hard stop, and the thrown message is the author's
-  // own word after the operator. Getting this wrong means a deploy silently
-  // proceeds with an empty image tag / port instead of telling the user which
-  // variable they forgot.
+  // #472: these are a hard stop for `docker compose up`, but this parser only
+  // ever INSPECTS a file — during an import scan the user hasn't supplied any
+  // values yet. Throwing took the whole repo load down ("Failed to Load
+  // Repository: Could not parse the Docker Compose file: set POSTGRES_PASSWORD
+  // in .env") with no way to continue, so an unsatisfied mandatory variable is
+  // now REPORTED: "" like any other unset variable, flagged `required` per key,
+  // and listed in `missingRequired` for the caller to prompt for.
   const compose = (expr: string) => `
 services:
   app:
     image: node:\${${expr}}
 `;
 
-  it(":? throws when the variable is unset", () => {
-    expect(() => parseComposeFile(compose("NODE_VERSION:?NODE_VERSION is required"))).toThrow(
-      "NODE_VERSION is required",
-    );
+  it(":? reports instead of throwing when the variable is unset", () => {
+    const parsed = parseComposeFile(compose("NODE_VERSION:?NODE_VERSION is required"));
+    expect(parsed.services[0]?.image).toBe("node:");
+    expect(parsed.missingRequired).toEqual([
+      { variable: "NODE_VERSION", message: "NODE_VERSION is required" },
+    ]);
   });
 
-  it(":? throws when the variable is set but empty", () => {
-    expect(() =>
-      parseComposeFile(compose("NODE_VERSION:?NODE_VERSION is required"), {
-        envFileContent: "NODE_VERSION=\n",
-      }),
-    ).toThrow("NODE_VERSION is required");
+  it(":? reports when the variable is set but empty", () => {
+    const parsed = parseComposeFile(compose("NODE_VERSION:?NODE_VERSION is required"), {
+      envFileContent: "NODE_VERSION=\n",
+    });
+    expect(parsed.missingRequired.map((m) => m.variable)).toEqual(["NODE_VERSION"]);
   });
 
-  it(":? passes the value through when non-empty", () => {
+  it(":? passes the value through when non-empty, reporting nothing", () => {
     const parsed = parseComposeFile(compose("NODE_VERSION:?NODE_VERSION is required"), {
       envFileContent: "NODE_VERSION=22\n",
     });
     expect(parsed.services[0]?.image).toBe("node:22");
+    expect(parsed.missingRequired).toEqual([]);
   });
 
-  it("? throws only when the variable is unset", () => {
-    expect(() => parseComposeFile(compose("NODE_VERSION?NODE_VERSION is required"))).toThrow(
-      "NODE_VERSION is required",
-    );
+  it("? reports only when the variable is unset", () => {
+    expect(
+      parseComposeFile(compose("NODE_VERSION?NODE_VERSION is required")).missingRequired,
+    ).toEqual([{ variable: "NODE_VERSION", message: "NODE_VERSION is required" }]);
   });
 
-  it("? accepts an explicitly empty value (set-but-empty is not an error)", () => {
+  it("? accepts an explicitly empty value (set-but-empty is not missing)", () => {
     const parsed = parseComposeFile(compose("NODE_VERSION?NODE_VERSION is required"), {
       envFileContent: "NODE_VERSION=\n",
     });
     expect(parsed.services[0]?.image).toBe("node:");
+    expect(parsed.missingRequired).toEqual([]);
   });
 
-  it("reports the author's message verbatim, punctuation and all", () => {
-    expect(() => parseComposeFile(compose("DB_URL:?DB_URL must be set (see README)"))).toThrow(
-      "DB_URL must be set (see README)",
-    );
+  it("keeps the author's message verbatim, punctuation and all", () => {
+    expect(parseComposeFile(compose("DB_URL:?DB_URL must be set (see README)")).missingRequired)
+      .toEqual([{ variable: "DB_URL", message: "DB_URL must be set (see README)" }]);
+  });
+
+  it("flags the env row as required + missing so the wizard can prompt for it", () => {
+    const parsed = parseComposeFile(`
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: \${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+`);
+    expect(parsed.services[0]?.environment.POSTGRES_PASSWORD).toBe("");
+    expect(parsed.services[0]?.environmentMeta?.POSTGRES_PASSWORD).toMatchObject({
+      source: "missing",
+      variable: "POSTGRES_PASSWORD",
+      required: true,
+    });
+    expect(parsed.missingRequired).toEqual([
+      { variable: "POSTGRES_PASSWORD", message: "set POSTGRES_PASSWORD in .env" },
+    ]);
+  });
+
+  it("reports each required variable once, however many services demand it", () => {
+    const parsed = parseComposeFile(`
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: \${DB_PASSWORD:?needed}
+  api:
+    image: api:latest
+    environment:
+      DATABASE_PASSWORD: \${DB_PASSWORD:?needed}
+      API_KEY: \${API_KEY:?also needed}
+`);
+    expect(parsed.missingRequired.map((m) => m.variable)).toEqual(["DB_PASSWORD", "API_KEY"]);
+  });
+
+  it("satisfies a required variable from the caller-supplied env (#383)", () => {
+    const parsed = parseComposeFile(compose("NODE_VERSION:?required"), {
+      env: { NODE_VERSION: "24" },
+    });
+    expect(parsed.services[0]?.image).toBe("node:24");
+    expect(parsed.missingRequired).toEqual([]);
   });
 });
 
@@ -736,10 +785,12 @@ services:
     expect(value("${A:-}}")).toBe("}");
   });
 
-  it("interpolates a nested variable inside a :? message", () => {
-    expect(() => parseComposeFile(env("${A:?need ${B}}"), { envFileContent: "B=bv\n" })).toThrow(
-      "need bv",
-    );
+  it("reports a :? message verbatim, WITHOUT interpolating it", () => {
+    // The message rides out to the client in a scan response, which is masked
+    // precisely so env values can't. Interpolating `${B}` here would smuggle one
+    // through the one field nobody thinks of as value-bearing.
+    const parsed = parseComposeFile(env("${A:?need ${B}}"), { envFileContent: "B=bv\n" });
+    expect(parsed.missingRequired).toEqual([{ variable: "A", message: "need ${B}" }]);
   });
 
   it("reports the outer variable in environmentMeta for a nested default", () => {

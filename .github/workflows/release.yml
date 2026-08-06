@@ -242,6 +242,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: openship-cli-release
+          # .cli-payload is a hidden dir (leading dot); upload-artifact excludes
+          # hidden files by default, so without this the tarball is silently
+          # dropped ("No files were found") and the release ships no CLI payload.
+          include-hidden-files: true
           path: |
             apps/cli/.cli-payload/openship-cli-*.tar.gz
             apps/cli/.cli-payload/openship-cli-*.tar.gz.sha256

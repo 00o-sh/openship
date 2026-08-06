@@ -8,7 +8,12 @@
 import * as githubService from "../github/github.service";
 import type { RequestContext } from "../../lib/request-context";
 import { MANIFEST_FILES, type RepoFile, type StackResult } from "../../lib/stack-detector";
-import { parseComposeEnvFile, parseComposeFile, type ComposeService } from "../../lib/compose-parser";
+import {
+  parseComposeEnvFile,
+  parseComposeFile,
+  type ComposeMissingVariable,
+  type ComposeService,
+} from "../../lib/compose-parser";
 import { maskEnv, maskScanService } from "../../lib/secret-env";
 import {
   applyWorkspaceContext,
@@ -203,6 +208,9 @@ export interface ProjectInfo {
   volumes?: string[];
   port: number;
   services?: ComposeService[];
+  /** Compose variables the file marks mandatory that no `.env`/caller value
+   *  satisfied — the wizard's list to prompt for. Absent when there are none. */
+  missingRequiredEnv?: ComposeMissingVariable[];
   monorepoApps?: MonorepoApp[];
   monorepoWorkspace?: MonorepoWorkspace;
   rootEnv?: Record<string, string>;
@@ -465,6 +473,7 @@ export function projectInfoToScanResponse(result: ProjectInfo) {
     // deploy pipeline recovers the real values by re-parsing the source, and the
     // wizard reveals them on demand via the write-gated reveal endpoint.
     services: (result.services ?? []).map(maskScanService),
+    ...(result.missingRequiredEnv && { missingRequiredEnv: result.missingRequiredEnv }),
     // Declared-overlay fields (openship.json) — omitted from the response when
     // absent so a repo without the file yields the exact same payload as before.
     ...(result.productionMode && { productionMode: result.productionMode }),
@@ -794,6 +803,7 @@ function toProjectInfo(
   const rootEnv = composeEnvContent ? parseComposeEnvFile(composeEnvContent) : {};
 
   let services: ComposeService[] | undefined;
+  let missingRequiredEnv: ComposeMissingVariable[] | undefined;
   if (composeContent && (opts?.declaredCompose || stack.projectType === "services")) {
     try {
       const parsed = parseComposeFile(composeContent, {
@@ -801,8 +811,13 @@ function toProjectInfo(
         env: opts?.env,
       });
       services = parsed.services;
+      // Values the file demands (`${VAR:?…}`) that nothing here supplied. NOT an
+      // error: the scan runs before the user has filled the wizard's env form, so
+      // this is the list to prompt for, not a reason to refuse the repo (#472).
+      if (parsed.missingRequired.length > 0) missingRequiredEnv = parsed.missingRequired;
     } catch (err) {
-      // Surface the broken file. Swallowing it returns a services project with
+      // Surface the broken file — an unusable file (invalid YAML), which is all
+      // the parser throws for now. Swallowing it returns a services project with
       // ZERO services — the wizard then shows nothing to deploy and no reason
       // why (issue #339). True whether the path was declared or detected: we
       // only parse when compose IS this root's stack.
@@ -855,6 +870,7 @@ function toProjectInfo(
     productionPaths: stack.productionPaths,
     port: stack.port,
     ...(services && { services }),
+    ...(missingRequiredEnv && { missingRequiredEnv }),
     ...(isMonorepo && monorepo
       ? { monorepoApps: monorepo.apps, monorepoWorkspace: monorepo.workspace }
       : {}),

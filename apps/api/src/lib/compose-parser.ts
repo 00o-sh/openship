@@ -53,6 +53,20 @@ export interface ComposeParseResult {
   services: ComposeService[];
   volumes: string[];
   networks: string[];
+  /**
+   * Variables the file marks mandatory (`${VAR:?msg}` / `${VAR?msg}`) that no
+   * `.env` or caller value satisfied. Reported, never thrown — see
+   * {@link parseComposeFile}.
+   */
+  missingRequired: ComposeMissingVariable[];
+}
+
+/** A mandatory compose variable with no value yet. */
+export interface ComposeMissingVariable {
+  variable: string;
+  /** The author's own word after `:?`, VERBATIM — never interpolated, so a
+   *  nested `${SECRET}` in the message can't ride out through a scan response. */
+  message?: string;
 }
 
 export interface ComposeEnvironmentMeta {
@@ -61,6 +75,9 @@ export interface ComposeEnvironmentMeta {
   defaultValue?: string;
   resolvedValue: string;
   expression?: string;
+  /** The file declares this one mandatory (`:?` / `?`). Only set when it also
+   *  came back unresolved, i.e. alongside `source: "missing"`. */
+  required?: boolean;
 }
 
 export interface ComposeParseOptions {
@@ -72,6 +89,20 @@ export interface ComposeParseOptions {
 
 // ─── Parser ──────────────────────────────────────────────────────────────────
 
+/**
+ * Parse a compose file. Throws ONLY when the file itself is unusable (invalid
+ * YAML) — never because a variable has no value.
+ *
+ * A mandatory-variable operator (`${VAR:?msg}`) is a hard stop for
+ * `docker compose up`, but every caller here is INSPECTING a file (import scan,
+ * server migration, redeploy drift) at a point where the user hasn't supplied
+ * values yet: that's the whole reason the wizard shows an env form. Throwing
+ * there took the entire repo load down with "Could not parse the Docker Compose
+ * file: set POSTGRES_PASSWORD in .env" (#472) and left no way forward. So an
+ * unsatisfied mandatory variable resolves to "" like any other unset one, marked
+ * `required` in `environmentMeta` (the wizard's "Needs value" state) and listed
+ * in `missingRequired`.
+ */
 export function parseComposeFile(content: string, options: ComposeParseOptions = {}): ComposeParseResult {
   // `merge: true` is required, not cosmetic: the parser defaults to YAML 1.2,
   // where `<<` is an ordinary key. Compose files that hoist shared config into
@@ -80,10 +111,12 @@ export function parseComposeFile(content: string, options: ComposeParseOptions =
   const doc = parseYaml(content, { merge: true });
 
   if (!doc || typeof doc !== "object") {
-    return { services: [], volumes: [], networks: [] };
+    return { services: [], volumes: [], networks: [], missingRequired: [] };
   }
 
   const interpolationEnv = buildInterpolationEnv(options);
+  const missingRequired = new Map<string, string | undefined>();
+  missingRequiredSinks.set(interpolationEnv, missingRequired);
   const rawServices = doc.services ?? {};
   const services: ComposeService[] = [];
 
@@ -113,7 +146,36 @@ export function parseComposeFile(content: string, options: ComposeParseOptions =
   const volumes = doc.volumes ? Object.keys(doc.volumes) : [];
   const networks = doc.networks ? Object.keys(doc.networks) : [];
 
-  return { services, volumes, networks };
+  return {
+    services,
+    volumes,
+    networks,
+    missingRequired: [...missingRequired].map(([variable, message]) => ({
+      variable,
+      ...(message && { message }),
+    })),
+  };
+}
+
+/**
+ * Where {@link resolveInterpolationExpression} reports unsatisfied mandatory
+ * variables. Keyed by the interpolation env object of the parse that's running,
+ * so a sink is scoped to one `parseComposeFile` call and there is no global state
+ * to reset — a resolver reached with any other env record (`.env` self-expansion
+ * in `parseComposeEnvFile`) simply has nowhere to report, which is fine.
+ */
+const missingRequiredSinks = new WeakMap<Record<string, string>, Map<string, string | undefined>>();
+
+function reportMissingRequired(
+  key: string,
+  rawWord: string,
+  env: Record<string, string>,
+): { value: string; source: "missing"; variable: string; required: true } {
+  const sink = missingRequiredSinks.get(env);
+  // First mention wins: the same variable is often required in several services
+  // and the first message is as good as the last.
+  if (sink && !sink.has(key)) sink.set(key, rawWord.trim() || undefined);
+  return { value: "", source: "missing", variable: key, required: true };
 }
 
 // ─── Field parsers ───────────────────────────────────────────────────────────
@@ -583,6 +645,7 @@ function resolveComposeValue(
         defaultValue: resolved.defaultValue,
         resolvedValue: resolved.value,
         expression: trimmed,
+        ...(resolved.required && { required: true }),
       },
     };
   }
@@ -635,7 +698,13 @@ function resolveBareEnvironmentKey(
 function resolveInterpolationExpression(
   expression: string,
   env: Record<string, string>,
-): { value: string; source: ComposeEnvironmentMeta["source"]; variable?: string; defaultValue?: string } {
+): {
+  value: string;
+  source: ComposeEnvironmentMeta["source"];
+  variable?: string;
+  defaultValue?: string;
+  required?: boolean;
+} {
   const match = expression.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-+?])(.*))?$/s);
   if (!match) return { value: "", source: "missing" };
 
@@ -662,10 +731,10 @@ function resolveInterpolationExpression(
       }
     case ":?":
       if (isNonEmpty) return { value, source: "env-file", variable: key };
-      throw new Error(word());
+      return reportMissingRequired(key, rawWord, env);
     case "?":
       if (hasValue) return { value, source: "env-file", variable: key };
-      throw new Error(word());
+      return reportMissingRequired(key, rawWord, env);
     case ":+":
       if (!isNonEmpty) return { value: "", source: "missing", variable: key };
       {

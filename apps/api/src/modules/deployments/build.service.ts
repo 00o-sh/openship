@@ -496,7 +496,10 @@ async function reconcileComposeDrift(
     });
     const services = info.services ?? [];
     if (services.length === 0) return;
-    const { driftedNames } = await repos.service.reconcileFromCompose(project.id, services);
+    const { driftedNames } = await repos.service.reconcileFromCompose(
+      project.id,
+      keepUnresolvedEnv(services, composeRows),
+    );
     if (driftedNames.length > 0) {
       console.log(
         `[compose-drift] ${project.id}: kept user edits on ${driftedNames.join(", ")} (pending review)`,
@@ -505,6 +508,45 @@ async function reconcileComposeDrift(
   } catch (err) {
     console.warn(`[compose-drift] reconcile skipped for ${project.id}:`, err);
   }
+}
+
+/**
+ * A re-parse of the repo's compose resolves `${DB_PASSWORD}` against the repo's
+ * own `.env` — which for a secret is exactly the file that ISN'T committed, so it
+ * comes back "". Handing that to the 3-way merge reads as "upstream cleared this
+ * value" and, on an unedited row, auto-applies it: the password the user typed in
+ * the wizard is wiped on the next push deploy.
+ *
+ * So for env keys whose value came from a variable the parse could NOT resolve,
+ * keep the stored row's value. The key stays present (dropping it would delete
+ * the variable from the container instead), and a real upstream edit — a new key,
+ * a changed literal, a different `${VAR:-default}` — still drifts normally.
+ */
+function keepUnresolvedEnv<
+  T extends {
+    name: string;
+    environment?: Record<string, string>;
+    environmentMeta?: Record<string, { source?: string }>;
+  },
+>(parsed: T[], stored: { name: string; environment?: unknown }[]): T[] {
+  const storedByName = new Map(
+    stored.map((row) => [row.name, (row.environment as Record<string, string> | null) ?? {}]),
+  );
+  return parsed.map((svc) => {
+    const meta = svc.environmentMeta;
+    if (!meta || !svc.environment) return svc;
+    const storedEnv = storedByName.get(svc.name);
+    if (!storedEnv) return svc; // new upstream service — nothing to preserve
+    let patched: Record<string, string> | undefined;
+    for (const [key, value] of Object.entries(svc.environment)) {
+      if (value !== "" || meta[key]?.source !== "missing") continue;
+      const kept = storedEnv[key];
+      if (!kept) continue;
+      patched ??= { ...svc.environment };
+      patched[key] = kept;
+    }
+    return patched ? { ...svc, environment: patched } : svc;
+  });
 }
 
 /**

@@ -12,7 +12,7 @@ describe("resolveProjectInfo", () => {
     await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
-  it("reports missing required Compose variables instead of returning no services", async () => {
+  it("reports a required Compose variable as a value to collect, not a load failure", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "openship-prepare-"));
     tempDirs.push(tempDir);
 
@@ -27,9 +27,19 @@ describe("resolveProjectInfo", () => {
       ].join("\n"),
     );
 
-    await expect(resolveProjectInfo({ source: "local", path: tempDir })).rejects.toThrow(
-      "Could not parse the Docker Compose file: Set API_PASSWORD",
-    );
+    // #472: this used to throw, so the wizard showed "Failed to Load Repository"
+    // and the project could never be imported at all — for a file whose only
+    // problem is a value the wizard exists to ask for.
+    const info = await resolveProjectInfo({ source: "local", path: tempDir });
+
+    expect(info.services?.map((s) => s.name)).toEqual(["web"]);
+    expect(info.services?.[0]?.environmentMeta?.API_PASSWORD).toMatchObject({
+      source: "missing",
+      required: true,
+    });
+    expect(info.missingRequiredEnv).toEqual([
+      { variable: "API_PASSWORD", message: "Set API_PASSWORD" },
+    ]);
   });
 
   it("interpolates required Compose variables from the configured deploy env", async () => {

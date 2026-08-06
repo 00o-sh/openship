@@ -77,6 +77,9 @@ export interface PrepareComposeService {
       defaultValue?: string;
       resolvedValue: string;
       expression?: string;
+      /** The compose file marks this one mandatory (`${VAR:?…}`) and it has no
+       *  value yet — always alongside `source: "missing"`. */
+      required?: boolean;
     }
   >;
   volumes: string[];

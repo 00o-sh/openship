@@ -4,13 +4,9 @@ on:
   pull_request: {}
   push:
     branches: [main]
-    # A tag is what actually ships; the image-build E2E runs here (see the
-    # e2e-docker matrix) so a release is proven restorable before it goes out.
+    # A tag is what actually ships; the e2e-docker job runs on tags (see its
+    # `if` gate) so a release is proven restorable before it goes out.
     tags: ["v*"]
-  # Off-the-hour on purpose: shared-runner Docker Hub pulls are rate-limited by
-  # IP, and :00 is when everyone else's nightly fires.
-  schedule:
-    - cron: "37 4 * * *"
   workflow_dispatch: {}
 
 # One in-flight run per ref. PR pushes cancel their predecessor — nobody reads
@@ -97,31 +93,28 @@ jobs:
   # Rollback and restore against a REAL Docker daemon. This is the only job that
   # proves those paths work at all; every other test in the repo mocks the runtime.
   #
+  # MANUAL by design: runs only on a manual `workflow_dispatch` and on release
+  # tag pushes (v*) — never on main pushes or PRs, which stay fast (typecheck +
+  # tests). The tag run is the release-restorability gate.
+  #
   # `RUN_DOCKER_E2E=1` is what makes it honest: without it the suite skips when no
   # daemon answers, which is exactly how these cases sat green-and-unrun for months.
   # With it, an unreachable daemon fails in `beforeAll` instead of reporting skipped.
   #
-  # Split by cost rather than trigger-gated as a whole, because "run the cheap
-  # proof on every PR" and "don't pull a Node base image and run a real docker
-  # build on every push" are both true. `fast` is every daemon-level and
-  # full-cycle case (~5 min); `heavy` is rollback-build-restore alone (~225s cold,
-  # and fileParallelism is off, so it holds the whole suite up). One job
-  # definition, two parallel runs when heavy is warranted — see E2E_SCOPE in
+  # `fast` is every daemon-level and full-cycle case (~5 min); `heavy` is
+  # rollback-build-restore alone (~225s cold, and fileParallelism is off, so it
+  # holds the whole suite up). Both run here — see E2E_SCOPE in
   # apps/api/vitest.e2e.config.ts.
-  #
-  # If main is ever branch-protected, require "E2E (real Docker, fast)" and NOT
-  # the heavy one: heavy doesn't run on PRs, and a required check that never
-  # reports is the same deadlock as a path-filtered one.
   e2e-docker:
     name: E2E (real Docker, ${{ matrix.scope }})
+    # Manual + release tags only. Never on main pushes or PRs.
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        # Kept on one line: the whole scalar has to be a single expression for
-        # the matrix to receive an array rather than a string.
-        scope: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) && fromJSON('["fast","heavy"]') || fromJSON('["fast"]') }}
+        scope: [fast, heavy]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -148,21 +141,6 @@ jobs:
         run: |
           docker info
           docker version
-
-      # These tests pull alpine/busybox/node from Docker Hub, and hosted runners
-      # share outbound IPs — anonymous pulls hit `toomanyrequests` as a function
-      # of other people's traffic, which reads as a flaky rollback test. An
-      # authenticated pull is quota'd per account instead.
-      #
-      # No such secret exists in this repo yet (docker-images.yml only logs into
-      # GHCR), so today this step skips and nothing changes; set
-      # DOCKERHUB_USERNAME/DOCKERHUB_TOKEN and the flake class disappears.
-      - name: Log in to Docker Hub (raises the pull rate limit)
-        if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Run real-daemon E2E
         env:
