@@ -35,6 +35,10 @@ export interface SelfEdgeOptions {
   /** Operator accepted MIGRATING the existing proxy's sites into Openship
    *  before taking over (full scan → import → takeover). */
   edgeMigrate?: boolean;
+  /** Corrected static roots (keyed by primary hostname) the wizard copied into the
+   *  edge's static bind mount host-side, for adopted static sites the container edge
+   *  couldn't reach at their original docroot. Passed to `runEdgeTakeover`. See #456. */
+  staticRootOverrides?: Record<string, string>;
 }
 
 let inFlight: Promise<SelfEdgeInfraResult> | null = null;
@@ -128,6 +132,9 @@ async function runEnsure(
         // runEdgeTakeover, so leaving its `edgeImage` unset is what made the option
         // dead code — and a dead pin reads as "the takeover doesn't need one".
         edgeImage: pinnedEdgeImage(),
+        // Corrected static roots the wizard copied host-side (#456); absent when the
+        // operator left them or none were unreachable.
+        ...(options?.staticRootOverrides ? { staticRootOverrides: options.staticRootOverrides } : {}),
       },
       (entry) => log(entry.message, entry.level),
     );

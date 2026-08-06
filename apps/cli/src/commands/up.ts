@@ -501,7 +501,12 @@ async function runCompose(opts: UpOpts & { yes?: boolean }): Promise<{ apiPort: 
   // has already printed the failure and the restore command.
   let importedOk = true;
   if (edgePlan.action === "migrate" && edgePlan.sites?.length) {
-    const outcome = await importMigratedSites(res.apiPort, edgePlan.sites, edgePlan.certPems);
+    const outcome = await importMigratedSites(
+      res.apiPort,
+      edgePlan.sites,
+      edgePlan.certPems,
+      edgePlan.staticRootOverrides,
+    );
     importedOk = outcome.registered.length > 0;
     // Don't re-offer a stopped proxy's sites on the next run once they're in.
     if (importedOk) markStoppedProxyImported();

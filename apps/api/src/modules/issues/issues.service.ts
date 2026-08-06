@@ -21,8 +21,10 @@
  *   listBehindByOrg                   managed edge/mail image drift (advisory)
  *
  * The rules that keep it from becoming a fifth source of truth:
- *   - it never writes, never probes, and never re-implements a verdict. A stale row
- *     is fixed in the job that writes it, not here.
+ *   - it never writes, never probes, and never re-implements a verdict. Freshness
+ *     is each source's own business — `listOrganizationUpdates` polls what its
+ *     cache can't answer, precisely so this module never has to ask whether the
+ *     row it just read was real.
  *   - severity is defined ONCE, in `SEVERITY_RANK` below. Pending actions map their
  *     existing tier straight through rather than being re-judged.
  *   - every item carries its fix as data — `resolveWith` (an HTTP call) for
@@ -444,7 +446,7 @@ export async function listOrganizationIssues(
       ? repos.serverContainerStatus.listBehindByOrg(organizationId).catch(() => [])
       : Promise.resolve([]),
     getOrgPendingActions(organizationId).catch(() => new Map<string, PendingAction[]>()),
-    listOrganizationUpdates(organizationId, { behindOnly: true }).catch(() => []),
+    listOrganizationUpdates(ctx, { behindOnly: true }).catch(() => []),
     loadNames(organizationId),
   ]);
 

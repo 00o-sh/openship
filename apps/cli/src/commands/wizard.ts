@@ -77,9 +77,10 @@ import {
   completeHostEdge,
   renderEdgeConflict,
   confirmEdgeAction,
+  remediateUnreachableStaticRoots,
 } from "../lib/edge-preflight";
 import { importMigratedSites } from "../lib/edge-import";
-import type { ImportedSite } from "@repo/adapters/proxy";
+import { LocalExecutor, type ImportedSite, type UnreachableStaticRoot } from "@repo/adapters/proxy";
 import { headlessProvision, type InstallInputs } from "../lib/instance-provision";
 
 declare const __CLI_VERSION__: string;
@@ -359,9 +360,12 @@ function finishSetup(opts: {
  * choice). This is the bare-mode twin of `openship up`'s compose `planAndApplyHostEdge`.
  * Returns proceed=false only when the operator chose to leave the proxy running.
  */
-async function promptLocalEdgeTakeover(
-  port: string,
-): Promise<{ proceed: boolean; edgeMigrate: boolean; edgeTakeover: boolean }> {
+async function promptLocalEdgeTakeover(port: string): Promise<{
+  proceed: boolean;
+  edgeMigrate: boolean;
+  edgeTakeover: boolean;
+  staticRootOverrides?: Record<string, string>;
+}> {
   const pf = await internalPost(port, "/api/system/self-edge/preflight", {});
   const status = pf.ok
     ? (pf.data?.status as
@@ -383,7 +387,28 @@ async function promptLocalEdgeTakeover(
   renderEdgeConflict({ owner, sites, warnings });
   const action = await confirmEdgeAction({ owner, known, importable: sites.length });
   if (action === "cancel") return { proceed: false, edgeMigrate: false, edgeTakeover: false };
-  return { proceed: true, edgeMigrate: action === "migrate", edgeTakeover: action === "takeover" };
+
+  // On migrate, remediate adopted static roots the edge can't reach (copy them into
+  // its static mount host-side, this box being the host). The server's preflight
+  // decided containerEdge (bare-vs-container) already, so trust its list — a bare
+  // edge sees every path and returns none. See #456.
+  let staticRootOverrides: Record<string, string> | undefined;
+  if (action === "migrate") {
+    const unreachable = (
+      pf.ok && Array.isArray(pf.data?.unreachableStaticRoots) ? pf.data.unreachableStaticRoots : []
+    ) as UnreachableStaticRoot[];
+    staticRootOverrides = await remediateUnreachableStaticRoots({
+      unreachable,
+      executor: new LocalExecutor(),
+      interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    });
+  }
+  return {
+    proceed: true,
+    edgeMigrate: action === "migrate",
+    edgeTakeover: action === "takeover",
+    ...(staticRootOverrides ? { staticRootOverrides } : {}),
+  };
 }
 
 export async function runWizard(): Promise<void> {
@@ -685,6 +710,7 @@ export async function runWizard(): Promise<void> {
   let edgeAction: "migrate" | "takeover" | "cancel" | undefined;
   let migratedSites: ImportedSite[] | undefined;
   let migratedCertPems: Record<string, { certPem: string; keyPem: string }> | undefined;
+  let migratedStaticRootOverrides: Record<string, string> | undefined;
   // Host control is a SECURITY decision, so it's shown rather than assumed — but
   // pre-selected to "allow", because a single-box install needs it (:80/:443
   // takeover, host port scans, the host terminal) and a hardening prompt that
@@ -767,6 +793,7 @@ export async function runWizard(): Promise<void> {
     edgeAction = edgePlan.action;
     migratedSites = edgePlan.sites;
     migratedCertPems = edgePlan.certPems;
+    migratedStaticRootOverrides = edgePlan.staticRootOverrides;
     log.step("Starting the Docker Compose stack…");
     const up = await composeUp({
       // Prefetched above, before the preflight stopped anything.
@@ -838,7 +865,12 @@ export async function runWizard(): Promise<void> {
     // this, "Migrate N sites & take over" would take the ports and serve nothing
     // for those hostnames.
     if (edgeAction === "migrate" && migratedSites?.length) {
-      const imported = await importMigratedSites(started.port, migratedSites, migratedCertPems);
+      const imported = await importMigratedSites(
+        started.port,
+        migratedSites,
+        migratedCertPems,
+        migratedStaticRootOverrides,
+      );
       if (!imported.ok) {
         log.warn(
           `Your ${migratedSites.length} existing site${migratedSites.length === 1 ? "" : "s"} ` +
@@ -986,6 +1018,7 @@ export async function runWizard(): Promise<void> {
             localEdge: edge.proceed,
             edgeTakeover: edge.edgeTakeover,
             edgeMigrate: edge.edgeMigrate,
+            ...(edge.staticRootOverrides ? { staticRootOverrides: edge.staticRootOverrides } : {}),
           },
         },
         onLog: (msg) => log.message(chalk.dim(msg)),
@@ -1033,6 +1066,7 @@ export async function runWizard(): Promise<void> {
         acmeEmail: admin?.email,
         edgeTakeover,
         edgeMigrate,
+        ...(edge.staticRootOverrides ? { staticRootOverrides: edge.staticRootOverrides } : {}),
       });
       if (res.ok && res.data?.sessionId) {
         const s2 = spinner();

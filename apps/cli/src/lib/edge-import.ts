@@ -68,6 +68,7 @@ export async function importMigratedSites(
   apiPort: string,
   sites: ImportedSite[],
   certPems?: Record<string, { certPem: string; keyPem: string }>,
+  staticRootOverrides?: Record<string, string>,
 ): Promise<EdgeImportOutcome> {
   const token = composeInternalToken();
   if (!token) {
@@ -95,7 +96,7 @@ export async function importMigratedSites(
     const r = await fetch(`http://127.0.0.1:${apiPort}/api/system/edge/import-sites`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Internal-Token": token },
-      body: JSON.stringify({ sites, certPems }),
+      body: JSON.stringify({ sites, certPems, staticRootOverrides }),
       signal: AbortSignal.timeout(120000),
     });
     const data = (await r.json().catch(() => ({}))) as {

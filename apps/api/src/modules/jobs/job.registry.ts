@@ -256,11 +256,15 @@ export const SYSTEM_JOB_DEFS: SystemJobDef[] = [
   {
     key: "updates:scan",
     label: "Update scan",
-    // The one channel for "is anything out of date?" — polls what each
+    // Warms the one channel for "is anything out of date?" — polls what each
     // app/project/self-app/webmail's SOURCE currently offers and caches it in
-    // update_status, so the home Updates block + Apps tab read a table instead of
-    // hitting registries/GitHub per page load. Off-peak, off the :00/:30 marks;
-    // not on desktop.
+    // update_status, so the home Updates block, Apps tab and issues feed read a
+    // table instead of hitting registries/GitHub per page load. Off-peak, off the
+    // :00/:30 marks; not on desktop.
+    //
+    // NOT the only writer, and nothing depends on it having run: those reads are
+    // read-through and poll whatever the cache can't answer (which is also why
+    // updates work on desktop, where this job doesn't exist).
     //
     // No "behind" count here on purpose: whether a project is behind depends on
     // what's deployed right now, which is compared at read time — the scan only

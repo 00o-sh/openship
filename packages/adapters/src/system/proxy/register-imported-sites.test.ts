@@ -301,6 +301,62 @@ describe("registerImportedSites", () => {
     });
   });
 
+  /**
+   * A container edge can't read a docroot outside its bind mounts, so the CLI copies
+   * the tree in host-side and hands the corrected root here keyed by primary hostname.
+   * Substituting it (not the original) is what keeps the site from 500ing after
+   * cutover — and what lands in the route sidecar cert renewal re-reads. See #456.
+   */
+  it("substitutes staticRootOverrides for an adopted static root, keyed by primary hostname", async () => {
+    const { routing, ssl } = providers();
+    const sites: ImportedSite[] = [
+      { serverNames: ["front.com", "www.front.com"], ssl: false, target: { kind: "static", root: "/home/app/dist" } },
+    ];
+    await registerImportedSites(routing as RoutingProvider, ssl as SslProvider, fakeExecutor(), sites, {
+      onLog: () => {},
+      warnings: [],
+      staticRootOverrides: { "front.com": "/opt/openship/static/_adopted/front.com" },
+    });
+
+    // Both server names register, and BOTH get the corrected root (the override keys
+    // on the primary name that the copy was performed for).
+    expect(routing.registerRoute).toHaveBeenCalledWith({
+      domain: "front.com",
+      tls: false,
+      terminatesTlsLocally: false,
+      staticRoot: "/opt/openship/static/_adopted/front.com",
+      staticRootAdopted: true,
+    });
+    expect(routing.registerRoute).toHaveBeenCalledWith({
+      domain: "www.front.com",
+      tls: false,
+      terminatesTlsLocally: false,
+      staticRoot: "/opt/openship/static/_adopted/front.com",
+      staticRootAdopted: true,
+    });
+  });
+
+  it("falls back to the original root when no override matches the site", async () => {
+    const { routing, ssl } = providers();
+    const sites: ImportedSite[] = [
+      { serverNames: ["b.com"], ssl: false, target: { kind: "static", root: "/var/www/b" } },
+    ];
+    await registerImportedSites(routing as RoutingProvider, ssl as SslProvider, fakeExecutor(), sites, {
+      onLog: () => {},
+      warnings: [],
+      // A key for a DIFFERENT site (operator left this one) must not leak across.
+      staticRootOverrides: { "other.com": "/opt/openship/static/_adopted/other.com" },
+    });
+
+    expect(routing.registerRoute).toHaveBeenCalledWith({
+      domain: "b.com",
+      tls: false,
+      terminatesTlsLocally: false,
+      staticRoot: "/var/www/b",
+      staticRootAdopted: true,
+    });
+  });
+
   it("omits `proxy` entirely when the source vhost tuned nothing", async () => {
     // `proxy: undefined` and "no proxy key" are the same thing to the renderer, but
     // only the second keeps the RouteConfig sidecar clean.

@@ -1493,14 +1493,15 @@ export async function createProjectEnvironment(
  *
  * The upstream half is cached UNDER THE SOURCE IDENTITY it was polled for — a
  * branch key, a release-source key, an image ref. Change the branch or the tag
- * and the next read simply misses (reported as "upstream unknown", i.e. not
- * behind) until the scan repopulates it. That's why editing a project's source
- * needs no invalidation call either: a cache keyed by what it describes cannot
- * be asked the wrong question.
+ * and the cached answer stops matching the question (`upstreamMatchesSource`),
+ * so the reader re-polls instead of comparing against another source's HEAD.
+ * That's why editing a project's source needs no invalidation call: a cache keyed
+ * by what it describes cannot be asked the wrong question.
  *
  * So: `resolveUpstreamDrift` (cache this) + `resolveDeployedDrift` (never cache)
- * + `evaluateDrift` (compare). `getProjectCommitStatus` is the three composed
- * live, for callers that want a fresh answer regardless of cost.
+ * + `evaluateDrift` (compare). This module owns the three primitives and knows
+ * nothing about the cache; `updates.service` owns the storage and the freshness
+ * policy, and is the one place any surface asks "is this project behind?".
  */
 
 /**
@@ -1571,6 +1572,43 @@ export function releaseSourceKey(p: Project): string {
 async function imageServicesOf(p: Project) {
   const services = await repos.service.listByProject(p.id).catch(() => []);
   return services.filter((s) => s.image && !s.build && (s.enabled ?? true));
+}
+
+/**
+ * Is there anything running to BE behind? Nothing to compare means drift is not a
+ * question worth a network round-trip, so readers skip the poll entirely rather
+ * than resolving a HEAD they'd only discard.
+ *
+ * The self-app and webmail qualify without a deployment row: they report the
+ * running API's own version (see `resolveDeployedDrift`).
+ */
+export function hasDeployedSide(p: Project): boolean {
+  return (
+    Boolean(p.activeDeploymentId) ||
+    p.appTemplateId === "openship" ||
+    p.appTemplateId === "mail-webmail"
+  );
+}
+
+/**
+ * Does a previously-polled upstream still answer the question this project is
+ * asking NOW? False for a repointed branch/repo, a swapped release source, a
+ * retagged image — and for a project whose whole drift shape changed.
+ *
+ * This is what lets the cache carry no invalidation hooks: instead of every
+ * source edit remembering to clear a row, the row simply stops matching and the
+ * reader re-polls. Cheap (local fields; one indexed service read for image apps).
+ */
+export async function upstreamMatchesSource(p: Project, u: UpstreamDrift): Promise<boolean> {
+  if (!u.supported || u.mode !== driftMode(p)) return false;
+  if (u.mode === "commit") return u.key === commitSourceKey(p);
+  if (u.mode === "release") return u.key === releaseSourceKey(p);
+  const services = await imageServicesOf(p);
+  if (services.length === 0) return false;
+  // Every current ref must have been polled — a service added or retagged since
+  // has no digest here, and guessing from a sibling's is how a retag reads as
+  // "behind forever".
+  return services.every((s) => Object.hasOwn(u.digestByRef, s.image!));
 }
 
 /**
@@ -1803,26 +1841,11 @@ export async function evaluateDrift(p: Project, upstream: UpstreamDrift) {
   return { supported: false as const };
 }
 
-/**
- * Live source-drift status for the "your deploy is behind — redeploy" nudge,
- * fetched on demand by the project page. Both halves resolved fresh; returns a
- * `mode`-tagged union so the client can render the right banner:
- *   - commit  → compares the branch HEAD sha against the deployed sha
- *   - release → compares the newest advertised semver against the deployed version
- *   - image   → compares each service's registry digest against the running one
- * Unsupported sources (local, upload, git project with no owner/repo, no image
- * services) return `{ supported:false }` and the banner stays hidden.
- */
-export async function getProjectCommitStatus(
-  ctx: RequestContext | null,
-  projectId: string,
-  organizationId: string,
-) {
-  const p = await repos.project.findById(projectId);
-  assertResourceInOrg(p, "Project", organizationId, projectId);
-  const upstream = await resolveUpstreamDrift(ctx, p);
-  return evaluateDrift(p, upstream);
-}
+// The composition of these three — for the project page's banner, the Apps tab,
+// the home card and the issues feed alike — lives in `updates.service`
+// (`getProjectDrift` / `listOrganizationUpdates`). There is deliberately no
+// second entry point here: two compositions is how one surface starts answering
+// "is this behind?" differently from another.
 
 // ─── Git info ────────────────────────────────────────────────────────────────
 

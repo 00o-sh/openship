@@ -29,6 +29,7 @@ import * as projectTeardown from "./project-teardown";
 import { getRouteStrategy } from "../settings/settings.service";
 import { checkProjectPorts } from "./port-check.service";
 import { checkProjectOutput } from "./output-check.service";
+import { getProjectDrift } from "../updates/updates.service";
 import { AppError, resolveProjectVolumes, safeErrorMessage } from "@repo/core";
 import type {
   TCreateProjectBody,
@@ -1855,14 +1856,21 @@ export async function setOptions(c: Context) {
   return c.json({ data: result });
 }
 
-/** GET /:id/commit-status — drift check for the "project outdated" banner. */
+/**
+ * GET /:id/commit-status — drift check for the "project outdated" banner.
+ *
+ * Goes through the updates service rather than resolving drift here, so this
+ * banner and the issues feed are the same computation. It also caches what it
+ * polls, which is what stops a visit to this page from knowing more than the
+ * tracker does.
+ */
 export async function getCommitStatus(c: Context) {
   const id = param(c, "id");
   await permission.assert(getRequestContext(c), { resourceType: "project", resourceId: id, action: "read" });
   // ctx AFTER assert — resource-scoped org for cross-org callers; a stale org makes
-  // getProjectCommitStatus's assertResourceInOrg throw 404 (see setSleepMode).
+  // getProjectDrift's assertResourceInOrg throw 404 (see setSleepMode).
   const ctx = getRequestContext(c);
-  const status = await projectService.getProjectCommitStatus(ctx, id, ctx.organizationId);
+  const status = await getProjectDrift(ctx, id);
   return c.json({ data: status });
 }
 

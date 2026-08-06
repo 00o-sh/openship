@@ -20,7 +20,6 @@ export {
   updateProject,
   linkProjectRepo,
   getGitInfo,
-  getProjectCommitStatus,
   setBranch,
   listProjectEnvironments,
   createProjectEnvironment,

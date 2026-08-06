@@ -92,7 +92,9 @@ export function AppSource() {
     }
   };
 
-  const hasData = !!status; // false until a scan has populated this project
+  // Absent means this project has no drift to compare (never deployed, no remote
+  // source) — the list read is read-through, so it isn't "waiting for a scan".
+  const hasData = !!status;
   const kind = status?.kind ?? "release";
   const current = status?.currentLabel ?? projectData.version ?? "—";
   const latest = status?.latestLabel ?? null;

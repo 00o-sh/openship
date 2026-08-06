@@ -38,10 +38,13 @@ import {
   edgeProxy,
   edgeProxyFor,
   collectProxyCerts,
+  unreachableStaticRoots,
+  copyStaticRootIntoEdge,
   type CommandExecutor,
   type EdgeStatus,
   type ImportedSite,
   type ProxyKind,
+  type UnreachableStaticRoot,
 } from "@repo/adapters/proxy";
 
 export type EdgeAction = "migrate" | "takeover" | "cancel";
@@ -61,6 +64,13 @@ export interface EdgePlan {
   sites?: ImportedSite[];
   /** Foreign cert PEMs read host-side, keyed by hostname (migrate + TLS sites). */
   certPems?: Record<string, { certPem: string; keyPem: string }>;
+  /**
+   * Corrected static roots (keyed by primary hostname) for adopted static sites
+   * whose original docroot the container edge can't reach — the files were copied
+   * into the edge's static bind mount host-side. Forwarded to the import endpoint
+   * so the route records the reachable root. See #456.
+   */
+  staticRootOverrides?: Record<string, string>;
 }
 
 export interface EdgePreflightDeps {
@@ -179,6 +189,18 @@ export async function planAndApplyHostEdge(
   // takeover just frees the ports and lets the imported sites drop.
   const certPems =
     action === "migrate" ? await deps.collectCerts(executor, sites, { status }) : undefined;
+  // Adopted static sites whose docroot the container edge can't see would 500 after
+  // cutover — copy them into the edge's static mount host-side and record the
+  // corrected root (both are host ops, done before we stop the proxy). The compose
+  // edge is ALWAYS a container, so containerEdge:true here. See #456.
+  const staticRootOverrides =
+    action === "migrate"
+      ? await remediateUnreachableStaticRoots({
+          unreachable: unreachableStaticRoots(sites, { containerEdge: true }),
+          executor,
+          interactive: deps.interactive,
+        })
+      : undefined;
   // Journaled stop: if the caller's bring-up fails it calls rollbackHostEdge()
   // and the operator's proxy comes back, instead of the box staying dark.
   const freed = await deps.beginEdgeTakeover(executor, status, (m, l) =>
@@ -198,7 +220,9 @@ export async function planAndApplyHostEdge(
         (restored ? " (the previous proxy has been restored)" : ""),
     };
   }
-  return action === "migrate" ? { proceed: true, action, sites, certPems } : { proceed: true, action };
+  return action === "migrate"
+    ? { proceed: true, action, sites, certPems, staticRootOverrides }
+    : { proceed: true, action };
 }
 
 /** What `previewHostEdge` found on :80/:443. */
@@ -630,6 +654,81 @@ export async function confirmEdgeAction(info: {
     initialValue: importable > 0 ? "migrate" : known ? "cancel" : "takeover",
   });
   return isCancel(choice) ? "cancel" : (choice as EdgeAction);
+}
+
+/**
+ * Adopted static sites whose docroot the containerized edge can't see would 500
+ * after cutover (try_files can't find the index in a directory that isn't
+ * mounted). Before the handover, list them and — on Copy — snapshot each tree
+ * into the edge's static bind mount HOST-SIDE, returning `{ primaryHost:
+ * correctedRoot }` for the server to substitute into the route. THE one
+ * remediation presenter, shared by the compose preflight and the bare wizard
+ * (#456).
+ *
+ * Takes the already-computed `unreachable` list rather than recomputing: the
+ * compose edge is ALWAYS a container (so its caller computes with
+ * `containerEdge:true`), but the bare wizard's edge may be container OR bare, and
+ * only the server's preflight knows which — passing the list keeps that
+ * determination authoritative instead of hardcoding it here.
+ *
+ * Batch (not per-site): a 15-site migrate shouldn't ask 15 times. Returns
+ * undefined when nothing is unreachable or the operator chose Leave (the sites
+ * migrate at their original root and 500 — their explicit choice). A copy that
+ * fails for one site drops it from the map (left as-is) with a warning rather
+ * than aborting the whole migrate. Non-interactive defaults to Copy — Leave would
+ * silently 500, the exact failure #456 is about.
+ */
+export async function remediateUnreachableStaticRoots(opts: {
+  unreachable: UnreachableStaticRoot[];
+  executor: CommandExecutor;
+  interactive: boolean;
+}): Promise<Record<string, string> | undefined> {
+  const { unreachable } = opts;
+  if (unreachable.length === 0) return undefined;
+
+  note(
+    unreachable.map((u) => `${chalk.bold(u.host)} → ${chalk.dim(u.root)}`).join("\n"),
+    `${unreachable.length} static site${unreachable.length === 1 ? "" : "s"} rooted outside the edge`,
+  );
+  log.warn("Their files live outside the edge container's mounts, so they'd return 500 after cutover.");
+
+  let copy = true;
+  if (opts.interactive) {
+    const choice = await select({
+      message: "Copy these sites' files into the edge so they keep serving?",
+      options: [
+        {
+          value: "copy" as const,
+          label: `Copy ${unreachable.length === 1 ? "it" : "all"} into the edge`,
+          hint: "snapshot the files under /opt/openship/static (recommended)",
+        },
+        {
+          value: "leave" as const,
+          label: "Leave as-is",
+          hint: "they stop serving until you mount their directory yourself",
+        },
+      ],
+      initialValue: "copy",
+    });
+    copy = !isCancel(choice) && choice === "copy";
+  } else {
+    log.info("Non-interactive: copying unreachable static roots into the edge.");
+  }
+  if (!copy) return undefined;
+
+  const overrides: Record<string, string> = {};
+  for (const u of unreachable) {
+    try {
+      const newRoot = await copyStaticRootIntoEdge(opts.executor, { root: u.root, host: u.host });
+      overrides[u.host] = newRoot;
+      log.success(`Copied ${u.host} → ${newRoot}`);
+    } catch (err) {
+      log.warn(
+        `Couldn't copy ${u.host} (${u.root}) — it will migrate as-is: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  return Object.keys(overrides).length > 0 ? overrides : undefined;
 }
 
 function defaultDeps(): EdgePreflightDeps {

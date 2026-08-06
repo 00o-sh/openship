@@ -7,6 +7,7 @@
 import type { CommandExecutor } from "../../../types";
 import type { ImportedSite, ProxyKind, ProxyScanResult } from "../../types";
 import { EDGE_CONTAINER_MOUNTS } from "../../../infra/openresty-lua";
+import { sq } from "../detect";
 import { scanNginx, scanOpenshipEdge, scanForeignOpenResty } from "./nginx";
 import { scanCaddy } from "./caddy";
 import { scanApache } from "./apache";
@@ -164,4 +165,51 @@ export function unreachableStaticRoots(
     if (!reachable) out.push({ host: site.serverNames[0] ?? root, root: site.target.root });
   }
   return out;
+}
+
+/**
+ * The edge's bind-mounted static dir (host path == container path), where copies
+ * of adopted-but-unreachable static roots land so the containerized edge can
+ * actually serve them. Derived from {@link EDGE_CONTAINER_MOUNTS} so it tracks
+ * the baked mounts rather than hardcoding the path in two places.
+ */
+const EDGE_STATIC_MOUNT =
+  EDGE_CONTAINER_MOUNTS.find((m) => m.host === "/opt/openship/static")?.host ??
+  "/opt/openship/static";
+
+/**
+ * Copy an adopted static site's docroot INTO the edge's bind-mounted static dir
+ * and return the new (container-visible) root. The migrate flow rewrites the
+ * route's `staticRoot` to this value so the site keeps serving after cutover
+ * instead of 500ing — see {@link unreachableStaticRoots}.
+ *
+ * The source is a HOST path the foreign proxy served (e.g. `/home/app/dist`) that
+ * the edge container cannot see; the dest `/opt/openship/static/_adopted/<host>`
+ * is inside {@link EDGE_CONTAINER_MOUNTS}, mounted at the SAME path inside the
+ * container. This is a point-in-time SNAPSHOT: later changes to the original tree
+ * do NOT propagate (the operator can re-copy or add a bind mount for live files).
+ *
+ * Copies CONTENTS (`<root>/.`) so files land directly under <dest>, matching the
+ * `root <dest>;` the vhost emits. MUST run on the HOST executor (the only one that
+ * sees both paths) — i.e. the CLI's LocalExecutor before `docker compose up`, not
+ * the containerized API. Throws if the source is unreadable; callers treat a copy
+ * failure as "leave this site as-is".
+ */
+export async function copyStaticRootIntoEdge(
+  executor: CommandExecutor,
+  opts: { root: string; host: string },
+): Promise<string> {
+  const slug =
+    opts.host
+      .replace(/[^a-zA-Z0-9._-]/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .toLowerCase() || "site";
+  const src = opts.root.replace(/\/+$/, "");
+  const dest = `${EDGE_STATIC_MOUNT}/_adopted/${slug}`;
+  await executor.exec(`mkdir -p ${sq(dest)}`);
+  // `<src>/.` copies CONTENTS (incl. dotfiles) so files land directly under <dest>,
+  // matching the `root <dest>;` the vhost emits; quote the whole argument so a path
+  // with spaces stays one token.
+  await executor.exec(`cp -a ${sq(`${src}/.`)} ${sq(`${dest}/`)}`);
+  return dest;
 }

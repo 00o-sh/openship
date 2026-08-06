@@ -48,6 +48,13 @@ export interface EdgeTakeoverOptions {
    * edge can't read the host filesystem.
    */
   certPems?: Record<string, ManualCert>;
+  /**
+   * Corrected static docroots keyed by primary hostname, for adopted static sites
+   * whose original root the containerized edge can't see. The CLI copies the tree
+   * into the edge's static bind mount host-side (see `copyStaticRootIntoEdge`) and
+   * passes the new root here; without it the site 500s after cutover. See #456.
+   */
+  staticRootOverrides?: Record<string, string>;
 }
 
 export interface EdgeTakeoverResult {
@@ -73,6 +80,14 @@ export interface RegisterImportedSitesOptions {
    * those, and every producer already knows the hostname.
    */
   certPems?: Record<string, ManualCert>;
+  /**
+   * Corrected static docroots keyed by primary hostname (`serverNames[0]`), for
+   * adopted static sites the containerized edge can't reach at their original
+   * root. The CLI copies the tree into the edge's static bind mount host-side and
+   * supplies the new root here; substituted into `staticRoot` so the corrected
+   * path is what lands in the route sidecar (and survives cert renewal). See #456.
+   */
+  staticRootOverrides?: Record<string, string>;
 }
 
 /**
@@ -128,12 +143,15 @@ export async function registerImportedSites(
           });
         } else {
           // Adopted: this root is what the operator's own proxy was already serving, so
-          // it is allowed outside the managed base (see assertValidStaticRoot).
+          // it is allowed outside the managed base (see assertValidStaticRoot). When a
+          // containerized edge can't see that root, the CLI copied the tree into the
+          // static bind mount and passed the corrected root here (keyed on the primary
+          // hostname) — otherwise the site 500s after cutover (#456).
           await routing.registerRoute({
             domain,
             tls: site.ssl,
             terminatesTlsLocally: site.ssl,
-            staticRoot: site.target.root,
+            staticRoot: opts.staticRootOverrides?.[site.serverNames[0]] ?? site.target.root,
             staticRootAdopted: true,
             ...(site.proxy ? { proxy: site.proxy } : {}),
           });
@@ -328,6 +346,7 @@ export async function runEdgeTakeover(
       onLog,
       warnings,
       ...(certPems ? { certPems } : {}),
+      ...(opts.staticRootOverrides ? { staticRootOverrides: opts.staticRootOverrides } : {}),
     });
 
     for (const route of opts.extraRoutes ?? []) {
