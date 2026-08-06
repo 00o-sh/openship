@@ -23,7 +23,10 @@ import {
   type ContainerApplyIntent,
   type ServerContainerView,
 } from "./server-containers.service";
-import { subscribeContainerApplySession } from "../../lib/server-container-session";
+import {
+  getActiveContainerApplySession,
+  subscribeContainerApplySession,
+} from "../../lib/server-container-session";
 
 async function resolveServer(c: Context) {
   const id = c.req.param("id")!;
@@ -225,6 +228,85 @@ export async function applyServerContainerStream(c: Context) {
       }, 1000);
       sseStream.onAbort(() => {
         closed = true;
+        clearInterval(iv);
+        resolve();
+      });
+    });
+  });
+}
+
+/**
+ * GET /servers/:id/containers/:component/apply/session — read-only status.
+ *
+ * The mount-time re-attach path polls this before opening the modal: a running
+ * swap hands back its session id so the client attaches via GET, never a POST
+ * (which would start a fresh run if the swap finished in the detect→open
+ * window). No running session → {active:false}.
+ */
+export async function getServerContainerApplySession(c: Context) {
+  const cloudGuard = assertNotCloud(c); if (cloudGuard) return cloudGuard;
+  const { server } = await resolveServer(c);
+  if (!server) return c.json({ error: "Server not found" }, 404);
+
+  const component = parseComponent(c);
+  if (!component) return c.json({ error: "Unknown component" }, 400);
+
+  const session = getActiveContainerApplySession(server.id, component);
+  if (!session) return c.json({ active: false }, 200);
+
+  return c.json({
+    active: true,
+    sessionId: session.id,
+    status: session.status,
+    serverId: session.serverId,
+    component: session.component,
+  });
+}
+
+/**
+ * GET /servers/:id/containers/:component/apply/stream — read-only SSE attach.
+ *
+ * The GET sibling of the POST apply stream, for page reloads: it subscribes to
+ * an already-running swap (replaying steps+logs+terminal) but NEVER calls
+ * runContainerApply, so refreshing mid-swap can't kick off a second one. No
+ * active session → 404, same shape as the install attach.
+ */
+export async function attachServerContainerStream(c: Context) {
+  const cloudGuard = assertNotCloud(c); if (cloudGuard) return cloudGuard;
+  const { server } = await resolveServer(c);
+  if (!server) return c.json({ error: "Server not found" }, 404);
+
+  const component = parseComponent(c);
+  if (!component) return c.json({ error: "Unknown component" }, 400);
+
+  const session = getActiveContainerApplySession(server.id, component);
+  if (!session) return c.json({ error: "No active session" }, 404);
+
+  return streamSSE(c, async (sseStream) => {
+    let closed = false;
+    const writer = (event: string, data: string): boolean => {
+      if (closed) return false;
+      try {
+        void sseStream.writeSSE({ event, data });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const { success, unsubscribe } = subscribeContainerApplySession(session.id, writer);
+    if (!success || session.status !== "running") return;
+
+    await new Promise<void>((resolve) => {
+      const iv = setInterval(() => {
+        if (closed || session.status !== "running") {
+          clearInterval(iv);
+          resolve();
+        }
+      }, 1000);
+      sseStream.onAbort(() => {
+        closed = true;
+        unsubscribe();
         clearInterval(iv);
         resolve();
       });

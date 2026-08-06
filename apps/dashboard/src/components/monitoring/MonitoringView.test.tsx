@@ -496,11 +496,15 @@ describe("round of screenshot fixes", () => {
     expect(geo.slice(0, geo.indexOf("}"))).toContain("z-index: 40");
   });
 
-  it("renders services as wrapping chips, not a grid of tall rows", () => {
+  it("renders services as a single-line scroller, not a wrapping grid", () => {
     const html = render();
     const services = html.slice(html.indexOf("Services"));
-    // ~56px per row x 5 services was ~170px of height before the map, for three values.
-    expect(services).toContain("flex flex-wrap");
+    // One line that scrolls sideways. A wrapping stack grew the block's height with the
+    // service count and pushed the map down; flex-nowrap + overflow-x-auto fixes the height.
+    expect(services).toContain("flex-nowrap gap-1.5 overflow-x-auto");
+    // The old wrapping-chips container is gone. Named by its exact former class rather than
+    // "flex-wrap" in general, because the VisitorMap rendered just below still uses that.
+    expect(services).not.toContain("flex flex-wrap gap-1.5");
     expect(services).not.toContain("grid gap-2 sm:grid-cols-2");
     // Status word dropped — the dot carries it; kept reachable in the title.
     expect(html).toContain("web — Running");
@@ -769,14 +773,15 @@ describe("top paths puts the count on the header line", () => {
 });
 
 describe("resource card structure", () => {
-  it("reports liveness, on the services row rather than a row of its own", () => {
+  it("carries liveness in the card subtitle, with no redundant badge on the services row", () => {
     const html = render();
-    // This very nearly shipped commented out, with no liveness indicator anywhere — the
-    // card looked fine and nothing failed, because no test asserted the badge existed.
-    expect(html).toContain("Live");
+    // Liveness is stated once, by the card subtitle. A second green "Live" pill on the
+    // services row was redundant chrome, so a connected stream shows no badge there.
+    expect(html).toContain("Live, refreshed every few seconds");
     const services = html.slice(html.indexOf("Services"));
-    // Same row as the Services heading: heading, spacer, badge.
-    expect(services.slice(0, 400)).toContain("bg-success");
+    // Nothing on the row while the stream is up — the offline notice appears only on drop.
+    expect(services).not.toContain("Disconnected");
+    expect(services).not.toContain("Reconnect");
   });
 
   it("offers a retry when the stream is down, and does not still say Live", () => {
@@ -804,7 +809,7 @@ describe("resource card structure", () => {
     expect(chip).not.toContain("border");
   });
 
-  it("caps the chip list and counts the remainder instead of dropping it", () => {
+  it("renders every service in the scroller instead of capping the list", () => {
     const many = {
       ...mockComposeUsage,
       services: Array.from({ length: 14 }, (_, i) => ({
@@ -816,12 +821,13 @@ describe("resource card structure", () => {
       })),
     };
     const html = render({ usage: many });
-    // Chips wrap, so 14 services silently became four rows and the footnote outgrew the
-    // totals it annotates. A truncated list that looks complete is the worse failure, so
-    // the remainder is stated.
-    expect(html).toContain("+6 more");
+    // No cap, no "+N more": the strip scrolls sideways, so a long list stays one line
+    // without hiding anything. Every service is in the DOM, first to last.
+    expect(html).not.toContain("+6 more");
+    expect(html).not.toContain("Show less");
+    expect(html).toContain("svc-0");
     expect(html).toContain("svc-7");
-    expect(html).not.toContain("svc-8");
+    expect(html).toContain("svc-13");
   });
 });
 

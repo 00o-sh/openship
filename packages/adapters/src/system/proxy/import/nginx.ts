@@ -20,10 +20,36 @@ import { containerCommand } from "../../edge-container-executor";
 import { resolveOurEdgeContainer } from "../detect";
 import { collapseByHost, extractBlocks, stripComments, tryExec } from "./parse-utils";
 
+/**
+ * The fully-resolved config dump from the first of `bins` that yields one. `-T`
+ * inlines every `include`, so a cert in a snippet (`include snippets/ssl-<host>.conf`)
+ * or a vhost kept under a custom `--conf-path`/conf.d is visible — a plain cat of the
+ * top-level files sees NEITHER. It reads config off disk without touching the running
+ * master, so it works for a proxy a takeover already stopped. Null when no binary
+ * produces a server block.
+ *
+ * `nginx` and `openresty` are different binaries: an OpenResty box usually has no
+ * `nginx` on PATH, so both are worth trying (in caller-chosen order). Skipping the
+ * `openresty` attempt is how an OpenResty box silently dropped to the include-blind
+ * cat and lost every snippet-declared cert — the edge then served the self-signed
+ * placeholder on :443 and a fronting Cloudflare in Full/Strict answered 525.
+ */
+async function dumpResolvedConfig(
+  executor: CommandExecutor,
+  bins: string[],
+): Promise<string | null> {
+  for (const bin of bins) {
+    const dumped = await tryExec(executor, `${bin} -T 2>/dev/null`);
+    if (dumped && /server\s*\{/.test(dumped)) return dumped;
+  }
+  return null;
+}
+
 async function loadNginxConfig(executor: CommandExecutor): Promise<string> {
-  const dumped = await tryExec(executor, "nginx -T 2>/dev/null");
-  if (dumped && /server\s*\{/.test(dumped)) return dumped;
-  // Fallback: concatenate the usual include targets.
+  const dumped = await dumpResolvedConfig(executor, ["nginx", "openresty"]);
+  if (dumped) return dumped;
+  // Fallback: concatenate the usual include targets. Include-blind — a cert in a
+  // snippet won't be seen here, which is why the `-T` dumps above are tried first.
   const cat = await tryExec(
     executor,
     "cat /etc/nginx/nginx.conf /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf 2>/dev/null",
@@ -391,6 +417,32 @@ const OUR_EDGE_SITE_GLOBS = [
  * The blocks are plain nginx (`server_name` + `proxy_pass http://host:<port>` +
  * `ssl_certificate`), so the same parser applies. Read-only; empty if unreadable.
  */
+/**
+ * Scan a FOREIGN host OpenResty holding — or having held — the edge ports: a legacy
+ * bare Openship edge, or a hand-rolled one.
+ *
+ * Unlike {@link scanOpenshipEdge} (which reads OUR edge's KNOWN site trees), this
+ * can't assume where the vhosts live, so it dumps the fully-resolved config
+ * (`openresty -T`) — the one read that follows every `include` regardless of layout,
+ * and that works even after a takeover has stopped the proxy. That gap is exactly
+ * what hid a legacy bare edge's sites from the migrate offer: the fixed-glob read
+ * missed vhosts `include`d from a non-default path, so the scan returned zero and the
+ * consent gate collapsed to takeover-only — silently dropping every site the box was
+ * serving. Falls back to the known openship site trees when no `openresty` binary is
+ * on PATH to dump.
+ *
+ * NOT folded into `scanOpenshipEdge`: a bare `openresty` binary left behind after a
+ * bare→container conversion would make `-T` dump the ORPHANED bare config over the
+ * container's own sites on the "ours" read path.
+ */
+export async function scanForeignOpenResty(
+  executor: CommandExecutor,
+): Promise<ProxyScanResult> {
+  const dump = await dumpResolvedConfig(executor, ["openresty"]);
+  if (dump) return parseNginxConfig(dump);
+  return scanOpenshipEdge(executor);
+}
+
 export async function scanOpenshipEdge(executor: CommandExecutor): Promise<ProxyScanResult> {
   const cat = `cat ${OUR_EDGE_SITE_GLOBS.join(" ")} 2>/dev/null`;
   const raw = await tryExec(executor, cat);

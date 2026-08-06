@@ -16,13 +16,19 @@
  * update must never leave the box without a mail engine.
  */
 
-import { posix } from "node:path";
-
 import { buildMailImageRef, safeErrorMessage } from "@repo/core";
 import type { CommandExecutor, LogEntry } from "../../types";
 import type { SystemLog, SystemLogCallback } from "../types";
 import { sq } from "../local-shell";
-import { containerImageRef, containerState, dockerAvailable } from "../proxy/ensure-container-edge";
+import {
+  containerImageRef,
+  containerState,
+  dockerAvailable,
+  fromSourceImageMissingMessage,
+  imageExistsLocally,
+  managedImagesAreFromSource,
+  swapManagedImage,
+} from "../managed-image";
 import { waitForPortListening } from "../port-listen";
 import {
   MAIL_CONTAINER,
@@ -92,16 +98,6 @@ export interface ContainerMailOptions {
   dbContainer?: string;
   /** How long to wait for the mail ports before calling the start a failure. */
   verifyTimeoutMs?: number;
-  /**
-   * Dev / from-source: BUILD the engine image from a source checkout on the
-   * EXECUTOR's host instead of pulling an (unpublished) tag. `context` is the repo
-   * root — the Dockerfile's COPY paths (`apps/email/…`) are repo-root-relative.
-   *
-   * Gated on the Dockerfile actually being present on the executor, so an API-local
-   * context that doesn't exist on a remote box safely falls through to the pull path
-   * (this never fires in a compiled production install — there's no checkout on disk).
-   */
-  build?: { context: string };
 }
 
 /** Is a container present (running or stopped)? */
@@ -110,58 +106,6 @@ async function containerExists(
   container: string,
 ): Promise<boolean> {
   return (await containerState(executor, container)) !== null;
-}
-
-/** Repo-root-relative path of the engine Dockerfile (POSIX — it names a path on the executor). */
-const MAIL_DOCKERFILE = "apps/email/Dockerfile";
-
-/** Is `ref` already present in the executor's local Docker image store? */
-async function imageExistsLocally(executor: CommandExecutor, ref: string): Promise<boolean> {
-  const out = await executor
-    .exec(`docker image inspect -f '{{.Id}}' ${sq(ref)} 2>/dev/null`)
-    .catch(() => "");
-  return Boolean(out.trim());
-}
-
-/** The image ID a running container was created from — changes after a same-tag rebuild. */
-async function containerImageId(executor: CommandExecutor, container: string): Promise<string> {
-  const out = await executor
-    .exec(`docker inspect -f '{{.Image}}' ${sq(container)} 2>/dev/null`)
-    .catch(() => "");
-  return out.trim();
-}
-
-/** The image ID `ref` currently resolves to locally (empty when it isn't present). */
-async function refImageId(executor: CommandExecutor, ref: string): Promise<string> {
-  const out = await executor
-    .exec(`docker image inspect -f '{{.Id}}' ${sq(ref)} 2>/dev/null`)
-    .catch(() => "");
-  return out.trim();
-}
-
-/**
- * Build the engine image from a source checkout on the EXECUTOR's host — the dev
- * path that stands in for a pull of an unpublished tag. Context is the repo root
- * (the Dockerfile's COPY paths are repo-root-relative); throws on a non-zero build.
- */
-async function buildEngineImage(
-  executor: CommandExecutor,
-  image: string,
-  context: string,
-  onLog: SystemLogCallback,
-): Promise<void> {
-  const dockerfile = posix.join(context, MAIL_DOCKERFILE);
-  onLog(log(`Building mail engine image ${image} from ${context} (dev/from-source)...`));
-  const build = await executor.streamExec(
-    `docker build -t ${sq(image)} -f ${sq(dockerfile)} ${sq(context)}`,
-    onLog as (l: LogEntry) => void,
-  );
-  if (build.code !== 0) {
-    throw new Error(
-      `Could not build the mail engine image ${image} from ${context}. ` +
-        "Check the Dockerfile and the build output above, then retry.",
-    );
-  }
 }
 
 /**
@@ -327,44 +271,22 @@ export async function verifyMailEngine(
 }
 
 /**
- * Move a running engine onto a new image: pull, recreate, verify — and put the OLD
- * image back if the new one doesn't come up. The sidecar and all data are on bind
- * mounts, so recreating the engine is safe; the DB container is left untouched.
+ * The engine's "start this image AND prove it's actually serving" callback — the
+ * unit `swapManagedImage` drives. Recreating the engine is safe: the sidecar and all
+ * data live on bind mounts, so a swap that fails verification rolls back to the old
+ * image with nothing lost. Mirrors the edge's `makeEdgeStart`.
  */
-async function swapEngineImage(
+function makeMailStart(
   executor: CommandExecutor,
   container: string,
-  from: string,
-  to: string,
   opts: ContainerMailOptions,
-): Promise<{ swapped: boolean; mailDown: boolean }> {
+): (image: string) => Promise<boolean> {
   const { onLog } = opts;
-  onLog(log(`Updating the mail engine: ${from} → ${to}`));
-  // Skip the registry when the target is already on the box (a manual build, a
-  // prior pull, or offline) — a differing tag whose image is present is ready to run.
-  if (!(await imageExistsLocally(executor, to))) {
-    const pull = await executor.streamExec(`docker pull ${sq(to)}`, onLog as (l: LogEntry) => void);
-    if (pull.code !== 0) {
-      onLog(log(`Could not pull ${to} — the engine stays on ${from}.`, "warn"));
-      return { swapped: false, mailDown: false };
-    }
-  }
-
   const hostname = `mail.${opts.domain}`;
-  const start = async (image: string) => {
+  return async (image: string) => {
     if (!(await startEngine(executor, container, image, hostname, onLog))) return false;
     return (await verifyMailEngine(executor, opts)).ok;
   };
-
-  if (await start(to)) {
-    onLog(log(`Mail engine updated to ${to}`));
-    return { swapped: true, mailDown: false };
-  }
-
-  onLog(log(`Mail engine ${to} failed to come up — rolling back to ${from}...`, "error"));
-  if (await start(from)) return { swapped: false, mailDown: false };
-  onLog(log(`Rollback to ${from} ALSO failed — the mail engine is down on this server.`, "error"));
-  return { swapped: false, mailDown: true };
 }
 
 /**
@@ -384,42 +306,27 @@ export async function ensureContainerMail(
   const dbContainer = opts.dbContainer?.trim() || MAIL_DB_CONTAINER;
   const image = resolveMailImage(opts.image);
 
-  // Dev / from-source: build the image on the executor's host in place of a pull.
-  // Gated on the Dockerfile being present ON THE EXECUTOR, so an API-local context
-  // that doesn't exist on a remote box falls through to the pull path.
-  const buildable =
-    !!opts.build &&
-    (await executor.exists(posix.join(opts.build.context, MAIL_DOCKERFILE)).catch(() => false));
-  if (buildable && opts.build) {
-    await buildEngineImage(executor, image, opts.build.context, onLog);
-  }
-
   // Container already there (running or stopped)? Reconcile only the IMAGE — data +
   // DB persist on the binds. Deliberately keyed on EXISTENCE, not run state: falling
   // into the create path for a stopped engine would rewrite its secret env files.
+  // Staleness is a plain tag-compare: the dev tag is content-derived (`…-dev.<hash>`),
+  // so a source edit moves it exactly like a prod version bump. `swapManagedImage`
+  // pulls only if the target tag isn't already on the box (deliver shipped the dev
+  // image there first), so the dev flow needs no build-on-executor branch.
   const current = await containerImageRef(executor, container);
   if (current) {
-    // Build path: the tag is unchanged across rebuilds, so compare the container's
-    // image ID to the freshly-built ref's — a `mail build` + redeploy then actually
-    // recreates. Pull path: a differing tag is the signal, as before.
-    const stale = buildable
-      ? (await containerImageId(executor, container)) !== (await refImageId(executor, image))
-      : current !== image;
-    if (!stale) return { container, dbContainer, image, updated: false };
+    if (current === image) return { container, dbContainer, image, updated: false };
 
-    if (buildable) {
-      // Recreate directly onto the rebuilt local image — no pull, and no
-      // swap-to-same-ref rollback (the old image ID was replaced under this tag).
-      onLog(log(`Recreating the mail engine on the rebuilt image ${image}...`));
-      if (!(await startEngine(executor, container, image, `mail.${opts.domain}`, onLog))) {
-        return { container, dbContainer, image, updated: false, mailDown: true };
-      }
-      const verified = await verifyMailEngine(executor, opts);
-      return { container, dbContainer, image, updated: verified.ok, mailDown: !verified.ok };
-    }
-
-    const swap = await swapEngineImage(executor, container, current, image, opts);
-    return { container, dbContainer, image, updated: swap.swapped, mailDown: swap.mailDown };
+    const start = makeMailStart(executor, container, opts);
+    const swap = await swapManagedImage(executor, {
+      kind: "mail",
+      from: current,
+      to: image,
+      label: "mail engine",
+      onLog,
+      start,
+    });
+    return { container, dbContainer, image, updated: swap.swapped, mailDown: swap.down };
   }
 
   if (!(await dockerAvailable(executor))) {
@@ -429,10 +336,17 @@ export async function ensureContainerMail(
     );
   }
 
-  // 1. Obtain the image before anything is created: a fresh build is already local;
-  //    otherwise pull unless it's already on the box (a manual `openship mail build`,
-  //    a prior pull, or offline). A genuine no-image-no-build case still fails here.
-  if (!buildable && !(await imageExistsLocally(executor, image))) {
+  // 1. Obtain the image before anything is created. Pull unless it's already on the
+  //    box: in dev the control plane built the `…-dev.<hash>` engine from our source
+  //    and shipped it here (deliverManagedImage), so the unpublished tag is present
+  //    and a pull would 404; in prod the tag is absent → pull `:APP_VERSION`.
+  if (!(await imageExistsLocally(executor, image))) {
+    if (managedImagesAreFromSource("mail")) {
+      // Unpublished from-source (dev) engine tag the control plane was meant to build
+      // and ship here (deliverManagedImage). It's absent, so that didn't finish — a
+      // pull can only 404. Surface the real cause rather than a registry error.
+      throw new Error(fromSourceImageMissingMessage("mail engine", image));
+    }
     onLog(log(`Pulling mail engine image ${image}...`));
     // Keep the pull's own words: "the tag doesn't exist" and "the registry is
     // unreachable" are opposite problems with opposite fixes, and a single

@@ -108,6 +108,35 @@ export interface SystemPrepareOptions {
    * means "still couldn't tell", which keeps the honest unknown message.
    */
   resolveOutcome?: () => Promise<{ ok: boolean; message: string } | null>;
+  /**
+   * Read-only GET SSE endpoint for an ALREADY-running session, built from its
+   * id. Presence enables two re-attach paths: (1) mount re-attach, when the
+   * caller passes `initialAttachSessionId`; (2) a POST that 409s with a
+   * `sessionId` (a run is already in flight) re-attaches instead of surfacing
+   * the raw code. A mount re-attach NEVER POSTs — a POST could start a fresh run
+   * if the session finished in the detect→open window.
+   */
+  attachUrl?: (sessionId: string) => string;
+  /** Open straight into GET re-attach for this session (browser-refresh path). */
+  initialAttachSessionId?: string;
+}
+
+/**
+ * Humanize the machine error codes the prepare endpoints return so a raw
+ * `install_in_progress` never lands in the modal. Unmapped codes fall back to
+ * the server's own message (or statusText).
+ */
+const FRIENDLY_ERRORS: Record<string, string> = {
+  // Defensive only: the effect re-attaches on a 409 rather than surfacing this,
+  // but if the re-attach can't resolve a session id we still want readable copy.
+  install_in_progress: "An install is already running — reattaching to it…",
+  auth_failed: "The server rejected the connection — check its SSH credentials and try again.",
+  no_server: "That server no longer exists.",
+  "No active session": "That run has already finished.",
+};
+
+function friendlyError(code: string | undefined, fallback: string): string {
+  return (code && FRIENDLY_ERRORS[code]) || fallback;
 }
 
 /** Modal body — rendered as the global modal's `customContent`. */
@@ -126,6 +155,12 @@ function PrepareStreamContent({
   /** Bumped by Retry — re-runs the stream effect in place. */
   const [attempt, setAttempt] = useState(0);
   const sessionIdRef = useRef<string | null>(null);
+  /**
+   * When set (mount re-attach via `initialAttachSessionId`, or a 409 handing
+   * back the running session's id), the effect GETs the read-only attach stream
+   * instead of POSTing a fresh run. Retry clears it so "Try again" always POSTs.
+   */
+  const attachSessionIdRef = useRef<string | null>(opts.initialAttachSessionId ?? null);
   /**
    * A terminal `complete` was received, so the outcome is KNOWN. Everything
    * after it — the reader ending, a late socket error — is teardown noise and
@@ -175,6 +210,9 @@ function PrepareStreamContent({
     setError(null);
     setPrompt(null);
     setPhase("running");
+    // "Try again" is an explicit re-run: drop any re-attach id so the effect
+    // POSTs fresh (install 409→re-attaches if still running; else a new run).
+    attachSessionIdRef.current = null;
     setAttempt((n) => n + 1);
   }, []);
 
@@ -187,67 +225,114 @@ function PrepareStreamContent({
     // run aborts, the second run fetches fresh.
     const controller = new AbortController();
     terminalRef.current = false;
-    (async () => {
+
+    // Read + dispatch the SSE frames off a streaming Response. Shared verbatim by
+    // the POST (fresh run) and GET (re-attach) paths so both parse identically
+    // (session / steps / log / prompt / complete + the terminal guard).
+    const consume = async (res: Response) => {
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
       let buffer = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, nl);
+          buffer = buffer.slice(nl + 2);
+          const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
+          if (!dataLine) continue;
+          let json: {
+            type?: string;
+            sessionId?: string;
+            message?: string;
+            level?: string;
+            status?: Phase;
+            steps?: StreamStep[];
+          } & Partial<StreamPrompt>;
+          try {
+            json = JSON.parse(dataLine.slice(5).trim());
+          } catch {
+            continue;
+          }
+          if (json.type === "session" && json.sessionId) sessionIdRef.current = json.sessionId;
+          else if (json.type === "steps") setSteps(json.steps ?? []);
+          else if (json.type === "log")
+            setLogs((p) => [...p, { message: json.message ?? "", level: json.level ?? "info" }]);
+          else if (json.type === "prompt") setPrompt(json as StreamPrompt);
+          else if (json.type === "complete") {
+            terminalRef.current = true;
+            const ok = json.status === "completed";
+            setPhase(ok ? "completed" : "failed");
+            setPrompt(null);
+            if (ok) opts.onDone?.();
+          }
+        }
+      }
+    };
+
+    const attachStream = (sid: string) =>
+      fetch(`${getApiBaseUrl()}${opts.attachUrl!(sid)}`, {
+        method: "GET",
+        credentials: "include",
+        headers: { Accept: "text/event-stream" },
+        signal: controller.signal,
+      });
+
+    (async () => {
       try {
-        const res = await fetch(`${getApiBaseUrl()}${opts.streamUrl}`, {
-          method: "POST",
-          credentials: "include",
-          headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-          body: JSON.stringify(opts.body ?? {}),
-          signal: controller.signal,
-        });
+        const attachSid = attachSessionIdRef.current;
+        let res: Response;
+        if (attachSid && opts.attachUrl) {
+          // Mount / browser-refresh re-attach: read-only GET, NEVER a POST — a
+          // POST here could start a brand-new run if the session finished in the
+          // detect→open window.
+          sessionIdRef.current = attachSid;
+          res = await attachStream(attachSid);
+        } else {
+          res = await fetch(`${getApiBaseUrl()}${opts.streamUrl}`, {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+            body: JSON.stringify(opts.body ?? {}),
+            signal: controller.signal,
+          });
+          // An install POST 409s when one is already running, handing back its
+          // session id — re-attach to that live run instead of showing the raw
+          // `install_in_progress`. (Only install 409s; container-apply re-POST is
+          // idempotent, so this branch is simply never taken there.)
+          if (res.status === 409 && opts.attachUrl) {
+            let sid: string | undefined;
+            try {
+              sid = (await res.json())?.sessionId;
+            } catch {
+              /* fall through to the generic !res.ok handling below */
+            }
+            if (sid) {
+              attachSessionIdRef.current = sid;
+              sessionIdRef.current = sid;
+              res = await attachStream(sid);
+            }
+          }
+        }
+
         if (!res.ok || !res.body) {
+          let code: string | undefined;
           let msg = res.statusText;
           try {
             const j = await res.json();
-            msg = j.error || msg;
+            code = j.error;
+            msg = j.error || j.message || msg;
           } catch {
             /* keep statusText */
           }
-          setError(msg);
+          setError(friendlyError(code, msg));
           setPhase("error");
           return;
         }
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          let nl: number;
-          while ((nl = buffer.indexOf("\n\n")) !== -1) {
-            const frame = buffer.slice(0, nl);
-            buffer = buffer.slice(nl + 2);
-            const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
-            if (!dataLine) continue;
-            let json: {
-              type?: string;
-              sessionId?: string;
-              message?: string;
-              level?: string;
-              status?: Phase;
-              steps?: StreamStep[];
-            } & Partial<StreamPrompt>;
-            try {
-              json = JSON.parse(dataLine.slice(5).trim());
-            } catch {
-              continue;
-            }
-            if (json.type === "session" && json.sessionId) sessionIdRef.current = json.sessionId;
-            else if (json.type === "steps") setSteps(json.steps ?? []);
-            else if (json.type === "log")
-              setLogs((p) => [...p, { message: json.message ?? "", level: json.level ?? "info" }]);
-            else if (json.type === "prompt") setPrompt(json as StreamPrompt);
-            else if (json.type === "complete") {
-              terminalRef.current = true;
-              const ok = json.status === "completed";
-              setPhase(ok ? "completed" : "failed");
-              setPrompt(null);
-              if (ok) opts.onDone?.();
-            }
-          }
-        }
+
+        await consume(res);
         // Stream ended WITHOUT a terminal `complete` (server closed early /
         // crashed / the connection dropped mid-op). The operation's outcome is
         // usually still recorded server-side, so read it back rather than
@@ -493,7 +578,13 @@ export function useContainerApplyModal() {
     (
       serverId: string,
       component: "edge" | "mail",
-      opts?: { label?: string; intent?: "update" | "repair"; onDone?: () => void },
+      opts?: {
+        label?: string;
+        intent?: "update" | "repair";
+        onDone?: () => void;
+        /** Open straight into GET re-attach for this running swap (refresh path). */
+        attachSessionId?: string;
+      },
     ): string => {
       const noun = opts?.label ?? (component === "edge" ? "edge" : "mail engine");
       const repair = opts?.intent === "repair";
@@ -535,6 +626,11 @@ export function useContainerApplyModal() {
 
       return prepare({
         streamUrl: `system/servers/${serverId}/containers/${component}/apply/stream${repair ? "?intent=repair" : ""}`,
+        // The read-only GET sibling of the apply stream re-attaches to the one
+        // running swap for this (server, component); it ignores the id (there's
+        // only ever one), which is why re-POST is idempotent and never 409s.
+        attachUrl: () => `system/servers/${serverId}/containers/${component}/apply/stream`,
+        initialAttachSessionId: opts?.attachSessionId,
         title: repair ? `Start ${noun}` : `Update ${noun}`,
         labels: repair
           ? {
@@ -565,10 +661,22 @@ export function useContainerApplyModal() {
 export function useServerEdgeInstallModal() {
   const prepare = useSystemPrepareModal();
   return useCallback(
-    (serverId: string, opts?: { onDone?: () => void }): string =>
+    (
+      serverId: string,
+      opts?: {
+        onDone?: () => void;
+        /** Open straight into GET re-attach for this running install (refresh path). */
+        attachSessionId?: string;
+      },
+    ): string =>
       prepare({
         streamUrl: "system/install/stream",
         respondUrl: "system/install/respond",
+        // GET re-attach to a running install by id: replays logs + progress AND
+        // any parked 80/443-takeover prompt (answered via respondUrl above). Also
+        // the target of the 409→attach path when a second install POST is made.
+        attachUrl: (sid) => `system/install/stream?id=${encodeURIComponent(sid)}`,
+        initialAttachSessionId: opts?.attachSessionId,
         body: { serverId, components: ["edge"] },
         title: "Install edge",
         labels: {

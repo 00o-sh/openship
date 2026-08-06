@@ -140,6 +140,43 @@ describe("registerImportedSites", () => {
     expect(o.warnings.some((w) => w.includes("unsafe"))).toBe(true);
   });
 
+  it("announces a fresh ACME issuance before the call so it isn't mistaken for a hang", async () => {
+    // A migrate that can't carry a cert falls to a per-domain Let's Encrypt issuance
+    // — the one step with real wall-clock cost. Reuse (installCert) is silent; the
+    // fresh path must LOG, or a slow migrate looks hung with no attributable cause.
+    const { routing, ssl } = providers();
+    const logs: string[] = [];
+    const sites: ImportedSite[] = [
+      // No `tls` and no inline PEM → nothing to reuse → provisionCert.
+      { serverNames: ["fresh.com"], ssl: true, target: { kind: "proxy", url: "http://127.0.0.1:3000" } },
+    ];
+    await registerImportedSites(routing as RoutingProvider, ssl as SslProvider, fakeExecutor(), sites, {
+      onLog: (l) => logs.push(l.message),
+      warnings: [],
+    });
+
+    expect(ssl.installCert).not.toHaveBeenCalled();
+    expect(ssl.provisionCert).toHaveBeenCalledWith("fresh.com");
+    expect(logs.some((m) => m.includes("fresh.com") && /requesting a new one/i.test(m))).toBe(true);
+  });
+
+  it("does NOT log a fresh issuance when an existing cert is reused", async () => {
+    // The reuse branch must stay silent — a log there would cry wolf on the fast path.
+    const { routing, ssl } = providers();
+    const logs: string[] = [];
+    const sites: ImportedSite[] = [
+      { serverNames: ["a.com"], ssl: true, target: { kind: "proxy", url: "http://127.0.0.1:3000" } },
+    ];
+    await registerImportedSites(routing as RoutingProvider, ssl as SslProvider, fakeExecutor(), sites, {
+      onLog: (l) => logs.push(l.message),
+      warnings: [],
+      certPems: { "a.com": { certPem: "CERT", keyPem: "KEY" } },
+    });
+
+    expect(ssl.installCert).toHaveBeenCalledWith("a.com", { certPem: "CERT", keyPem: "KEY" });
+    expect(logs.some((m) => /requesting a new one/i.test(m))).toBe(false);
+  });
+
   // The carry must not hand over a cert for the WRONG hostname. A vhost naming two
   // hosts off a single-name cert used to carry that cert to both, so the second
   // domain served a mismatched cert under a green padlock.

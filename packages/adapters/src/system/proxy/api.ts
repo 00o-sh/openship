@@ -247,7 +247,14 @@ export function edgeProxyFor(
   kind: ProxyKind,
   opts: { ours?: boolean; container?: string | null } = {},
 ): EdgeProxyApi {
-  return makeApi(exec, kind, opts.ours ?? kind === "openresty", opts.container ?? null);
+  // `ours` defaults FALSE: a bare kind shortcut is a FOREIGN proxy unless the
+  // caller says otherwise. It used to default `kind === "openresty"` — the stale
+  // bare-edge assumption ("an openresty IS our edge"), which is wrong now that our
+  // edge is a container. That default made the one caller (harvesting certs from a
+  // proxy we're migrating FROM) read a foreign OpenResty through `scanOpenshipEdge`
+  // instead of `scanForeignOpenResty`, so a legacy bare edge's vhost-declared certs
+  // at non-default paths were silently not harvested — the sites migrated with no TLS.
+  return makeApi(exec, kind, opts.ours ?? false, opts.container ?? null);
 }
 
 /**

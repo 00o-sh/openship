@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { buildEdgeRunCommand, ensureContainerEdge, resolveEdgeImage } from "./ensure-container-edge";
+import {
+  buildEdgeRunCommand,
+  ensureContainerEdge,
+  resolveEdgeImage,
+} from "./ensure-container-edge";
+import { setManagedImagesFromSource } from "../managed-image";
 import { JOURNAL_PATH } from "./takeover-journal";
 import type { CommandExecutor } from "../../types";
 import type { InstallerConfig } from "../types";
@@ -40,6 +45,12 @@ interface BoxOpts {
   configInvalid?: boolean;
   /** Container starts and validates, but nothing ever binds :80. */
   notListening?: boolean;
+  /**
+   * The target image ref is ALREADY in the executor's local store — the delivered
+   * dev tag (`deliverManagedImage` built it on the control plane and shipped it here).
+   * Flips the pull gate: present ⇒ no pull, absent (prod) ⇒ pull.
+   */
+  imagePresent?: boolean;
 }
 
 /** procfs socket table rows: state 0A = LISTEN, hex 0050 = 80, 01BB = 443. */
@@ -72,6 +83,10 @@ function box(opts: BoxOpts = {}) {
   const files = new Map<string, string>();
   let edgeState = opts.edgeStatus ?? (opts.edgeContainer ? "running" : "");
   let unitUp = Boolean(opts.hostOpenResty);
+  // The local image ID the target ref resolves to — non-empty iff the image is
+  // already on the box (a delivered dev tag). `imageExistsLocally` reads this: empty
+  // (prod) ⇒ pull, present (dev, shipped by deliverManagedImage) ⇒ skip the pull.
+  const localImageId = opts.imagePresent ? "sha-present" : "";
 
   /** Is anything holding the edge ports right now? */
   const served = () =>
@@ -90,6 +105,9 @@ function box(opts: BoxOpts = {}) {
     if (cmd.includes("{{.State.Running}}")) {
       return opts.edgeContainerImage ? `true\t${opts.edgeContainerImage}` : "";
     }
+    // `imageExistsLocally` — `docker image inspect -f '{{.Id}}' <ref>`. Non-empty
+    // means the ref is on the box. Must precede the generic inspect catch.
+    if (cmd.includes("{{.Id}}")) return localImageId;
     if (cmd.startsWith("docker inspect")) return "";
     if (cmd.startsWith("docker logs")) return opts.crashLog ?? "";
     if (cmd.startsWith("docker rm -f") || cmd.startsWith("docker stop")) {
@@ -161,6 +179,8 @@ function box(opts: BoxOpts = {}) {
       }
       return { code: 0, output: "" };
     }),
+    // Every existence check (mount dirs, journal) is true so the takeover path is
+    // unaffected — the retired build path was the only conditional probe.
     exists: vi.fn(async () => true),
     readFile: vi.fn(async () => ""),
     // Journal writes go through the executor, not a shell — recorded in `commands`
@@ -487,5 +507,60 @@ describe("ensureContainerEdge", () => {
     await expect(ensureContainerEdge(executor, { onLog, image: IMAGE })).rejects.toThrow(
       /Docker isn't available/,
     );
+  });
+});
+
+// Create-path image acquisition: pull only when the image ISN'T already on the box.
+// In dev, `deliverManagedImage` builds the content-derived `…-dev.<hash>` tag on the
+// control plane and ships it here first, so bring-up finds it present and skips the
+// pull (the tag is unpublished — a pull would 404). In prod the tag is absent, so it
+// pulls `:APP_VERSION` exactly as the pull-path tests above assert.
+describe("ensureContainerEdge — image acquisition gate", () => {
+  it("pulls on create when the image isn't already on the box (prod)", async () => {
+    const { executor, commands, onLog } = box({ imagePresent: false });
+    await ensureContainerEdge(executor, { onLog, image: IMAGE, verifyTimeoutMs: 50 });
+
+    expect(commands.some((c) => c === `docker pull '${IMAGE}'`)).toBe(true);
+    expect(commands.some((c) => c.startsWith("docker run -d"))).toBe(true);
+  });
+
+  it("does NOT pull on create when the image is already present (delivered dev tag)", async () => {
+    const { executor, commands, onLog } = box({ imagePresent: true });
+    const result = await ensureContainerEdge(executor, { onLog, image: IMAGE, verifyTimeoutMs: 50 });
+
+    expect(result.converted).toBe(false);
+    expect(commands.some((c) => c.startsWith("docker pull"))).toBe(false);
+    expect(commands.some((c) => c.startsWith("docker run -d"))).toBe(true);
+  });
+
+  // From-source (dev) backstop: the tag is unpublished, so an absent image means the
+  // control-plane build/ship didn't complete. Pulling can only 404 and blame the
+  // registry, so bring-up throws a clear "build didn't complete" error and never pulls.
+  it("throws instead of pulling an absent image when managed images are from source", async () => {
+    setManagedImagesFromSource("edge", true);
+    try {
+      const { executor, commands, onLog } = box({ imagePresent: false });
+      await expect(
+        ensureContainerEdge(executor, { onLog, image: IMAGE, verifyTimeoutMs: 50 }),
+      ).rejects.toThrow(/from-source edge image .* isn't on this server/);
+      expect(commands.some((c) => c.startsWith("docker pull"))).toBe(false);
+    } finally {
+      setManagedImagesFromSource("edge", false);
+    }
+  });
+
+  it("swaps a serving edge onto a new tag with no pull when that tag is already present", async () => {
+    // The delivered dev tag differs from the running container's tag (the source hash
+    // moved), so it's stale — but it's already on the box, so the swap runs no pull.
+    const { executor, commands, onLog } = box({
+      edgeContainer: "openship-edge",
+      edgeContainerImage: "ghcr.io/oblien/openship-edge:1.0.0",
+      imagePresent: true,
+    });
+    const result = await ensureContainerEdge(executor, { onLog, image: IMAGE, verifyTimeoutMs: 50 });
+
+    expect(result.updated).toBe(true);
+    expect(commands.some((c) => c.startsWith("docker pull"))).toBe(false);
+    expect(commands.some((c) => c.includes(`docker run -d --name 'openship-edge'`))).toBe(true);
   });
 });

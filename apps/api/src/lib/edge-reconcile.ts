@@ -8,6 +8,7 @@ import {
 } from "@repo/adapters";
 import { safeErrorMessage } from "@repo/core";
 
+import { deliverManagedImage } from "./deliver-managed-image";
 import { pinnedEdgeImage } from "./edge-image";
 
 /**
@@ -80,6 +81,10 @@ export async function reconcileServerEdge(
 
   try {
     const image = pinnedEdgeImage();
+    // Stage-B APPLY: build our source onto this box (or ship + build for a remote one)
+    // so the create/swap below adopts the dev image instead of pulling an unpublished
+    // tag. No-op in prod (no checkout → deliver returns immediately).
+    await deliverManagedImage({ kind: "edge", image, targetExecutor: executor, onLog: opts.onLog });
     const result = await ensureContainerEdge(executor, {
       onLog: opts.onLog,
       image,
@@ -142,7 +147,10 @@ interface RoutingFeatureManager {
 export async function ensureRoutingReady(
   executor: CommandExecutor,
   system: RoutingFeatureManager,
-  opts: { onLog: (log: SystemLog) => void; promptUser?: PromptUserFn },
+  opts: {
+    onLog: (log: SystemLog) => void;
+    promptUser?: PromptUserFn;
+  },
 ): Promise<{ edgeDown: boolean }> {
   await system.ensureFeature("routing", opts.onLog, { promptUser: opts.promptUser });
   const { edgeDown, error } = await reconcileServerEdge(executor, opts);

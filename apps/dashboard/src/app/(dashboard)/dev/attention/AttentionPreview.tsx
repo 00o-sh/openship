@@ -104,8 +104,9 @@ export function AttentionPreview() {
         )}
         {hidden.length > 0 && (
           <p className="text-xs text-muted-foreground">
-            Hidden here only. On the home page the tip card takes the slot back once both
-            cards are hidden, and the Activity overview above returns as soon as one is.
+            Hidden here only. On the home page the column gives a card back per panel
+            hidden — the Apps card returns as soon as one is, the Activity overview once
+            both are.
           </p>
         )}
       </div>

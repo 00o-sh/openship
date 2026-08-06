@@ -30,7 +30,8 @@ import { permission } from "../../lib/permission";
 import { param } from "../../lib/controller-helpers";
 import { streamSSE } from "../../lib/sse";
 import { sshManager } from "../../lib/ssh-manager";
-import { withPinnedEdgeImage } from "../../lib/edge-image";
+import { pinnedEdgeImage, withPinnedEdgeImage } from "../../lib/edge-image";
+import { deliverManagedImage } from "../../lib/deliver-managed-image";
 import { resolveAcmeProviderOptions } from "../../lib/acme-config";
 import { applyProjectRouting } from "./routing-apply.service";
 import {
@@ -218,6 +219,16 @@ export async function ensureEdgeStream(c: Context) {
         // console stays alive without a duplicate round-trip.
         // Self-heal a takeover that crashed mid-flight on a prior attempt.
         await recoverInterruptedTakeover(executor, onLog).catch(() => {});
+        // Stage-B APPLY, ahead of the installer: build the edge from our source on
+        // the control plane and ship it to this box, so the create path below adopts
+        // the dev image instead of pulling `ghcr.io/oblien/openship-edge:<version>`
+        // (the reported bug). No-op in prod — no checkout → deliver returns at once.
+        await deliverManagedImage({
+          kind: "edge",
+          image: pinnedEdgeImage(),
+          targetExecutor: executor,
+          onLog,
+        });
         const installer = COMPONENT_INSTALLERS["edge"];
         // Same call shape as the deploy pipeline + server-setup: the installer
         // raises the edge-conflict consent via promptUser; on "migrate",

@@ -242,6 +242,8 @@
     "ofCores": "de {cores} núcleos",
     "ofMemory": "de {total}",
     "servicesTitle": "Servicios",
+    "scrollServicesLeft": "Desplazar servicios a la izquierda",
+    "scrollServicesRight": "Desplazar servicios a la derecha",
     "unsupportedTitle": "Uso de recursos no disponible",
     "reconnect": "Reconectar",
     "live": "En vivo",

@@ -463,10 +463,15 @@ function captureClient(client: net.Socket) {
       }
       pipeThrough(client, upstream);
     },
-    /** Terminal: no usable upstream — surface the error to dockerode. */
-    fail(err: unknown): void {
+    /** Terminal: no usable upstream. Destroy WITHOUT an error argument — a
+     *  server-side accepted socket can't transmit a JS Error to the peer anyway
+     *  (dockerode only ever sees the reset), and destroy(err) emits a local
+     *  'error' event that, now that detach() removed this socket's error
+     *  listener, would be unhandled and crash the process. The cause is already
+     *  logged by bridgeClient's catch before this runs. */
+    fail(): void {
       detach();
-      client.destroy(err instanceof Error ? err : new Error(String(err)));
+      client.destroy();
     },
   };
 }
@@ -659,15 +664,29 @@ export function createDockerSshBridge(opts: DockerConnectionOptions): DockerSshB
       await downgradeToDialStdio(capture, "channel opened but no data flowed");
     } catch (err) {
       console.warn(`[docker-ssh] bridge client failed (${opts.host ?? "?"}): ${safeErrorMessage(err)}`);
-      capture.fail(err);
+      capture.fail();
     }
   };
 
   const server = net.createServer((client) => {
     clients.add(client);
     client.setNoDelay(true);
+    // Permanent error floor. captureClient attaches its own 'error' listener and
+    // then DETACHes it at the transport handoff (commit/fail), so there are
+    // moments with zero listeners on this socket. A peer reset — or a fail()-path
+    // destroy — in that gap would be an unhandled 'error' event that crashes the
+    // whole API process; one dead Docker request must never do that. Real
+    // teardown still flows through close/pipeThrough; this only stops the throw.
+    client.on("error", () => {});
     client.once("close", () => clients.delete(client));
     void bridgeClient(client);
+  });
+
+  // The listener outlives start()'s transient bind-time 'error' handler; without a
+  // permanent floor an accept-time error (EMFILE/ENFILE under fd pressure) would be
+  // an unhandled 'error' event and crash the process. Log and keep serving.
+  server.on("error", (err) => {
+    console.warn(`[docker-ssh] bridge listener error (${opts.host ?? "?"}): ${safeErrorMessage(err)}`);
   });
 
   return {

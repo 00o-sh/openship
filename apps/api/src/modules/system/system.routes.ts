@@ -149,6 +149,11 @@ r.post("/containers/apply-all", { tag: "server:write", collection: true }, serve
 r.get("/servers/:id/containers", { tag: "server:read" }, serverContainers.listServerContainers);
 r.post("/servers/:id/containers/scan", { tag: "server:write" }, serverContainers.scanServerContainers);
 r.post("/servers/:id/containers/:component/apply/stream", { tag: "server:write" }, serverContainers.applyServerContainerStream);
+// Read-only siblings of the POST apply stream, for page reloads: /session hands
+// back a running swap's id, /stream (GET) re-attaches to it. Neither can start a
+// run, so they stay on server:read while the POST keeps server:write.
+r.get("/servers/:id/containers/:component/apply/session", { tag: "server:read" }, serverContainers.getServerContainerApplySession);
+r.get("/servers/:id/containers/:component/apply/stream", { tag: "server:read" }, serverContainers.attachServerContainerStream);
 
 // ── Per-server GitHub auth (self-hosted): device-login token / PAT / SSH
 //    server-key / per-repo deploy-key. The `:id` server is the permission

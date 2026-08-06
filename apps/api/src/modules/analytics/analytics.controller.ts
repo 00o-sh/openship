@@ -81,7 +81,9 @@ export async function projectGeo(c: Context) {
  */
 export async function setPathsCollection(c: Context) {
   const ctx = getRequestContext(c);
-  const id = c.req.query("projectId") ?? "";
+  // Path param, not ?projectId= — the project:write route resolver already asserted
+  // write on this id from the URL, so the assert below is defense-in-depth, not the gate.
+  const id = c.req.param("projectId") ?? "";
   await permission.assert(ctx, { resourceType: "project", resourceId: id, action: "write" });
 
   const project = await repos.project.findById(id);

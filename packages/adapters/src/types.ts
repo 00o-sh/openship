@@ -642,10 +642,17 @@ export interface CommandExecutor {
   /**
    * Run a command with real-time log streaming.
    * Resolves when the command exits - the log callback fires for each line.
+   *
+   * `opts.signal` aborts a still-running command (kills the child). Needed by the
+   * live-log exec transport, which holds a `curl -sN` open against the edge and must be
+   * able to tear it down when the browser disconnects — otherwise the orphaned curl keeps
+   * draining the edge's shared log queue. Optional; executors that don't stream a killable
+   * child may ignore it.
    */
   streamExec(
     command: string,
     onLog: (log: LogEntry) => void,
+    opts?: { signal?: AbortSignal },
   ): Promise<{ code: number; output: string }>;
 
   /** Write content to a file on the target machine. Creates dirs as needed. */

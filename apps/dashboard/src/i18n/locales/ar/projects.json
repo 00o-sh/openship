@@ -242,6 +242,8 @@
     "ofCores": "من {cores} نواة",
     "ofMemory": "من {total}",
     "servicesTitle": "الخدمات",
+    "scrollServicesLeft": "تمرير الخدمات لليسار",
+    "scrollServicesRight": "تمرير الخدمات لليمين",
     "unsupportedTitle": "استخدام الموارد غير متاح",
     "reconnect": "إعادة الاتصال",
     "live": "مباشر",

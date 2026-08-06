@@ -350,6 +350,9 @@ export async function applyServerContainer(
       const log = (l: SystemLog) => onLog?.(l);
       let outcome: ApplyContainerResult;
 
+      // Both reconciles deliver a dev/from-source image before bring-up: they build it
+      // on THIS box (the executor is the target), or ship + build for a remote one — no
+      // server identity needed, the executor is the only handle required.
       if (component === "edge") {
         const r = await reconcileServerEdge(executor, { onLog: log });
         outcome = { component, updated: r.updated, down: r.edgeDown, ...(r.error ? { error: r.error } : {}) };

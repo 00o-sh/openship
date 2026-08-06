@@ -42,10 +42,24 @@ export const ServerLogs: React.FC<ServerLogsProps> = ({
         .filter((d: unknown): d is string => typeof d === "string" && d.length > 0),
     [domainsData?.domains],
   );
-  const [selectedDomain, setSelectedDomain] = useState(domain || "");
+  // Default to "" = All: combine every domain so a multi-route project never opens on a
+  // dead-looking primary. A specific selection survives a domain-list refresh; anything
+  // else (including a domain that stopped existing) falls back to All.
+  const [selectedDomain, setSelectedDomain] = useState("");
   useEffect(() => {
-    setSelectedDomain((current) => (current && domains.includes(current) ? current : domain || ""));
+    setSelectedDomain((current) => (current && domains.includes(current) ? current : ""));
   }, [domain, domains]);
+
+  // Whether the combined view is active (more than one domain, none singled out) — drives
+  // the per-row host label so you can tell which route a request hit.
+  const isCombined = !selectedDomain && domains.length > 1;
+
+  // Primary-first so the live-stream cap (MAX_STREAMS) drops the least-used tail, not the
+  // domain that matters most.
+  const streamDomains = useMemo(() => {
+    if (domain && domains.includes(domain)) return [domain, ...domains.filter((d) => d !== domain)];
+    return domains;
+  }, [domains, domain]);
 
   // The stream effect keys off the domain SET, as a string. `domains` is rebuilt by
   // useMemo on every domainsData change, so depending on the array (or on
@@ -131,7 +145,10 @@ export const ServerLogs: React.FC<ServerLogsProps> = ({
    */
   useRequestLogStream({
     projectId,
-    domain: selectedDomain,
+    // A specific selection streams that one domain; "All" (empty) fans out across every
+    // route so the combined tail is never empty just because the primary is idle.
+    domain: selectedDomain || undefined,
+    domains: streamDomains,
     // Gated on the same condition the effect above uses: with no routed domain there is
     // nothing to stream, and the empty state should say "add a domain" rather than show a
     // connection error.
@@ -250,8 +267,9 @@ export const ServerLogs: React.FC<ServerLogsProps> = ({
           {domains.length > 1 && (
             <DomainSwitcher
               domains={domains}
-              value={selectedDomain || domain || ""}
+              value={selectedDomain}
               onChange={setSelectedDomain}
+              allowAll
             />
           )}
           {!error && (
@@ -288,6 +306,14 @@ export const ServerLogs: React.FC<ServerLogsProps> = ({
                     <Clock className="w-3 h-3" />
                     <span className="font-mono tabular-nums">{new Date(log.timestamp).toLocaleTimeString()}</span>
                   </span>
+                  {isCombined && log.host && (
+                    <span
+                      className="shrink-0 max-w-[160px] truncate rounded-md bg-muted/60 px-1.5 py-0.5 font-mono text-muted-foreground/80"
+                      title={log.host}
+                    >
+                      {log.host}
+                    </span>
+                  )}
                   <span className="flex items-center gap-1 shrink-0">
                     {log.country && (
                       // eslint-disable-next-line @next/next/no-img-element

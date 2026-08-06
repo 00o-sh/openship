@@ -27,12 +27,14 @@ import {
   scanPorts,
   probeTcp,
   type PortScanResult,
+  type SystemLog,
   SYSTEM_COMPONENTS,
   getSystemComponentDefinition,
 } from "@repo/adapters";
 import { formatDuration, systemDebug } from "@/lib/system-debug";
 import { sshManager, buildSshConfig } from "../../lib/ssh-manager";
-import { withPinnedEdgeImage } from "../../lib/edge-image";
+import { pinnedEdgeImage, withPinnedEdgeImage } from "../../lib/edge-image";
+import { deliverManagedImage } from "../../lib/deliver-managed-image";
 import { resolveAcmeProviderOptions } from "../../lib/acme-config";
 import { runConnectivityCheck } from "../../lib/connectivity";
 import "../../lib/connectivity-checks"; // registers ssh / ssh-server / backup-destination
@@ -370,6 +372,28 @@ export async function installRespond(c: Context) {
 }
 
 /**
+ * Edge-only Stage-B APPLY ahead of a component installer: build our source onto the
+ * box (or ship + build for a remote one) so the create path adopts the dev image
+ * instead of pulling an unpublished dev tag from GHCR (the reported bug). A no-op for
+ * every non-edge component (docker/git/rsync aren't our images) and in prod (no
+ * checkout → deliver returns at once). Shared by the two install entry points below so
+ * the edge gate and the deliver call can't drift between them.
+ */
+async function deliverEdgeBeforeInstall(
+  component: string,
+  executor: CommandExecutor,
+  onLog: (log: SystemLog) => void,
+): Promise<void> {
+  if (component !== "edge") return;
+  await deliverManagedImage({
+    kind: "edge",
+    image: pinnedEdgeImage(),
+    targetExecutor: executor,
+    onLog,
+  });
+}
+
+/**
  * POST /system/install
  *
  * Install a specific component on a server.
@@ -384,8 +408,8 @@ export async function installComponent(c: Context) {
   const serverId = body.serverId as string | undefined;
   if (!serverId) return c.json({ error: "serverId is required" }, 400);
 
-  getRequestContext(c);
-  await permission.assert(getRequestContext(c), { resourceType: "server", resourceId: serverId, action: "admin" });
+  const ctx = getRequestContext(c);
+  await permission.assert(ctx, { resourceType: "server", resourceId: serverId, action: "admin" });
 
   const componentName = body.component as string;
 
@@ -399,15 +423,19 @@ export async function installComponent(c: Context) {
     return c.json({ error: `No installer for ${componentName}` }, 400);
   }
 
+  // Hoisted so the catch can return whatever the build/install already logged: a
+  // from-source edge build that fails throws with its output ONLY in these lines, and
+  // a success-only `logs` would drop exactly the diagnostic the operator needs.
+  const logs: string[] = [];
   try {
-    const logs: string[] = [];
-    const installResult = await sshManager.withExecutor(serverId, (executor) =>
-      installerFn(
+    const installResult = await sshManager.withExecutor(serverId, async (executor) => {
+      await deliverEdgeBeforeInstall(componentName, executor, (log) => logs.push(log.message));
+      return installerFn(
         executor,
         (log) => logs.push(log.message),
         withPinnedEdgeImage(body.config ?? {}),
-      ),
-    );
+      );
+    });
 
     return c.json({
       ...installResult,
@@ -420,12 +448,12 @@ export async function installComponent(c: Context) {
       message === "No server configured" ||
       message === "Invalid SSH auth configuration"
     ) {
-      return c.json({ error: "no_server", message }, 400);
+      return c.json({ error: "no_server", message, logs }, 400);
     }
     if (isSshAuthError(err)) {
-      return c.json({ error: "auth_failed", message }, 400);
+      return c.json({ error: "auth_failed", message, logs }, 400);
     }
-    return c.json({ error: "install_failed", message }, 502);
+    return c.json({ error: "install_failed", message, logs }, 502);
   }
 }
 
@@ -505,8 +533,8 @@ export async function installStream(c: Context) {
   const serverId = body.serverId as string | undefined;
   if (!serverId) return c.json({ error: "serverId is required" }, 400);
 
-  getRequestContext(c);
-  await permission.assert(getRequestContext(c), { resourceType: "server", resourceId: serverId, action: "admin" });
+  const ctx = getRequestContext(c);
+  await permission.assert(ctx, { resourceType: "server", resourceId: serverId, action: "admin" });
 
   const requestedComponents = body.components as string[] | undefined;
   // Pinned here, at the boundary — the edge image is never caller-supplied.
@@ -595,6 +623,7 @@ export async function installStream(c: Context) {
 
         try {
           const result = await sshManager.withExecutor(serverId, async (executor) => {
+            await deliverEdgeBeforeInstall(name, executor, onLog);
             // Single edge-prepare point: the installer raises the edge-conflict
             // consent prompt via promptUser; on "migrate", ensureEdge runs the
             // takeover. Its InstallResult is returned unchanged when no migration.

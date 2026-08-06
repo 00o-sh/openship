@@ -30,6 +30,13 @@ vi.mock("@repo/adapters", () => ({
   runEdgeTakeover: vi.fn(),
 }));
 
+// The build-only APPLY (build the edge from source onto the local daemon before
+// bring-up) has its own unit tests — here it's a no-op so these cases stay about
+// the halt-and-report contract, not the deliver pipeline.
+vi.mock("../deliver-managed-image", () => ({
+  deliverManagedImage: vi.fn(async () => ({ delivered: false })),
+}));
+
 import { ensureSelfEdgeInfra } from "./self-edge";
 
 const origPlatform = Object.getOwnPropertyDescriptor(process, "platform");

@@ -15,7 +15,6 @@
 import { randomBytes } from "node:crypto";
 import type { CommandExecutor, SystemLogCallback, SystemLog } from "@repo/adapters";
 import { checkMailHealth } from "./mail-health.service";
-import { mailBuildSpec } from "../../lib/mail-image";
 import { safeErrorMessage } from "@repo/core";
 import {
   installDocker,
@@ -469,9 +468,9 @@ export async function stepDeployEngine(
       domain,
       secrets,
       onLog: bridgeToSystemLog(stepId, log),
-      // Dev / from-source: build the engine image locally instead of pulling an
-      // unpublished tag. No-op in a published install (mailBuildSpec → undefined).
-      build: mailBuildSpec(),
+      // The engine image is delivered before this call (deliverManagedImage in the
+      // deploy_engine step) — dev builds on the control plane and ships to the box,
+      // prod pulls; ensureContainerMail just runs whatever tag is already present.
     });
     if (result.mailDown) {
       return {

@@ -1,10 +1,9 @@
-import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { buildMailImageRef } from "@repo/core";
 
 import { APP_VERSION } from "./app-version";
-import { apiRootPath } from "./release-resolver";
+import { detectBuildContext, devFallbackTag } from "./managed-images";
 
 /**
  * The mail-engine container image this API is allowed to run.
@@ -17,7 +16,11 @@ import { apiRootPath } from "./release-resolver";
  * this produces and the ref that consumes it can't drift.
  */
 export function pinnedMailImage(): string {
-  return buildMailImageRef({ fallbackTag: APP_VERSION });
+  // Same model as pinnedEdgeImage: in a source checkout the fallback becomes a
+  // content-derived DEV tag so an edit to apps/email moves the tag and the drift scan
+  // reports the engine behind (see devSourceTag). OPENSHIP_MAIL_TAG / OPENSHIP_MAIL_IMAGE
+  // still float it independently; a compiled/prod install stays on plain APP_VERSION.
+  return buildMailImageRef({ fallbackTag: devFallbackTag(APP_VERSION, mailBuildSpec()) });
 }
 
 /**
@@ -30,30 +33,13 @@ const MAIL_DOCKERFILE = join("apps", "email", "Dockerfile");
 
 /**
  * The from-source BUILD context for the engine image, or undefined when there's no
- * checkout to build from. Consumed by `ensureContainerMail`'s `build` path, which
- * builds `apps/email/Dockerfile` on the executor in place of pulling the tag.
- *
- * TEMPORARY, by design: `openship-mail` is not published yet, so building locally is
- * the only way to exercise the containerized engine. Once the image ships with a
- * release, this stops being load-bearing for normal installs and stays only as the
- * dev/from-source escape hatch — the pull path in `ensureContainerMail` becomes the
- * one every published install takes.
- *
- *   1. OPENSHIP_MAIL_BUILD_CONTEXT — an explicit repo root. Also the ONLY way to
- *      point at a checkout on a REMOTE box: auto-detect only sees this API's own disk.
- *   2. Auto: the repo root above this API package, via the single on-disk anchor
- *      ({@link apiRootPath}) rather than a second `import.meta.url` derivation.
- *      Guarded by the Dockerfile existing there, so a compiled binary or a bundled
- *      install — where that anchor points nowhere useful — returns undefined and
- *      bring-up falls through to the registry pull.
- *
- * The tag is unaffected — it stays driven by {@link pinnedMailImage}, so a built
- * image carries exactly the ref bring-up resolves.
+ * checkout to build from. Consumed by `deliverManagedImage`, which builds
+ * `apps/email/Dockerfile` ON THE TARGET box (in place, or ship + build for a remote
+ * one) so the create/swap adopts the dev image instead of pulling the pinned tag. Its
+ * presence is also what makes `pinnedMailImage()` produce the dev-suffixed tag (see
+ * `devFallbackTag`). Detection + the security rationale (why the context is never
+ * client-supplied — it feeds `docker build` as root) live in {@link detectBuildContext}.
  */
-export function mailBuildSpec(): { context: string } | undefined {
-  const explicit = process.env.OPENSHIP_MAIL_BUILD_CONTEXT?.trim();
-  if (explicit) return { context: explicit };
-
-  const repoRoot = apiRootPath("..", "..");
-  return existsSync(join(repoRoot, MAIL_DOCKERFILE)) ? { context: repoRoot } : undefined;
+export function mailBuildSpec(): { context: string; dockerfile: string } | undefined {
+  return detectBuildContext(MAIL_DOCKERFILE, "OPENSHIP_MAIL_BUILD_CONTEXT");
 }

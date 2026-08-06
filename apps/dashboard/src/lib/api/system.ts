@@ -316,6 +316,15 @@ export interface SetupSessionInfo {
   finishedAt?: number;
 }
 
+/** Read-only status of a managed-container image swap (edge/mail), for re-attach. */
+export interface ContainerApplySessionInfo {
+  active: boolean;
+  sessionId?: string;
+  status?: "running" | "completed" | "failed";
+  serverId?: string;
+  component?: "edge" | "mail";
+}
+
 export interface SetupLogEvent {
   type: "log";
   timestamp: string;
@@ -526,6 +535,12 @@ export const systemApi = {
     api.get<SetupSessionInfo>(endpoints.system.installSession, {
       params: sessionId ? { id: sessionId } : undefined,
     }),
+
+  /** Is a container image swap (edge/mail) running for this server? (re-attach) */
+  getContainerApplySession: (serverId: string, component: "edge" | "mail") =>
+    api.get<ContainerApplySessionInfo>(
+      endpoints.system.serverContainerApplySession(serverId, component),
+    ),
 
   // ── Servers CRUD ─────────────────────────────────────────────────────────
 

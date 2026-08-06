@@ -92,12 +92,27 @@ async function runEnsure(
     importSites,
     runEdgeTakeover,
   } = await import("@repo/adapters");
+  // Lazy, like @repo/adapters above: deliver pulls in the deploy runtime (db, ssh,
+  // dockerode), which must stay off the boot path on the topologies that skip early.
+  const { deliverManagedImage } = await import("../deliver-managed-image");
   const executor = createExecutor(); // LocalExecutor — this same machine
+
+  // Stage-B APPLY, build-only: this host IS the target, so build the edge from our
+  // source onto the local daemon before either bring-up path pulls the pinned tag.
+  // serverId undefined ⇒ no transfer; prod (no checkout) ⇒ deliver no-ops.
+  const deliverEdge = () =>
+    deliverManagedImage({
+      kind: "edge",
+      image: pinnedEdgeImage(),
+      targetExecutor: executor,
+      onLog: (l) => log(l.message, l.level),
+    });
 
   // Migrate: import the existing proxy's sites and take over 80/443. The
   // self-app's own route is added AFTER by the pipeline (reapplyProjectLiveRoutes),
   // not here — so no extraRoutes.
   if (options?.edgeMigrate) {
+    await deliverEdge();
     const { status } = await foreignProxyOnEdge(executor);
     const scan = await importSites(executor, status);
     const res = await runEdgeTakeover(
@@ -147,6 +162,7 @@ async function runEnsure(
   // Bring up the edge (idempotent — the container edge, or bare OpenResty on a
   // Docker-less box). edgeTakeover authorizes reclaiming 80/443 from an existing
   // proxy without prompting.
+  await deliverEdge();
   const installerConfig = withPinnedEdgeImage(
     options?.edgeTakeover
       ? { edgePolicy: { mode: "takeover" as const, stopTargets: [] } }

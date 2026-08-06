@@ -10,7 +10,8 @@ import {
 } from "@repo/adapters";
 import { safeErrorMessage } from "@repo/core";
 
-import { mailBuildSpec, pinnedMailImage } from "./mail-image";
+import { deliverManagedImage } from "./deliver-managed-image";
+import { pinnedMailImage } from "./mail-image";
 
 /**
  * Converge a server's mail ENGINE onto the pinned container image — the mail
@@ -56,12 +57,15 @@ export async function reconcileServerMail(
 
   try {
     const image = pinnedMailImage();
+    // Stage-B APPLY: build our source onto this box (or ship + build for a remote one)
+    // so the swap below adopts the dev engine image instead of pulling an unpublished
+    // tag. No-op in prod (no checkout → deliver returns immediately).
+    await deliverManagedImage({ kind: "mail", image, targetExecutor: executor, onLog: opts.onLog });
     const result = await ensureContainerMail(executor, {
       onLog: opts.onLog,
       domain: opts.domain,
       secrets: {},
       image,
-      build: mailBuildSpec(),
     });
     return {
       updated: Boolean(result.updated),

@@ -42,6 +42,13 @@ export interface RequestLogEntry {
   responseTime: number;
   requestSize?: number;
   responseSize?: number;
+  /**
+   * The hostname this request hit. Every live frame carries it (`pipe_log.lua` sets
+   * `payload.host`); `/logs/recent` rows don't (the edge keys its ring by host), so the
+   * API injects it when it fans a combined "all domains" view. Lets the combined view
+   * label which domain a row belongs to; single-domain views ignore it.
+   */
+  host?: string;
 }
 
 function parseNumber(value: unknown): number {
@@ -87,6 +94,7 @@ export function normalizeRequestLog(d: unknown): RequestLogEntry | null {
     responseTime: rtRaw !== undefined ? Math.round(parseNumber(rtRaw) * 1000) : 0,
     requestSize: parseNumber(r.requestSize ?? r.req_size ?? r.bw_in),
     responseSize: parseNumber(r.responseSize ?? r.res_size ?? r.bw_out),
+    host: (typeof r.host === "string" && r.host) || undefined,
   };
 }
 
@@ -103,8 +111,14 @@ export type RequestLogStreamStatus =
 
 interface Options {
   projectId: string;
-  /** Restrict to one hostname. Empty/undefined streams the project's primary. */
+  /** Restrict to one hostname (route switch / the monitoring map). Wins over `domains`.
+   *  Empty/undefined streams the project's primary (or fans out across `domains`). */
   domain?: string | null;
+  /** Fan out across every one of these hostnames at once — the combined "all domains"
+   *  view — so a project spread over several routes never looks dead because the primary
+   *  happened to be idle. Ignored when `domain` is set. Caller orders it primary-first;
+   *  we cap the number of concurrent connections. */
+  domains?: string[];
   /** Nothing opens while this is false. The map's live-hits switch defaults to off, and a
    *  network stream must not be opened by merely rendering a tab. */
   enabled: boolean;
@@ -115,7 +129,13 @@ interface Options {
 const appendQueryParam = (url: string, key: string, value: string) =>
   `${url}${url.includes("?") ? "&" : "?"}${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
 
-export function useRequestLogStream({ projectId, domain, enabled, onEntry, onStatus }: Options) {
+/** Ceiling on simultaneous EventSources for the combined view. One browser holds a
+ *  handful of HTTP/1.1 connections per origin; a project with dozens of routes must not
+ *  starve the rest of the page. Primary-first ordering means the cap drops the least-used
+ *  tail, not the domain the user cares about. */
+const MAX_STREAMS = 8;
+
+export function useRequestLogStream({ projectId, domain, domains, enabled, onEntry, onStatus }: Options) {
   // Callbacks in refs, not deps: a caller that passes an inline arrow (all of them) would
   // otherwise tear down and reopen the EventSource on every render — which for the map
   // means reconnecting several times a second while ripples animate.
@@ -124,6 +144,20 @@ export function useRequestLogStream({ projectId, domain, enabled, onEntry, onSta
   onEntryRef.current = onEntry;
   onStatusRef.current = onStatus;
 
+  // Which hostnames to tail. A `null` entry means "let the server pick the primary",
+  // preserving the old no-argument behaviour for the monitoring map.
+  const targets: (string | null)[] = domain
+    ? [domain]
+    : domains && domains.length
+      ? Array.from(new Set(domains.filter((d): d is string => typeof d === "string" && d.length > 0))).slice(
+          0,
+          MAX_STREAMS,
+        )
+      : [null];
+  // Content, not identity: don't tear down every render just because the caller rebuilt
+  // the array. Keyed by the joined target list.
+  const targetsKey = targets.map((t) => t ?? "").join(",");
+
   useEffect(() => {
     if (!enabled || !projectId) {
       onStatusRef.current?.({ state: "idle" });
@@ -131,81 +165,116 @@ export function useRequestLogStream({ projectId, domain, enabled, onEntry, onSta
     }
 
     let cancelled = false;
-    let es: EventSource | null = null;
+    const sources: EventSource[] = [];
+    // Aggregate N connections into one status: OPEN if any is live, UNAVAILABLE only when
+    // they are all cloud-without-a-token, ERROR only when they all fail. One idle domain
+    // must never blank a tail another domain is filling.
+    const states = new Map<number, RequestLogStreamStatus["state"]>();
+    let lastError = "closed";
     const status = (s: RequestLogStreamStatus) => {
       if (!cancelled) onStatusRef.current?.(s);
     };
-
-    const handleRequest = (e: MessageEvent) => {
-      try {
-        const d = JSON.parse(e.data);
-        if (d?.error) {
-          status({ state: "error", message: String(d.error) });
-          return;
-        }
-        const entry = normalizeRequestLog(d);
-        // Live data means whatever failed earlier has recovered.
-        if (entry) {
-          status({ state: "open" });
-          onEntryRef.current(entry);
-        }
-      } catch {
-        /* malformed frame — drop it rather than kill the stream */
-      }
+    const report = () => {
+      const vals = [...states.values()];
+      if (!vals.length) return;
+      if (vals.some((v) => v === "open")) return status({ state: "open" });
+      if (vals.length === targets.length && vals.every((v) => v === "unavailable"))
+        return status({ state: "unavailable" });
+      if (vals.length === targets.length && vals.every((v) => v === "error" || v === "unavailable"))
+        return status({ state: "error", message: lastError });
+      status({ state: "connecting" });
     };
 
-    const handleError = (e: Event) => {
-      const me = e as MessageEvent;
-      if (me.data) {
+    const connectOne = (index: number, target: string | null) => {
+      let es: EventSource | null = null;
+      const set = (st: RequestLogStreamStatus["state"], msg?: string) => {
+        states.set(index, st);
+        if (st === "error" && msg) lastError = msg;
+        report();
+      };
+
+      const handleRequest = (e: MessageEvent) => {
         try {
-          status({ state: "error", message: String(JSON.parse(me.data).error ?? me.data) });
-          return;
+          const d = JSON.parse(e.data);
+          if (d?.error) {
+            set("error", String(d.error));
+            return;
+          }
+          const entry = normalizeRequestLog(d);
+          if (entry) {
+            // The frame's own host wins; fall back to the connection's domain so a
+            // combined view can still label the row.
+            if (!entry.host && typeof target === "string") entry.host = target;
+            set("open");
+            onEntryRef.current(entry);
+          }
         } catch {
-          status({ state: "error", message: String(me.data) });
+          /* malformed frame — drop it rather than kill the stream */
+        }
+      };
+
+      const handleError = (e: Event) => {
+        const me = e as MessageEvent;
+        if (me.data) {
+          try {
+            set("error", String(JSON.parse(me.data).error ?? me.data));
+          } catch {
+            set("error", String(me.data));
+          }
           return;
         }
-      }
-      if (es?.readyState === EventSource.CLOSED) status({ state: "error", message: "closed" });
+        // A data-less error is only terminal once the browser has given up (CLOSED);
+        // during an auto-reconnect (CONNECTING) it's transient and must NOT flap the
+        // aggregate to error while another domain's tail is live.
+        if (es?.readyState === EventSource.CLOSED) set("error", "closed");
+      };
+
+      (async () => {
+        try {
+          const tokenRes = await api.get<{ kind: string; url?: string; token?: string }>(
+            typeof target === "string"
+              ? appendQueryParam(endpoints.projects.serverLogsStreamToken(projectId), "domain", target)
+              : endpoints.projects.serverLogsStreamToken(projectId),
+          );
+          if (cancelled) return;
+
+          if (tokenRes.kind === "cloud" && tokenRes.url && tokenRes.token) {
+            es = new EventSource(appendQueryParam(tokenRes.url, "token", tokenRes.token));
+            // A cloud edge may send unnamed messages or named `request` events.
+            es.onmessage = handleRequest;
+            es.addEventListener("request", handleRequest);
+          } else if (tokenRes.kind === "self-hosted") {
+            let url = `${getApiBaseUrl()}${endpoints.projects.serverLogsStream(projectId)}`;
+            if (typeof target === "string") url = appendQueryParam(url, "domain", target);
+            es = new EventSource(url, { withCredentials: true });
+            es.addEventListener("request", handleRequest);
+          } else {
+            // Cloud project, no token right now. Deliberately does NOT fall through to
+            // /server-logs/stream, which 400s for cloud.
+            set("unavailable");
+            return;
+          }
+
+          es.addEventListener("error", handleError);
+          es.onopen = () => set("open");
+          if (cancelled) {
+            es.close();
+            return;
+          }
+          sources.push(es);
+        } catch {
+          set("error", "connect-failed");
+        }
+      })();
     };
 
     status({ state: "connecting" });
-
-    (async () => {
-      try {
-        const tokenRes = await api.get<{ kind: string; url?: string; token?: string }>(
-          domain
-            ? appendQueryParam(endpoints.projects.serverLogsStreamToken(projectId), "domain", domain)
-            : endpoints.projects.serverLogsStreamToken(projectId),
-        );
-        if (cancelled) return;
-
-        if (tokenRes.kind === "cloud" && tokenRes.url && tokenRes.token) {
-          es = new EventSource(appendQueryParam(tokenRes.url, "token", tokenRes.token));
-          // A cloud edge may send unnamed messages or named `request` events.
-          es.onmessage = handleRequest;
-          es.addEventListener("request", handleRequest);
-        } else if (tokenRes.kind === "self-hosted") {
-          let url = `${getApiBaseUrl()}${endpoints.projects.serverLogsStream(projectId)}`;
-          if (domain) url = appendQueryParam(url, "domain", domain);
-          es = new EventSource(url, { withCredentials: true });
-          es.addEventListener("request", handleRequest);
-        } else {
-          // Cloud project, no token right now. Deliberately does NOT fall through to
-          // /server-logs/stream, which 400s for cloud.
-          status({ state: "unavailable" });
-          return;
-        }
-
-        es.addEventListener("error", handleError);
-        es.onopen = () => status({ state: "open" });
-      } catch {
-        status({ state: "error", message: "connect-failed" });
-      }
-    })();
+    targets.forEach((t, i) => connectOne(i, t));
 
     return () => {
       cancelled = true;
-      es?.close();
+      for (const es of sources) es.close();
     };
-  }, [projectId, domain, enabled]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, targetsKey, enabled]);
 }

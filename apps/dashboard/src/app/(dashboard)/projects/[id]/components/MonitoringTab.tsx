@@ -62,7 +62,7 @@ function initialPreview(): MockVariant | null {
 }
 
 export const MonitoringTab = () => {
-  const { id, projectData } = useProjectSettings();
+  const { id, projectData, domain } = useProjectSettings();
 
   /**
    * Which domain the whole tab is scoped to. `null` = All.
@@ -83,6 +83,14 @@ export const MonitoringTab = () => {
       new Set(list.map((d) => d.domain?.trim()).filter((d): d is string => !!d)),
     );
   }, [projectData?.domains]);
+  // Primary-first, so the live-stream cap (MAX_STREAMS) drops the least-used tail, not the
+  // domain that matters most. Mirrors ServerLogs so the map's default All scope fans out
+  // across every route instead of tailing only the primary — a busy secondary domain must
+  // still ripple when the primary is idle.
+  const streamDomains = useMemo(
+    () => (domain && domains.includes(domain) ? [domain, ...domains.filter((d) => d !== domain)] : domains),
+    [domains, domain],
+  );
 
   /**
    * Fixture preview. Starts from the URL, but is also toggleable from the empty
@@ -122,6 +130,9 @@ export const MonitoringTab = () => {
   useRequestLogStream({
     projectId: id,
     domain: domainScope,
+    // When no single domain is scoped (default All), fan out across every route so the map
+    // aggregates all domains combined; a scoped `domainScope` still wins over this list.
+    domains: streamDomains,
     // Never while a fixture is driving the page: the preview must not open a socket, and
     // real ripples over mock aggregates would be two different projects on one map. The
     // preview gets simulated hits instead — see below.
@@ -257,7 +268,7 @@ export const MonitoringTab = () => {
     async (enabled: boolean) => {
       setPathsBusy(true);
       try {
-        await api.post(`${endpoints.analytics.pathsCollection}?projectId=${encodeURIComponent(id)}`, {
+        await api.post(`${endpoints.analytics.pathsCollection}/${encodeURIComponent(id)}`, {
           enabled,
         });
         setPathsOverride(enabled);

@@ -12,8 +12,17 @@
  * theme.
  */
 
-import React, { useState } from "react";
-import { Cpu, MemoryStick, Network, HardDrive, Info, RefreshCw } from "lucide-react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Cpu,
+  MemoryStick,
+  Network,
+  HardDrive,
+  Info,
+  RefreshCw,
+  ChevronLeft,
+  ChevronRight,
+} from "lucide-react";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import type {
   ProjectUsage,
@@ -58,43 +67,121 @@ const STATUS_DOT: Record<ServiceStatus, string> = {
 };
 
 /**
- * How many service chips show before the rest fold behind a count.
+ * The stream's FAILURE state, on the services row.
  *
- * Eight fits two rows at most usable widths. Past that the block was growing taller than
- * the metrics it annotates, which inverts the hierarchy — the totals are the subject and
- * the per-service breakdown is the footnote.
+ * When the stream is live there is no badge at all: the parent card's subtitle already
+ * says "Live, refreshed every few seconds", so a second green "Live" dot was redundant
+ * chrome. Only disconnection earns a spot here — it changes what the numbers mean and
+ * has to offer the retry, so it can't be silent.
  */
-const SERVICE_CHIP_LIMIT = 8;
-
-/**
- * Whether the usage stream is currently delivering.
- *
- * The dot only pulses meaning when it can also be absent: a static green dot beside the
- * word "Live" looks identical whether the stream is working or died four minutes ago, so
- * the disconnected state changes both the colour AND offers the retry.
- */
-const LiveBadge: React.FC<{ isConnected: boolean; onReconnect: () => void }> = ({
-  isConnected,
-  onReconnect,
-}) => {
+const OfflineNotice: React.FC<{ onReconnect: () => void }> = ({ onReconnect }) => {
   const { t } = useI18n();
   const m = t.projects.monitoring;
   return (
     <div className="flex shrink-0 items-center gap-2">
-      <span
-        aria-hidden
-        className={`size-2 rounded-full ${isConnected ? "bg-success" : "bg-muted-foreground/40"}`}
-      />
-      <span className="text-xs text-muted-foreground">{isConnected ? m.live : m.offline}</span>
-      {!isConnected && (
-        <button
-          type="button"
-          onClick={onReconnect}
-          className="ml-1 flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
-        >
-          <RefreshCw className="size-3" />
-          {m.reconnect}
-        </button>
+      <span aria-hidden className="size-2 rounded-full bg-muted-foreground/40" />
+      <span className="text-xs text-muted-foreground">{m.offline}</span>
+      <button
+        type="button"
+        onClick={onReconnect}
+        className="ml-1 flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+      >
+        <RefreshCw className="size-3" />
+        {m.reconnect}
+      </button>
+    </div>
+  );
+};
+
+/**
+ * The services as a single horizontal strip that scrolls sideways instead of wrapping.
+ *
+ * Was a wrapping grid capped at eight chips with a "+N more" fold — but a stack that grew
+ * downward pushed the map below it and made the block's height depend on the service
+ * count. One line keeps the height fixed no matter how many services there are; the list
+ * runs off the right edge and the arrows (or drag / trackpad) reach the rest.
+ *
+ * The arrows appear ONLY on overflow — a short list that fits shows no chrome. Overflow is
+ * measured on the live element (scroll position + client/scroll width) because it depends
+ * on the rendered width, not the service count; a ResizeObserver keeps it honest as the
+ * card resizes. Both are client-only, so a server render draws the strip with no arrows
+ * and the native overflow still scrolls.
+ */
+const ServiceStrip: React.FC<{
+  services: ServiceUsage[];
+  focusServiceKey: string | null;
+  statusLabels: Partial<Record<ServiceStatus, string>>;
+}> = ({ services, focusServiceKey, statusLabels }) => {
+  const { t } = useI18n();
+  const m = t.projects.monitoring;
+  const ref = useRef<HTMLDivElement>(null);
+  const [canLeft, setCanLeft] = useState(false);
+  const [canRight, setCanRight] = useState(false);
+
+  const measure = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    // 1px slack: sub-pixel widths never let scrollLeft land exactly on an edge.
+    setCanLeft(el.scrollLeft > 1);
+    setCanRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+  }, []);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    measure();
+    el.addEventListener("scroll", measure, { passive: true });
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => {
+      el.removeEventListener("scroll", measure);
+      ro.disconnect();
+    };
+  }, [measure, services.length]);
+
+  const nudge = (dir: 1 | -1) => {
+    const el = ref.current;
+    if (!el) return;
+    // Most of a viewport per press, floored so a narrow card still advances.
+    el.scrollBy({ left: dir * Math.max(160, el.clientWidth * 0.75), behavior: "smooth" });
+  };
+
+  const arrowBtn =
+    "flex size-6 shrink-0 items-center justify-center rounded-full bg-muted/60 text-muted-foreground transition-colors hover:text-foreground disabled:cursor-default disabled:opacity-30 disabled:hover:text-muted-foreground";
+
+  return (
+    // Scroller and arrows share one row: the strip takes the remaining width, the
+    // navigator sits at the right edge next to where the overflow disappears.
+    <div className="mt-2 flex items-center gap-2">
+      <div
+        ref={ref}
+        role="group"
+        aria-label={m.servicesTitle}
+        // One line, always. `flex-nowrap` + `overflow-x-auto` scrolls sideways rather than
+        // wrapping; the scrollbar is hidden because the arrows and drag/trackpad are the
+        // affordance and a native bar under a ~32px strip is more chrome than content.
+        className="flex min-w-0 flex-1 flex-nowrap gap-1.5 overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      >
+        {services.map((s) => (
+          <ServiceChip
+            key={s.serviceId ?? s.name}
+            service={s}
+            focused={focusServiceKey != null && s.serviceId === focusServiceKey}
+            // The service-detail labels, not a second vocabulary: these chips report the
+            // SAME live container states the Services tab shows, so they read identically.
+            statusLabel={statusLabels[s.status] ?? s.status}
+          />
+        ))}
+      </div>
+      {(canLeft || canRight) && (
+        <div className="flex shrink-0 items-center gap-1">
+          <button type="button" aria-label={m.scrollServicesLeft} disabled={!canLeft} onClick={() => nudge(-1)} className={arrowBtn}>
+            <ChevronLeft className="size-3.5" />
+          </button>
+          <button type="button" aria-label={m.scrollServicesRight} disabled={!canRight} onClick={() => nudge(1)} className={arrowBtn}>
+            <ChevronRight className="size-3.5" />
+          </button>
+        </div>
       )}
     </div>
   );
@@ -156,7 +243,7 @@ const ServiceChip: React.FC<{
     // No border. A ring around a pill that already has its own fill is a second boundary
     // for one edge, and at this size it read as noise — five outlined pills in a row drew
     // more attention than the numbers inside them. The fill alone separates them.
-    className={`flex min-w-0 items-center gap-2 rounded-full py-1 pl-3 pr-2 text-xs transition-colors ${
+    className={`flex shrink-0 items-center gap-2 rounded-full py-1 pl-3 pr-2 text-xs transition-colors ${
       focused ? "bg-primary/15" : "bg-muted/60"
     }`}
   >
@@ -186,7 +273,6 @@ export const ResourceCards: React.FC<Props> = ({
   const m = t.projects.monitoring;
   const statusLabels: Partial<Record<ServiceStatus, string>> =
     t.projectDetail.services.detail.status;
-  const [showAllServices, setShowAllServices] = useState(false);
 
   // `supported: false` is a real answer, not an error: BareRuntime's old stub
   // returned zeros and the dashboard drew them as data, so an unmeasurable
@@ -247,10 +333,6 @@ export const ResourceCards: React.FC<Props> = ({
       ? usage.services.find((s) => s.serviceId === focusServiceKey)
       : undefined;
   const o: ResourceUsage = focused ? (focused.usage ?? { ...ZERO_USAGE }) : usage.overall;
-  const shownServices = showAllServices
-    ? usage.services
-    : usage.services.slice(0, SERVICE_CHIP_LIMIT);
-  const hiddenCount = usage.services.length - shownServices.length;
   // A single-app deploy's one "service" IS the app, so chips would just repeat the totals
   // above them.
   const hasServiceChips = usage.services.length > 1;
@@ -301,57 +383,25 @@ export const ResourceCards: React.FC<Props> = ({
           the parent card rather than a card of its own — the chips belong WITH the totals
           they break down. */}
       {/* This row exists whether or not there are services, because it also carries the
-          liveness badge — and a single-container app needs that just as much. Only the
-          label and the chips are conditional, so there is one layout rather than two. */}
+          offline notice — and a single-container app needs that just as much. When the
+          stream is live the header collapses to just the title; when it drops, the notice
+          appears on the right. */}
       <div>
         <div className="mb-2 flex items-center gap-3">
           {hasServiceChips && (
             <h3 className="text-xs font-medium text-muted-foreground">{m.servicesTitle}</h3>
           )}
           <span className="min-w-0 flex-1" />
-          {/* Liveness rides THIS row rather than one of its own. It describes the whole
-              stream, so it belongs beside the list of what is being streamed, and the row
-              had empty space across the middle anyway. */}
-          <LiveBadge isConnected={isConnected} onReconnect={onReconnect} />
+          {/* Only the FAILURE state shows here. Live is already stated by the card
+              subtitle, so a second "Live" pill was redundant — see OfflineNotice. */}
+          {!isConnected && <OfflineNotice onReconnect={onReconnect} />}
         </div>
         {hasServiceChips && (
-          <div className="flex flex-wrap gap-1.5">
-            {shownServices.map((s) => (
-              <ServiceChip
-                key={s.serviceId ?? s.name}
-                service={s}
-                focused={focusServiceKey != null && s.serviceId === focusServiceKey}
-                // The service-detail labels, not a second vocabulary: these chips
-                // report the SAME live container states resolveLiveServiceState
-                // produces, so they must read identically to the Services tab.
-                statusLabel={statusLabels[s.status] ?? s.status}
-              />
-            ))}
-            {/* Bounded, with the remainder COUNTED rather than dropped.
-                Chips wrap, so 15 services silently became four rows — the block quietly
-                grew past the metrics it annotates. A cap plus a count keeps the height
-                predictable and never lets a truncated list look complete. Deliberately not
-                a horizontal scroller: a strip that runs off the edge hides the fact that
-                there is more at all, whereas "+7" states it. */}
-            {hiddenCount > 0 && (
-              <button
-                type="button"
-                onClick={() => setShowAllServices(true)}
-                className="rounded-full bg-muted/60 px-3 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
-              >
-                {interpolate(m.servicesMore, { count: String(hiddenCount) })}
-              </button>
-            )}
-            {showAllServices && usage.services.length > SERVICE_CHIP_LIMIT && (
-              <button
-                type="button"
-                onClick={() => setShowAllServices(false)}
-                className="rounded-full bg-muted/60 px-3 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
-              >
-                {m.servicesLess}
-              </button>
-            )}
-          </div>
+          <ServiceStrip
+            services={usage.services}
+            focusServiceKey={focusServiceKey}
+            statusLabels={statusLabels}
+          />
         )}
       </div>
       </div>

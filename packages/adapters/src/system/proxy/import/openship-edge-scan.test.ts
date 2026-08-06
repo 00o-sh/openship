@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { scanOpenshipEdge } from "./nginx";
+import { scanForeignOpenResty, scanOpenshipEdge } from "./nginx";
 import {
   OPENRESTY_DEFAULT_PATHS,
   edgeChallengeVhostConf,
@@ -121,5 +121,57 @@ describe("scanOpenshipEdge", () => {
   it("returns empty when the box is unreachable", async () => {
     const dead = { exec: vi.fn().mockRejectedValue(new Error("ssh timeout")) };
     expect((await scanOpenshipEdge(dead as unknown as CommandExecutor)).sites).toEqual([]);
+  });
+});
+
+// `openresty -T` output for a legacy bare edge whose real vhost is `include`d from a
+// path NONE of scanOpenshipEdge's fixed globs cover — the shape that made a takeover
+// offer "takeover only" (drop every site) instead of a migrate.
+const LEGACY_OPENRESTY_DUMP = `# configuration file /usr/local/openresty/nginx/conf/nginx.conf:
+http {
+  server {
+    listen 80 default_server;
+    server_name _;
+    location / { return 404; }
+  }
+# configuration file /opt/legacy/vhosts/app.conf:
+${VHOST}
+}
+`;
+
+describe("scanForeignOpenResty", () => {
+  it("finds a legacy bare edge's vhosts via `openresty -T`, not the fixed globs", async () => {
+    // The reported bug: the vhost lives at a non-default include path, so the glob
+    // `cat` returns nothing and the migrate offer collapsed to takeover-only. The
+    // fully-resolved dump follows the include and surfaces the site.
+    const exec = vi.fn(async (cmd: string) => {
+      if (cmd.startsWith("openresty -T")) return LEGACY_OPENRESTY_DUMP;
+      return ""; // every glob `cat` is empty — the site is NOT in a known tree
+    });
+    const result = await scanForeignOpenResty({ exec } as unknown as CommandExecutor);
+
+    expect(result.sites).toHaveLength(1);
+    expect(result.sites[0]!.serverNames).toEqual(["app.example.com"]);
+    expect(result.sites[0]!.target).toEqual({ kind: "proxy", url: "http://127.0.0.1:8080" });
+    // The dump is what surfaced it — never fell through to the glob cat.
+    expect(exec.mock.calls.some(([cmd]) => cmd.startsWith("openresty -T"))).toBe(true);
+  });
+
+  it("falls back to the openship site trees when no dump is available (no binary / stopped-with-no-config)", async () => {
+    // `openresty -T` yields nothing (binary absent) → the fixed-glob read still finds
+    // an edge whose sites DO sit in a known tree.
+    const exec = vi.fn(async (cmd: string) => {
+      if (cmd.startsWith("openresty -T")) return "";
+      return cmd.startsWith("cat ") ? VHOST : "";
+    });
+    const result = await scanForeignOpenResty({ exec } as unknown as CommandExecutor);
+
+    expect(result.sites).toHaveLength(1);
+    expect(result.sites[0]!.serverNames).toEqual(["app.example.com"]);
+  });
+
+  it("returns empty (never throws) when neither the dump nor the trees have anything", async () => {
+    const exec = vi.fn(async () => "");
+    expect((await scanForeignOpenResty({ exec } as unknown as CommandExecutor)).sites).toEqual([]);
   });
 });
