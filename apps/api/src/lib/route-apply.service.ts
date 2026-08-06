@@ -142,6 +142,15 @@ export async function reconcileProjectRoutes(
     // orphaned → stale 502). On remote-server deploys the route isn't local, so
     // this is a harmless no-op.
     if (removes.length > 0) {
+      // Teardown runs against the API's OWN routing context. For a single-box
+      // install that IS the edge; for a containerized API or a remote/takeover'd
+      // target it isn't, so the stray vhost may actually live on another host and
+      // these removes are a no-op there. Non-fatal either way, but log it so an
+      // orphaned vhost that survives isn't mistaken for a completed teardown.
+      console.warn(
+        `[route-apply] no deployment routing resolved — running ${removes.length} route removal(s) ` +
+          `against the API's own edge context; a remote/takeover'd edge may retain the vhost until redeploy`,
+      );
       const local = platform().routing;
       for (const r of removes) {
         await local

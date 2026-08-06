@@ -61,11 +61,17 @@ describe("IssuesCard", () => {
     expect(html).toContain(`title="${EDGE_ERROR}"`);
   });
 
-  it("carries severity on the card border, not by tinting every row", () => {
+  it("carries severity in the header, not on the card edge or by tinting every row", () => {
     const html = issues();
-    expect(html).toContain("border-danger-border");
+    expect(html).toContain("bg-danger-bg"); // icon tile
+    expect(html).toContain("text-danger"); // title
     expect(html).toContain("bg-card");
     expect(html).not.toContain("bg-danger/");
+    // The edge stays the same hairline every other card on the page draws: a tinted
+    // border turns the whole card into a status object, and a column of two of them
+    // reads as colored boxes instead of a ranked list.
+    expect(html).toContain("border-border/50");
+    expect(html).not.toContain("border-danger-border");
   });
 
   it("offers a solid Fix for a stopped component", () => {
@@ -76,8 +82,9 @@ describe("IssuesCard", () => {
 
   it("stays at warning when nothing is actually down", () => {
     const html = issues(broken("action"));
-    expect(html).toContain("border-warning-border");
-    expect(html).not.toContain("border-danger-border");
+    expect(html).toContain("bg-warning-bg");
+    expect(html).not.toContain("bg-danger-bg");
+    expect(html).not.toContain("text-danger");
     // An edge that was never installed installs, it doesn't get repaired.
     expect(html).toContain("Install");
   });
@@ -139,11 +146,12 @@ describe("UpdatesCard", () => {
   });
 
   it("wears the update accent without becoming an alarm", () => {
-    // Amber card, but nothing that competes with "your site is down": no red anywhere,
+    // Amber header, but nothing that competes with "your site is down": no red anywhere,
     // and its rows keep the ghost control rather than a solid button.
     const html = updates(ISSUE_FIXTURES.advisory!);
-    expect(html).toContain("border-warning-border");
-    expect(html).not.toContain("border-danger-border");
+    expect(html).toContain("bg-warning-bg");
+    expect(html).toContain("text-warning");
+    expect(html).not.toContain("bg-danger-bg");
     expect(html).not.toContain("bg-warning-solid");
     expect(html).not.toContain("bg-danger-solid");
   });

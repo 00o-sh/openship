@@ -1686,11 +1686,17 @@ export const DomainSettings = () => {
     opts: { onEdit?: () => void; onSetPrimary?: () => void },
   ): React.ReactNode => {
     const canVerify = item.needsVerify && !!item.domainId;
+    // An SSL action (renew / recheck) lives in the ⋯ menu, but the menu closes the
+    // instant it's clicked — so its spinner-label never gets a chance to show and
+    // the operator sees nothing happen for the several seconds certbot takes. Mirror
+    // the inline Verify pattern: surface the in-flight state on the CARD itself.
+    const isRenewing = renewingHostname === item.hostname;
+    const isRechecking = recheckingDomainId === item.domainId;
     const menuActions = buildDomainMenuActions({
       domain: item,
       isManagedRow: item.hostname.toLowerCase().endsWith(`.${baseDomain}`),
-      isRenewing: renewingHostname === item.hostname,
-      isRechecking: recheckingDomainId === item.domainId,
+      isRenewing,
+      isRechecking,
       onEditRoute: opts.onEdit,
       onSetPrimary: opts.onSetPrimary,
       isSettingPrimary: settingPrimaryId === item.id,
@@ -1700,6 +1706,8 @@ export const DomainSettings = () => {
         key={item.id}
         domain={item}
         menuActions={menuActions}
+        sslActionBusy={isRenewing || isRechecking}
+        sslActionLabel={isRenewing ? t.projectSettings.domains.menu.renewing : t.projectSettings.domains.menu.rechecking}
         onVerify={canVerify ? () => startVerify(item.domainId!, item.hostname) : undefined}
         verifying={!!verifyingDomainId && verifyingDomainId === item.domainId}
         verifyHint={verifyHintFor(item.domainId)}
@@ -2665,6 +2673,8 @@ function DiagnosablePill({
 function DomainOverviewCard({
   domain,
   menuActions = [],
+  sslActionBusy = false,
+  sslActionLabel,
   onVerify,
   verifying = false,
   verifyHint,
@@ -2678,6 +2688,11 @@ function DomainOverviewCard({
   /** Secondary actions (edit, renew, …) collapsed into a ⋯ menu. Visit is a
    *  plain icon; Verify is a direct inline button below, not a menu item. */
   menuActions?: MenuAction[];
+  /** An SSL action (renew / recheck) is running for this row. The action lives in
+   *  the ⋯ menu, which closes on click, so the feedback has to surface here. */
+  sslActionBusy?: boolean;
+  /** Label for the in-flight SSL action ("Renewing…" / "Rechecking…"). */
+  sslActionLabel?: string;
   onVerify?: () => void;
   verifying?: boolean;
   /** Message naming the DNS record that still isn't resolving after a fail. */
@@ -2791,6 +2806,16 @@ function DomainOverviewCard({
             />
           }
         />
+        {/* SSL action feedback. The renew/recheck triggers live in the ⋯ menu,
+            which unmounts the moment it's clicked — so without this the operator
+            gets no signal for the seconds the request takes. Sits next to the SSL
+            pill it's acting on; the completion toast still fires as before. */}
+        {sslActionBusy ? (
+          <div className="flex items-center gap-2 rounded-xl border border-primary/20 bg-primary/5 px-3 py-2.5 text-[12px] text-foreground">
+            <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />
+            <span>{sslActionLabel}</span>
+          </div>
+        ) : null}
         {/* The actual reason, in place. Inline rather than a separate dialog so it
             sits next to the pill that has the problem and stays open while the
             operator fixes DNS and re-checks. */}

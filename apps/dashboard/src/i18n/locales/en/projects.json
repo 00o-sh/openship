@@ -289,6 +289,8 @@
     "ofCores": "of {cores} cores",
     "ofMemory": "of {total}",
     "servicesTitle": "Services",
+    "scrollServicesLeft": "Scroll services left",
+    "scrollServicesRight": "Scroll services right",
     "unsupportedTitle": "Resource usage unavailable",
     "reconnect": "Reconnect",
     "live": "Live",

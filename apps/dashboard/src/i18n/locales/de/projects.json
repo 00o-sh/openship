@@ -242,6 +242,8 @@
     "ofCores": "von {cores} Kernen",
     "ofMemory": "von {total}",
     "servicesTitle": "Dienste",
+    "scrollServicesLeft": "Dienste nach links scrollen",
+    "scrollServicesRight": "Dienste nach rechts scrollen",
     "unsupportedTitle": "Ressourcennutzung nicht verfügbar",
     "reconnect": "Neu verbinden",
     "live": "Live",

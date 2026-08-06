@@ -41,6 +41,10 @@ import { permission } from "../../lib/permission";
 // the mail stack gives SSH-level reach into the box, so a cross-org
 // serverId here is the same severity as the terminal hole.
 import { isServerInOrg } from "../../lib/controller-helpers";
+import type { CommandExecutor } from "@repo/adapters";
+import { pinnedEdgeImage } from "../../lib/edge-image";
+import { pinnedMailImage } from "../../lib/mail-image";
+import { deliverManagedImage } from "../../lib/deliver-managed-image";
 import {
   MAIL_SETUP_STEPS,
   TOTAL_STEPS,
@@ -827,16 +831,41 @@ export async function startSetup(c: Context) {
           // surface a failure here so the wizard isn't stuck staring at
           // silent output. The user can Retry (and on retry, the engine's
           // status file may show the work as already done).
+          // Dev/from-source APPLY for the two steps that BRING UP a managed
+          // container: build our source onto this box (or ship + build for a remote
+          // one) before the installer runs, so its create/swap adopts the dev image
+          // instead of pulling the published tag. No-op in prod (no checkout →
+          // deliver returns at once).
+          const deliverBefore = async (
+            kind: "edge" | "mail",
+            image: string,
+            executor: CommandExecutor,
+          ) => {
+            await deliverManagedImage({
+              kind,
+              image,
+              targetExecutor: executor,
+              onLog: (l) => log(stepId, l.level, l.message),
+            });
+          };
+
           const runStep = (): Promise<StepResult> => {
+            if (stepDef.key === "ensure_components") {
+              return sshManager.withExecutor(serverId, async (executor) => {
+                await deliverBefore("edge", pinnedEdgeImage(), executor);
+                return (runner as BasicStepFn)(executor, domain, log);
+              });
+            }
             if (stepDef.key === "deploy_engine") {
               const installerConfig: IRedMailConfig = {
                 ...config,
                 prefillSecrets:
                   Object.keys(state.secrets).length > 0 ? state.secrets : undefined,
               };
-              return sshManager.withExecutor(serverId, (executor) =>
-                (runner as InstallerStepFn)(executor, domain, log, installerConfig),
-              );
+              return sshManager.withExecutor(serverId, async (executor) => {
+                await deliverBefore("mail", pinnedMailImage(), executor);
+                return (runner as InstallerStepFn)(executor, domain, log, installerConfig);
+              });
             }
             if (stepDef.key === "request_ssl") {
               // Issues through `platform.ssl`, which is resolved per SERVER — so

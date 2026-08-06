@@ -10,7 +10,7 @@ import { SCOPE_ICON, SEVERITY_TONE } from "./issueMeta";
  * One scope's panel — the single level of grouping this surface has.
  *
  * The panel's tone is the WORST severity inside it, not an average: a card whose
- * border says "advisory" while it contains an outage is the failure mode this page
+ * header says "advisory" while it contains an outage is the failure mode this page
  * exists to prevent. Items arrive pre-sorted by the server, so the first one is the
  * worst and no re-ranking happens here.
  */

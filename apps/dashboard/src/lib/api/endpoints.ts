@@ -291,6 +291,12 @@ export const endpoints = {
     serverContainersScan: (id: string) => `system/servers/${id}/containers/scan`,
     serverContainerApply: (id: string, component: string) =>
       `system/servers/${id}/containers/${component}/apply/stream`,
+    // Read-only siblings of the apply stream, for page-reload re-attach:
+    // /session reports a running swap, /stream (GET) re-attaches to it.
+    serverContainerApplySession: (id: string, component: string) =>
+      `system/servers/${id}/containers/${component}/apply/session`,
+    serverContainerApplyAttach: (id: string, component: string) =>
+      `system/servers/${id}/containers/${component}/apply/stream`,
     containersBehind: () => `system/containers/behind`,
     // Actionable-issue rollup (edge down / absent-with-projects) for the dot + home
     containersIssues: () => `system/containers/issues`,

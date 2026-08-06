@@ -755,7 +755,9 @@ export async function deployComposeServices(
         // the second half can't live inside ensureFeature. Without an executor
         // there's no box to converge (cloud), so components alone are correct.
         if (opts.executor) {
-          await ensureRoutingReady(opts.executor, opts.system, { onLog: systemLog });
+          await ensureRoutingReady(opts.executor, opts.system, {
+            onLog: systemLog,
+          });
         } else {
           await opts.system.ensureFeature("routing", systemLog);
         }

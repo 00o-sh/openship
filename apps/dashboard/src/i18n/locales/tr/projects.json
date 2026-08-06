@@ -242,6 +242,8 @@
     "ofCores": "{cores} çekirdeğin",
     "ofMemory": "{total} içinde",
     "servicesTitle": "Servisler",
+    "scrollServicesLeft": "Hizmetleri sola kaydır",
+    "scrollServicesRight": "Hizmetleri sağa kaydır",
     "unsupportedTitle": "Kaynak kullanımı kullanılamıyor",
     "reconnect": "Yeniden bağlan",
     "live": "Canlı",

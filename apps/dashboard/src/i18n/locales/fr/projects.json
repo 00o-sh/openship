@@ -242,6 +242,8 @@
     "ofCores": "sur {cores} cœurs",
     "ofMemory": "sur {total}",
     "servicesTitle": "Services",
+    "scrollServicesLeft": "Faire défiler les services vers la gauche",
+    "scrollServicesRight": "Faire défiler les services vers la droite",
     "unsupportedTitle": "Utilisation des ressources indisponible",
     "reconnect": "Reconnecter",
     "live": "En direct",

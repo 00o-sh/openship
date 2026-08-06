@@ -190,8 +190,8 @@ export function edgeContainerExecutor(
     // lines and throws that text). So the explanation has to go through `onLog` to
     // reach them — appending it only to the return value would leave certbot's
     // caller raising the daemon's bare container id, which is the original bug.
-    streamExec: async (command: string, onLog: (log: LogEntry) => void) => {
-      const result = await inner.streamExec(inContainer(command), onLog);
+    streamExec: async (command: string, onLog: (log: LogEntry) => void, opts?: { signal?: AbortSignal }) => {
+      const result = await inner.streamExec(inContainer(command), onLog, opts);
       if (result.code === 0 || !isEdgeDownFailure(result.output)) return result;
       const explanation = await diagnoseEdgeDown(inner, container);
       onLog(logEntry(explanation, "error"));

@@ -20,9 +20,6 @@
     {
       "name": "db",
       "image": "supabase/postgres:17.6.1.136",
-      "ports": [
-        "5432:5432"
-      ],
       "environment": {
         "POSTGRES_HOST": "/var/run/postgresql",
         "PGPORT": "5432",
@@ -54,9 +51,6 @@
     {
       "name": "kong",
       "image": "kong:3.9.1",
-      "ports": [
-        "8000:8000"
-      ],
       "exposedPort": 8000,
       "exposed": true,
       "routes": [
@@ -434,12 +428,12 @@
       {
         "id": "dbUrl",
         "label": "Database URL",
-        "source": "template:postgresql://postgres:{{env:db:POSTGRES_PASSWORD}}@{{host}}:5432/postgres",
+        "source": "template:postgresql://postgres:{{env:db:POSTGRES_PASSWORD}}@db:5432/postgres",
         "service": "db",
         "secret": true,
         "envKey": "DATABASE_URL",
         "recommended": true,
-        "help": "Direct Postgres connection (superuser) for psql / ORMs. Published on port 5432."
+        "help": "Direct Postgres connection (superuser) reachable over this project's shared network. Connect another project to Supabase to inject it automatically."
       },
       {
         "id": "dbPassword",
@@ -461,7 +455,8 @@
       "service": "db",
       "port": 5432,
       "label": "Database",
-      "kind": "tcp"
+      "kind": "tcp",
+      "scope": "internal"
     }
   ],
   "settings": [

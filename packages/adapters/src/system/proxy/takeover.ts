@@ -142,10 +142,38 @@ export async function registerImportedSites(
         if (site.ssl) {
           const manual = await resolveCert(executor, site, domain, opts);
           if (manual) {
+            // Reuse the source's existing certificate — no ACME, no network round-trip.
             await ssl.installCert(domain, manual);
           } else {
+            // The slow path: a fresh per-domain ACME issuance, serialized against
+            // Let's Encrypt. This is the one step of a migrate that can take real
+            // wall-clock time (and hit rate limits), so announce it BEFORE the call —
+            // otherwise a migrate that's busy reissuing certs is indistinguishable
+            // from a hang. The WHY (expired / unreadable / doesn't cover the host)
+            // is already in `warnings` from resolveCert.
+            opts.onLog(
+              log(
+                `${domain}: existing certificate couldn't be carried over — requesting a new one (this can take a while)…`,
+                "warn",
+              ),
+            );
             const r = await ssl.provisionCert(domain);
-            if (!r.verified) opts.warnings.push(`${domain}: TLS not ready yet (${r.reason ?? "pending"})`);
+            if (!r.verified) {
+              // The source was serving HTTPS, but we couldn't carry its certificate
+              // AND couldn't issue a fresh one — so the edge is now answering :443 with
+              // the self-signed placeholder. That's invisible to a browser hitting the
+              // box directly (it just warns), but a CDN fronting the origin with strict
+              // origin TLS (Cloudflare "Full (strict)") REJECTS the placeholder and
+              // returns a 525 with no hint of the cause. Name it here, next to the fix,
+              // so the migrate log isn't the only place the operator can learn why a
+              // site that worked a minute ago now 525s.
+              opts.warnings.push(
+                `${domain}: was serving HTTPS, but its certificate could not be carried over and a ` +
+                  `new one could not be issued (${r.reason ?? "pending"}). The edge is serving a temporary ` +
+                  `self-signed certificate — a CDN in front (e.g. Cloudflare "Full (strict)") will reject it ` +
+                  `with a 525. Upload the origin certificate from the domain's SSL menu, or issue one via DNS-01.`,
+              );
+            }
           }
         }
 

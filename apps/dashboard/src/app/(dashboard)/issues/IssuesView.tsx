@@ -18,6 +18,7 @@ import { EmptyIssues } from "@/components/issues/EmptyIssues";
 import { IssueList } from "@/components/issues/IssueList";
 import { IssueSummary } from "@/components/issues/IssueSummary";
 import { useIssueActions } from "@/components/issues/useIssueActions";
+import { useReattachActiveFix } from "@/hooks/useReattachActiveFix";
 
 type SeverityFilter = "all" | IssueSeverity;
 
@@ -41,6 +42,11 @@ export function IssuesView() {
   const c = t.issues;
   const { selfHosted } = usePlatform();
   const { toast } = useToast();
+
+  // Refresh recovery: if an edge install/repair is running (the fix a row here
+  // dispatches), re-open its live modal rather than leaving the operator on a
+  // static "issue" row with no sign the work is already underway.
+  useReattachActiveFix({ install: true });
 
   const [tab, setTab] = useState<"open" | "resolved">("open");
   const [issues, setIssues] = useState<SystemIssue[]>([]);

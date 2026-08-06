@@ -27,6 +27,14 @@ import {
   OPENRESTY_DEFAULT_PATHS,
 } from "../../infra/openresty-lua";
 import { sq } from "../local-shell";
+import {
+  containerImageRef,
+  dockerAvailable,
+  fromSourceImageMissingMessage,
+  imageExistsLocally,
+  managedImagesAreFromSource,
+  swapManagedImage,
+} from "../managed-image";
 import { containerCommand, edgeContainerExecutor } from "../edge-container-executor";
 import { waitForPortListening } from "../port-listen";
 import {
@@ -92,48 +100,6 @@ export interface ContainerEdgeResult {
    * only as a log line inside a deploy's output.
    */
   edgeDown?: boolean;
-}
-
-/** Is Docker usable on this box? The container edge needs it; a bare edge doesn't. */
-export async function dockerAvailable(executor: CommandExecutor): Promise<boolean> {
-  return executor
-    .exec("docker version --format '{{.Server.Version}}' 2>/dev/null")
-    .then((v) => Boolean(v.trim()))
-    .catch(() => false);
-}
-
-/**
- * A container's existence, run state and created-with image ref, in one
- * `docker inspect`. `null` means no such container (or the daemon didn't answer).
- *
- * Run state comes from `.State.Running` and NEVER from the inspect having
- * succeeded: `docker inspect` answers happily for a STOPPED container, so
- * "inspect returned an image ref" proves existence only. Conflating the two is
- * what made a stopped mail engine report as running — and its one-click repair a
- * no-op that logged "already running".
- */
-export async function containerState(
-  executor: CommandExecutor,
-  container: string,
-): Promise<{ running: boolean; image: string | null } | null> {
-  const out = await executor
-    .exec(`docker inspect -f '{{.State.Running}}\t{{.Config.Image}}' ${sq(container)} 2>/dev/null`)
-    .catch(() => "");
-  const line = out
-    .split("\n")
-    .map((l) => l.trim())
-    .find(Boolean);
-  if (!line) return null;
-  const [running, image] = line.split("\t");
-  return { running: running?.trim() === "true", image: image?.trim() || null };
-}
-
-/** The image ref a container was created from, running or not. */
-export async function containerImageRef(
-  executor: CommandExecutor,
-  container: string,
-): Promise<string | null> {
-  return (await containerState(executor, container))?.image ?? null;
 }
 
 /**
@@ -267,56 +233,26 @@ export function buildEdgeRunCommand(container: string, image: string): string {
 }
 
 /**
- * Move a running edge onto a new image: pull, recreate, verify — and put the OLD
- * image back if the new one doesn't come up.
- *
- * Same ordering rule as the bare→container conversion: nothing is torn down until
- * the replacement is on the box. Best-effort by design — a failed update must leave
- * the edge serving, so it logs and reports false rather than throwing.
+ * The edge's "start this image AND prove it's actually serving" callback — the unit
+ * `swapManagedImage` drives. It is the SAME verdict the create path uses: an image swap that leaves a
+ * crash-looping container behind must read as a failed swap, not a successful one —
+ * `waitForPortListening` alone said "listening" whenever ANY proxy held :80,
+ * including the one we were replacing.
  */
-async function swapEdgeImage(
+function makeEdgeStart(
   executor: CommandExecutor,
   container: string,
-  from: string,
-  to: string,
   opts: ContainerEdgeOptions,
-): Promise<{ swapped: boolean; edgeDown: boolean }> {
+): (image: string) => Promise<boolean> {
   const { onLog } = opts;
-  onLog(log(`Updating the edge: ${from} → ${to}`));
-  const pull = await executor.streamExec(`docker pull ${sq(to)}`, onLog as (l: LogEntry) => void);
-  if (pull.code !== 0) {
-    // Nothing was torn down yet — the old edge is still serving.
-    onLog(log(`Could not pull ${to} — the edge stays on ${from}.`, "warn"));
-    return { swapped: false, edgeDown: false };
-  }
-
-  const start = async (image: string) => {
+  return async (image: string) => {
     if (!(await startEdgeContainer(executor, container, image, onLog))) return false;
-    // The SAME verdict the create path uses. An image swap that leaves a
-    // crash-looping container behind must read as a failed swap, not a successful
-    // one — `waitForPortListening` alone said "listening" whenever ANY proxy held
-    // :80, including the one we were replacing.
     const verdict = await verifyEdgeServing(executor, container, {
       timeoutMs: opts.verifyTimeoutMs ?? 30_000,
     });
     if (!verdict.serving && verdict.reason) onLog(log(`Edge ${image}: ${verdict.reason}`, "warn"));
     return verdict.serving;
   };
-
-  if (await start(to)) {
-    onLog(log(`Edge updated to ${to}`));
-    return { swapped: true, edgeDown: false };
-  }
-
-  onLog(log(`Edge ${to} failed to come up — rolling back to ${from}...`, "error"));
-  if (await start(from)) {
-    // Rolled back cleanly: not updated, but still serving on the old image.
-    return { swapped: false, edgeDown: false };
-  }
-  // Both failed: say so loudly AND report it. The box is now without an edge, and
-  // that must not be discoverable only by a user noticing a 502.
-  onLog(log(`Rollback to ${from} ALSO failed — the edge is down on this server.`, "error"));
-  return { swapped: false, edgeDown: true };
 }
 
 /** Verdict of {@link verifyEdgeServing}. `reason` is set iff `serving` is false. */
@@ -418,16 +354,30 @@ export async function ensureContainerEdge(
       // Already ours and serving. The only thing left to reconcile is the IMAGE: the
       // edge's Lua and nginx.conf are baked in, so an edge left on an old tag keeps
       // serving rules a newer API assumes it rewrote. Upgrading the API upgrades the
-      // edge.
+      // edge. Staleness is a plain tag-compare: the dev tag is content-derived
+      // (`…-dev.<hash>`), so a source edit moves it exactly like a prod version bump —
+      // no image-ID probe needed. `swapManagedImage` pulls only if the target tag
+      // isn't already on the box (deliver placed the dev image there first).
       const current = await containerImageRef(executor, existing);
-      if (current && current !== image) {
-        const swap = await swapEdgeImage(executor, existing, current, image, opts);
+      // A null ref (the image reads back empty in a TOCTOU) is left alone, not judged
+      // stale — recreating a serving container onto the same image buys nothing.
+      const stale = current != null && current !== image;
+      if (stale) {
+        const start = makeEdgeStart(executor, existing, opts);
+        const swap = await swapManagedImage(executor, {
+          kind: "edge",
+          from: current ?? image,
+          to: image,
+          label: "edge",
+          onLog,
+          start,
+        });
         return {
           container: existing,
           image,
           converted: false,
           updated: swap.swapped,
-          edgeDown: swap.edgeDown,
+          edgeDown: swap.down,
         };
       }
       return { container: existing, image, converted: false };
@@ -445,13 +395,27 @@ export async function ensureContainerEdge(
   //    registry failure has to land here: past the consent gate the old proxy is
   //    already down, so "the box is unchanged and still serving" would be a lie and
   //    a failed pull would leave a live box with no proxy at all.
-  onLog(log(`Pulling edge image ${image}...`));
-  const pull = await executor.streamExec(`docker pull ${sq(image)}`, onLog as (l: LogEntry) => void);
-  if (pull.code !== 0) {
-    throw new Error(
-      `Could not pull the edge image ${image} — the box is unchanged and still serving. ` +
-        "Check the server's network access to the registry, then retry.",
-    );
+  //
+  //    Skipped when the image is already on the box: in dev the control plane built
+  //    the `…-dev.<hash>` image from our source and shipped it here (see
+  //    deliverManagedImage), so the unpublished tag is present and a pull would 404.
+  //    In prod the tag is absent → this pulls `:APP_VERSION` from the registry.
+  if (!(await imageExistsLocally(executor, image))) {
+    if (managedImagesAreFromSource("edge")) {
+      // The image is an unpublished from-source (dev) tag that the control plane was
+      // meant to build and ship here (deliverManagedImage). It isn't on the box, so
+      // that build/ship didn't run or didn't finish — a pull can only 404. Fail with
+      // the real cause instead of "check the server's network access to the registry".
+      throw new Error(fromSourceImageMissingMessage("edge", image));
+    }
+    onLog(log(`Pulling edge image ${image}...`));
+    const pull = await executor.streamExec(`docker pull ${sq(image)}`, onLog as (l: LogEntry) => void);
+    if (pull.code !== 0) {
+      throw new Error(
+        `Could not pull the edge image ${image} — the box is unchanged and still serving. ` +
+          "Check the server's network access to the registry, then retry.",
+      );
+    }
   }
   for (const mount of EDGE_CONTAINER_MOUNTS) {
     await executor.exec(`mkdir -p ${sq(mount.host)}`).catch(() => {});

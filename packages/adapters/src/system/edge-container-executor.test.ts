@@ -70,9 +70,13 @@ describe("edgeContainerExecutor", () => {
     const onLog = vi.fn();
     await edgeContainerExecutor(inner, "openship-edge").streamExec("certbot certonly", onLog);
 
+    // The opts (abort signal) forward through transparently — undefined here since
+    // this caller passes none, but the live-log transport relies on it reaching the
+    // inner executor so an aborted stream kills the curl inside the container.
     expect(inner.streamExec).toHaveBeenCalledWith(
       "docker exec 'openship-edge' sh -c 'certbot certonly'",
       onLog,
+      undefined,
     );
   });
 

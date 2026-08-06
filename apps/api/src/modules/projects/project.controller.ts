@@ -50,6 +50,7 @@ import { env } from "../../config";
 import { domainWebhookUrl } from "../../lib/public-url";
 import {
   resolveProjectTrafficSource,
+  resolveProjectTrafficSources,
   fetchMgmt,
   mgmtStream,
   probeMgmt,
@@ -1256,7 +1257,7 @@ export async function serverLogStream(c: Context) {
 
 export async function recentServerLogs(c: Context) {
   const ctx = getRequestContext(c);
-  const { userId, organizationId } = ctx;
+  const { organizationId } = ctx;
   const id = param(c, "id");
   await permission.assert(getRequestContext(c), { resourceType: "project", resourceId: id, action: "read" });
 
@@ -1267,37 +1268,78 @@ export async function recentServerLogs(c: Context) {
     return c.json({ error: "Project not found" }, 404);
   }
 
-  const source = await resolveProjectTrafficSource(id, { domain: c.req.query("domain") });
-  if (!source) {
+  const limit = Math.min(Math.max(parseInt(c.req.query("limit") || "50", 10) || 50, 1), 200);
+
+  // A specific `?domain=` scopes to one route (the switcher). Without it, combine EVERY
+  // tracked domain — same plural fan-out as getAnalyticsOverview — so a multi-route
+  // project's recent-log view is never empty just because the primary happens to be idle.
+  const requested = c.req.query("domain");
+  const sources = await resolveProjectTrafficSources(id, requested ? { domain: requested } : undefined);
+  if (sources.length === 0) {
     return c.json({ logs: [] });
   }
 
-  const limit = Math.min(Math.max(parseInt(c.req.query("limit") || "50", 10) || 50, 1), 200);
+  // The edge keys its ring buffer BY host and doesn't repeat the host inside each row, so
+  // stamp it on here — that's the only way the combined view can label which domain a row
+  // hit. A row that already carries a host (a cloud relay might) keeps it.
+  const tagHost = (rows: unknown[], host: string): unknown[] =>
+    rows.map((r) =>
+      r && typeof r === "object" && !Array.isArray(r) && !("host" in (r as object))
+        ? { ...(r as Record<string, unknown>), host }
+        : r,
+    );
 
-  if (source.kind === "cloud") {
+  // Ordering scale in seconds, tolerant of every producer's field/unit: epoch seconds
+  // (mgmt ring `ts`), epoch millis, or an ISO string (a cloud relay).
+  const tsOf = (r: unknown): number => {
+    const o = (r ?? {}) as Record<string, unknown>;
+    const raw = o.ts ?? o.timestamp ?? o.date;
+    if (typeof raw === "number") return raw > 1_000_000_000_000 ? raw / 1000 : raw;
+    const n = parseFloat(String(raw ?? ""));
+    if (Number.isFinite(n) && n > 0) return n > 1_000_000_000_000 ? n / 1000 : n;
+    const parsed = Date.parse(String(raw ?? ""));
+    return Number.isFinite(parsed) ? parsed / 1000 : 0;
+  };
+
+  const collected: unknown[][] = [];
+
+  const cloudSources = sources.filter((s) => s.kind === "cloud");
+  if (cloudSources.length) {
     const client = getAdminOblienClient();
-    let result: unknown = null;
-
-    if (client) {
-      try {
-        result = await client.analytics.requests(source.domain, { limit });
-      } catch {
-        return c.json({ logs: [] });
-      }
-    } else {
-      result = await cloudClient({ organizationId }).analytics.requests(source.domain, { limit });
-    }
-
-    return c.json({ logs: extractCloudRequestLogs(result) });
+    // Settle per-domain: one domain's upstream failure must not blank the others'.
+    const settled = await Promise.allSettled(
+      cloudSources.map(async (s) => {
+        const result = client
+          ? await client.analytics.requests(s.domain, { limit })
+          : await cloudClient({ organizationId }).analytics.requests(s.domain, { limit });
+        return tagHost(extractCloudRequestLogs(result), s.domain);
+      }),
+    );
+    for (const r of settled) if (r.status === "fulfilled") collected.push(r.value);
   }
 
-  const { domain, serverId } = source;
+  const selfHostedSources = sources.filter((s) => s.kind === "self-hosted");
+  if (selfHostedSources.length) {
+    const perDomain = await Promise.all(
+      selfHostedSources.map(async ({ domain, serverId }) => {
+        const entries = await fetchMgmt<unknown[]>(
+          serverId,
+          `/logs/recent?domain=${encodeURIComponent(domain)}&limit=${limit}`,
+        );
+        return tagHost(entries ?? [], domain);
+      }),
+    );
+    collected.push(...perDomain);
+  }
 
-  const entries = await fetchMgmt<unknown[]>(
-    serverId,
-    `/logs/recent?domain=${encodeURIComponent(domain)}&limit=${limit}`,
-  );
-  return c.json({ logs: entries ?? [] });
+  // Newest-first across ALL domains, then cap: the combined view shows the last `limit`
+  // requests project-wide, not `limit` per domain.
+  const logs = collected
+    .flat()
+    .sort((a, b) => tsOf(b) - tsOf(a))
+    .slice(0, limit);
+
+  return c.json({ logs });
 }
 
 // ─── Git info ────────────────────────────────────────────────────────────────

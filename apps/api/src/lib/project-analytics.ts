@@ -460,28 +460,63 @@ async function execMgmtStream(serverId: string, path: string) {
   const stream = new PassThrough();
   const url = `http://127.0.0.1:${OPENRESTY_MGMT_PORT}${path}`;
 
+  // Kills the curl child on teardown (LocalExecutor honours the signal). Without it a
+  // disconnected browser left `curl -sN` alive inside the edge, holding its
+  // `log_pipe:sub` subscription and draining the shared queue — stealing frames from the
+  // next subscriber. That is the regression from the bare→containerized edge switch: the
+  // tunnel transport closed its TCP socket on destroy; this one had no handle to close.
+  const abort = new AbortController();
   let ended = false;
+  let torndown = false;
+  let forwarded = false;
+  const errParts: string[] = [];
   const finish = () => {
     if (ended) return;
     ended = true;
     stream.end();
   };
 
-  // Fire-and-forget: resolves when curl exits (client abort or edge close), which
-  // is exactly when the SSE stream should end.
+  // `-f` fails fast on an HTTP error (no body, non-zero exit) and `-S` lets curl print
+  // WHY to stderr even under `-s` — together they turn a dead/misrouted edge from a
+  // silent empty stream into a diagnosable one. `-N` keeps SSE unbuffered.
   void executor
-    .streamExec(containerCommand(container, `curl -sN ${sq(url)}`), (log) => {
-      // Byte-exact, and NO added newline. This used to write `${log.message}\n`,
-      // which broke SSE framing: chunks split anywhere, so the extra newline landed
-      // inside a `data:` line as often as after one. A frame cut mid-JSON parses as
-      // truncated and the browser drops the event (the client swallows malformed
-      // data by design), which is why the live tail showed nothing until you
-      // reloaded and the history fetch filled it in. Frame boundaries belong to the
-      // edge (pipe_stream.lua already emits `event: request\ndata: …\n\n`); this
-      // transport must not reinterpret them.
-      if (!ended) stream.write(streamChunkBytes(log));
+    .streamExec(
+      containerCommand(container, `curl -fsSN ${sq(url)}`),
+      (log) => {
+        if (ended) return;
+        // Only stdout is the SSE body. stderr (curl's own error under `-S`) is a
+        // DIAGNOSTIC — forwarding it as bytes would both corrupt framing (dropped by
+        // the client) and mask the real failure by making `forwarded` go true.
+        if (log.level !== "info") {
+          if (log.message) errParts.push(log.message);
+          return;
+        }
+        // Byte-exact, NO added newline: frame boundaries belong to the edge
+        // (pipe_stream.lua emits `event: request\ndata: …\n\n`); a chunk is an arbitrary
+        // slice, so any reinterpretation here truncates a frame and the client drops it.
+        const bytes = streamChunkBytes(log);
+        if (bytes.length) forwarded = true;
+        stream.write(bytes);
+      },
+      { signal: abort.signal },
+    )
+    .then((result) => {
+      // curl exited on its own. If it never forwarded a byte and this wasn't an
+      // intentional teardown, the browser would otherwise just watch the socket close
+      // with no reason — the exec transport has no HTTP status to hand back (it used to
+      // report 200 unconditionally, so a dead edge looked identical to an idle one).
+      // Speak the failure in a frame the client already understands (`event: error`),
+      // the same shape the tunnel-null path in the controller uses.
+      if (!torndown && !forwarded && !ended) {
+        const detail = errParts.join("").trim() || (result?.output || "").trim();
+        const reason =
+          `Couldn't reach the Openship edge's log service on this server` +
+          `${detail ? `: ${detail}` : ""}. Make sure the edge is running ` +
+          "(`docker ps` should show openship-edge) and redeploy the routing if it isn't.";
+        stream.write(`event: error\ndata: ${JSON.stringify({ error: reason })}\n\n`);
+      }
+      finish();
     })
-    .then(finish)
     .catch((err) => {
       systemDebug("analytics", `execMgmtStream ended: ${err instanceof Error ? err.message : String(err)}`);
       finish();
@@ -489,11 +524,13 @@ async function execMgmtStream(serverId: string, path: string) {
 
   return {
     stream,
-    // The exec transport has no HTTP response envelope to read — curl consumed it.
-    // Reaching here means the stream is open, so report the equivalent of 200.
+    // No HTTP response envelope to read — curl consumed it. A real failure now arrives as
+    // the `error` frame above rather than a status code, so this stays 200.
     statusCode: 200,
     headers: {} as Record<string, string>,
     destroy: () => {
+      torndown = true;
+      abort.abort();
       finish();
       stream.destroy();
     },

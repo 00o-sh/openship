@@ -7,7 +7,7 @@
 import type { CommandExecutor } from "../../../types";
 import type { ImportedSite, ProxyKind, ProxyScanResult } from "../../types";
 import { EDGE_CONTAINER_MOUNTS } from "../../../infra/openresty-lua";
-import { scanNginx, scanOpenshipEdge } from "./nginx";
+import { scanNginx, scanOpenshipEdge, scanForeignOpenResty } from "./nginx";
 import { scanCaddy } from "./caddy";
 import { scanApache } from "./apache";
 import { scanTraefik } from "./traefik";
@@ -92,10 +92,11 @@ export async function scanImportableSites(
     case "traefik":
       return scanTraefik(executor);
     case "openresty":
-      // Same parser: OpenResty vhosts ARE nginx syntax. scanOpenshipEdge already
-      // reads the two bare-host sites-enabled layouts, which is exactly where a
-      // host OpenResty (ours or hand-rolled) keeps them.
-      return scanOpenshipEdge(executor);
+      // A host OpenResty is a MIGRATION SOURCE — a legacy bare Openship edge or a
+      // hand-rolled one. Dump its fully-resolved config so vhosts are found wherever
+      // the install `include`s them; the fixed-glob read missed a non-default layout
+      // and the migrate offer collapsed to takeover-only (dropping every live site).
+      return scanForeignOpenResty(executor);
     default:
       return {
         proxy,

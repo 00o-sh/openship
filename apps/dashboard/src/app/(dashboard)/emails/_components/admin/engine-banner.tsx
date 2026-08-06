@@ -28,6 +28,7 @@ import { AlertTriangle, RotateCw, Wrench } from "lucide-react";
 import type { MailEngineState } from "@/lib/api";
 import { useI18n } from "@/components/i18n-provider";
 import { useInfraFix } from "@/hooks/useInfraFix";
+import { useReattachActiveFix } from "@/hooks/useReattachActiveFix";
 
 export function MailEngineBanner({
   serverId,
@@ -42,6 +43,16 @@ export function MailEngineBanner({
   const { t } = useI18n();
   const fix = useInfraFix();
   const c = t.emailsAdmin.engine;
+
+  // Refresh recovery: if the mail-engine repair is already running (e.g. the
+  // operator hit Start, then reloaded), re-open its live modal instead of just
+  // re-showing this static banner. onRepaired clears the banner when it lands.
+  // Called BEFORE the early return to satisfy rules-of-hooks.
+  useReattachActiveFix({
+    containerTargets: [
+      { serverId, component: "mail", label: t.servers.containers.componentMail, onDone: onRepaired },
+    ],
+  });
 
   if (!engine || engine.running) return null;
 

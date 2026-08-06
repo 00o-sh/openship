@@ -225,10 +225,17 @@ export {
   type EdgeFreeResult,
 } from "./system/proxy/detect";
 export {
-  containerEdgeProvider,
+  buildImage,
   containerImageRef,
   containerState,
   dockerAvailable,
+  imageExistsLocally,
+  managedImagesAreFromSource,
+  setManagedImagesFromSource,
+  type ManagedImageKind,
+} from "./system/managed-image";
+export {
+  containerEdgeProvider,
   ensureContainerEdge,
   resolveEdgeImage,
   setDefaultEdgeImage,

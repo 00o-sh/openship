@@ -377,8 +377,18 @@ async function resolveSslProvider(owner: SslOwner): Promise<ResolvedSslProvider>
       try {
         const resolved = await resolveDeploymentPlatform(meta, { organizationId: dep.organizationId });
         return { ssl: resolved.platform.ssl, lockScope: meta.serverId ?? LOCAL_ACME_SCOPE };
-      } catch {
+      } catch (err) {
         // Deploy target unresolvable — fall through to the host-anchored fallback.
+        // But say so with the real cause: for a REMOTE-target project (meta.serverId
+        // set) the fallbacks below act on a DIFFERENT box than the one whose edge
+        // serves the domain, so certbot/verify silently misfires there and the
+        // operator sees an inexplicable "no cert"/525 with nothing to trace it to.
+        // (For a single-box install the fallback resolves to the same local edge, so
+        // this is only noise there — hence a warn, not a throw.)
+        console.warn(
+          `[domain-ssl] could not resolve the deployment platform for ${owner.kind === "project" ? owner.project.id : "domain"}` +
+            `${meta.serverId ? ` (server ${meta.serverId})` : ""} — falling back to the host edge: ${safeErrorMessage(err)}`,
+        );
       }
     }
   }
@@ -403,11 +413,27 @@ async function resolveSslProvider(owner: SslOwner): Promise<ResolvedSslProvider>
           { organizationId: project.organizationId },
         );
         return { ssl: resolved.platform.ssl, lockScope: local.id };
-      } catch {
+      } catch (err) {
         // Host-server unresolvable — last resort below.
+        console.warn(
+          `[domain-ssl] could not resolve the local host-server (${local.id}) edge — ` +
+            `falling back to the API's own context: ${safeErrorMessage(err)}`,
+        );
       }
     }
   }
+  // Last resort: the API's OWN platform. This is correct only for a single-box
+  // bare install where the API IS the edge host; for a containerized API or a
+  // takeover'd/remote-target project it points at an edge that does not serve this
+  // domain, so certbot/verify runs against the wrong (or a non-existent) edge and
+  // the SSL action fails with no obvious cause. Left non-throwing so the single-box
+  // case still works, but logged so the misfire is traceable when it isn't that.
+  console.warn(
+    `[domain-ssl] resolving SSL via the API's own edge context (last resort) for ` +
+      `${owner.kind === "project" ? owner.project.id : "domain"} — if this instance's edge runs ` +
+      `elsewhere (containerized API, remote deploy target, or a post-takeover host), this action ` +
+      `may not reach the edge that serves the domain.`,
+  );
   return { ssl: platform().ssl, lockScope: LOCAL_ACME_SCOPE };
 }
 

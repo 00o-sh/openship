@@ -6,8 +6,12 @@ import {
   resolveMailImage,
   setDefaultMailImage,
 } from "./ensure-container-mail";
+import { setManagedImagesFromSource } from "../managed-image";
 
-afterEach(() => setDefaultMailImage(undefined));
+afterEach(() => {
+  setDefaultMailImage(undefined);
+  setManagedImagesFromSource("mail", false);
+});
 
 /**
  * The one container-state probe every path here goes through (`containerState`):
@@ -77,10 +81,10 @@ const PROC_LISTENING = [
 
 /**
  * A first-boot executor: no container running, docker available, ports reported
- * listening, and every image-presence probe reports whatever `imagePresent` says.
+ * listening, and the image-presence probe reports whatever `imagePresent` says.
  * `streamExec` and the writes succeed so the bring-up runs end to end.
  */
-function firstBootExecutor(opts: { imagePresent: boolean; dockerfilePresent?: boolean }) {
+function firstBootExecutor(opts: { imagePresent: boolean }) {
   const streamExec = vi.fn(async (_cmd: string) => ({ code: 0, output: "" }));
   const exec = vi.fn(async (cmd: string) => {
     // No engine on the box yet — the state probe finds nothing.
@@ -94,12 +98,16 @@ function firstBootExecutor(opts: { imagePresent: boolean; dockerfilePresent?: bo
     return "";
   });
   const writeFile = vi.fn(async () => {});
-  const exists = vi.fn(async () => opts.dockerfilePresent ?? false);
-  return { executor: { exec, streamExec, writeFile, exists } as never, exec, streamExec, exists };
+  return { executor: { exec, streamExec, writeFile } as never, exec, streamExec };
 }
 
-describe("ensureContainerMail local-image awareness", () => {
-  it("skips the registry pull when the image is already present locally", async () => {
+// Create-path image acquisition: pull only when the image ISN'T already on the box.
+// In dev, `deliverManagedImage` builds the content-derived `…-dev.<hash>` engine tag
+// on the control plane and ships it here first, so bring-up finds it present and
+// skips the pull (an unpublished tag — a pull would 404). In prod the tag is absent,
+// so it pulls `:APP_VERSION`.
+describe("ensureContainerMail image acquisition gate", () => {
+  it("skips the registry pull when the image is already present locally (delivered dev tag)", async () => {
     setDefaultMailImage("ghcr.io/x/openship-mail:pinned");
     const { executor, streamExec } = firstBootExecutor({ imagePresent: true });
 
@@ -107,14 +115,13 @@ describe("ensureContainerMail local-image awareness", () => {
       domain: "example.com",
       secrets: {},
       onLog: () => {},
-      // no build spec → pull path, but image is local
     }).catch(() => {}); // verifyEngine may fail on the stub; we only assert the pull
 
     const pulled = streamExec.mock.calls.some(([cmd]) => String(cmd).startsWith("docker pull"));
     expect(pulled).toBe(false);
   });
 
-  it("pulls when no build spec and the image is absent locally", async () => {
+  it("pulls when the image is absent locally (prod)", async () => {
     setDefaultMailImage("ghcr.io/x/openship-mail:pinned");
     const { executor, streamExec } = firstBootExecutor({ imagePresent: false });
 
@@ -127,77 +134,47 @@ describe("ensureContainerMail local-image awareness", () => {
     const pulled = streamExec.mock.calls.some(([cmd]) => String(cmd).startsWith("docker pull"));
     expect(pulled).toBe(true);
   });
+
+  // From-source (dev) backstop: an absent unpublished tag means the control-plane
+  // build/ship didn't complete. Throw a clear error rather than a 404-ing pull.
+  it("throws instead of pulling an absent image when managed images are from source", async () => {
+    setDefaultMailImage("ghcr.io/x/openship-mail:pinned");
+    setManagedImagesFromSource("mail", true);
+    const { executor, streamExec } = firstBootExecutor({ imagePresent: false });
+
+    await expect(
+      ensureContainerMail(executor, { domain: "example.com", secrets: {}, onLog: () => {} }),
+    ).rejects.toThrow(/from-source mail engine image .* isn't on this server/);
+
+    const pulled = streamExec.mock.calls.some(([cmd]) => String(cmd).startsWith("docker pull"));
+    expect(pulled).toBe(false);
+  });
 });
 
-describe("ensureContainerMail build path", () => {
-  it("builds from the checkout instead of pulling when the Dockerfile is on the executor", async () => {
-    setDefaultMailImage("ghcr.io/x/openship-mail:pinned");
-    const { executor, streamExec, exists } = firstBootExecutor({
-      imagePresent: false,
-      dockerfilePresent: true,
-    });
-
-    await ensureContainerMail(executor, {
-      domain: "example.com",
-      secrets: {},
-      onLog: () => {},
-      build: { context: "/src/openship" },
-    }).catch(() => {});
-
-    // Gated on the Dockerfile existing on the executor.
-    expect(exists).toHaveBeenCalledWith("/src/openship/apps/email/Dockerfile");
-    const cmds = streamExec.mock.calls.map(([cmd]) => String(cmd));
-    expect(cmds.some((c) => c.startsWith("docker build -t"))).toBe(true);
-    // A build stands in for the pull — the registry is never contacted.
-    expect(cmds.some((c) => c.startsWith("docker pull"))).toBe(false);
-  });
-
-  it("falls through to the pull path when the context has no Dockerfile on the executor", async () => {
-    setDefaultMailImage("ghcr.io/x/openship-mail:pinned");
-    // Remote box: build context is an API-local path that doesn't exist here.
-    const { executor, streamExec } = firstBootExecutor({
-      imagePresent: false,
-      dockerfilePresent: false,
-    });
-
-    await ensureContainerMail(executor, {
-      domain: "example.com",
-      secrets: {},
-      onLog: () => {},
-      build: { context: "/api-only/path" },
-    }).catch(() => {});
-
-    const cmds = streamExec.mock.calls.map(([cmd]) => String(cmd));
-    expect(cmds.some((c) => c.startsWith("docker build"))).toBe(false);
-    expect(cmds.some((c) => c.startsWith("docker pull"))).toBe(true);
-  });
-
-  it("recreates on a same-tag rebuild when the running container's image ID is stale", async () => {
+describe("ensureContainerMail swap", () => {
+  it("swaps a running engine onto a new tag with no pull when that tag is already present", async () => {
+    // The delivered dev tag differs from the running engine's tag (the source hash
+    // moved), so it's stale — but it's already on the box, so the swap runs no pull.
     setDefaultMailImage("ghcr.io/x/openship-mail:pinned");
     const streamExec = vi.fn(async (_cmd: string) => ({ code: 0, output: "" }));
     const exec = vi.fn(async (cmd: string) => {
-      // Engine is running on the pinned tag.
-      if (cmd.includes(STATE_PROBE)) return stateLine("ghcr.io/x/openship-mail:pinned");
-      // Container was created from the OLD image ID...
-      if (cmd.includes("inspect -f '{{.Image}}'")) return "sha256:old\n";
-      // ...but the freshly-built ref now points at a NEW ID → stale → recreate.
-      if (cmd.includes("docker image inspect")) return "sha256:new\n";
+      // Engine is running on an OLDER tag → stale vs the pinned ref.
+      if (cmd.includes(STATE_PROBE)) return stateLine("ghcr.io/x/openship-mail:old");
+      // The pinned tag is already present locally (deliver shipped it) → no pull.
+      if (cmd.includes("docker image inspect")) return "sha256:present\n";
       if (cmd.includes("/proc/net/tcp")) return PROC_LISTENING;
       return "";
     });
-    const exists = vi.fn(async () => true);
-    const executor = { exec, streamExec, exists, writeFile: vi.fn(async () => {}) } as never;
+    const executor = { exec, streamExec, writeFile: vi.fn(async () => {}) } as never;
 
     await ensureContainerMail(executor, {
       domain: "example.com",
       secrets: {},
       onLog: () => {},
-      build: { context: "/src/openship" },
     }).catch(() => {});
 
     const cmds = streamExec.mock.calls.map(([cmd]) => String(cmd));
-    expect(cmds.some((c) => c.startsWith("docker build -t"))).toBe(true);
-    // Recreated in place — a new `docker run` for the engine, no pull, no swap-pull.
+    // Swapped in place — a new engine `docker run`, and no pull (tag already present).
     expect(cmds.some((c) => c.includes("docker run") && c.includes("--network host"))).toBe(true);
     expect(cmds.some((c) => c.startsWith("docker pull"))).toBe(false);
   });

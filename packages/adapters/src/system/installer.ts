@@ -18,7 +18,8 @@ import {
   resolveOurEdgeContainer,
 } from "./proxy/detect";
 import { probeListeningPort } from "../runtime/port-conflict";
-import { dockerAvailable, ensureContainerEdge } from "./proxy/ensure-container-edge";
+import { dockerAvailable } from "./managed-image";
+import { ensureContainerEdge } from "./proxy/ensure-container-edge";
 import { containerCommand } from "./edge-container-executor";
 import { sq } from "./local-shell";
 

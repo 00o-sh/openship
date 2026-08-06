@@ -242,6 +242,8 @@
     "ofCores": "共 {cores} 核",
     "ofMemory": "共 {total}",
     "servicesTitle": "服务",
+    "scrollServicesLeft": "向左滚动服务",
+    "scrollServicesRight": "向右滚动服务",
     "unsupportedTitle": "资源使用情况不可用",
     "reconnect": "重新连接",
     "live": "实时",

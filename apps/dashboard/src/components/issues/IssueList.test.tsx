@@ -64,9 +64,10 @@ describe("grouping", () => {
 });
 
 describe("tone comes from the worst row in the panel", () => {
-  it("borders a panel danger when it holds an outage, even beside milder rows", () => {
+  it("heads a panel danger when it holds an outage, even beside milder rows", () => {
     const html = render(ISSUE_FIXTURES.outage!);
-    expect(html).toContain("border-danger-border");
+    expect(html).toContain("bg-danger-bg");
+    expect(html).toContain("text-danger");
   });
 
   it("never renders danger for a page of setup gaps and held decisions", () => {
@@ -74,17 +75,29 @@ describe("tone comes from the worst row in the panel", () => {
     // not things that are down. If either escalates, every panel looks like an
     // outage and the distinction stops being readable.
     const html = render(ISSUE_FIXTURES.action!);
-    expect(html).toContain("border-warning-border");
-    expect(html).not.toContain("border-danger-border");
+    expect(html).toContain("bg-warning-bg");
+    expect(html).not.toContain("bg-danger-bg");
+    expect(html).not.toContain("text-danger");
     expect(html).not.toContain("bg-danger-solid");
   });
 
   it("keeps advisories on the muted surface, with no status color anywhere", () => {
     const html = render(ISSUE_FIXTURES.advisory!);
-    expect(html).not.toContain("border-danger-border");
-    expect(html).not.toContain("border-warning-border");
+    expect(html).not.toContain("bg-danger-bg");
+    expect(html).not.toContain("bg-warning-bg");
     expect(html).not.toContain("text-warning");
-    expect(html).toContain("border-border/60");
+    expect(html).not.toContain("text-danger");
+  });
+
+  it("draws the same neutral edge whatever the tone", () => {
+    // Severity belongs to the header tile and title. Tinting the border makes the
+    // card itself the status object, so a page of panels reads as colored boxes.
+    for (const fixture of [ISSUE_FIXTURES.outage!, ISSUE_FIXTURES.action!, ISSUE_FIXTURES.advisory!]) {
+      const html = render(fixture);
+      expect(html).toContain("border-border/50");
+      expect(html).not.toContain("border-danger-border");
+      expect(html).not.toContain("border-warning-border");
+    }
   });
 });
 

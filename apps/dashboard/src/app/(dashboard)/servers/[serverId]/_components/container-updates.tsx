@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Boxes, RefreshCw } from "lucide-react";
 import { systemApi, type ServerContainerStatus } from "@/lib/api/system";
 import { ContainerStatusRow, EdgeInstallRow } from "@/components/infra/ContainerStatusRow";
 import { useI18n, interpolate } from "@/components/i18n-provider";
+import { useReattachActiveFix } from "@/hooks/useReattachActiveFix";
 
 /**
  * Per-server managed-container versions (edge / mail). Unlike ServerModuleUpdates
@@ -40,6 +41,20 @@ export function ServerContainerUpdates({ serverId }: { serverId: string }) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Refresh recovery for an in-flight image swap (edge/mail update or mail
+  // repair). Container-apply ONLY — NOT install: the parent server page already
+  // re-attaches the install/repair session into the setup wizard, so passing
+  // install here would open a second UI for the same run. Pre-filter to rows the
+  // cache marks in-progress to skip a request per idle row.
+  const applyTargets = useMemo(
+    () =>
+      rows
+        .filter((r) => r.latestInProgress)
+        .map((r) => ({ serverId, component: r.component })),
+    [rows, serverId],
+  );
+  useReattachActiveFix({ containerTargets: applyTargets });
 
   // projectCount decides whether an ABSENT edge is an issue (box hosts projects)
   // or just an offer — same rule the fleet view uses. Read once; cheap.
