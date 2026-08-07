@@ -11,6 +11,8 @@ import {
   SlidersHorizontal,
   ChevronDown,
   ChevronUp,
+  Square,
+  Ban,
 } from "lucide-react";
 import { INSTALL_PHASES, type InstallPhaseId, type InstallPhaseStatus } from "@repo/core";
 import { AppLogo } from "@/components/AppLogo";
@@ -213,16 +215,17 @@ function FirstLoginCard({
 }
 
 /**
- * The install progress view shared by the app wizards. Keeps the install form's
- * frame + header (logo · name · status) so the flow reads as one continuous
- * wizard.
+ * The install progress view shared by the app wizards.
  *
  * Two shapes, chosen by whether `phases` is passed:
- *  - JSON-mapped install (app wizard): a left phase stepper (images → services →
- *    app-setup → ready, with a per-service sub-list and authored app-setup steps)
- *    and logs demoted to a foldable panel; the done screen adds a connect +
- *    first-login surface.
- *  - Legacy (mail wizard, no `phases`): the original progress bar + terminal.
+ *  - JSON-mapped install (app wizard): the project-detail layout — a fluid main
+ *    column (phase stepper + demoted logs while installing; connection +
+ *    first-login on the done screen; message + logs on failure/cancel) beside a
+ *    fixed 340px sticky aside carrying the app summary, a status pill, and the
+ *    phase's actions (Stop / Open app / Go to project). Mirrors the project page
+ *    so the two read as one product.
+ *  - Legacy (mail wizard, no `phases`): the original centered progress bar +
+ *    terminal, left untouched.
  */
 export function CleanDeployProgressCard({
   appId,
@@ -238,6 +241,9 @@ export function CleanDeployProgressCard({
   onGoToProject,
   onViewBuild,
   onRetry,
+  onStop,
+  isStopping,
+  cancelled,
   phases,
   services,
   appSetupSteps,
@@ -259,6 +265,13 @@ export function CleanDeployProgressCard({
   onGoToProject: () => void;
   onViewBuild: () => void;
   onRetry: () => void;
+  /** Cancel the in-flight install. Rendered as a Stop button while installing. */
+  onStop?: () => void;
+  /** The cancel request is in flight — disables Stop and shows a spinner. */
+  isStopping?: boolean;
+  /** `phase === "error"` was a user-initiated cancel, not a failure — swaps the
+   *  copy + status token to a neutral "cancelled" reading. */
+  cancelled?: boolean;
   /** Live install-phase status map. Presence switches on the JSON-mapped stepper
    *  layout; absent → the legacy progress-bar layout (mail wizard). */
   phases?: Partial<Record<InstallPhaseId, InstallPhaseStatus>>;
@@ -284,8 +297,143 @@ export function CleanDeployProgressCard({
   const hasStepper = phases !== undefined;
 
   const statusLine =
-    phase === "installing" ? phaseLabel : phase === "done" ? w.progressLive : w.installFailed;
+    phase === "installing"
+      ? phaseLabel
+      : phase === "done"
+        ? w.progressLive
+        : cancelled
+          ? w.installCancelled
+          : w.installFailed;
 
+  // Header status glyph — spinner while working, then a terminal-state mark.
+  const statusIcon =
+    phase === "installing" ? (
+      <Loader2 className="size-3.5 shrink-0 animate-spin" />
+    ) : phase === "done" ? (
+      <Check className="size-3.5 shrink-0 text-success" />
+    ) : cancelled ? (
+      <Ban className="size-3.5 shrink-0 text-muted-foreground" />
+    ) : (
+      <AlertTriangle className="size-3.5 shrink-0 text-danger" />
+    );
+
+  // ── Legacy mail wizard (no phase stepper): original centered layout, untouched.
+  if (!hasStepper) {
+    return (
+      <PageContainer outerClassName="pb-20">
+        <div className="mx-auto max-w-2xl pt-6">
+          <div className="flex items-center gap-4">
+            <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-muted/60">
+              <AppLogo appId={appId} className="size-7 object-contain" />
+            </div>
+            <div className="min-w-0">
+              <h1 className="truncate text-xl font-semibold text-foreground">{title}</h1>
+              <p className="mt-0.5 flex items-center gap-2 text-sm text-muted-foreground">
+                {statusIcon}
+                <span className="truncate">{statusLine}</span>
+              </p>
+            </div>
+          </div>
+
+          {phase === "installing" && (
+            <>
+              <div className="mt-5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                <div
+                  className="h-full rounded-full bg-primary transition-all duration-500"
+                  style={{ width: `${Math.max(5, progress)}%` }}
+                />
+              </div>
+              {logs != null && <TerminalLogs logs={logs} live label={w.deployLogs} />}
+            </>
+          )}
+
+          {phase === "done" && (
+            <div className="mt-6 space-y-4">
+              <div className="rounded-2xl border border-border/50 bg-card p-6">
+                <div className="flex size-10 items-center justify-center rounded-full bg-success-bg ring-4 ring-success/10">
+                  <Check className="size-5 text-success" />
+                </div>
+                <h2 className="mt-4 text-base font-semibold text-foreground">{w.progressLive}</h2>
+                {liveHost && (
+                  <p className="mt-1 break-all font-mono text-xs text-muted-foreground/70">{liveHost}</p>
+                )}
+                <div className="mt-5 flex flex-col gap-2 sm:flex-row">
+                  {liveUrl && (
+                    <a
+                      href={liveUrl.startsWith("http") ? liveUrl : `https://${liveUrl}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+                    >
+                      <ExternalLink className="size-4" /> {w.openApp}
+                    </a>
+                  )}
+                  <button
+                    type="button"
+                    onClick={onGoToProject}
+                    className="inline-flex items-center justify-center gap-2 rounded-xl border border-border bg-background px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/50"
+                  >
+                    {w.goToApp} <ArrowRight className="size-4 rtl:rotate-180" />
+                  </button>
+                </div>
+              </div>
+              {firstLogin && (firstLogin.username || firstLogin.password) && (
+                <FirstLoginCard
+                  title={w.firstLoginTitle}
+                  userLabel={w.firstLoginUser}
+                  passLabel={w.firstLoginPassword}
+                  firstLogin={firstLogin}
+                />
+              )}
+              {connect?.projectId && (
+                <ConnectionCard
+                  projectId={connect.projectId}
+                  appTemplateId={connect.appTemplateId}
+                  serverId={connect.serverId}
+                  deployTarget={connect.deployTarget}
+                />
+              )}
+            </div>
+          )}
+
+          {phase === "error" && (
+            <div className="mt-6 rounded-2xl border border-border/50 bg-card p-6">
+              <div className="flex size-10 items-center justify-center rounded-full bg-danger-bg ring-4 ring-danger/10">
+                <AlertTriangle className="size-5 text-danger" />
+              </div>
+              <h2 className="mt-4 text-base font-semibold text-foreground">{w.installFailed}</h2>
+              <p className="mt-1 text-sm text-muted-foreground">{errorMsg}</p>
+              {logs != null && <TerminalLogs logs={logs} live={false} label={w.deployLogs} />}
+              <div className="mt-5 flex flex-col gap-2 sm:flex-row">
+                {deploymentId && (
+                  <button
+                    type="button"
+                    onClick={onViewBuild}
+                    className="inline-flex items-center justify-center gap-2 rounded-xl border border-border bg-background px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/50"
+                  >
+                    <SlidersHorizontal className="size-4" /> {w.viewDetails}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onRetry}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  <ArrowLeft className="size-4 rtl:rotate-180" /> {w.back}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {description && phase === "installing" && (
+            <p className="mt-4 text-center text-xs text-muted-foreground/50">{description}</p>
+          )}
+        </div>
+      </PageContainer>
+    );
+  }
+
+  // ── JSON-mapped install: build the phase stepper.
   const phaseLabelFor: Record<InstallPhaseId, string> = {
     images: w.phaseImages,
     services: w.phaseServices,
@@ -321,140 +469,210 @@ export function CleanDeployProgressCard({
       ) : undefined,
   }));
 
+  // Aside status pill — theme tokens only, mirrors PROJECT_STATUS_META.
+  const pill =
+    phase === "installing"
+      ? { badge: "bg-info-bg text-info", dot: "bg-info-solid", label: w.statusInstalling }
+      : phase === "done"
+        ? { badge: "bg-success-bg text-success", dot: "bg-success-solid", label: w.statusLive }
+        : cancelled
+          ? { badge: "bg-muted text-muted-foreground", dot: "bg-muted-foreground", label: w.statusCancelled }
+          : { badge: "bg-danger-bg text-danger", dot: "bg-danger-solid", label: w.statusFailed };
+
+  const btnPrimary =
+    "inline-flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90";
+  const btnSecondary =
+    "inline-flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-background px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/50";
+  const btnGhost =
+    "inline-flex w-full items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground";
+
+  const openHref = liveUrl ? (liveUrl.startsWith("http") ? liveUrl : `https://${liveUrl}`) : null;
+
+  // Phase actions — rendered once in the aside (desktop) and once in an inline
+  // card (mobile, where the aside is hidden). Same handlers in both places.
+  const actions =
+    phase === "installing" ? (
+      onStop ? (
+        <button
+          type="button"
+          onClick={onStop}
+          disabled={isStopping}
+          className={`inline-flex w-full items-center justify-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-medium transition-colors ${
+            isStopping
+              ? "cursor-not-allowed border-border bg-muted text-muted-foreground"
+              : "border-danger/20 bg-danger-bg text-danger hover:bg-danger/15"
+          }`}
+        >
+          {isStopping ? <Loader2 className="size-4 animate-spin" /> : <Square className="size-4" />}
+          {isStopping ? w.stopping : w.stopInstall}
+        </button>
+      ) : null
+    ) : phase === "done" ? (
+      <>
+        {openHref && (
+          <a href={openHref} target="_blank" rel="noreferrer" className={btnPrimary}>
+            <ExternalLink className="size-4" /> {w.openApp}
+          </a>
+        )}
+        <button type="button" onClick={onGoToProject} className={btnSecondary}>
+          {w.goToApp} <ArrowRight className="size-4 rtl:rotate-180" />
+        </button>
+      </>
+    ) : (
+      <>
+        {deploymentId && (
+          <button type="button" onClick={onViewBuild} className={btnSecondary}>
+            <SlidersHorizontal className="size-4" /> {w.viewDetails}
+          </button>
+        )}
+        <button type="button" onClick={onRetry} className={btnGhost}>
+          <ArrowLeft className="size-4 rtl:rotate-180" /> {cancelled ? w.startOver : w.back}
+        </button>
+      </>
+    );
+
+  const hasConnectSurface =
+    !!connect?.projectId || !!(firstLogin && (firstLogin.username || firstLogin.password));
+
+  const mainContent =
+    phase === "installing" ? (
+      <>
+        <div className="rounded-2xl border border-border/50 bg-card p-5">
+          <h2 className="text-sm font-semibold text-foreground">{w.stepperTitle}</h2>
+          <div className="mt-4">
+            <InstallStepper steps={stepItems} />
+          </div>
+        </div>
+        <CollapsibleLogs
+          logs={logs ?? ""}
+          live
+          label={w.deployLogs}
+          showLabel={w.showLogs}
+          hideLabel={w.hideLogs}
+        />
+      </>
+    ) : phase === "done" ? (
+      hasConnectSurface ? (
+        <>
+          {firstLogin && (firstLogin.username || firstLogin.password) && (
+            <FirstLoginCard
+              title={w.firstLoginTitle}
+              userLabel={w.firstLoginUser}
+              passLabel={w.firstLoginPassword}
+              firstLogin={firstLogin}
+            />
+          )}
+          {connect?.projectId && (
+            <ConnectionCard
+              projectId={connect.projectId}
+              appTemplateId={connect.appTemplateId}
+              serverId={connect.serverId}
+              deployTarget={connect.deployTarget}
+            />
+          )}
+        </>
+      ) : (
+        // Nothing to connect (e.g. an app with no connection block) — a compact
+        // confirmation so the main column isn't empty.
+        <div className="rounded-2xl border border-border/50 bg-card p-6">
+          <div className="flex size-10 items-center justify-center rounded-full bg-success-bg ring-4 ring-success/10">
+            <Check className="size-5 text-success" />
+          </div>
+          <h2 className="mt-4 text-base font-semibold text-foreground">{w.progressLive}</h2>
+          {liveHost && (
+            <p className="mt-1 break-all font-mono text-xs text-muted-foreground/70">{liveHost}</p>
+          )}
+        </div>
+      )
+    ) : (
+      <>
+        <div className="rounded-2xl border border-border/50 bg-card p-6">
+          <div
+            className={`flex size-10 items-center justify-center rounded-full ${
+              cancelled ? "bg-muted ring-4 ring-border/30" : "bg-danger-bg ring-4 ring-danger/10"
+            }`}
+          >
+            {cancelled ? (
+              <Ban className="size-5 text-muted-foreground" />
+            ) : (
+              <AlertTriangle className="size-5 text-danger" />
+            )}
+          </div>
+          <h2 className="mt-4 text-base font-semibold text-foreground">
+            {cancelled ? w.installCancelled : w.installFailed}
+          </h2>
+          {errorMsg && <p className="mt-1 text-sm text-muted-foreground">{errorMsg}</p>}
+        </div>
+        {logs != null && <TerminalLogs logs={logs} live={false} label={w.deployLogs} />}
+      </>
+    );
+
   return (
     <PageContainer outerClassName="pb-20">
-      <div className={`mx-auto ${hasStepper ? "max-w-4xl" : "max-w-2xl"} pt-6`}>
-        {/* Header — same logo · title layout as the install form, so the wizard
-            reads as one continuous flow rather than jumping to a modal card. */}
-        <div className="flex items-center gap-4">
+      {/* Header — project-detail treatment (breadcrumb + 2xl title + status). */}
+      <div className="mb-6">
+        <div className="mb-2 flex items-center space-x-2 text-sm text-muted-foreground rtl:space-x-reverse">
+          <a href="/apps/new" className="font-medium transition-colors hover:text-foreground">
+            {w.breadcrumbApps}
+          </a>
+          <span>/</span>
+          <span className="truncate font-medium text-foreground">{title}</span>
+        </div>
+        <div className="flex min-w-0 items-center gap-4">
           <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl bg-muted/60">
             <AppLogo appId={appId} className="size-7 object-contain" />
           </div>
           <div className="min-w-0">
-            <h1 className="truncate text-xl font-semibold text-foreground">{title}</h1>
+            <h1 className="truncate text-2xl font-semibold text-foreground">{title}</h1>
             <p className="mt-0.5 flex items-center gap-2 text-sm text-muted-foreground">
-              {phase === "installing" && <Loader2 className="size-3.5 shrink-0 animate-spin" />}
-              {phase === "done" && <Check className="size-3.5 shrink-0 text-success" />}
-              {phase === "error" && <AlertTriangle className="size-3.5 shrink-0 text-danger" />}
+              {statusIcon}
               <span className="truncate">{statusLine}</span>
             </p>
           </div>
         </div>
+      </div>
 
-        {phase === "installing" &&
-          (hasStepper ? (
-            <div className="mt-6 grid grid-cols-1 gap-5 lg:grid-cols-2">
-              <div className="rounded-2xl border border-border/50 bg-card p-5">
-                <h2 className="text-sm font-semibold text-foreground">{w.stepperTitle}</h2>
-                <div className="mt-4">
-                  <InstallStepper steps={stepItems} />
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_340px]">
+        {/* MAIN — the substance for the current phase. */}
+        <div className="min-w-0 space-y-6">
+          {mainContent}
+          {actions && (
+            <div className="space-y-2 rounded-2xl border border-border/50 bg-card p-4 lg:hidden">
+              {actions}
+            </div>
+          )}
+        </div>
+
+        {/* ASIDE — sticky summary + status + phase actions (desktop only). */}
+        <div className="hidden lg:block">
+          <div className="space-y-4 lg:sticky lg:top-6 lg:self-start">
+            <div className="rounded-2xl border border-border/50 bg-card p-5">
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-xl border border-border/50 bg-muted/40">
+                  <AppLogo appId={appId} className="size-5 object-contain" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground/70">
+                    {w.appEyebrow}
+                  </p>
+                  <h3 className="truncate text-base font-semibold text-foreground">{title}</h3>
                 </div>
               </div>
-              <CollapsibleLogs
-                logs={logs ?? ""}
-                live
-                label={w.deployLogs}
-                showLabel={w.showLogs}
-                hideLabel={w.hideLogs}
-              />
-            </div>
-          ) : (
-            <>
-              <div className="mt-5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                <div
-                  className="h-full rounded-full bg-primary transition-all duration-500"
-                  style={{ width: `${Math.max(5, progress)}%` }}
-                />
-              </div>
-              {logs != null && <TerminalLogs logs={logs} live label={w.deployLogs} />}
-            </>
-          ))}
-
-        {phase === "done" && (
-          <div className="mt-6 space-y-4">
-            <div className="rounded-2xl border border-border/50 bg-card p-6">
-              <div className="flex size-10 items-center justify-center rounded-full bg-success-bg ring-4 ring-success/10">
-                <Check className="size-5 text-success" />
-              </div>
-              <h2 className="mt-4 text-base font-semibold text-foreground">{w.progressLive}</h2>
-              {liveHost && (
-                <p className="mt-1 break-all font-mono text-xs text-muted-foreground/70">
-                  {liveHost}
-                </p>
-              )}
-              <div className="mt-5 flex flex-col gap-2 sm:flex-row">
-                {liveUrl && (
-                  <a
-                    href={liveUrl.startsWith("http") ? liveUrl : `https://${liveUrl}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
-                  >
-                    <ExternalLink className="size-4" /> {w.openApp}
-                  </a>
-                )}
-                <button
-                  type="button"
-                  onClick={onGoToProject}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-border bg-background px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/50"
+              <div className="mt-3">
+                <span
+                  className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${pill.badge}`}
                 >
-                  {w.goToApp} <ArrowRight className="size-4 rtl:rotate-180" />
-                </button>
+                  <span className={`size-1.5 rounded-full ${pill.dot}`} />
+                  {pill.label}
+                </span>
               </div>
-            </div>
-
-            {firstLogin && (firstLogin.username || firstLogin.password) && (
-              <FirstLoginCard
-                title={w.firstLoginTitle}
-                userLabel={w.firstLoginUser}
-                passLabel={w.firstLoginPassword}
-                firstLogin={firstLogin}
-              />
-            )}
-
-            {connect?.projectId && (
-              <ConnectionCard
-                projectId={connect.projectId}
-                appTemplateId={connect.appTemplateId}
-                serverId={connect.serverId}
-                deployTarget={connect.deployTarget}
-              />
-            )}
-          </div>
-        )}
-
-        {phase === "error" && (
-          <div className="mt-6 rounded-2xl border border-border/50 bg-card p-6">
-            <div className="flex size-10 items-center justify-center rounded-full bg-danger-bg ring-4 ring-danger/10">
-              <AlertTriangle className="size-5 text-danger" />
-            </div>
-            <h2 className="mt-4 text-base font-semibold text-foreground">{w.installFailed}</h2>
-            <p className="mt-1 text-sm text-muted-foreground">{errorMsg}</p>
-            {logs != null && <TerminalLogs logs={logs} live={false} label={w.deployLogs} />}
-            <div className="mt-5 flex flex-col gap-2 sm:flex-row">
-              {deploymentId && (
-                <button
-                  type="button"
-                  onClick={onViewBuild}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-border bg-background px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/50"
-                >
-                  <SlidersHorizontal className="size-4" /> {w.viewDetails}
-                </button>
+              {phase === "done" && liveHost && (
+                <p className="mt-3 break-all font-mono text-xs text-muted-foreground/70">{liveHost}</p>
               )}
-              <button
-                type="button"
-                onClick={onRetry}
-                className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
-              >
-                <ArrowLeft className="size-4 rtl:rotate-180" /> {w.back}
-              </button>
+              {actions && <div className="mt-4 space-y-2">{actions}</div>}
             </div>
           </div>
-        )}
-
-        {description && phase === "installing" && !hasStepper && (
-          <p className="mt-4 text-center text-xs text-muted-foreground/50">{description}</p>
-        )}
+        </div>
       </div>
     </PageContainer>
   );

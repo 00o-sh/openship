@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
-import { Check, Copy, Eye, EyeOff, Loader2, Link2, MonitorSmartphone, PlugZap } from "lucide-react";
+import { Check, Copy, ExternalLink, Eye, EyeOff, Loader2, Link2, MonitorSmartphone, PlugZap } from "lucide-react";
 import { hasUnresolvedPlaceholder, resolveLocalized } from "@repo/core";
 import { appsApi, type AppConnectionOutput, type AppConnectionView } from "@/lib/api/apps";
 import { useI18n } from "@/components/i18n-provider";
@@ -231,6 +231,12 @@ function OutputRow({
   const opensTab = opensInBrowser(value);
   const forwardText = opensTab ? c.openShort : c.forwardShort;
   const forwardLabel = opensTab ? c.openLocalhost : c.forwardLocalhost;
+  // A `kind:"url"` output opens the ALREADY-PUBLIC value in a new tab — distinct
+  // from the localhost forward (which tunnels a remote port to this machine).
+  // Gated on a resolved http(s) value (hides on the "—" state) and excludes
+  // synthesized internal east-west addresses, which aren't browser-reachable.
+  const canOpen = output.kind === "url" && opensTab && !output.internal;
+  const openInTab = () => window.open(value, "_blank", "noopener,noreferrer");
 
   const copy = async () => {
     if (!value) return;
@@ -305,6 +311,14 @@ function OutputRow({
           </code>
         ) : (
           <span className="min-w-0 flex-1 text-[13px] text-muted-foreground/50">—</span>
+        )}
+        {/* First in the run so it sits directly to the right of the URL. Opens
+            the public value itself (no tunnel), so it's offered anywhere the URL
+            is routed — unlike the desktop-only localhost forward below. */}
+        {canOpen && value && (
+          <FieldAction onClick={openInTab} label={c.openUrl} text={c.openShort}>
+            <ExternalLink className="size-4" />
+          </FieldAction>
         )}
         {/* Labelled, not a bare glyph: port-forwarding a remote service onto this
             machine is not something anyone guesses from an icon, and it's the one

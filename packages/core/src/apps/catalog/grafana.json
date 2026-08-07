@@ -37,7 +37,8 @@
       {
         "id": "url",
         "label": "URL",
-        "source": "publicUrl:grafana"
+        "source": "publicUrl:grafana",
+        "kind": "url"
       }
     ],
     "firstLogin": {

@@ -13,7 +13,8 @@
     "all": "Tümü",
     "outage": "Kesinti",
     "action_required": "İşlem gerekli",
-    "advisory": "Bilgi"
+    "advisory": "Bilgi",
+    "clear": "Filtreleri temizle"
   },
   "scopes": {
     "platform": "Openship",
@@ -56,11 +57,11 @@
   "selfUpdateNote": "Bu kurulum kendini komut satırından günceller.",
   "empty": {
     "openTitle": "İlgi bekleyen bir şey yok",
-    "openBody": "Kesinti yok, engellenmiş dağıtım yok, sertifika veya alan adı sorunu yok, geride kalan bir şey yok. Kontroller arka planda çalışmaya devam ediyor.",
+    "openBody": "Engellenmiş veya bekleyen dağıtım yok, sertifika veya alan adı sorunu yok, geride kalan bir şey yok, yanlış portta çalışan bir şey yok. Kontroller arka planda çalışmaya devam ediyor.",
     "resolvedTitle": "Çözülmüş olay yok",
     "resolvedBody": "Konteyner ve sunucu olayları düzeldiklerinde burada görünür ve 30 gün saklanır.",
     "filteredTitle": "Sonuç yok",
-    "filteredBody": "Bu filtreye uyan sorun yok."
+    "filteredBody": "Açık sorunlar var — hiçbiri bu filtreye uymuyor."
   },
   "summary": {
     "title": "Genel bakış",

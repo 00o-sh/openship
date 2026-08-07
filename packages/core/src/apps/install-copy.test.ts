@@ -72,6 +72,47 @@ describe("authored install copy is additive (no schemaVersion bump)", () => {
   });
 });
 
+describe("connection output `kind` is additive (no schemaVersion bump)", () => {
+  it("accepts a url-kind output", () => {
+    const tpl = {
+      ...base,
+      connection: { outputs: [{ id: "ui", label: "UI", source: "publicUrl:db", kind: "url" }] },
+    };
+    expect(isValidAppTemplate(tpl)).toBe(true);
+    expect(parseAppTemplate(tpl)).toEqual({ ok: true });
+  });
+
+  it("accepts an explicit text-kind output", () => {
+    const tpl = {
+      ...base,
+      connection: { outputs: [{ id: "u", label: "U", source: "env:db:URL", kind: "text" }] },
+    };
+    expect(parseAppTemplate(tpl)).toEqual({ ok: true });
+  });
+
+  it("rejects an unknown kind", () => {
+    const tpl = {
+      ...base,
+      connection: { outputs: [{ id: "u", label: "U", source: "env:db:URL", kind: "link" }] },
+    };
+    expect(isValidAppTemplate(tpl)).toBe(false);
+  });
+});
+
+describe("bundled catalog marks only browser-openable outputs `kind:url`", () => {
+  it("Qdrant: the Web UI is openable, the REST API is not", () => {
+    const outs = getAppTemplate("qdrant")?.connection?.outputs ?? [];
+    expect(outs.find((o) => o.id === "ui")?.kind).toBe("url");
+    expect(outs.find((o) => o.id === "restUrl")?.kind).toBeUndefined();
+  });
+
+  it("MinIO: the console is openable, the S3 API endpoint is not", () => {
+    const outs = getAppTemplate("minio")?.connection?.outputs ?? [];
+    expect(outs.find((o) => o.id === "console")?.kind).toBe("url");
+    expect(outs.find((o) => o.id === "endpoint")?.kind).toBeUndefined();
+  });
+});
+
 describe("authored copy accessors on the bundled catalog", () => {
   it("Grafana surfaces its static admin/admin first login", () => {
     const g = getAppTemplate("grafana");

@@ -115,6 +115,8 @@ export interface AppConnectionOutput {
   variants?: { id: string; label: LocalizedString; value: string }[];
   /** Layout hint: "half" pairs with the next half-width output on one line. */
   width?: "full" | "half";
+  /** "url" → render an Open-in-new-tab action to the right of the value. */
+  kind?: "text" | "url";
   /** The value is ALREADY an internal east-west address (`http://<alias>:<port>`),
    *  synthesized for a non-template project — the connect flow injects it verbatim
    *  in internal mode rather than rewriting a public URL. */

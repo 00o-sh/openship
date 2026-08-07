@@ -13,7 +13,8 @@
     "all": "All",
     "outage": "Outage",
     "action_required": "Action needed",
-    "advisory": "Advisory"
+    "advisory": "Advisory",
+    "clear": "Clear filters"
   },
   "scopes": {
     "platform": "Openship",
@@ -56,11 +57,11 @@
   "selfUpdateNote": "This installation updates itself from the command line.",
   "empty": {
     "openTitle": "Nothing needs attention",
-    "openBody": "No outages, no blocked deploys, no certificate or domain problems, nothing behind. Checks keep running in the background.",
+    "openBody": "No deploys blocked or waiting, no certificate or domain problems, nothing behind, nothing on the wrong port. Checks keep running in the background.",
     "resolvedTitle": "No resolved incidents",
     "resolvedBody": "Container and server incidents appear here once they recover, and are kept for 30 days.",
     "filteredTitle": "No matches",
-    "filteredBody": "No issues match this filter."
+    "filteredBody": "Some issues are open — none match this filter."
   },
   "summary": {
     "title": "Overview",

@@ -110,6 +110,7 @@
         "id": "admin",
         "label": "Mongo Express",
         "source": "publicUrl:mongo-express",
+        "kind": "url",
         "envKey": "MONGO_EXPRESS_URL",
         "help": "Sign in with the username + password below."
       },

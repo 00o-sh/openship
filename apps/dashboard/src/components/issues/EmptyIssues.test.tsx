@@ -57,15 +57,40 @@ describe("the three nothings", () => {
   });
 
   it("stays a neutral surface — an empty feed is not a status", () => {
+    // Every variant, including the both-flags combo: the illustration is chosen by the
+    // same precedence as the copy, so a collapsed branch would tint here too.
     for (const props of [
       { filtered: false, resolved: false },
       { filtered: false, resolved: true },
       { filtered: true, resolved: false },
+      { filtered: true, resolved: true },
     ]) {
       const html = render(props);
-      expect(html).not.toContain("text-danger");
-      expect(html).not.toContain("text-warning");
-      expect(html).not.toContain("text-success");
+      // Both forms: the fill/tint variants are how a status hue would most plausibly
+      // arrive in an illustration, and IssueList already pins the bg-* spelling.
+      for (const token of [
+        "text-danger",
+        "text-warning",
+        "text-success",
+        "danger-bg",
+        "warning-bg",
+        "success-bg",
+        "st-success",
+      ]) {
+        expect(html).not.toContain(token);
+      }
     }
+  });
+
+  it("draws the panel an issue would land in, not a verdict icon", () => {
+    // The reassurance is structural — the empty state occupies the same silhouette as a
+    // real IssueGroup. Its one accent is var(--primary), which resolves to --th-btn-bg
+    // and is achromatic in all three themes; a literal hex here would escape the
+    // neutrality check above, since it never goes through a Tailwind class.
+    const html = render({ filtered: false, resolved: false });
+    expect(html).toContain("var(--primary)");
+    expect(html).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+    // Decorative: the h3 stays the accessible name for the whole card.
+    expect(html).toContain('aria-hidden="true"');
   });
 });

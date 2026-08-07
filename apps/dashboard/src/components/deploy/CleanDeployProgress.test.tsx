@@ -53,8 +53,11 @@ describe("CleanDeployProgressCard — installing", () => {
     expect(out).toContain("Starting services");
     expect(out).toContain("backend"); // per-service sub-list
     expect(out).toContain("Hide logs"); // logs open by default → toggle offers "Hide"
-    // Legacy numeric progress bar must be gone in the stepper layout.
-    expect(html).not.toContain("h-1.5");
+    // Legacy numeric progress bar must be gone in the stepper layout. Matched on
+    // `h-1.5 w-full` (the bar's track), not bare `h-1.5` — that alone is a spacing
+    // value the status pill's dot also uses, which made this assert on a
+    // coincidence and let the legacy-path assertion below pass vacuously.
+    expect(html).not.toContain("h-1.5 w-full");
     // images done → check icon; services active → spinner
     expect(html).toContain("lucide-circle-check");
     expect(html).toContain("animate-spin");
@@ -78,8 +81,30 @@ describe("CleanDeployProgressCard — installing", () => {
 
   it("without phases (legacy mail wizard): renders the progress bar, no stepper", () => {
     const html = render({ phase: "installing", phases: undefined, logs: "x", progress: 40 });
-    expect(html).toContain("h-1.5"); // the numeric progress bar
+    expect(html).toContain("h-1.5 w-full"); // the numeric progress bar's track
     expect(text(html)).not.toContain("Installation steps");
+  });
+});
+
+describe("CleanDeployProgressCard — Stop / status pill / header", () => {
+  it("offers a Stop button while installing when onStop is wired", () => {
+    const out = text(render({ phase: "installing", phases: { services: "active" }, onStop: () => {} }));
+    expect(out).toContain("Stop install");
+    expect(out).toContain("Installing"); // aside status pill
+    expect(out).toContain("Apps"); // breadcrumb back to the catalog
+  });
+
+  it("shows a stopping state while the cancel is in flight", () => {
+    const out = text(
+      render({ phase: "installing", phases: {}, onStop: () => {}, isStopping: true }),
+    );
+    expect(out).toContain("Stopping…");
+    expect(out).not.toContain("Stop install");
+  });
+
+  it("reads the done screen as Live in the status pill", () => {
+    const out = text(render({ phase: "done", phases: {}, liveUrl: "https://x.example.com" }));
+    expect(out).toContain("Live");
   });
 });
 
@@ -122,5 +147,22 @@ describe("CleanDeployProgressCard — error", () => {
     expect(out).toContain("Install failed");
     expect(out).toContain("boom");
     expect(out).toContain("View technical details");
+  });
+
+  it("a user cancel reads as a neutral 'cancelled', not a failure", () => {
+    const out = text(
+      render({
+        phase: "error",
+        phases: {},
+        cancelled: true,
+        errorMsg: "Install cancelled",
+        deploymentId: "dep_9",
+      }),
+    );
+    expect(out).toContain("Install cancelled");
+    expect(out).not.toContain("Install failed");
+    expect(out).toContain("Cancelled"); // status pill, not "Failed"
+    expect(out).not.toContain("Failed");
+    expect(out).toContain("Start over"); // ghost action, not "Back"
   });
 });

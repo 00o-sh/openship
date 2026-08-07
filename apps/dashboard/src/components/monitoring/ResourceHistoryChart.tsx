@@ -132,9 +132,66 @@ export const ResourceHistoryChart: React.FC<Props> = ({
       </div>
 
       {!hasAny ? (
-        // Distinguish "nothing sampled yet" from "sampled and idle". The sampler runs
-        // every 5 minutes, so a just-deployed project legitimately has no history.
-        <p className="py-8 text-center text-sm text-muted-foreground">{m.historyEmpty}</p>
+        // A just-deployed project legitimately has no history: the sampler runs every
+        // few minutes, so this is a wait state, not a failure. Same illustration language
+        // and `--th-*` tokens as TopPathsEmptyState so an empty card reads as part of the
+        // app; the preview line reuses `--color-primary` — the real CPU series' color.
+        <div className="py-2 text-center">
+          <div className="relative mx-auto mb-5 h-32 w-52 max-w-full">
+            <svg className="absolute inset-0 h-full w-full" viewBox="0 0 220 140" fill="none">
+              {/* Card stack, same three-layer motif as the other empty states */}
+              <rect x="52" y="40" width="118" height="76" rx="12" fill="var(--th-sf-04)" />
+              <rect x="42" y="32" width="118" height="76" rx="12" fill="var(--th-sf-03)" stroke="var(--th-bd-subtle)" strokeWidth="1" />
+              <rect x="32" y="24" width="118" height="76" rx="12" fill="var(--th-card-bg)" stroke="var(--th-bd-default)" strokeWidth="1" />
+
+              {/* A time series inside the card — what it shows once samples land. Dashed
+                  gridlines + an axis + a rising primary line, so it reads as "usage over
+                  time" without any numbers. */}
+              <line x1="44" y1="52" x2="140" y2="52" stroke="var(--th-on-06)" strokeWidth="1" strokeDasharray="3 3" />
+              <line x1="44" y1="66" x2="140" y2="66" stroke="var(--th-on-06)" strokeWidth="1" strokeDasharray="3 3" />
+              <line x1="44" y1="80" x2="140" y2="80" stroke="var(--th-on-06)" strokeWidth="1" strokeDasharray="3 3" />
+              <path d="M44 40 V90 H140" stroke="var(--th-on-12)" strokeWidth="1.5" fill="none" />
+
+              <path d="M48 82 66 72 84 76 102 60 120 54 138 46 138 90 48 90Z" fill="var(--color-primary)" fillOpacity="0.08" />
+              <path d="M48 82 66 72 84 76 102 60 120 54 138 46" stroke="var(--color-primary)" strokeOpacity="0.5" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+              <circle cx="66" cy="72" r="2" fill="var(--color-primary)" fillOpacity="0.4" />
+              <circle cx="102" cy="60" r="2" fill="var(--color-primary)" fillOpacity="0.4" />
+
+              {/* The single accent: the next point, ringed and dashed — "waiting to be
+                  collected", matching the house CTA ring. */}
+              <circle cx="138" cy="46" r="9" fill="var(--th-card-bg)" stroke="var(--th-on-20)" strokeWidth="1.5" strokeDasharray="3 2.5" />
+              <circle cx="138" cy="46" r="3.5" fill="var(--color-primary)" />
+
+              {/* Decorative dots + sparkle, matching the family */}
+              <circle cx="18" cy="52" r="4" fill="var(--th-on-10)" />
+              <circle cx="26" cy="112" r="4.5" fill="var(--th-on-08)" />
+              <circle cx="12" cy="86" r="2.5" fill="var(--th-on-06)" />
+              <circle cx="200" cy="40" r="3" fill="var(--th-on-12)" />
+              <circle cx="196" cy="116" r="3.5" fill="var(--th-on-06)" />
+              <path d="M14 68l1.8-3.6 1.8 3.6-3.6-1.8 3.6 0-3.6 1.8z" fill="var(--th-on-16)" />
+            </svg>
+          </div>
+
+          <h4
+            className="mb-2 text-base font-medium text-foreground/80"
+            style={{ letterSpacing: "-0.2px" }}
+          >
+            {m.historyEmptyTitle}
+          </h4>
+          <p className="mx-auto mb-5 max-w-sm text-xs leading-relaxed text-muted-foreground/70">
+            {m.historyEmpty}
+          </p>
+
+          {/* Not a CTA — there is nothing to enable, sampling is automatic. A live pulse
+              answers "is this actually working?" without over-claiming a cadence. */}
+          <div className="mx-auto inline-flex items-center gap-2 rounded-full bg-muted/60 px-3 py-1.5 text-xs font-medium text-muted-foreground">
+            <span className="relative flex size-2">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary/60" />
+              <span className="relative inline-flex size-2 rounded-full bg-primary" />
+            </span>
+            {m.historyWaiting}
+          </div>
+        </div>
       ) : (
         <ResponsiveContainer width="100%" height={220}>
           <ComposedChart data={data} margin={{ top: 4, right: 8, bottom: 0, left: -8 }}>

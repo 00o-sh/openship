@@ -26,6 +26,7 @@ import {
   Building2,
   ChevronsUpDown,
   Check,
+  ShieldAlert,
 } from "lucide-react";
 import { authClient, signOut } from "@/lib/auth-client";
 import { useTheme } from "@/components/theme-provider";
@@ -92,6 +93,12 @@ const MAIN_ITEMS: NavItem[] = [
   { key: "projects", href: "/projects", icon: FolderKanban },
   { key: "apps", href: "/apps", icon: Building2 },
   { key: "deployments", href: "/deployments", icon: Rocket },
+  // MAIN, not infrastructure: `/api/issues` reports project, domain and update items on
+  // the SaaS too (only the server/container sources resolve empty there), and the
+  // infrastructure section is `if (selfHosted)` — putting Issues in it would delete the
+  // page from cloud. No count badge: the nav's single getHome() fetch carries no issue
+  // total, and a badge here would be the only notification-style one in the rail.
+  { key: "issues", href: "/issues", icon: ShieldAlert },
 ];
 
 /** Build nav sections dynamically */

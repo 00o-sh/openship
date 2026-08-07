@@ -108,7 +108,7 @@ export const issuesApi = {
     api.get<IssueFeed>(status === "resolved" ? endpoints.issues.resolved : endpoints.issues.open),
 
   // `GET /issues/summary` (counts without rows) has no client wrapper on purpose: the
-  // page reads its counts off the feed it already fetched, and the nav has no issue
+  // page reads its counts off the feed it already fetched, and the nav entry carries no
   // badge. It stays a server endpoint for MCP clients asking "is anything broken".
 
   /** Run the scheduled checkers behind the feed now. Self-hosted only (404s on cloud). */

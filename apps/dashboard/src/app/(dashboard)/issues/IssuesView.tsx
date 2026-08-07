@@ -92,6 +92,15 @@ export function IssuesView() {
     debounce.current = setTimeout(() => setQuery(value), 300);
   };
 
+  // Cancels the pending debounce too, or a 300ms-old keystroke lands after the reset
+  // and re-narrows the page.
+  const clearFilters = () => {
+    if (debounce.current) clearTimeout(debounce.current);
+    setQueryDraft("");
+    setQuery("");
+    setSeverity("all");
+  };
+
   const handleRescan = async () => {
     if (rescanning) return;
     setRescanning(true);
@@ -175,6 +184,16 @@ export function IssuesView() {
         ))}
       </div>
 
+      {/* The Resolved tab is honest about its coverage: only incidents have a lifecycle,
+          so its silence is not a claim that nothing else ever broke. Sits above the
+          content rather than inside the feed column, because it qualifies the whole tab —
+          including the empty card, which is exactly when the caveat matters most. */}
+      {!loading && tab === "resolved" && (
+        <p className="mb-4 rounded-xl border border-border/50 bg-muted/25 px-4 py-3 text-[12px] leading-relaxed text-muted-foreground">
+          {c.resolvedNote}
+        </p>
+      )}
+
       {loading ? (
         // Two-column skeleton: the feed on the left, the summary rail on the right,
         // so the fold doesn't reflow when the real data lands.
@@ -257,14 +276,6 @@ export function IssuesView() {
               </div>
             </div>
 
-            {/* The Resolved tab is honest about its coverage: only incidents have a
-                lifecycle, so its silence is not a claim that nothing else ever broke. */}
-            {tab === "resolved" && (
-              <p className="mb-4 rounded-xl border border-border/50 bg-muted/25 px-4 py-3 text-[12px] leading-relaxed text-muted-foreground">
-                {c.resolvedNote}
-              </p>
-            )}
-
             {filtered.length === 0 ? (
               <EmptyIssues filtered resolved={tab === "resolved"} />
             ) : (
@@ -277,11 +288,22 @@ export function IssuesView() {
             )}
 
             {/* Shown out of total, only while a filter is narrowing the page — otherwise
-                the facet strip and the rail already say it. */}
+                the facet strip and the rail already say it. The reset rides along: when
+                the filter hides everything the page has no other way out, and the search
+                box and severity strip are two separate controls to undo by hand. */}
             {counts && filtered.length !== counts.total && (
-              <p className="mt-4 text-[12px] tabular-nums text-muted-foreground/70">
-                {filtered.length} / {counts.total}
-              </p>
+              <div className="mt-4 flex items-center gap-3">
+                <p className="text-[12px] tabular-nums text-muted-foreground/70">
+                  {filtered.length} / {counts.total}
+                </p>
+                <button
+                  type="button"
+                  onClick={clearFilters}
+                  className="text-[12px] font-medium text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline"
+                >
+                  {c.filters.clear}
+                </button>
+              </div>
             )}
           </div>
 
