@@ -34,9 +34,10 @@
 
 import { it, expect, beforeAll, afterAll } from "vitest";
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -105,29 +106,46 @@ async function edgeBaseImage(): Promise<string> {
  * for), and nginx refuses to LOAD a config whose `ssl_certificate` is missing —
  * so without this the container could not start for a reason that has nothing to
  * do with what is under test. EC P-256, matching both writers.
+ *
+ * Cert and key are written to a temp dir and read back, NOT piped through
+ * `-keyout /dev/stdout`: openssl `fopen`s that path, and when the process's stdout
+ * is a pipe (every CI runner) rather than a tty it fails with "No such device or
+ * address". Both real writers (nginx.ts, openresty-lua.ts) and the sibling tests
+ * write the key to a file for the same reason.
  */
 async function placeholderCert(): Promise<{ cert: string; key: string }> {
-  const { stdout } = await execFileAsync("openssl", [
-    "req",
-    "-x509",
-    "-newkey",
-    "ec",
-    "-pkeyopt",
-    "ec_paramgen_curve:P-256",
-    "-nodes",
-    "-days",
-    "2",
-    "-subj",
-    PLACEHOLDER_SUBJ,
-    "-keyout",
-    "/dev/stdout",
-  ]);
-  const cert = stdout.slice(stdout.indexOf("-----BEGIN CERTIFICATE-----"));
-  const key = stdout.slice(0, stdout.indexOf("-----BEGIN CERTIFICATE-----"));
-  if (!cert.includes("END CERTIFICATE") || !/BEGIN (EC )?PRIVATE KEY/.test(key)) {
-    throw new Error(`unexpected openssl output:\n${stdout.slice(0, 300)}`);
+  const dir = await mkdtemp(join(tmpdir(), "openship-edge-cert-"));
+  try {
+    const certFile = join(dir, "cert.pem");
+    const keyFile = join(dir, "key.pem");
+    await execFileAsync("openssl", [
+      "req",
+      "-x509",
+      "-newkey",
+      "ec",
+      "-pkeyopt",
+      "ec_paramgen_curve:P-256",
+      "-nodes",
+      "-days",
+      "2",
+      "-subj",
+      PLACEHOLDER_SUBJ,
+      "-out",
+      certFile,
+      "-keyout",
+      keyFile,
+    ]);
+    const cert = await readFile(certFile, "utf8");
+    const key = await readFile(keyFile, "utf8");
+    if (!cert.includes("END CERTIFICATE") || !/BEGIN (EC )?PRIVATE KEY/.test(key)) {
+      throw new Error(
+        `unexpected openssl output:\ncert=${cert.slice(0, 120)}\nkey=${key.slice(0, 120)}`,
+      );
+    }
+    return { cert, key };
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
-  return { cert, key };
 }
 
 interface Answer {
