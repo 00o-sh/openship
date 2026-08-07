@@ -656,53 +656,54 @@ export const ServicesTab = () => {
 
 /* ── Status Badge ───────────────────────────────────────────────────── */
 
+// Hollow status ring + colored label — the same calmer treatment as the service
+// detail panel and the Servers view, rather than a filled pill per row. `ring`
+// is a BORDER on an empty circle, not a solid pip.
 function StatusBadge({ status, t }: { status: string; t: Dictionary }) {
-  const map: Record<string, { dot: string; badge: string; label: string }> = {
+  const map: Record<string, { ring: string; text: string; label: string }> = {
     running: {
-      dot: "bg-success-solid",
-      badge: "bg-success-bg text-success",
+      ring: "border-success-solid",
+      text: "text-success",
       label: t.projects.serviceStatus.running,
     },
     stopped: {
-      dot: "bg-muted-foreground/30",
-      badge: "bg-muted/60 text-muted-foreground/70",
+      ring: "border-muted-foreground/40",
+      text: "text-muted-foreground",
       label: t.projects.serviceStatus.stopped,
     },
     disabled: {
-      dot: "bg-muted-foreground/20",
-      badge: "bg-muted/40 text-muted-foreground/50",
+      ring: "border-muted-foreground/30",
+      text: "text-muted-foreground/60",
       label: t.projects.serviceStatus.disabled,
     },
     failed: {
-      dot: "bg-danger-solid",
-      badge: "bg-danger-bg text-danger",
+      ring: "border-danger-solid",
+      text: "text-danger",
       label: t.projects.serviceStatus.failed,
     },
     starting: {
-      dot: "bg-warning-solid",
-      badge: "bg-warning-bg text-warning",
+      ring: "border-warning-solid animate-pulse",
+      text: "text-warning",
       label: t.projects.serviceStatus.starting,
     },
     // A bouncing container is NOT running — it used to render green, which hid
     // whole stacks in a crash loop.
     restarting: {
-      dot: "bg-warning-solid",
-      badge: "bg-warning-bg text-warning",
+      ring: "border-warning-solid animate-pulse",
+      text: "text-warning",
       label: t.projects.serviceStatus.restarting,
     },
     // The host couldn't be reached — say so instead of echoing a stale status.
     unknown: {
-      dot: "bg-muted-foreground/40",
-      badge: "bg-muted/60 text-muted-foreground",
+      ring: "border-muted-foreground/40",
+      text: "text-muted-foreground",
       label: t.projects.serviceStatus.unknown,
     },
   };
   const s = map[status] ?? map.stopped;
   return (
-    <span
-      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold ${s.badge}`}
-    >
-      <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`} />
+    <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${s.text}`}>
+      <span className={`size-2.5 rounded-full border-2 ${s.ring}`} />
       {s.label}
     </span>
   );

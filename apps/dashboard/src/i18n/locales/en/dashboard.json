@@ -60,6 +60,7 @@
     "projects": "Projects",
     "apps": "Apps",
     "deployments": "Deployments",
+    "issues": "Issues",
     "backups": "Backups",
     "domains": "Domains",
     "monitoring": "Monitoring",

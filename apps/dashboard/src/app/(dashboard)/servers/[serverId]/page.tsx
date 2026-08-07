@@ -31,6 +31,7 @@ import { Tabs } from "@/components/ui/Tabs";
 import { ResourceNotFound } from "@/components/resource-not-found";
 import { useSetupStream } from "@/hooks/useSetupStream";
 import { useMonitorStream } from "@/hooks/useMonitorStream";
+import { useServerTunnels } from "@/hooks/useServerTunnels";
 import type { ServerInfo, ComponentStatus, SetupComponentProgress, SetupLogEvent } from "@/lib/api/system";
 import { PromptDetails } from "@/components/import-project/PromptDetails";
 import { ServerForm } from "../_components/server-form";
@@ -96,6 +97,14 @@ export default function ServerDetailPage({
   const { deployMode } = usePlatform();
   const isDesktop = deployMode === "desktop";
   const [serverId, setServerId] = useState<string>("");
+  // Single source of truth for saved port-forwards: drives the "Ports" tab
+  // count badge (live even when the card is unmounted) AND the card's list.
+  // No-ops off desktop, where the feature is gated away.
+  const {
+    tunnels,
+    loading: tunnelsLoading,
+    refresh: refreshTunnels,
+  } = useServerTunnels(isDesktop ? serverId : null);
   const [server, setServer] = useState<ServerInfo | null>(null);
   const [components, setComponents] = useState<ComponentStatus[]>([]);
   const [loading, setLoading] = useState(true);
@@ -689,6 +698,8 @@ export default function ServerDetailPage({
             icon,
             href: tabHref(key),
             hidden: desktopOnly && !isDesktop,
+            // Show how many forwards (running + stopped) are saved on this server.
+            count: key === "ports" && isDesktop ? tunnels.length : undefined,
           }))}
         />
 
@@ -752,7 +763,12 @@ export default function ServerDetailPage({
             )}
 
             {activeTab === "ports" && isDesktop && serverId && (
-              <PortForwardingCard serverId={serverId} />
+              <PortForwardingCard
+                serverId={serverId}
+                tunnels={tunnels}
+                loading={tunnelsLoading}
+                refresh={refreshTunnels}
+              />
             )}
 
             {activeTab === "terminal" && (

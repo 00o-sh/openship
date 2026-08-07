@@ -209,6 +209,8 @@ export interface AppConnectionOutput {
   variants?: { id: string; label: LocalizedString; value: string }[];
   /** Layout hint: "half" pairs with the next half-width output on one line. */
   width?: "full" | "half";
+  /** "url" → the card offers an Open-in-new-tab action for the resolved value. */
+  kind?: "text" | "url";
   /** The `value` is ALREADY an internal address (`http://<alias>:<port>`),
    *  synthesized for a project with no template `connection` block. The connect
    *  flow injects it directly for internal mode instead of routing through
@@ -490,6 +492,7 @@ export async function getAppConnectionView(
       sourceLabel: o.sourceLabel,
       variants,
       width: o.width,
+      kind: o.kind,
     });
   }
 

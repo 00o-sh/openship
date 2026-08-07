@@ -1536,7 +1536,7 @@ export type UpstreamDrift =
       digestByRef: Record<string, string | null>;
     };
 
-/** What `getProjectCommitStatus` (and `evaluateDrift`) hand back to callers. */
+/** What `evaluateDrift` (and so `getProjectDrift`) hands back to callers. */
 export type DriftStatus = Awaited<ReturnType<typeof evaluateDrift>>;
 
 /** Which of the three drift shapes a project has, from local fields only. */

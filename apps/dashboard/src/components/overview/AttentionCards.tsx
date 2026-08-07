@@ -103,9 +103,8 @@ function AttentionCard({
         )
       }
       // The footer is the card's way into the tracker, so it renders whether or not
-      // anything overflowed — these cards ARE the home shortcut to `/issues` (there is
-      // no nav entry), and a card that only became clickable at four rows left the page
-      // unreachable exactly when the fleet was healthy enough to browse.
+      // anything overflowed — a card that only became clickable at four rows read as
+      // "there is more" rather than "here is the full list".
       footer={
         <Link href="/issues" className={FOOTER_LINK}>
           {hidden > 0 ? interpolate(c.more, { n: String(hidden) }) : t.dashboard.home.viewAll}

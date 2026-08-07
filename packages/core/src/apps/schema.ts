@@ -115,6 +115,10 @@ const connection = z.object({
       sourceLabel: z.union([z.string(), z.record(z.string(), z.string())]).optional(),
       variants: z.array(outputVariant).optional(),
       width: z.enum(["full", "half"]).optional(),
+      /** "url" marks the resolved value as an openable link — the Connection
+       *  card shows an Open-in-new-tab action beside it. Enforced only for a
+       *  resolved http(s) value (checked at render); default "text". Additive. */
+      kind: z.enum(["text", "url"]).optional(),
     }),
   ),
   guide: z

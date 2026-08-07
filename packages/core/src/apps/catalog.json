@@ -422,6 +422,7 @@
             "id": "studio",
             "label": "Studio",
             "source": "publicUrl:kong",
+            "kind": "url",
             "help": "Open in a browser and sign in with the Studio username + password below."
           },
           {
@@ -618,6 +619,7 @@
             "id": "admin",
             "label": "Mongo Express",
             "source": "publicUrl:mongo-express",
+            "kind": "url",
             "envKey": "MONGO_EXPRESS_URL",
             "help": "Sign in with the username + password below."
           },
@@ -782,12 +784,14 @@
             "id": "dashboard",
             "label": "Dashboard URL",
             "source": "publicUrl:dashboard",
+            "kind": "url",
             "help": "Open the Convex dashboard UI, then sign in with the deployment URL and admin key below."
           },
           {
             "id": "url",
             "label": "Deployment URL",
-            "source": "env:backend:CONVEX_CLOUD_ORIGIN"
+            "source": "env:backend:CONVEX_CLOUD_ORIGIN",
+            "kind": "url"
           },
           {
             "id": "adminKey",
@@ -1173,7 +1177,8 @@
           {
             "id": "url",
             "label": "URL",
-            "source": "publicUrl:grafana"
+            "source": "publicUrl:grafana",
+            "kind": "url"
           }
         ],
         "firstLogin": {
@@ -1567,7 +1572,8 @@
           {
             "id": "console",
             "label": "Console",
-            "source": "publicUrl:minio:9001"
+            "source": "publicUrl:minio:9001",
+            "kind": "url"
           },
           {
             "id": "endpoint",
@@ -1713,6 +1719,7 @@
             "id": "ui",
             "label": "Kafka UI",
             "source": "publicUrl:kafka-ui",
+            "kind": "url",
             "help": "Sign in with the username + password below."
           },
           {
@@ -1805,6 +1812,7 @@
             "id": "ui",
             "label": "Qdrant Web UI",
             "source": "publicUrl:qdrant",
+            "kind": "url",
             "help": "The dashboard is at this URL under /dashboard. Paste the API key when it asks."
           },
           {

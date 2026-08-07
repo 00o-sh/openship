@@ -110,12 +110,14 @@
         "id": "dashboard",
         "label": "Dashboard URL",
         "source": "publicUrl:dashboard",
+        "kind": "url",
         "help": "Open the Convex dashboard UI, then sign in with the deployment URL and admin key below."
       },
       {
         "id": "url",
         "label": "Deployment URL",
-        "source": "env:backend:CONVEX_CLOUD_ORIGIN"
+        "source": "env:backend:CONVEX_CLOUD_ORIGIN",
+        "kind": "url"
       },
       {
         "id": "adminKey",

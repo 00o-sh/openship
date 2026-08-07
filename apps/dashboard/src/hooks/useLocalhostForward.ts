@@ -44,8 +44,16 @@ export function useLocalhostForward({
         const started = await systemApi.startTunnel(serverId, saved.id);
         const url = started.url ?? (started.localPort ? `http://localhost:${started.localPort}` : null);
         if (!url) return null;
-        if (action === "open") window.open(url, "_blank", "noopener");
-        else await navigator.clipboard.writeText(url).catch(() => {});
+        // The forward is now a managed row (visible + controllable under the
+        // server's Ports tab); toast so it doesn't read as a throwaway action.
+        const localLabel = url.replace(/^https?:\/\//, "");
+        if (action === "open") {
+          window.open(url, "_blank", "noopener");
+          showToast(`Forwarding remote port ${remotePort} → ${localLabel}`, "success");
+        } else {
+          await navigator.clipboard.writeText(url).catch(() => {});
+          showToast(`Copied ${localLabel} (forwarding remote port ${remotePort})`, "success");
+        }
         return url;
       } catch {
         showToast("Could not open the tunnel to localhost.", "error");

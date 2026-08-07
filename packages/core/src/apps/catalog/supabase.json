@@ -398,6 +398,7 @@
         "id": "studio",
         "label": "Studio",
         "source": "publicUrl:kong",
+        "kind": "url",
         "help": "Open in a browser and sign in with the Studio username + password below."
       },
       {

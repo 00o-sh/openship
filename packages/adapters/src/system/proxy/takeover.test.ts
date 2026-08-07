@@ -23,10 +23,14 @@ const h = vi.hoisted(() => ({
 
 vi.mock("../installer", () => ({ installContainerEdge: h.installContainerEdge }));
 vi.mock("../checks", () => ({ checkEdge: h.checkEdge }));
-vi.mock("../../infra/openresty-lua", () => ({
+// Partial mock: only `detectOpenRestyPaths` is faked, since it's the one that
+// shells out. The path/mount CONSTANTS pass through from the real module —
+// hand-writing them here meant that adding an export (`EDGE_CONTAINER_MOUNTS`,
+// dereferenced at module load two hops down the `./takeover` import chain)
+// collapsed this whole suite to zero collected tests.
+vi.mock("../../infra/openresty-lua", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../infra/openresty-lua")>()),
   detectOpenRestyPaths: h.detectPaths,
-  EDGE_HOST_PATHS: { sitesDir: "/var/lib/openship/edge/sites-enabled" },
-  OPENRESTY_DEFAULT_PATHS: { sitesDir: "/usr/local/openresty/nginx/conf/sites-enabled" },
 }));
 vi.mock("../../infra/nginx", () => ({
   NginxProvider: class {

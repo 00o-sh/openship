@@ -13,7 +13,8 @@
     "all": "Todos",
     "outage": "Caída",
     "action_required": "Requiere acción",
-    "advisory": "Aviso"
+    "advisory": "Aviso",
+    "clear": "Borrar filtros"
   },
   "scopes": {
     "platform": "Openship",
@@ -56,11 +57,11 @@
   "selfUpdateNote": "Esta instalación se actualiza desde la línea de comandos.",
   "empty": {
     "openTitle": "Nada requiere atención",
-    "openBody": "Sin caídas, sin despliegues bloqueados, sin problemas de certificados ni dominios, nada desactualizado. Las comprobaciones siguen ejecutándose en segundo plano.",
+    "openBody": "Sin despliegues bloqueados ni en espera, sin problemas de certificados ni dominios, nada desactualizado, nada en un puerto incorrecto. Las comprobaciones siguen ejecutándose en segundo plano.",
     "resolvedTitle": "Sin incidentes resueltos",
     "resolvedBody": "Los incidentes de contenedores y servidores aparecen aquí cuando se recuperan, y se conservan 30 días.",
     "filteredTitle": "Sin resultados",
-    "filteredBody": "Ningún problema coincide con este filtro."
+    "filteredBody": "Hay problemas abiertos, pero ninguno coincide con este filtro."
   },
   "summary": {
     "title": "Resumen",

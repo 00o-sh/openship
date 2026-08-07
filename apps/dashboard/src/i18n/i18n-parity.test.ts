@@ -29,7 +29,13 @@ const MISSING_BASELINE: Record<string, number> = {
   // the first-login title/username/password). Translated in tr; English-first in
   // the other 7 locales, which fall back via deepMerge so the stepper is correct
   // everywhere.
-  projectSettings: 1128,
+  //
+  // +77: appInstall project-style redesign — 11 keys for the two-column install
+  // view (status pill installing/live/cancelled/failed, Stop/stopping + stopFailed,
+  // installCancelled + startOver, the Apps breadcrumb, and the aside App eyebrow).
+  // Same convention: translated in tr, English-first in the other 7 (deepMerge
+  // fallback), so the view is correct in every locale.
+  projectSettings: 1205,
   jobs: 876,
   migration: 1237,
   // +64: the GitHub card's credential-health strings — 8 English-first keys for

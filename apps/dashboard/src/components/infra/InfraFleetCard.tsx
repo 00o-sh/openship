@@ -65,9 +65,7 @@ export function InfraFleetCard({
           >
             <RefreshCw className={`size-3.5 ${scanning ? "animate-spin" : ""}`} />
           </button>
-          {/* This roll-up says how many boxes need attention; the tracker says what.
-              It's one of the two ways in (the home attention card is the other) — the
-              nav deliberately has no Issues entry. */}
+          {/* This roll-up says how many boxes need attention; the tracker says what. */}
           <Link href="/issues" title={t.issues.title} aria-label={t.issues.title} className={ICON_BUTTON}>
             <ShieldAlert className="size-3.5" />
           </Link>

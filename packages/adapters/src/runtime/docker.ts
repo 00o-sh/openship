@@ -176,21 +176,42 @@ const SIGTERM_EXIT_CODE = 143;
  * arms a `sleep`+`kill` against its own child and reports the child's status, so
  * a timeout ends the remote process too.
  *
- * Two details are load-bearing:
+ * Three details are load-bearing:
  *  - the command is a POSITIONAL ARGUMENT (`$1`), never spliced into this script,
  *    so `sh -c <command>` semantics stay byte-identical to the unwrapped call and
  *    there is no new quoting surface;
  *  - the watchdog's fds go to /dev/null. A backgrounded `sleep` holding a copy of
  *    the exec's stdout pipe keeps that pipe from reaching EOF, which would make
- *    every fast command block for the whole timeout instead of returning at once.
+ *    every fast command block for the whole timeout instead of returning at once;
+ *  - `setsid` gives the command its own PROCESS GROUP so the deadline can signal
+ *    the whole tree. `$!` only ever names the intermediate `sh`, and TERMing that
+ *    alone reparents the actual command to PID 1 — still running, still holding
+ *    the exec's stdout, which is the exact orphan this wrapper exists to prevent.
+ *    Alpine's busybox `ash` hid the bug by exec-optimizing the inner shell away;
+ *    on any Debian/Ubuntu-based image (dash AND bash 5) it leaked every time.
+ *    `set -m` is not an alternative: dash and busybox refuse monitor mode with
+ *    "can't access tty", and bash makes it work but prints job-status noise onto
+ *    the command's stderr.
  *
  * `sleep && kill` (not `;`) so an image with no `sleep` simply has no watchdog
- * instead of killing the command instantly.
+ * instead of killing the command instantly. Same reason `setsid` is probed rather
+ * than assumed: no `setsid` degrades to the old single-child kill, never to a
+ * command that won't start.
  */
 const IN_CONTAINER_EXEC_WATCHDOG = [
-  'sh -c "$1" &',
-  "__osc=$!",
-  '{ sleep "$2" && kill -TERM $__osc 2>/dev/null; } >/dev/null 2>&1 &',
+  "if command -v setsid >/dev/null 2>&1; then",
+  '  setsid sh -c "$1" &',
+  "  __osc=$!",
+  // New session ⇒ pgid == pid, so the negative pid addresses the whole tree.
+  "  __ost=-$__osc",
+  "else",
+  '  sh -c "$1" &',
+  "  __osc=$!",
+  // No group of its own here: a negative pid would hit OUR group, i.e. this
+  // wrapper and the exec itself.
+  "  __ost=$__osc",
+  "fi",
+  '{ sleep "$2" && { kill -TERM "$__ost" 2>/dev/null || kill -TERM "$__osc" 2>/dev/null; }; } >/dev/null 2>&1 &',
   "__osw=$!",
   "wait $__osc 2>/dev/null",
   "__osr=$?",

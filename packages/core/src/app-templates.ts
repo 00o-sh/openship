@@ -192,6 +192,10 @@ export interface AppOutput {
   /** Layout hint on the Connection card: two consecutive `half` outputs pair on
    *  one line; `full` (default) spans the row. */
   width?: "full" | "half";
+  /** Presentation kind. "url" → the Connection card renders an Open (new tab)
+   *  action beside the value. Acted on only for a resolved http(s) URL; default
+   *  "text". Additive/optional — does not bump the schema version. */
+  kind?: "text" | "url";
 }
 
 /**

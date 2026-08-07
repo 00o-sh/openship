@@ -13,7 +13,8 @@
     "all": "Tous",
     "outage": "Panne",
     "action_required": "Action requise",
-    "advisory": "Information"
+    "advisory": "Information",
+    "clear": "Réinitialiser les filtres"
   },
   "scopes": {
     "platform": "Openship",
@@ -56,11 +57,11 @@
   "selfUpdateNote": "Cette installation se met à jour depuis la ligne de commande.",
   "empty": {
     "openTitle": "Rien ne demande votre attention",
-    "openBody": "Aucune panne, aucun déploiement bloqué, aucun problème de certificat ou de domaine, rien en retard. Les vérifications continuent en arrière-plan.",
+    "openBody": "Aucun déploiement bloqué ou en attente, aucun problème de certificat ou de domaine, rien en retard, rien sur un mauvais port. Les vérifications continuent en arrière-plan.",
     "resolvedTitle": "Aucun incident résolu",
     "resolvedBody": "Les incidents de conteneurs et de serveurs apparaissent ici dès qu'ils sont rétablis, et sont conservés 30 jours.",
     "filteredTitle": "Aucun résultat",
-    "filteredBody": "Aucun problème ne correspond à ce filtre."
+    "filteredBody": "Des problèmes sont ouverts — aucun ne correspond à ce filtre."
   },
   "summary": {
     "title": "Aperçu",

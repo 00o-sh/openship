@@ -382,6 +382,11 @@ export default function AppInstallPage() {
 
   const [phase, setPhase] = useState<Phase>(resumeDeploymentId ? "installing" : "form");
   const [busy, setBusy] = useState(false);
+  // A Stop request is in flight (the cancel POST + teardown). Disables the Stop
+  // button. `cancelled` records that the terminal `error` phase was a user Stop,
+  // not a failure — the progress view swaps to neutral "cancelled" copy.
+  const [isStopping, setIsStopping] = useState(false);
+  const [cancelled, setCancelled] = useState(false);
   const [deploymentId, setDeploymentId] = useState<string | null>(resumeDeploymentId);
   const [projectId, setProjectId] = useState<string | null>(adoptedProjectId);
   const [progress, setProgress] = useState(0);
@@ -521,6 +526,9 @@ export default function AppInstallPage() {
       const res = await deployApi.getBuildStatus(deploymentId);
       s = res?.data ?? res ?? {};
       status = s.deploymentStatus ?? s.status ?? "";
+      // A cancelled deploy (user Stop, or resuming one) is a neutral outcome, not
+      // a failure — flag it so the error screen reads as "cancelled".
+      if (status === "cancelled") setCancelled(true);
       // Prefer the server's full accumulated log over the streamed fragments.
       if (typeof s.logs === "string" && s.logs.length >= logs.length) setLogs(s.logs);
     } catch {
@@ -569,7 +577,10 @@ export default function AppInstallPage() {
       },
       onSuccess: () => void resolveTerminal({ ok: true }),
       onFailure: (message) => void resolveTerminal({ ok: false, message }),
-      onCanceled: (message) => void resolveTerminal({ ok: false, message }),
+      onCanceled: (message) => {
+        setCancelled(true);
+        void resolveTerminal({ ok: false, message: message || w.installCancelled });
+      },
     },
   });
 
@@ -610,6 +621,28 @@ export default function AppInstallPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, deploymentId]);
+
+  /** Stop an in-flight install. Aborts the build server-side (containers/images
+   *  torn down, volumes kept so a retry works), then resolves the progress view
+   *  to the neutral "cancelled" terminal. The SSE `cancelled`/`end` also fires —
+   *  `settledRef` makes whichever lands first the single resolution. */
+  const stopInstall = async () => {
+    if (!deploymentId || isStopping || settledRef.current) return;
+    setIsStopping(true);
+    setCancelled(true);
+    try {
+      await deployApi.cancel(deploymentId);
+      disconnect();
+      await resolveTerminal({ ok: false, message: w.installCancelled });
+    } catch (err) {
+      // The build likely already finished in the race — let the stream/terminal
+      // read settle it, and undo the optimistic cancel flag.
+      setCancelled(false);
+      showToast(getApiErrorMessage(err, w.stopFailed), "error");
+    } finally {
+      setIsStopping(false);
+    }
+  };
 
   if (!template) return null;
 
@@ -788,6 +821,7 @@ export default function AppInstallPage() {
     setServices([]);
     setProgress(0);
     setLiveUrl(null);
+    setCancelled(false);
     settledRef.current = false;
     // Flips true the moment a deployment is actually created. A preflight
     // failure rejects buildAccess BEFORE that, so `started` stays false and the
@@ -938,6 +972,7 @@ export default function AppInstallPage() {
       setLiveUrl(null);
       setErrorMsg("");
       setDeploymentId(null);
+      setCancelled(false);
       try {
         const url = new URL(window.location.href);
         url.searchParams.delete("deployment");
@@ -976,6 +1011,9 @@ export default function AppInstallPage() {
         onGoToProject={() => projectId && router.push(`/projects/${projectId}`)}
         onViewBuild={() => deploymentId && router.push(`/build/${deploymentId}`)}
         onRetry={resetToForm}
+        onStop={stopInstall}
+        isStopping={isStopping}
+        cancelled={cancelled}
       />
     );
   }
