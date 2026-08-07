@@ -811,6 +811,12 @@ export default function AppInstallPage() {
       );
       return;
     }
+    // Installing TO Openship Cloud needs a cloud connection — the same hard gate
+    // the deploy wizard applies at Continue. Without it the pick was a dead end:
+    // the install failed deep in preflight with no way to act on it.
+    if (destination?.deployTarget === "cloud" && !cloudConnected) {
+      if (!(await requireCloud("cloud-deploy-target"))) return;
+    }
     const routes = await validatedRouteChoices();
     if (!routes) return;
     setBusy(true);

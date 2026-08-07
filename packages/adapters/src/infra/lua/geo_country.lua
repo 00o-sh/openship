@@ -14,9 +14,10 @@
 --                 image from apps/api/assets/geoip, so no runtime download)
 --
 -- Falls back gracefully - if the library or database is missing,
--- get_country_code() returns nil.  Both site_logger.lua and pipe_log.lua
--- wrap this module in pcall(require, ...) so a missing DB never crashes
--- the request pipeline. mgmt_api `GET /status` reports whether geo actually
+-- get_country_code() returns nil.  site_logger.lua wraps this module in
+-- pcall(require, ...) so a missing DB never crashes the request pipeline
+-- (the country it resolves flows into the ring buffer, and from there to
+-- both /logs/recent and the live SSE stream). mgmt_api `GET /status` reports whether geo actually
 -- resolved, so a silently-dark edge is visible instead of just yielding an
 -- empty country map.
 

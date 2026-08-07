@@ -3,7 +3,7 @@
 All notable changes to Openship. Versions follow [semver](https://semver.org);
 the in-app updater surfaces critical advisories from `release-advisories.json`.
 
-## 0.5.5
+## 0.6.1
 
 A large release. It adds a full service-to-service networking plane, around-the-clock
 container health monitoring, and real analytics with visitor geography and usage

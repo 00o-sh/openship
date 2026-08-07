@@ -763,6 +763,59 @@ function removeOrphanedStack(project: string): void {
 }
 
 /**
+ * Clear a stray `openship-edge` that THIS compose project doesn't own, so `up`
+ * can create its own.
+ *
+ * The edge is the one service pinned to a fixed `container_name` (everything else
+ * reaches it by name — `OPENSHIP_EDGE_CONTAINER`, the `docker ps --filter
+ * name=openship-edge` detection, `docker exec`), and a fixed name is a collision
+ * hazard: compose only ever recreates a container it LABELS as its own, so a
+ * container called `openship-edge` left by any other owner makes `up` abort with
+ * "the container name is already in use". `removeOrphanedStack` can't reach it —
+ * that matches our exact `config_files` label, so a foreign-project edge, a
+ * from-source `docker/docker-compose.yml` edge, or a label-less `docker run` edge
+ * (an edge takeover that never went through compose) all slip past. This closes
+ * that gap for the one name that can hit it.
+ *
+ * Unconditionally safe: the edge is stateless — every byte of vhost + cert config
+ * lives in the host bind mounts, not the container — so a removed edge recreated by
+ * `up` moments later serves exactly the same sites. Left alone when compose already
+ * owns it (same project + our compose file), where `up` recreates it cleanly.
+ */
+const EDGE_SWEEP_FORMAT =
+  '{{.Names}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.project.config_files"}}';
+
+/**
+ * From a `docker ps -a` sweep (name\tproject\tconfig_files rows), whether a stray
+ * `openship-edge` must be force-removed before `up`: it exists AND is not owned by
+ * THIS compose project (same project name AND our compose file among the config
+ * files). No such row → false. Pure, so the decision is unit-tested directly.
+ */
+export function edgeNameNeedsReclaim(psStdout: string, project: string): boolean {
+  const row = psStdout
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.split("\t")[0] === "openship-edge");
+  if (!row) return false; // no such container — nothing in the way
+  const [, proj = "", configFiles = ""] = row.split("\t");
+  const ours =
+    proj === project && configFiles.split(",").some((f) => f.trim() === COMPOSE_FILE);
+  return !ours;
+}
+
+function reconcileEdgeContainerName(project: string): void {
+  const r = spawnSync("docker", ["ps", "-a", "--format", EDGE_SWEEP_FORMAT], {
+    encoding: "utf8",
+  });
+  if (r.status !== 0 || !r.stdout) return;
+  if (!edgeNameNeedsReclaim(r.stdout, project)) return;
+  console.log(
+    "  Replacing an unmanaged `openship-edge` container so compose can own it (config is on the host, so no routes are lost).",
+  );
+  spawnSync("docker", ["rm", "-f", "openship-edge"], { stdio: "ignore" });
+}
+
+/**
  * Move edge state out of the legacy Docker-managed volumes onto the host.
  *
  * Installs before this change kept vhosts, certs, the ACME webroot and static
@@ -1340,6 +1393,10 @@ export async function composeUp(
   const env = readEnvFile();
   const project = env.COMPOSE_PROJECT_NAME || "openship";
   removeOrphanedStack(project);
+  // The edge's pinned container_name collides with any openship-edge this project
+  // doesn't own — a takeover's `docker run` edge, a from-source stack — which aborts
+  // `up` with a name conflict that removeOrphanedStack can't clear. Take the name.
+  reconcileEdgeContainerName(project);
   // Before anything mounts the new host paths: carry over an older install's
   // volume-held certs + vhosts, or the stack comes back up serving nothing.
   migrateLegacyEdgeVolumes(project);
@@ -1508,6 +1565,9 @@ export function composeRunning(): boolean {
  *  "Start" for a compose install. Files already exist, so this is a plain
  *  `up -d`, NOT the full composeUp (materialize + pull/build). */
 export function composeStart(): boolean {
+  // Same name-conflict guard as composeUp: a foreign openship-edge would abort this
+  // bare `up` too. Cheap when the edge is already ours (a no-op).
+  reconcileEdgeContainerName(readEnvFile().COMPOSE_PROJECT_NAME || "openship");
   return compose(["up", "-d"], { quiet: true }) === 0;
 }
 

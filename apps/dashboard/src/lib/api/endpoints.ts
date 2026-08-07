@@ -413,6 +413,7 @@ export const endpoints = {
   dockerMigration: {
     scan: "migration/scan",
     scanStream: "migration/scan/stream",
+    revealEnv: "migration/reveal-env",
     adopt: "migration/adopt",
     reimport: "migration/reimport",
     repoCompose: "migration/repo-compose",

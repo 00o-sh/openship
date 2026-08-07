@@ -24,6 +24,7 @@ import React, { useMemo, useState } from "react";
 import { TrafficChart, TopPaths } from "./general";
 import { MonitoringView } from "@/components/monitoring/MonitoringView";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
+import { usePlatform } from "@/context/PlatformContext";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import { formatCount } from "@/components/monitoring/format";
 import { api } from "@/lib/api";
@@ -41,6 +42,10 @@ import { useRequestLogStream } from "@/hooks/useRequestLogStream";
 
 /** Dev builds only — the fixture path must never be reachable in production. */
 const PREVIEW_ALLOWED = process.env.NODE_ENV !== "production";
+
+/** The sampler writes a point every 5 min; a 60s poll picks up new buckets soon after
+ *  they land so the chart grows without a page reload, at a cost of one small GET/min. */
+const USAGE_HISTORY_POLL_MS = 60_000;
 
 /**
  * Initial preview variant from the URL, read from `window.location.search` directly
@@ -63,6 +68,11 @@ function initialPreview(): MockVariant | null {
 
 export const MonitoringTab = () => {
   const { id, projectData, domain } = useProjectSettings();
+  // Desktop runs no background sampler, so the persisted history series is always
+  // empty there — hide the chart and skip its poll. The live "right now" card still
+  // works (it reads the local Docker socket) and is unaffected.
+  const { deployMode } = usePlatform();
+  const isDesktop = deployMode === "desktop";
 
   /**
    * Which domain the whole tab is scoped to. `null` = All.
@@ -111,7 +121,11 @@ export const MonitoringTab = () => {
   /** Scope for the history read. Held here rather than in the view because it keys the
    *  fetch — the view raises changes through `onServiceKeyChange`. */
   const [serviceKey, setServiceKey] = React.useState<string | null>(null);
-  const { data: liveHistory, isLoading: isLoadingHistory } = useProjectUsageHistory(liveId, serviceKey);
+  const { data: liveHistory, isLoading: isLoadingHistory } = useProjectUsageHistory(
+    liveId,
+    serviceKey,
+    isDesktop ? undefined : USAGE_HISTORY_POLL_MS,
+  );
 
   /**
    * Live hits on the map, off by default.
@@ -311,6 +325,9 @@ export const MonitoringTab = () => {
       isLoadingGeo={fixture ? false : isLoadingGeo}
       history={history}
       isLoadingHistory={fixture ? false : isLoadingHistory}
+      // Fixtures always show the populated layout; real data hides the chart on desktop
+      // where nothing is ever sampled.
+      historySupported={fixture ? true : !isDesktop}
       usage={usage}
       isUsageConnected={fixture ? true : isConnected}
       usageError={fixture ? null : usageError}

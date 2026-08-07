@@ -12,8 +12,9 @@
  * The ranked list is not decoration. Exact values are unreadable off a colour
  * ramp — the map answers "where", the list answers "how many".
  *
- * Colour comes from `--primary` at varying alpha, never a hardcoded hue, so it
- * tracks the active theme like every other chart surface.
+ * Two colourings, the user's choice: FLAG (the default — each country in its own flag's
+ * hue, so the map is readable as a map) and THEME (one ramp off `--color-primary`, which
+ * tracks the active palette like every other chart surface).
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -36,9 +37,9 @@ const PATHS = (countryPaths as { paths: Record<string, string> }).paths;
  * ISO alpha-2 → the dominant hue of that country's flag, precomputed from the same
  * `country-flag-icons` SVGs the legend renders (scripts/update-country-hues.mjs).
  *
- * Used in LIGHT mode only. Dark mode's white-at-opacity treatment already worked; light
- * mode's near-black equivalent read as grey smudges. Hue only — saturation and lightness
- * are imposed in CSS, because real flag colours side by side are a clown map.
+ * The BASE hue only — `resolveHues` nudges it where two countries would otherwise come out
+ * the same colour, and saturation and lightness are imposed in CSS (per theme), because
+ * real flag colours at their real saturations side by side are a clown map.
  */
 const HUES = (countryHues as { hues: Record<string, number> }).hues;
 
@@ -70,13 +71,110 @@ const LIST_LIMIT = 12;
 const RAMP_SPAN = LIST_LIMIT;
 
 /** Every custom property a rank needs, in either colouring mode and either theme. */
-function varsForRank(rank: number, code?: string): GeoVars {
+function varsForRank(rank: number, hue?: number): GeoVars {
   return {
     "--geo-mix": mixFor(rank),
-    "--geo-hue": code ? HUES[code] : undefined,
+    "--geo-hue": hue,
     "--geo-l": `${lightnessFor(rank)}%`,
     "--geo-l-dark": `${lightnessDarkFor(rank)}%`,
   };
+}
+
+/**
+ * Minimum separation (degrees) two hues need before the eye stops reading them as the
+ * same colour, and how far a hue may drift from its flag's real one to get there.
+ *
+ * The atlas is full of collisions: 42 flags reduce to hue 349 alone — US, DE, CN, JP and
+ * EG land on it EXACTLY — while GB/FR/RU/NO/FI sit within 5° of each other in blue. With
+ * only the rank lightness step (~3%) between them, a busy top-12 came out as five
+ * identical reds and three identical blues, which defeats the entire point of the mode:
+ * you pick flag colouring to tell countries apart, and it failed precisely where there
+ * was enough traffic to care.
+ *
+ * The drift limit is what keeps the shades intact. 28° moves a red from crimson to
+ * vermilion — still unmistakably that flag's colour — rather than turning the map into an
+ * arbitrary categorical palette where the hue no longer means anything.
+ */
+const HUE_MIN_GAP = 14;
+const HUE_MAX_DRIFT = 28;
+
+/**
+ * How many ranks apart two countries have to be before their lightness alone separates
+ * them, past which their hues may collide freely. The ramp moves ~3% per rank, so four
+ * ranks is ~13% — a visibly different shade of the same colour, which is exactly what the
+ * ramp is for. Spreading hues beyond the neighbourhood would spend drift on pairs that
+ * were never confusable.
+ */
+const HUE_NEIGHBOURHOOD = 4;
+
+/** Shortest distance between two hues on the 360° circle (349 and 3 are 14° apart). */
+function hueGap(a: number, b: number): number {
+  const d = Math.abs(a - b) % 360;
+  return Math.min(d, 360 - d);
+}
+
+/**
+ * code → the hue its landmass actually gets: the flag's own wherever that reads
+ * distinctly, nudged off it by the smallest amount that clears `HUE_MIN_GAP` where it
+ * doesn't.
+ *
+ * Assigned in RANK order, so the busiest country always keeps its true flag hue and each
+ * one below yields to the ones above it. Deterministic — same ranking in, same colours
+ * out — so the map doesn't reshuffle its palette between polls.
+ *
+ * Only the ramp's own span is spread. Past `RAMP_SPAN` every country already shares the
+ * flattest lightness step, so there is no shade budget left to separate them with and
+ * nothing in the legend naming them; they keep their real flag hue.
+ *
+ * Exported for the test — the invariant (no two near-ranked countries within the gap,
+ * nothing drifted past the limit) is arithmetic, and asserting it on rendered markup
+ * would mean parsing hues back out of a style attribute.
+ */
+export function resolveHues(
+  codes: string[],
+  hues: Record<string, number> = HUES,
+): Map<string, number> {
+  const out = new Map<string, number>();
+  const placed: Array<{ rank: number; hue: number }> = [];
+
+  codes.forEach((code, rank) => {
+    const base = hues[code];
+    if (base == null) return;
+    if (rank >= RAMP_SPAN) {
+      out.set(code, base);
+      return;
+    }
+
+    const near = placed.filter((p) => rank - p.rank <= HUE_NEIGHBOURHOOD);
+    const clearance = (hue: number) =>
+      near.reduce((min, p) => Math.min(min, hueGap(hue, p.hue)), Infinity);
+
+    let hue = base;
+    let best = clearance(base);
+    // Candidates walk outward from the flag's own hue in half-gap steps, nearest first,
+    // so a hue moves as little as it must. When nothing inside the drift limit clears the
+    // gap (a run of same-coloured flags longer than the band can hold), the most
+    // separated candidate wins: a tight pair beats an identical one.
+    for (
+      let off = HUE_MIN_GAP / 2;
+      off <= HUE_MAX_DRIFT && best < HUE_MIN_GAP;
+      off += HUE_MIN_GAP / 2
+    ) {
+      for (const cand of [(base + off) % 360, (base - off + 360) % 360]) {
+        const c = clearance(cand);
+        if (c > best) {
+          best = c;
+          hue = cand;
+        }
+        if (best >= HUE_MIN_GAP) break;
+      }
+    }
+
+    out.set(code, hue);
+    placed.push({ rank, hue });
+  });
+
+  return out;
 }
 
 /** Distinct donut wedges before the tail collapses into one "other". */
@@ -87,6 +185,18 @@ const DONUT_SLICES = 6;
 const OTHER_SLICE = "other";
 
 export type GeoColorMode = "theme" | "flag";
+
+/**
+ * FLAG, not theme.
+ *
+ * Theme colouring is one hue at twelve lightness steps: it shows you the RANKING and
+ * nothing else — which country a landmass is has to be read off the legend or a hover.
+ * Flag colouring answers "who is that" at a glance, which is the question a world map is
+ * on the page to answer. It only became a defensible default once the hues stopped
+ * colliding (see `resolveHues`); before that it opened on five indistinguishable reds.
+ * Theme stays one click away for anyone who wants the map to match the palette.
+ */
+const DEFAULT_MODE: GeoColorMode = "flag";
 
 /** Remembered across visits — a colouring preference you have to re-pick every time is
  *  not a preference. Own key, not tied to the UI theme, since it's orthogonal to it. */
@@ -113,9 +223,9 @@ function initialFeed(): boolean {
 }
 
 function initialMode(): GeoColorMode {
-  if (typeof window === "undefined") return "theme";
+  if (typeof window === "undefined") return DEFAULT_MODE;
   const v = window.localStorage.getItem(MODE_KEY);
-  return v === "flag" || v === "theme" ? v : "theme";
+  return v === "flag" || v === "theme" ? v : DEFAULT_MODE;
 }
 
 interface Props {
@@ -287,7 +397,10 @@ export const VisitorMap: React.FC<Props> = ({ data, isLoading, domainSelector, l
      * and the list disagreed.
      */
     const byCode = new Map<string, GeoVars>();
-    all.forEach((c, i) => byCode.set(c.code, varsForRank(i, c.code)));
+    // Resolved over the whole ranked list at once — a per-country lookup can't know what
+    // the countries above it already took.
+    const hueOf = resolveHues(all.map((c) => c.code));
+    all.forEach((c, i) => byCode.set(c.code, varsForRank(i, hueOf.get(c.code))));
 
     // The donut shows the top slices plus one "other" wedge. A ring of 60 hairline
     // slices conveys nothing, and dropping the tail silently would make the shares
@@ -299,8 +412,8 @@ export const VisitorMap: React.FC<Props> = ({ data, isLoading, domainSelector, l
     const slices: DonutSlice[] = top.map((c) => ({
       code: c.code,
       count: c.count,
-      vars: byCode.get(c.code) ?? varsForRank(0, c.code),
-      hasHue: HUES[c.code] != null,
+      vars: byCode.get(c.code) ?? varsForRank(0, hueOf.get(c.code)),
+      hasHue: hueOf.has(c.code),
     }));
     // The tail wedge is deliberately hueless — "other" is not a country and must not
     // borrow one's colour. It takes the faintest theme mix instead.
@@ -645,7 +758,10 @@ export const VisitorMap: React.FC<Props> = ({ data, isLoading, domainSelector, l
                   <span
                     aria-hidden
                     className="geo-swatch size-2 shrink-0 rounded-full"
-                    data-hue={HUES[c.code] != null ? "" : undefined}
+                    // Read off the same resolved vars the landmass uses, not HUES —
+                    // keying on the raw flag hue would light the swatch for a country
+                    // whose spread hue differs from it.
+                    data-hue={vars.get(c.code)?.["--geo-hue"] != null ? "" : undefined}
                     data-selected={selected === c.code ? "" : undefined}
                     style={vars.get(c.code) as React.CSSProperties}
                   />

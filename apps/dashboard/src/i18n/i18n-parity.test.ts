@@ -37,7 +37,10 @@ const MISSING_BASELINE: Record<string, number> = {
   // fallback), so the view is correct in every locale.
   projectSettings: 1205,
   jobs: 876,
-  migration: 1237,
+  // +15: discover.envFromImage/Hint/Import — the collapsed "vars come from the
+  // image" row and its one-click import. Translated in ar/fr/tr; the other 5
+  // locales have no migration.json at all and fall back via deepMerge.
+  migration: 1252,
   // +64: the GitHub card's credential-health strings — 8 English-first keys for
   // "GitHub rejected the stored {method}" vs "couldn't reach GitHub to check it",
   // the manage-on-GitHub links, and the note that Disconnect does NOT revoke the

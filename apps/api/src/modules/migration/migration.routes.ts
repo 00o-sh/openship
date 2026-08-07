@@ -22,6 +22,9 @@ r.use("*", localOnly);
 r.post("/scan", { tag: "server:write", collection: true }, migration.scanServer);
 // Streaming variant (SSE): step progress + result, no fixed timeout.
 r.get("/scan/stream", { tag: "server:write", collection: true }, migration.scanServerStream);
+// On-demand reveal of ONE discovered container's real env (scan masks it). Write-
+// gated: the masked scan is a read, revealing the real secret is a write (#336).
+r.post("/reveal-env", { tag: "server:write", collection: true }, migration.revealServiceEnv);
 // Create an Openship project from the selected discovered services (records only).
 r.post("/adopt", { tag: "server:write", collection: true }, migration.adoptServer);
 // Re-import an orphaned Openship project (DR / cross-instance), preserving its id.

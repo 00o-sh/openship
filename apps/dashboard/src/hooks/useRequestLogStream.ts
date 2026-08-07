@@ -43,10 +43,11 @@ export interface RequestLogEntry {
   requestSize?: number;
   responseSize?: number;
   /**
-   * The hostname this request hit. Every live frame carries it (`pipe_log.lua` sets
-   * `payload.host`); `/logs/recent` rows don't (the edge keys its ring by host), so the
-   * API injects it when it fans a combined "all domains" view. Lets the combined view
-   * label which domain a row belongs to; single-domain views ignore it.
+   * The hostname this request hit. The edge keys its ring by host and doesn't repeat it
+   * inside each row, so neither `/logs/recent` nor the live stream (both now read that one
+   * ring) carries it. `/logs/recent` gets it injected API-side; the live stream gets it
+   * from the per-connection target below. Lets the combined "all domains" view label which
+   * domain a row belongs to; single-domain views ignore it.
    */
   host?: string;
 }

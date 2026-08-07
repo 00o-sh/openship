@@ -2,18 +2,21 @@ import { describe, it, expect } from "vitest";
 import { normalizeRequestLog } from "./useRequestLogStream";
 
 /**
- * Three producers feed this, and they do NOT agree on field names:
+ * The producers feeding this do NOT agree on field names:
  *
- *   • the live SSE pipe (`pipe_log.lua`)      — uri, timestamp, status, requestSize
- *   • the ring buffer (`/logs/recent`)        — uri, ts, status, bw_in/bw_out, rt
+ *   • the ring buffer                         — uri, ts, status, bw_in/bw_out, rt
+ *     (now the single edge source: both `/logs/recent` AND the live SSE stream read it)
  *   • the cloud relay                         — path, statusCode, responseTime
+ *   • legacy long-name frames                 — uri, timestamp, status, requestSize
+ *     (the shape the old dedicated live pipe emitted; still accepted defensively)
  *
  * The shapes below are copied from frames observed against a real edge container, not
  * invented, because the whole reason this function exists is that guessing which name a
  * producer uses is how `country` came to be dropped on one path and kept on another.
  */
 
-/** Verbatim from the live SSE stream of a running edge. */
+/** The long-name shape the old dedicated live pipe emitted — still normalised so a
+ *  mid-upgrade edge or the cloud relay's overlapping names keep working. */
 const LIVE_FRAME = {
   host: "shop.example.com",
   status: 200,
@@ -30,7 +33,8 @@ const LIVE_FRAME = {
   responseTime: 0,
 };
 
-/** Verbatim from `/logs/recent` on the same edge. */
+/** Verbatim from the edge ring — the shape `/logs/recent` and the live SSE stream now
+ *  both deliver. */
 const RING_ROW = {
   ip: "82.196.0.1",
   country: "NL",
@@ -45,7 +49,7 @@ const RING_ROW = {
 };
 
 describe("country survives every producer", () => {
-  it("keeps it from a live SSE frame", () => {
+  it("keeps it from a long-name frame", () => {
     expect(normalizeRequestLog(LIVE_FRAME)?.country).toBe("US");
   });
 

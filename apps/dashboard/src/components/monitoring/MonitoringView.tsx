@@ -50,6 +50,10 @@ export interface MonitoringViewProps {
     granularityMinutes: number;
   } | null;
   isLoadingHistory: boolean;
+  /** Whether this platform persists a usage-history series at all. Desktop samples
+   *  nothing (no background sampler), so the chart would only ever show its empty
+   *  state — hide it there. Defaults to true; the live "right now" card is unaffected. */
+  historySupported?: boolean;
   usage: ProjectUsage | null;
   isUsageConnected: boolean;
   usageError: string | null;
@@ -127,6 +131,7 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
   isLoadingGeo,
   history,
   isLoadingHistory,
+  historySupported = true,
   usage,
   isUsageConnected,
   usageError,
@@ -357,7 +362,7 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
           together at the top they competed, and the trend pushed the traffic blocks off
           the screen. The scope selector above still governs it — `scopeLabel` names the
           series so the two can't be read as describing different things. */}
-      {showResources && (
+      {showResources && historySupported && (
         <ResourceHistoryChart
           buckets={history?.buckets ?? []}
           granularityMinutes={history?.granularityMinutes ?? 5}

@@ -16,6 +16,7 @@ import { useI18n } from "@/components/i18n-provider";
 import { usePlatform } from "@/context/PlatformContext";
 import { projectsApi, servicesApi, type Service } from "@/lib/api";
 import { PROJECT_INFO_NOT_FOUND, useProjectInfo } from "@/hooks/useProjectEndpoints";
+import { dedupeServerLogs } from "./server-log-dedup";
 
 interface ProjectDomain {
   domain: string;
@@ -801,76 +802,27 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
     }));
   }, []);
 
-  // Server Logs Management
-  const MAX_SERVER_LOGS = 100;
-
-  const getServerLogKey = useCallback((log: any) => {
-    if (!log || typeof log !== "object") return String(log);
-    const parsedTimestamp =
-      typeof log.timestamp === "string" ? Date.parse(log.timestamp) : Number.NaN;
-    const timestampKey = Number.isFinite(parsedTimestamp)
-      ? Math.floor(parsedTimestamp / 1000)
-      : String(log.timestamp ?? "");
-
-    return [
-      timestampKey,
-      log.ip,
-      log.method,
-      log.path,
-      log.statusCode,
-      log.responseTime,
-      log.requestSize,
-      log.responseSize,
-    ].join("|");
+  // Server Logs Management — dedup/sort logic lives in ./server-log-dedup (pure, unit-tested).
+  const addServerLog = useCallback((log: any) => {
+    setServerLogsData((prev) => ({
+      ...prev,
+      logs: dedupeServerLogs([log, ...prev.logs]),
+    }));
   }, []);
 
-  const dedupeServerLogs = useCallback(
-    (logs: any[]) => {
-      const seen = new Set<string>();
-      const merged: any[] = [];
+  const mergeServerLogs = useCallback((logs: any[]) => {
+    setServerLogsData((prev) => ({
+      ...prev,
+      logs: dedupeServerLogs([...prev.logs, ...logs]),
+    }));
+  }, []);
 
-      for (const log of logs) {
-        const key = getServerLogKey(log);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        merged.push(log);
-        if (merged.length >= MAX_SERVER_LOGS) break;
-      }
-
-      return merged;
-    },
-    [getServerLogKey],
-  );
-
-  const addServerLog = useCallback(
-    (log: any) => {
-      setServerLogsData((prev) => ({
-        ...prev,
-        logs: dedupeServerLogs([log, ...prev.logs]),
-      }));
-    },
-    [dedupeServerLogs],
-  );
-
-  const mergeServerLogs = useCallback(
-    (logs: any[]) => {
-      setServerLogsData((prev) => ({
-        ...prev,
-        logs: dedupeServerLogs([...prev.logs, ...logs]),
-      }));
-    },
-    [dedupeServerLogs],
-  );
-
-  const setServerLogs = useCallback(
-    (logs: any[]) => {
-      setServerLogsData((prev) => ({
-        ...prev,
-        logs: dedupeServerLogs(logs),
-      }));
-    },
-    [dedupeServerLogs],
-  );
+  const setServerLogs = useCallback((logs: any[]) => {
+    setServerLogsData((prev) => ({
+      ...prev,
+      logs: dedupeServerLogs(logs),
+    }));
+  }, []);
 
   const clearServerLogs = useCallback(() => {
     setServerLogsData((prev) => ({

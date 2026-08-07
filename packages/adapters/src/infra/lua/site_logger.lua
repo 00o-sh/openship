@@ -27,8 +27,10 @@
 -- Shared dict key schema (request_data zone):
 --   rlog:{domain}:seq               monotonic write pointer
 --   rlog:{domain}:{slot}            JSON entry (ring buf)       (TTL 1h)
---   log_pipe:sub:{domain}           live subscriber flag        (TTL 30s)
---   log_pipe:q:{domain}             live log queue entries
+--
+-- The ring is ALSO the live source: pipe_stream.lua's SSE endpoint reads these
+-- slots by a per-connection cursor, so there is no separate live queue or
+-- subscriber flag — every watcher sees the full stream and steals from none.
 --
 -- NOTE on `:u` — it counts non-static REQUESTS, not people. It was surfaced as
 -- "unique IPs" all the way to the dashboard, which it never was. Real distinct
@@ -42,10 +44,6 @@ if not geo_ok then
     geo = nil
     ngx.log(ngx.WARN, "[site_logger] geo_country module not available. GeoIP disabled.")
 end
-
--- SAFE LOAD: Pipe module (per-worker, cached by require)
-local pipe_ok, pipe_log = pcall(require, "openship.pipe_log")
-if not pipe_ok then pipe_log = nil end
 
 local analytics    = ngx.shared.analytics
 local request_data = ngx.shared.request_data
@@ -194,11 +192,12 @@ local status  = ngx.var.status         or "0"
 
 -- Client country, resolved ONCE per request.
 --
--- Hoisted out of the geo block because THREE consumers need it — the daily/per-minute
--- rollups, the raw ring buffer behind /logs/recent, and the live SSE pipe. It used to be
--- looked up inside the rollup and again inside pipe_log, so the ring buffer had no
--- country at all: a request-log list showed flags on rows that arrived live and none on
--- rows backfilled from /logs/recent, for the same traffic.
+-- Hoisted out of the geo block because both the daily/per-minute rollups and the raw
+-- ring buffer need it. The ring is the single source for the request log — /logs/recent
+-- reads it directly and the live SSE stream (pipe_stream.lua) reads the same slots by
+-- cursor — so resolving the country here means every row carries its flag no matter
+-- which path delivered it. An earlier split (looked up in the rollup, again in a
+-- separate live pipe) left the ring with no country at all.
 --
 -- pcall'd because a corrupt or partially-written mmdb makes the lookup raise, and an
 -- error here would abort every counter below it (see the section header).
@@ -356,10 +355,20 @@ pcall(function()
     bump_indexed(gpfx .. "s:" .. status, D48H, gpfx .. "sn", gpfx .. "si:", status)
 end)
 
--- ── 4. Raw request ring buffer ──────────────────────────────────────────────
+-- ── 4. Raw request ring buffer (also the live SSE source) ────────────────────
+--
+-- `seq` is claimed BEFORE encoding so the stored JSON can carry a deterministic
+-- id (`{host}:{seq}`). That id is the dedup key everywhere downstream: /logs/recent
+-- returns these entries verbatim, and pipe_stream.lua streams the same slots live,
+-- so the same request reaches the client with one stable id instead of a fresh
+-- random one per source. `incr` with init 0 never returns nil here; guard anyway
+-- so a shdict hiccup can't index a nil into the slot key.
 
 pcall(function()
+    local seq = request_data:incr("rlog:" .. host .. ":seq", 1, 0)
+    if not seq then return end
     local ok_j, j = pcall(cjson.encode, {
+        id     = host .. ":" .. seq,
         ip     = ip,
         -- nil is simply omitted by cjson, so a box with no GeoIP writes the same shape
         -- minus this key rather than a null the reader has to special-case.
@@ -374,17 +383,6 @@ pcall(function()
         rt     = rt,
     })
     if ok_j and j then
-        local seq  = request_data:incr("rlog:" .. host .. ":seq", 1, 0)
-        local slot = seq % RING
-        request_data:set("rlog:" .. host .. ":" .. slot, j, D1H)
+        request_data:set("rlog:" .. host .. ":" .. (seq % RING), j, D1H)
     end
 end)
-
--- ── 5. Live-log pipe (only when a subscriber is watching) ───────────────────
--- Fire via timer to avoid blocking the log phase
-
-if pipe_log and pipe_log.pipe_request_log
-   and request_data:get("log_pipe:sub:" .. host) then
-    ngx.timer.at(0, pipe_log.pipe_request_log,
-                 host, ip, ts, ua, uri, req_len, bytes, rt, method, status, cc)
-end

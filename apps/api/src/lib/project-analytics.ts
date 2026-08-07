@@ -460,11 +460,13 @@ async function execMgmtStream(serverId: string, path: string) {
   const stream = new PassThrough();
   const url = `http://127.0.0.1:${OPENRESTY_MGMT_PORT}${path}`;
 
-  // Kills the curl child on teardown (LocalExecutor honours the signal). Without it a
-  // disconnected browser left `curl -sN` alive inside the edge, holding its
-  // `log_pipe:sub` subscription and draining the shared queue — stealing frames from the
-  // next subscriber. That is the regression from the bare→containerized edge switch: the
-  // tunnel transport closed its TCP socket on destroy; this one had no handle to close.
+  // Tears the transport down on browser disconnect: LocalExecutor kills the curl child,
+  // SshExecutor closes the ssh2 channel (which EPIPEs the remote curl within a heartbeat).
+  // The edge log source is now the shared ring read by a per-connection cursor, so a
+  // lingering orphan can no longer steal frames from the next subscriber — but it still
+  // holds an SSH session, so honouring the signal keeps refreshes from exhausting
+  // sshd `MaxSessions`. The bare→containerized switch removed the TCP socket whose close
+  // used to do this for free; the abort signal is the replacement handle.
   const abort = new AbortController();
   let ended = false;
   let torndown = false;

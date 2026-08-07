@@ -176,21 +176,37 @@ describe("reconcileStack", () => {
     networks: NETWORKS,
     declared: declaredMap(COMPOSE),
     alreadyManaged: 0,
-    imageDefaults: new Map([["postgres:16", new Set(["PATH=/usr/bin", "LANG=C.UTF-8"])]]),
+    // Keyed by image ID, not tag — a moved tag must not lend its defaults.
+    imageEnv: new Map([["sha256:db", ["PATH=/usr/bin", "LANG=C.UTF-8"]]]),
   });
 
-  it("subtracts image-default env, keeping user-set vars", () => {
+  it("imports the operator's env and leaves the image's out", () => {
     const db = withDefaults.services.find((s) => s.name === "db")!;
-    // LANG is an image default (dropped), PATH is denylisted, POSTGRES_PASSWORD survives.
+    // LANG is image-supplied, PATH is denylisted, POSTGRES_PASSWORD survives.
     expect(db.env).toEqual({ POSTGRES_PASSWORD: "secret" });
   });
 
-  it("names the env it dropped instead of omitting it silently", () => {
+  it("reports what the image supplies, with values, instead of omitting it silently", () => {
     const db = withDefaults.services.find((s) => s.name === "db")!;
-    const dropped = db.warnings.find((w) => w.includes("Env not imported"));
-    // LANG is what was subtracted; PATH is denylisted noise and was never config.
-    expect(dropped).toContain("LANG");
-    expect(dropped).not.toContain("PATH");
+    // LANG is what the image supplies; PATH is denylisted noise and was never config.
+    expect(db.envImageDefaults).toEqual({ LANG: "C.UTF-8" });
+  });
+
+  it("ignores image env fetched under a stale tag key", () => {
+    // Same defaults keyed by TAG: the container's imageId no longer matches, so
+    // nothing is attributed to the image and every var is imported as config.
+    const stale = reconcileStack({
+      serverId: "srv-1",
+      details: [DB],
+      volumes: VOLUMES,
+      networks: NETWORKS,
+      declared: declaredMap(COMPOSE),
+      alreadyManaged: 0,
+      imageEnv: new Map([["postgres:16", ["PATH=/usr/bin", "LANG=C.UTF-8"]]]),
+    });
+    const db = stale.services.find((s) => s.name === "db")!;
+    expect(db.env).toEqual({ POSTGRES_PASSWORD: "secret", LANG: "C.UTF-8" });
+    expect(db.envImageDefaults).toBeUndefined();
   });
 
   const coolify = reconcileStack({
@@ -200,7 +216,7 @@ describe("reconcileStack", () => {
     networks: NETWORKS,
     declared: new Map(),
     alreadyManaged: 0,
-    imageDefaults: new Map([["app-kso4gc8:latest", new Set(COOLIFY_APP.env)]]),
+    imageEnv: new Map([["sha256:coolify", [...COOLIFY_APP.env]]]),
   });
 
   it("keeps a Coolify container's env even when it matches the image default", () => {
@@ -212,12 +228,12 @@ describe("reconcileStack", () => {
     });
   });
 
-  it("has nothing to report as dropped on a Coolify container", () => {
-    // The two halves of the #394 fix meet here: Coolify containers subtract no
-    // image defaults at all, so the drop report must stay silent rather than
-    // listing every variable the Nixpacks image happens to bake in.
+  it("has nothing to report as image-supplied on a Coolify container", () => {
+    // The two halves of the #394 fix meet here: Coolify re-sends the image's env
+    // verbatim (the one shape provenance can't resolve), so the label short-circuits
+    // the split rather than attributing every Nixpacks-baked variable to the image.
     const app = coolify.services.find((s) => s.name === "app-kso4gc8")!;
-    expect(app.warnings.some((w) => w.includes("Env not imported"))).toBe(false);
+    expect(app.envImageDefaults).toBeUndefined();
   });
 
   it("reports the Coolify variables Docker cannot expose", () => {

@@ -16,6 +16,7 @@ import { AppLogo } from "@/components/AppLogo";
 import { PageContainer } from "@/components/ui/PageContainer";
 import { OptionCard } from "@/app/(dashboard)/(deployment)/deploy/[slug]/components/DeployTargetStep";
 import { useToast } from "@/context/ToastContext";
+import { useCloud } from "@/context/CloudContext";
 import { usePlatform } from "@/context/PlatformContext";
 import { useI18n } from "@/components/i18n-provider";
 
@@ -39,6 +40,7 @@ export default function MailWizardPage() {
   const w = t.projectSettings.appInstall;
   const m = w.mail;
   const { showToast } = useToast();
+  const { connected: cloudConnected, requireCloud } = useCloud();
   const { baseDomain } = usePlatform();
 
   const [phase, setPhase] = useState<Phase>("choose");
@@ -115,6 +117,11 @@ export default function MailWizardPage() {
     if (!imapHost.trim() || !smtpHost.trim()) {
       showToast(m.hostsRequired, "error");
       return;
+    }
+    // Deploying the webmail TO Openship Cloud needs a cloud connection — same
+    // gate as the deploy wizard / app install, so the pick isn't a dead end.
+    if (destination?.deployTarget === "cloud" && !cloudConnected) {
+      if (!(await requireCloud("cloud-deploy-target"))) return;
     }
     setBusy(true);
     try {

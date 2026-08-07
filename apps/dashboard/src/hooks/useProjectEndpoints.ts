@@ -239,6 +239,10 @@ function useEndpoint<T>(
   // domain-scoped analytics key) so invalidateProjectCaches(projectId) still
   // notifies this hook.
   revisionId?: string | null,
+  // When set, refetch on this interval. Used by series that grow server-side
+  // on their own clock (the sampled usage history) so a chart that mounted
+  // empty animates as new points land, without a page reload. 0/undefined = off.
+  pollMs?: number,
 ): AsyncState<T> {
   // Ref tracks the LATEST id from props at any moment. Combined with
   // the `cancelled` flag, this prevents an in-flight fetch for project
@@ -323,6 +327,27 @@ function useEndpoint<T>(
     // invalidateProjectCaches() retriggers the effect for already-
     // mounted consumers, fetching fresh data without a remount.
   }, [id, cache, fetcher, revision]);
+
+  // Poll: re-fire the fetcher on an interval, bypassing the ready-cache
+  // short-circuit above. A transient failure keeps the last-good data on
+  // screen rather than blanking the chart — the next tick retries.
+  useEffect(() => {
+    if (!id || !pollMs || pollMs <= 0) return;
+    let cancelled = false;
+    const handle = setInterval(() => {
+      fetcher(id)
+        .then((data) => {
+          cache.set(id, { kind: "ready", data });
+          if (cancelled || idRef.current !== id) return;
+          setState({ data, isLoading: false, error: null });
+        })
+        .catch(() => {});
+    }, pollMs);
+    return () => {
+      cancelled = true;
+      clearInterval(handle);
+    };
+  }, [id, cache, fetcher, pollMs]);
 
   return state;
 }
@@ -462,9 +487,13 @@ export function useAnalyticsGeo(id: string | null | undefined, domain?: string |
 export function useProjectUsageHistory(
   id: string | null | undefined,
   serviceKey?: string | null,
+  // Poll interval (ms). The server samples every 5 min, so a mounted chart only
+  // sees new points if it re-reads — pass this on platforms that sample (VPS/cloud)
+  // and omit it where nothing is sampled (desktop) to avoid a pointless timer.
+  pollMs?: number,
 ) {
   const key = id ? `${id}${HISTORY_SEP}${serviceKey ?? ""}` : id;
-  return useEndpoint(key, usageHistoryCache, fetchUsageHistory, id);
+  return useEndpoint(key, usageHistoryCache, fetchUsageHistory, id, pollMs);
 }
 
 /**
@@ -574,11 +603,21 @@ export function mapAnalyticsData(
  */
 export function invalidateProjectCaches(id: string) {
   infoCache.delete(id);
-  // Drop every domain-scoped overview entry for this project, not just the
-  // aggregate key (entries are keyed `id` or `id::domain`).
-  const prefix = `${id}${OVERVIEW_KEY_SEP}`;
+  // Overview AND geo share the `id` / `id::domain` key format — drop every
+  // domain-scoped entry for this project from both, not just the aggregate key.
+  const domainPrefix = `${id}${OVERVIEW_KEY_SEP}`;
   for (const key of overviewCache.keys()) {
-    if (key === id || key.startsWith(prefix)) overviewCache.delete(key);
+    if (key === id || key.startsWith(domainPrefix)) overviewCache.delete(key);
+  }
+  for (const key of geoCache.keys()) {
+    if (key === id || key.startsWith(domainPrefix)) geoCache.delete(key);
+  }
+  // Usage-history entries are keyed `id##serviceKey`. Without this the chart kept a
+  // stale empty series after the first sample landed — the revision bump re-ran the
+  // effect but the cached `{kind:"ready"}` short-circuited it back to the old data.
+  const historyPrefix = `${id}${HISTORY_SEP}`;
+  for (const key of usageHistoryCache.keys()) {
+    if (key === id || key.startsWith(historyPrefix)) usageHistoryCache.delete(key);
   }
   bumpRevision(id);
 }

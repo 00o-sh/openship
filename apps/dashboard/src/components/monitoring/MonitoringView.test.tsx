@@ -3,6 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { I18nProvider } from "@/components/i18n-provider";
 import { MonitoringView } from "./MonitoringView";
 import { TopPathsEmptyState } from "./TopPathsEmptyState";
+import { resolveHues } from "./VisitorMap";
+import countryHues from "./country-hues.json";
 import {
   MOCK_SERVICES,
   MOCK_VARIANTS,
@@ -32,6 +34,8 @@ import {
 
 const geo = mockGeo();
 const analytics = mockAnalytics();
+/** The raw per-flag hues, to assert what `resolveHues` did and didn't move. */
+const HUES = (countryHues as { hues: Record<string, number | undefined> }).hues;
 const history = {
   buckets: mockHistoryBuckets(),
   services: MOCK_SERVICES,
@@ -403,11 +407,14 @@ describe("choropleth colouring", () => {
     expect(html).not.toMatch(/fillOpacity/);
   });
 
-  it("defaults to theme colouring, and carries the mix ramp for it", () => {
+  it("defaults to FLAG colouring, while still carrying the theme mix ramp", () => {
     const html = render();
-    expect(html).toContain('data-geo-mode="theme"');
-    // 100% → 22% of --color-primary mixed into --color-muted: solid, and always a shade
-    // that belongs to the active palette, so light/dark/dim all track automatically.
+    // Theme colouring is one hue at twelve lightness steps — it shows the ranking and
+    // nothing else, so the map can't be read as a map without hovering every landmass.
+    expect(html).toContain('data-geo-mode="flag"');
+    // Both ramps ride on every element regardless of mode: the element can't know which
+    // branch the cascade will take. 100% → 22% of --color-primary mixed into
+    // --color-muted: solid, and always a shade that belongs to the active palette.
     expect(html).toContain("--geo-mix");
   });
 
@@ -418,6 +425,84 @@ describe("choropleth colouring", () => {
     // picks per theme, so the element has to carry both.
     expect(html).toContain("--geo-l:");
     expect(html).toContain("--geo-l-dark:");
+  });
+
+  /**
+   * Flag hues, de-collided.
+   *
+   * The atlas maps 42 countries onto hue 349 alone — US, DE, CN and JP land on it
+   * EXACTLY, and GB/FR/RU/NO are within 5° of each other in blue. Flag mode used to hand
+   * those straight to CSS, so the fixture's top-12 painted five identical reds separated
+   * only by the ~3% per-rank lightness step. Now the default mode, so this is the mode
+   * everyone opens on.
+   *
+   * Asserted on the arithmetic rather than the markup: the numbers reach the DOM inside a
+   * style attribute, and parsing hues back out of one tests the parser.
+   */
+  describe("flag hue separation", () => {
+    const codes = geo.countries.map((c) => c.code);
+    const hues = resolveHues(codes);
+
+    it("leaves the busiest country on its real flag hue", () => {
+      // Rank 0 is the one most likely to be recognised by colour, and something has to be
+      // the fixed point — everything below yields to the ranks above it.
+      expect(hues.get("US")).toBe(349);
+    });
+
+    const gapBetween = (a: string, b: string) => {
+      const d = Math.abs(hues.get(a)! - hues.get(b)!) % 360;
+      return Math.min(d, 360 - d);
+    };
+
+    it("separates countries whose lightness step won't tell them apart", () => {
+      // RAMP_SPAN — the ranks whose shades the ramp actually resolves and the legend names.
+      const ranked = codes.slice(0, 12).filter((c) => hues.has(c));
+      const clashes: string[] = [];
+      ranked.forEach((a, i) => {
+        // HUE_NEIGHBOURHOOD. Beyond four ranks the shades are >13% apart, which is the
+        // ramp doing the separating; inside it, hue is all that's left.
+        ranked.slice(i + 1, i + 5).forEach((b) => {
+          const gap = gapBetween(a, b);
+          if (gap < 14) clashes.push(`${a}(${hues.get(a)}) vs ${b}(${hues.get(b)}) = ${gap}°`);
+        });
+      });
+      expect(clashes).toEqual([]);
+    });
+
+    it("leaves the tail on its real hues instead of drifting them for nothing", () => {
+      // Past the ramp every country shares the faintest lightness step, so there is no
+      // shade budget left to separate them with and no legend row naming them — and a
+      // bounded drift cannot spread 20+ countries anyway. Chile and Kenya both stay on
+      // 349: honest ("that's the flag, and the traffic is negligible") rather than two
+      // invented hues that imply a distinction the map isn't making.
+      expect(hues.get("CL")).toBe(HUES.CL);
+      expect(hues.get("KE")).toBe(HUES.KE);
+    });
+
+    it("pulls apart the pairs that made this visible", () => {
+      // US/DE: both 349 in the atlas, ranks 0 and 1 — one 3% lightness step apart.
+      expect(gapBetween("US", "DE")).toBeGreaterThanOrEqual(14);
+      // GB/FR: 222 and 219, ranks 2 and 4. Three degrees of blue is not a distinction.
+      expect(gapBetween("GB", "FR")).toBeGreaterThanOrEqual(14);
+    });
+
+    it("keeps every hue inside the drift limit, so a red stays a red", () => {
+      // HUE_MAX_DRIFT. This is the half of the fix that protects the shades: 28° is
+      // crimson→vermilion, not red→orange, so the colour still means "that flag".
+      for (const [code, hue] of hues) {
+        const raw = HUES[code]!;
+        const d = Math.abs(hue - raw) % 360;
+        expect(Math.min(d, 360 - d), `${code} drifted from ${raw} to ${hue}`).toBeLessThanOrEqual(28);
+      }
+    });
+
+    it("hues no country whose flag had no chromatic colour", () => {
+      // Singapore's flag reduces to red+white; the atlas records no hue for it, and
+      // inventing one would put a country on the map in a colour it doesn't own. Those
+      // fall back to the theme wash instead.
+      expect(HUES.SG).toBeUndefined();
+      expect(hues.has("SG")).toBe(false);
+    });
   });
 
   it("offers a Theme/Flags toggle once there is something to colour", () => {

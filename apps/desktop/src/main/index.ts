@@ -217,6 +217,10 @@ let mainWindow: BrowserWindow | null = null;
 /** The update found by the launch check, pending user action in the update window. */
 let pendingUpdate: UpdateInfo | null = null;
 
+/** The download/install currently running, or null. The single-flight lock that
+ *  keeps concurrent triggers from each starting their own download. */
+let updateInFlight: Promise<boolean> | null = null;
+
 function createWindow() {
   const bounds = store.get("windowBounds");
   // Never open larger than the display (a previously-stored oversized bound, or
@@ -706,12 +710,28 @@ ipcMain.handle("update:open", async () => {
   return true;
 });
 
+/** Single-flight guard over performUpdate. Every trigger funnels here — the
+ *  dashboard's beginUpdate() (update:start), the native modal's "Update now"
+ *  (also update:start), and the boot auto-update. Without coalescing, two
+ *  presses launch two downloadUpdate() calls that write the SAME temp file and
+ *  stream two progress tracks at once (the 33%-and-15% race). A concurrent call
+ *  now attaches to the run already in flight. The lock clears on failure so a
+ *  retry works; on success the app quits + relaunches, so nothing is left to
+ *  unlock. */
+function runUpdate(): Promise<boolean> {
+  if (updateInFlight) return updateInFlight;
+  updateInFlight = performUpdate().finally(() => {
+    updateInFlight = null;
+  });
+  return updateInFlight;
+}
+
 /** Download + install the pending update. The moment the download starts we
  *  hand the UI off to the dashboard's top-of-page update surface: the small
  *  native modal closes and progress streams into the main window instead, so
  *  the bar lives in the header the user already has — not stuck in the modal.
  *  Shared by the user-initiated IPC handler and the auto-update path. */
-async function runUpdate(): Promise<boolean> {
+async function performUpdate(): Promise<boolean> {
   await ensurePendingUpdate();
   if (!pendingUpdate) return false;
   // Close the notify modal — from here on progress belongs to the dashboard.

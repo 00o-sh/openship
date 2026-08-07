@@ -5,6 +5,7 @@ import { Server, Clock, User, AlertCircle } from "lucide-react";
 import { getCountryFlagUrl } from "@/lib/country";
 import './logs.css';
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
+import { getServerLogKey } from "@/context/server-log-dedup";
 import { api } from "@/lib/api";
 import { endpoints } from "@/lib/api/endpoints";
 import { DomainSwitcher } from "@/components/routing/DomainSwitcher";
@@ -286,7 +287,9 @@ export const ServerLogs: React.FC<ServerLogsProps> = ({
         {serverLogsData.logs.length === 0 ? renderEmpty() : (
           <div className="divide-y divide-border/30">
             {serverLogsData.logs.map((log: any) => (
-              <div key={log.id} className="group px-5 py-2.5 hover:bg-muted/30 transition-colors">
+              // Same identity the dedup keyed on, so the render key is provably unique even
+              // for an id-less row that fell back to a content key.
+              <div key={getServerLogKey(log)} className="group px-5 py-2.5 hover:bg-muted/30 transition-colors">
                 <div className="flex items-center gap-2">
                   <span className={`w-[52px] shrink-0 text-center px-1.5 py-0.5 rounded-md text-[11px] font-bold ${getMethodColor(log.method)}`}>
                     {log.method}

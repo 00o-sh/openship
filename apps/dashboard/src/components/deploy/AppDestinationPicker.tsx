@@ -24,6 +24,10 @@ export interface AppDestination {
  * searchable list, carries its own "add server"), with Openship Cloud as a
  * sibling choice. Reports the pick as `{deployTarget, serverId, serverHost}`.
  *
+ * The selector is a PEER radio option here, not a fixed header: passing an
+ * explicit `null` while cloud/local is active is what makes it render unselected
+ * and clickable again, so the choice stays two-way on a one-server box.
+ *
  * DESKTOP ONLY gets a separate "this machine" card. On a server-host install the
  * Openship host is already registered as the `isLocal` "This Server" row (see
  * startup/self-server.ts) and appears in the selector above, so a second card for

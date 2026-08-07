@@ -272,11 +272,12 @@ export class SshExecutor implements CommandExecutor {
   streamExec(
     command: string,
     onLog: (log: LogEntry) => void,
+    opts?: { signal?: AbortSignal },
   ): Promise<{ code: number; output: string }> {
-    return this._streamExec(command, onLog).catch((err) => {
+    return this._streamExec(command, onLog, opts).catch((err) => {
       if (SshExecutor.isChannelError(err)) {
         this.recoverFromChannelError();
-        return this._streamExec(command, onLog);
+        return this._streamExec(command, onLog, opts);
       }
       throw err;
     });
@@ -285,11 +286,15 @@ export class SshExecutor implements CommandExecutor {
   private async _streamExec(
     command: string,
     onLog: (log: LogEntry) => void,
+    opts?: { signal?: AbortSignal },
   ): Promise<{ code: number; output: string }> {
     const client = await this.connect();
+    const signal = opts?.signal;
 
     return new Promise<{ code: number; output: string }>((resolve, reject) => {
       let settled = false;
+      // Hoisted so an abort mid-stream can still hand back what did arrive.
+      const chunks: string[] = [];
 
       // A transport drop mid-stream rejects with SshDisconnectedError instead
       // of silently resolving `code ?? 1` (truncated output). Callers treat the
@@ -299,18 +304,44 @@ export class SshExecutor implements CommandExecutor {
         if (settled) return;
         settled = true;
         this.inflight.delete(abort);
+        signal?.removeEventListener("abort", onSignalAbort);
         act();
       };
       this.inflight.add(abort);
 
+      // Caller-driven teardown (a disconnected browser tearing down the log stream).
+      // Closing the ssh2 channel closes the sshd side too, which breaks the remote
+      // `docker exec curl`'s stdout pipe (the daemon buffers it, so nothing else ever
+      // gives it an EPIPE) and lets it exit — instead of lingering until pipe_stream's
+      // 1h cap and holding an SSH channel that would eventually starve MaxSessions. An
+      // intentional abort is not a failure, so resolve with whatever bytes arrived.
+      let channel: import("ssh2").ClientChannel | null = null;
+      const onSignalAbort = () => {
+        // Settle FIRST so the channel's own 'close' event (which close() triggers) is a
+        // no-op rather than racing us to reject with "closed without an exit status".
+        finish(() => resolve({ code: 0, output: chunks.join("") }));
+        try {
+          channel?.close();
+        } catch {
+          /* channel already gone */
+        }
+      };
+      if (signal?.aborted) {
+        // Told to stop before we even opened the channel.
+        finish(() => resolve({ code: 0, output: "" }));
+        return;
+      }
+
       client.exec(SshExecutor.ENV_PREFIX + command, (err, stream) => {
         if (err) return finish(() => reject(err));
+        channel = stream;
+        // The abort may have fired between the check above and the channel opening.
+        if (signal?.aborted) return onSignalAbort();
+        signal?.addEventListener("abort", onSignalAbort, { once: true });
 
         // Raw passthrough (see LocalExecutor.streamExec): forward the untouched
         // byte stream as rawData so the client's xterm renders "\r"/ANSI
         // natively — progress lines repaint in place instead of new lines.
-        const chunks: string[] = [];
-
         const onChunk = (data: Buffer, level: LogEntry["level"]) => {
           const text = data.toString();
           if (!text) return;

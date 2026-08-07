@@ -52,7 +52,7 @@ export interface UpFlags {
 }
 
 /** The CLI's own runtime + entry, so the service invokes THIS install. */
-function selfInvocation(): { runtime: string; args: string[] } {
+export function selfInvocation(): { runtime: string; args: string[] } {
   // Tarball installs run through the stable launcher (~/.openship/bin/openship):
   // it re-resolves node and cli/current on every boot, so `openship update` and
   // Node bumps repoint symlinks with NO service-unit rewrite. The launcher
