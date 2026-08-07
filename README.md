@@ -77,9 +77,12 @@ From the desktop app you connect a server (SSH) or Openship Cloud and deploy to 
 Install the CLI (it bundles the API + dashboard), then run **`openship`** — an interactive wizard creates the first admin, wires your domain, and installs Openship as a boot service. Run it again anytime to manage the instance.
 
 ```bash
-curl -fsSL https://get.openship.io | sh          # install  (or: npm i -g openship)
+curl -fsSL https://get.openship.io | sh          # install  (or: npm i -g openship — needs Node 22+)
 openship                                          # guided setup, then control panel
 ```
+
+The install script brings its own Node when your system one is older than 22; a package-manager
+install runs on the Node you already have.
 
 For CI / headless boxes, skip the wizard and drive `openship up` directly:
 
