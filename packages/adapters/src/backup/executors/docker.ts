@@ -141,7 +141,9 @@ function compressionFlag(compression: "zstd" | "gzip" | "none" | undefined): str
 }
 
 /** Parse a compose-syntax volume string into the executor's source shape. */
-function parseVolumeSpec(spec: string): { source: string; target: string; type: BackupSource["type"] } | null {
+function parseVolumeSpec(
+  spec: string,
+): { source: string; target: string; type: BackupSource["type"] } | null {
   // Strip mode suffix (":ro" / ":rw" etc.)
   const noMode = spec.replace(/:(ro|rw|z|Z|nocopy)$/, "");
   const parts = noMode.split(":");
@@ -176,9 +178,7 @@ export class DockerBackupExecutor implements BackupExecutor {
     //     isn't running or doesn't exist yet).
     if (service.containerId) {
       try {
-        const data = await this.dockerode
-          .getContainer(service.containerId)
-          .inspect();
+        const data = await this.dockerode.getContainer(service.containerId).inspect();
         const mounts = (data.Mounts ?? []) as Array<{
           Type?: string;
           Name?: string;
@@ -187,12 +187,14 @@ export class DockerBackupExecutor implements BackupExecutor {
         }>;
         return mounts
           .filter((m) => m.Type === "volume" || m.Type === "bind")
-          .map((m, i): BackupSource => ({
-            id: m.Name ?? m.Source ?? `mount-${i}`,
-            target: m.Destination ?? "",
-            source: m.Name ?? m.Source ?? "",
-            type: (m.Type as BackupSource["type"]) ?? "volume",
-          }));
+          .map(
+            (m, i): BackupSource => ({
+              id: m.Name ?? m.Source ?? `mount-${i}`,
+              target: m.Destination ?? "",
+              source: m.Name ?? m.Source ?? "",
+              type: (m.Type as BackupSource["type"]) ?? "volume",
+            }),
+          );
       } catch {
         // Container gone — fall through to the DB-declared volumes.
       }
@@ -238,9 +240,7 @@ export class DockerBackupExecutor implements BackupExecutor {
       AttachStderr: true,
       User: opts?.user,
       WorkingDir: opts?.cwd,
-      Env: opts?.env
-        ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`)
-        : undefined,
+      Env: opts?.env ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`) : undefined,
     });
     // NO `hijack` — this is the single entry point for EVERY backup producer
     // (pg_dump, mysqldump, mongodump, redis, custom commands, pre/post hooks), and
@@ -251,7 +251,9 @@ export class DockerBackupExecutor implements BackupExecutor {
     // failed before a byte was read. Nothing here writes stdin, so there is no
     // reason to hijack at all; see DockerEdgeExecutor.run() for the same fix.
     const stream = await exec.start({ stdin: false });
-    return this.attachDemuxed(this.dockerode, exec.id, stream, opts?.timeoutMs);
+    return this.attachDemuxed(this.dockerode, exec.id, stream, opts, {
+      label: `exec in service ${service.name}`,
+    });
   }
 
   async streamPath(
@@ -275,10 +277,7 @@ export class DockerBackupExecutor implements BackupExecutor {
     // shellEscape each pattern — these flow from user-facing fields,
     // an unescaped `; rm -rf /` would inject. tar's glob handling is
     // unchanged because the shell strips the quotes before exec.
-    const excludeArgs = (opts?.exclude ?? []).flatMap((p) => [
-      "--exclude",
-      shellEscape(p),
-    ]);
+    const excludeArgs = (opts?.exclude ?? []).flatMap((p) => ["--exclude", shellEscape(p)]);
     const tarFlags = compressionFlag(compression);
     const tarCmd =
       compression === "zstd"
@@ -309,7 +308,11 @@ export class DockerBackupExecutor implements BackupExecutor {
     return this.handOffHelper(
       {
         Image: helperImage,
-        Cmd: ["sh", "-c", compression === "zstd" ? `apk add --no-cache zstd >/dev/null 2>&1; ${tarCmd}` : tarCmd],
+        Cmd: [
+          "sh",
+          "-c",
+          compression === "zstd" ? `apk add --no-cache zstd >/dev/null 2>&1; ${tarCmd}` : tarCmd,
+        ],
         HostConfig: hostConfig,
         AttachStdout: true,
         AttachStderr: true,
@@ -358,9 +361,7 @@ export class DockerBackupExecutor implements BackupExecutor {
     const helperImage = compression === "zstd" ? "alpine:3" : HELPER_IMAGE;
     await this.ensureImage(helperImage);
 
-    const clearCmd = opts?.clearTarget
-      ? `find /mnt -mindepth 1 -delete 2>/dev/null || true; `
-      : "";
+    const clearCmd = opts?.clearTarget ? `find /mnt -mindepth 1 -delete 2>/dev/null || true; ` : "";
     const untarCmd =
       compression === "zstd"
         ? `${clearCmd}zstd -d -c | tar -x -C /mnt`
@@ -570,7 +571,11 @@ export class DockerBackupExecutor implements BackupExecutor {
           continue; // transient daemon hiccup — keep polling
         }
         // "created" also reports Running:false; only an exit carries a code.
-        if (state.Running === false && state.Status !== "created" && typeof state.ExitCode === "number") {
+        if (
+          state.Running === false &&
+          state.Status !== "created" &&
+          typeof state.ExitCode === "number"
+        ) {
           return { StatusCode: state.ExitCode };
         }
       }
@@ -726,9 +731,7 @@ export class DockerBackupExecutor implements BackupExecutor {
       AttachStderr: true,
       User: opts?.user,
       WorkingDir: opts?.cwd,
-      Env: opts?.env
-        ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`)
-        : undefined,
+      Env: opts?.env ? Object.entries(opts.env).map(([k, v]) => `${k}=${v}`) : undefined,
     });
     // Hand-rolled upgrade rather than dockerode's `{hijack: true}`: this exec
     // needs stdin (the dump bytes), and under Bun modem's hijack comes back as
@@ -781,7 +784,9 @@ export class DockerBackupExecutor implements BackupExecutor {
         try {
           resolve({
             code: await resolveExecExitCode(exec, exec.id),
-            stderr: Buffer.concat(stderrChunks).toString("utf8").slice(0, 16 * 1024),
+            stderr: Buffer.concat(stderrChunks)
+              .toString("utf8")
+              .slice(0, 16 * 1024),
           });
         } catch (err) {
           reject(err);
@@ -845,8 +850,13 @@ export class DockerBackupExecutor implements BackupExecutor {
     docker: Dockerode,
     execId: string,
     stream: NodeJS.ReadWriteStream,
-    timeoutMs: number | undefined,
+    opts?: ExecuteCommandOpts,
+    meta?: { label?: string },
   ): { stdout: Readable; awaitExit: Promise<ExecExitInfo> } {
+    const label = meta?.label ?? "exec";
+    const idleMs = opts?.idleTimeoutMs ?? DEFAULT_HELPER_IDLE_MS;
+    const timeoutMs = opts?.timeoutMs ?? DEFAULT_HELPER_TIMEOUT_MS;
+
     const stdout = new PassThrough();
     const stderrChunks: Buffer[] = [];
     const stderrSink = new PassThrough();
@@ -856,30 +866,42 @@ export class DockerBackupExecutor implements BackupExecutor {
 
     docker.modem.demuxStream(stream as unknown as NodeJS.ReadableStream, stdout, stderrSink);
 
-    const awaitExit = new Promise<ExecExitInfo>((resolve, reject) => {
-      const timer = timeoutMs
-        ? setTimeout(() => {
-            stdout.destroy(new Error(`exec timed out after ${timeoutMs}ms`));
-            reject(new Error(`exec timed out after ${timeoutMs}ms`));
-          }, timeoutMs)
-        : null;
+    const watchdog = createIdleWatchdog(
+      idleMs,
+      `${label} produced no data for ${Math.round(idleMs / 1000)}s and was abandoned.`,
+    );
+    stream.on("data", () => watchdog.touch());
 
-      stream.on("end", async () => {
-        if (timer) clearTimeout(timer);
-        try {
-          resolve({
-            code: await resolveExecExitCode(docker.getExec(execId), execId),
-            stderr: Buffer.concat(stderrChunks).toString("utf8").slice(0, 16 * 1024),
-          });
-        } catch (err) {
-          reject(err);
-        }
+    const awaitExit = (async (): Promise<ExecExitInfo> => {
+      const onEnd = new Promise<ExecExitInfo>((resolve, reject) => {
+        stream.on("end", async () => {
+          try {
+            resolve({
+              code: await resolveExecExitCode(docker.getExec(execId), execId),
+              stderr: Buffer.concat(stderrChunks)
+                .toString("utf8")
+                .slice(0, 16 * 1024),
+            });
+          } catch (err) {
+            reject(err);
+          }
+        });
+        stream.on("error", (err) => reject(err));
       });
-      stream.on("error", (err) => {
-        if (timer) clearTimeout(timer);
-        reject(err);
-      });
-    });
+
+      try {
+        return await withTimeout(
+          Promise.race([onEnd, watchdog.promise]),
+          timeoutMs,
+          `${label} exceeded its ${Math.round(timeoutMs / 1000)}s ceiling and was abandoned.`,
+        );
+      } catch (err) {
+        stdout.destroy(err as Error);
+        throw err;
+      } finally {
+        watchdog.dispose();
+      }
+    })();
 
     return { stdout, awaitExit };
   }
@@ -956,7 +978,9 @@ export class DockerBackupExecutor implements BackupExecutor {
         reapIfDone();
         return {
           code: res.StatusCode,
-          stderr: Buffer.concat(stderrChunks).toString("utf8").slice(0, 16 * 1024),
+          stderr: Buffer.concat(stderrChunks)
+            .toString("utf8")
+            .slice(0, 16 * 1024),
         };
       } catch (err) {
         // Nothing will drain this helper now, so reap directly rather than

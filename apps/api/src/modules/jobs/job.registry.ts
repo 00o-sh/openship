@@ -19,6 +19,7 @@ import { platform } from "../../lib/controller-helpers";
 import { renewExpiringCerts } from "../../lib/ssl-scheduler";
 import { runOrphanSweep } from "../projects/orphan-gc-schedule";
 import { runRetentionSweep } from "../backups/retention-prune";
+import { runBackupStaleSweep } from "../backups/backup-stale-sweep";
 import { pruneAuditEvents } from "../audit/audit-prune";
 import { runReconcileSweep } from "../deployments/reconcile-schedule";
 import { runImageGcSweep } from "../deployments/image-gc";
@@ -110,6 +111,14 @@ export const SYSTEM_JOB_DEFS: SystemJobDef[] = [
     label: "Backup retention prune",
     defaultCron: "17 3 * * *",
     run: async () => runRetentionSweep(),
+  },
+  {
+    key: "backups:stale-run-sweep",
+    label: "Backup in-flight stale reconciliation",
+    // Every five minutes — short enough to unblock queued siblings when an
+    // uploading run wedged without an API restart (#516).
+    defaultCron: "*/5 * * * *",
+    run: async () => runBackupStaleSweep(),
   },
   {
     key: "audit:retention-prune",
