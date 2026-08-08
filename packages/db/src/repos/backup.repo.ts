@@ -599,11 +599,20 @@ export function createBackupRunRepo(db: Database) {
      * `sweepStaleRuns` (boot-only, marks everything in-flight), this is selective:
      *   - queued rows nobody picked up within `queuedCutoff`
      *   - preparing/snapshotting/verifying with no transition within `idleCutoff`
-     *   - uploading with zero bytes and no transition within `idleCutoff` (#516)
+     *     (brief hops between states — a stall there is genuinely stuck)
      *   - any in-flight row past the absolute `ceilingCutoff`
      *
-     * Uploading rows that ARE moving bytes rely on the ceiling only — `lastEventAt`
-     * is not bumped per chunk, so a long honest upload must not be cut at idle.
+     * `uploading` is deliberately NOT idle-swept. A single-artifact dump
+     * (pg_dump/mysqldump/mongodump) streams the whole payload through one
+     * `destination.put`, and the orchestrator writes `bytesTransferred` / bumps
+     * `lastEventAt` only at artifact boundaries — never mid-stream. So for the
+     * entire upload the row sits `(uploading, bytesTransferred=NULL,
+     * lastEventAt=frozen)`, which is indistinguishable by DB state alone from a
+     * wedge. Idle-sweeping it here would kill honest multi-GB uploads that
+     * legitimately run past `idleCutoff` — the exact managed-postgres case #516
+     * is about. A genuinely wedged upload is reaped in-process by the executor's
+     * per-stream idle watchdog (which also frees the worker slot); this sweep
+     * only backstops `uploading` via the 6h `ceilingCutoff`.
      */
     async sweepRunsWithStaleHeartbeat(params: {
       queuedCutoff: Date;
@@ -628,11 +637,6 @@ export function createBackupRunRepo(db: Database) {
               and(eq(backupRun.status, "queued"), lt(backupRun.lastEventAt, queuedCutoff)),
               and(
                 inArray(backupRun.status, ["preparing", "snapshotting", "verifying"]),
-                lt(backupRun.lastEventAt, idleCutoff),
-              ),
-              and(
-                eq(backupRun.status, "uploading"),
-                or(isNull(backupRun.bytesTransferred), eq(backupRun.bytesTransferred, 0)),
                 lt(backupRun.lastEventAt, idleCutoff),
               ),
               lt(backupRun.lastEventAt, ceilingCutoff),
