@@ -6,14 +6,18 @@ import type { CommandExecutor } from "../types";
  * Regression for issue #514 — a static site deployed to a REMOTE SSH server
  * whose deploy user is not root.
  *
- * Two things went wrong on that box, and both are exercised here through
+ * Two things went wrong on that box. Both are exercised here through
  * `deployStatic`, the last step of the deploy:
  *
- *   1. `/opt/openship/static` is root-owned (Docker created it for the edge's
- *      bind mount), so the promote's `mkdir releases` failed outright.
- *   2. the promote is journaled, and the journal was hardcoded to
- *      `/root/.openship` — unwritable for this user, so the `mv` was never even
- *      issued and `releases/` stayed empty while `.builds/<id>` was cleaned up.
+ *   1. nothing under `/opt/openship` was writable by the deploy user, and no
+ *      preflight provisioned it, so the promote's `mkdir releases` failed. (The
+ *      reporter's box was a first-ever deploy that died earlier still, in the
+ *      build's doc-root extract — same missing-provisioning cause, different
+ *      call site.)
+ *   2. the promote is journaled, and the journal base was hardcoded to
+ *      `/root/.openship` — unreadable for this user, so `ensureRemoteJournal`
+ *      died SFTP-writing `bin/opsh-run` and the `mv` was never issued.
+ *      `releases/` stayed empty while `.builds/<id>` was reaped by cleanup.
  *
  * Both surfaced as the same opaque "Deploy failed: Permission denied".
  */
@@ -55,7 +59,11 @@ function remoteNonRootServer() {
       // The journal wrapper: only reachable under a directory we own.
       if (command.includes("/.openship")) {
         if (!isOurs(HOME)) throw denied();
-        if (command.includes("--version")) return "1";
+        // A box that has never journaled: no wrapper, so `ensureRemoteJournal`
+        // takes the deploy branch and SFTP-writes bin/opsh-run — which IS the
+        // operation that failed. Answering the live version here instead would
+        // skip the write and model the one state where the bug cannot happen.
+        if (command.includes("--version")) return "0";
         if (command.includes("--gc")) return "";
         return "OPSH1 0  ";
       }
@@ -111,5 +119,12 @@ describe("issue #514 — static deploy to a remote SSH server as a non-root user
     // …and the promote journaled into the USER's home, never /root.
     expect(commands.some((c) => c.includes(`${HOME}/.openship`))).toBe(true);
     expect(commands.some((c) => c.includes("/root/.openship"))).toBe(false);
+    // The wrapper write is the operation that used to throw. Assert it actually
+    // happened, so this stays a test about the mechanism and not just the path
+    // string: with the base unfixed, this SFTP write is where the deploy died.
+    expect(executor.writeFile).toHaveBeenCalledWith(
+      `${HOME}/.openship/bin/opsh-run.tmp`,
+      expect.stringContaining("OPSH"),
+    );
   });
 });
