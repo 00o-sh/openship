@@ -866,6 +866,27 @@ export class DockerBackupExecutor implements BackupExecutor {
 
     docker.modem.demuxStream(stream as unknown as NodeJS.ReadableStream, stdout, stderrSink);
 
+    // #openship-exec-stream-eof: docker-modem's demuxStream only forwards
+    // 'data' events — it never calls .end() on the destination streams
+    // when the source attach stream ends. demuxContainerStream (used for
+    // volume/tar backups, below) already works around this; this
+    // exec-based path (pg_dump, mysqldump, mongodump, custom commands)
+    // never got the same fix. Observed in production: a finished pg_dump
+    // (fully written, correct byte count) left the SFTP destination's
+    // .pipe() waiting forever for an EOF that never arrives — the temp
+    // file looked "stuck uploading" when in fact 100% of the data had
+    // already been sent and the process had already exited. Mirror the
+    // same endSinks() fix used below.
+    let sinksEnded = false;
+    const endSinks = () => {
+      if (sinksEnded) return;
+      sinksEnded = true;
+      stdout.end();
+      stderrSink.end();
+    };
+    stream.on("end", endSinks);
+    stream.on("close", endSinks);
+
     const watchdog = createIdleWatchdog(
       idleMs,
       `${label} produced no data for ${Math.round(idleMs / 1000)}s and was abandoned.`,
@@ -890,11 +911,18 @@ export class DockerBackupExecutor implements BackupExecutor {
       });
 
       try {
-        return await withTimeout(
+        const result = await withTimeout(
           Promise.race([onEnd, watchdog.promise]),
           timeoutMs,
           `${label} exceeded its ${Math.round(timeoutMs / 1000)}s ceiling and was abandoned.`,
         );
+        // Backstop: over an SSH-tunneled Docker connection (e.g. a remote
+        // server managed over SSH) the attach stream's 'end'/'close' is
+        // not always delivered promptly even though the exec has already
+        // exited and pushed all its output. The exit code is known now —
+        // force the sinks closed so a downstream .pipe() consumer sees EOF.
+        endSinks();
+        return result;
       } catch (err) {
         stdout.destroy(err as Error);
         throw err;

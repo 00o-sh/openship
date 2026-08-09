@@ -139,3 +139,31 @@ describe("execStream silence is bounded, traffic is not", () => {
     await expect(drive(awaitExit, 30_000)).rejects.toThrow(/exceeded its 10s ceiling/);
   });
 });
+
+describe("execStream stdout reaches EOF (not just awaitExit)", () => {
+  it("ends stdout when the attach stream finishes, so a piped consumer isn't left waiting forever", async () => {
+    const h = execHarness(stream);
+    const exec = await h.executor();
+
+    const { stdout, awaitExit } = await exec.execStream(SERVICE, ["pg_dump"], {
+      idleTimeoutMs: 60_000,
+      timeoutMs: 60_000,
+    });
+    const read = collect(stdout);
+    awaitExit.catch(() => {});
+
+    const stdoutEnded = new Promise<void>((resolve) => stdout.on("end", resolve));
+
+    stream.emitOutput("dump-bytes");
+    stream.finish();
+
+    // docker-modem's demuxStream only forwards 'data' — it never closes the
+    // destination streams itself. A consumer piping stdout downstream (the
+    // SFTP/S3 destination writer) waits on this 'end' event to know the
+    // artifact is complete. Before the fix, this never fires and the
+    // downstream write stream hangs forever despite every byte already
+    // having arrived.
+    await drive(stdoutEnded, 5_000);
+    expect(read()).toBe("dump-bytes");
+  });
+});
