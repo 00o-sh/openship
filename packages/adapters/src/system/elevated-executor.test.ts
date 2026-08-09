@@ -144,12 +144,13 @@ describe("ensureOwnedDir", () => {
   const PATH = "/opt/openship/static";
 
   /** A target that denies unelevated writes unless the tree is already ours. */
-  function target(opts: { canSudo: boolean; alreadyWritable?: boolean }) {
+  function target(opts: { canSudo: boolean; alreadyWritable?: boolean; loginUser?: string }) {
     const commands: string[] = [];
     const executor = {
       exec: vi.fn(async (command: string) => {
         commands.push(command);
         if (command === "id -u") return "1000";
+        if (command === "id -un") return `${opts.loginUser ?? "deploy"}\n`;
         if (command.startsWith("sudo -n true")) return opts.canSudo ? "yes" : "no";
         if (command.startsWith("sudo -n ")) return "";
         if (command.includes("mkdir -p") && !opts.alreadyWritable) {
@@ -168,10 +169,30 @@ describe("ensureOwnedDir", () => {
 
     // Unwrap the one level of quoting elevateCommand added.
     const inner = commands.find((c) => c.startsWith("sudo -n sh -c "))!.replace(/'\\''/g, "'");
-    expect(inner).toContain(`mkdir -p '${PATH}'`);
-    // $top, not the leaf: an `mv` needs write permission on the PARENT.
-    expect(inner).toContain(`while [ ! -d "$d" ]; do top="$d"; d=$(dirname "$d"); done`);
-    expect(inner).toContain(`chown -R "$SUDO_USER" "$top"`);
+    expect(inner).toContain(`p='${PATH}'`);
+    // Without it, a failed mkdir falls through and the chown's exit status is
+    // what the caller sees.
+    expect(inner).toContain("set -e");
+    // Walks up to the TOPMOST dir it had to create: an `mv` needs write
+    // permission on the PARENT, so a leaf-only chown would still fail.
+    expect(inner).toMatch(/top=\$d/);
+    expect(inner).toContain("dirname");
+    // The owner comes from the UNELEVATED `id -un`, not from `$SUDO_USER`, which a
+    // sudoers env_delete can strip.
+    expect(inner).toContain(`chown -R 'deploy' "\${top:-$p}"`);
+    expect(inner).not.toContain("SUDO_USER");
+  });
+
+  it("falls back to $SUDO_USER when the login probe says nothing", async () => {
+    const { executor, commands } = target({ canSudo: true, loginUser: "" });
+
+    await ensureOwnedDir(executor, PATH);
+
+    const inner = commands.find((c) => c.startsWith("sudo -n sh -c "))!.replace(/'\\''/g, "'");
+    // Left unexpanded on purpose: an empty owner must fail loudly at chown rather
+    // than default to root, which would hand the tree back to a user who still
+    // cannot write it.
+    expect(inner).toContain('chown -R "$SUDO_USER" "${top:-$p}"');
   });
 
   it("stays unelevated when the directory is already writable", async () => {
