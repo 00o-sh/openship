@@ -100,7 +100,7 @@ function clampShellWindow(
 }
 import type { Feature, SystemLog } from "../system/types";
 import { isRuntimeNotFoundError } from "../system/errors";
-import { ensureOwnedDir } from "../system/elevated-executor";
+import { dirOf, ensureOwnedDir } from "../system/elevated-executor";
 
 import type {
   RuntimeAdapter,
@@ -1745,7 +1745,12 @@ export class DockerRuntime implements RuntimeAdapter {
   ): Promise<void> {
     const cid = (await sshExecutor.exec(`docker create ${sq(tag)}`)).trim();
     try {
-      await ensureOwnedDir(sshExecutor, hostOutDir);
+      // The PARENT, not `hostOutDir` itself: promote renames this dir into
+      // releases/, and rename(2) needs write permission on the source's parent.
+      // Ensuring `.builds` covers the dir it will create here too, so the leaf
+      // comes out user-owned from a plain mkdir.
+      await ensureOwnedDir(sshExecutor, dirOf(hostOutDir));
+      await sshExecutor.exec(`mkdir -p ${sq(hostOutDir)}`);
       // `/.` → contents, so no strip step (see the contract above).
       await sshExecutor.exec(`docker cp ${sq(`${cid}:${docRoot}/.`)} ${sq(hostOutDir)}`);
       // `docker cp` of an empty dir exits 0, so the contract is checked here.
