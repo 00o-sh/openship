@@ -26,6 +26,55 @@ import { repos } from "@repo/db";
 import { auth } from "../../lib/auth";
 import { isAllowedMcpResource, publicOriginFor, resolveTokenAudience } from "../../lib/mcp-resource";
 import { signMcpAccessToken } from "../../lib/mcp-token";
+import { signRs256Jwt } from "../../lib/mcp-oidc-keys";
+
+/** Decode a JWT payload without verifying (we re-sign, we don't trust). */
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const parsed: unknown = JSON.parse(
+      Buffer.from(parts[1] as string, "base64url").toString("utf8"),
+    );
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Re-issue the plugin's id_token as a VERIFIABLE one.
+ *
+ * The mcp() plugin signs the id_token with HS256 over a key it generates and
+ * throws away inside the request, omits `iss`, and stamps `iat` in
+ * milliseconds. No client can validate that against the advertised metadata
+ * (`id_token_signing_alg_values_supported: ["RS256","none"]` + a jwks_uri) —
+ * Claude.ai tries, fails, and drops the connection right after the token
+ * exchange. Keep the plugin's user claims, fix the protocol claims, sign RS256
+ * with the instance key the jwks endpoint serves.
+ */
+async function reissueIdToken(
+  original: string,
+  issuer: string,
+  clientId: string,
+  userId: string,
+  expiresAt: Date,
+): Promise<string | null> {
+  const claims = decodeJwtPayload(original);
+  if (!claims) return null;
+  const now = Math.floor(Date.now() / 1000);
+  const authTime = typeof claims.auth_time === "number" ? claims.auth_time : undefined;
+  return signRs256Jwt({
+    ...claims,
+    iss: issuer,
+    sub: userId,
+    aud: clientId,
+    iat: now,
+    exp: Math.floor(expiresAt.getTime() / 1000),
+    // The plugin stamps auth_time in ms; OIDC wants seconds.
+    ...(authTime !== undefined ? { auth_time: authTime > 1e12 ? Math.floor(authTime / 1000) : authTime } : {}),
+  });
+}
 
 /** Read `resource` out of a token request without consuming the body. */
 async function readResourceParam(request: Request): Promise<string | undefined> {
@@ -85,9 +134,21 @@ async function bindAudience(response: Response, audience: string, issuer: string
 
   if (!(await repos.oauth.rebindAccessToken(opaque, jwt))) return response;
 
+  const next: Record<string, unknown> = { ...body, access_token: jwt };
+  if (typeof body.id_token === "string") {
+    const reissued = await reissueIdToken(
+      body.id_token,
+      issuer,
+      row.clientId,
+      row.userId,
+      row.accessTokenExpiresAt,
+    );
+    if (reissued) next.id_token = reissued;
+  }
+
   const headers = new Headers(response.headers);
   headers.delete("content-length");
-  return new Response(JSON.stringify({ ...body, access_token: jwt }), {
+  return new Response(JSON.stringify(next), {
     status: response.status,
     statusText: response.statusText,
     headers,
