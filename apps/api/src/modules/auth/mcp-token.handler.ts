@@ -96,6 +96,42 @@ async function readResourceParam(request: Request): Promise<string | undefined> 
   return undefined;
 }
 
+/**
+ * OAuth error codes RFC 6749 §5.2 requires to be returned with HTTP 400. The
+ * plugin answers 401 for all of them; only `invalid_client` legitimately uses
+ * 401. That matters most on a refresh: a client that sees 401 reads it as "the
+ * server rejected my credentials" and gives up, where 400 + `invalid_grant`
+ * tells it the grant is stale and a fresh authorization is needed. Claude.ai
+ * strands a connector in a connected-but-unauthenticated state on the 401.
+ */
+const BAD_REQUEST_ERRORS = new Set([
+  "invalid_request",
+  "invalid_grant",
+  "unauthorized_client",
+  "unsupported_grant_type",
+  "invalid_scope",
+  "invalid_target",
+]);
+
+/** Re-status an OAuth error response to what RFC 6749 §5.2 prescribes. */
+async function normalizeErrorStatus(response: Response): Promise<Response> {
+  if (response.status !== 401) return response;
+  if (!(response.headers.get("content-type") ?? "").includes("application/json")) return response;
+
+  let body: unknown;
+  try {
+    body = await response.clone().json();
+  } catch {
+    return response;
+  }
+  const error = (body as { error?: unknown } | null)?.error;
+  if (typeof error !== "string" || !BAD_REQUEST_ERRORS.has(error)) return response;
+
+  const headers = new Headers(response.headers);
+  headers.delete("content-length");
+  return new Response(JSON.stringify(body), { status: 400, headers });
+}
+
 function invalidTarget(resource: string): Response {
   return Response.json(
     {
@@ -165,7 +201,7 @@ export async function handleMcpTokenRequest(request: Request): Promise<Response>
   if (resource && !isAllowedMcpResource(resource, origin)) return invalidTarget(resource);
 
   const response = await auth.handler(request);
-  if (response.status !== 200) return response;
+  if (response.status !== 200) return normalizeErrorStatus(response);
   if (!(response.headers.get("content-type") ?? "").includes("application/json")) return response;
 
   try {
