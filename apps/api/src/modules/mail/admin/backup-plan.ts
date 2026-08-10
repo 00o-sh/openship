@@ -17,8 +17,29 @@
  * `{SSHA512}` password hashes are host-portable, so accounts work as-is.
  */
 
+import { HOST_STATE_DIR } from "@repo/adapters";
+import { HOST_AMAVIS_CONF_CANDIDATES } from "../mail-engine";
+
 /** The four tables that hold accounts / domains / aliases / admins. */
 const ACCOUNT_TABLES = ["domain", "mailbox", "forwardings", "domain_admins"] as const;
+
+/**
+ * Every place a legacy install may keep amavis's editable config, shared with the
+ * DKIM writer so a backup can't cover a narrower set of hosts than the thing it is
+ * backing up. Hardcoding `/etc/amavis/conf.d/50-user` here meant a RHEL-family box
+ * (monolithic `/etc/amavisd.conf`, no `conf.d`) produced a "keys" archive with no
+ * amavis config in it at all — and said it succeeded.
+ */
+const AMAVIS_CONF_PATHS = HOST_AMAVIS_CONF_CANDIDATES.map((c) => c.path);
+
+/** Debian-family location — the fallback when an archive doesn't name one. */
+const AMAVIS_CONF_DEFAULT = HOST_AMAVIS_CONF_CANDIDATES[0].path;
+
+/** Archive-relative name for the one amavis config we found, plus where it came from. */
+const AMAVIS_IN_ARCHIVE = "keys/amavis-conf";
+
+/** Pre-2026-08 archives stored the Debian path under this fixed name. */
+const AMAVIS_IN_ARCHIVE_LEGACY = "keys/amavis-50-user";
 
 export interface MailBackupFlags {
   /** Include the maildir message store (/var/vmail). Large. */
@@ -63,8 +84,17 @@ export function buildMailBackupPayload(
       ? [
           'mkdir -p "$tmp/keys"',
           '[ -d /var/lib/dkim ] && cp -a /var/lib/dkim "$tmp/keys/dkim" || true',
-          '[ -f /etc/amavis/conf.d/50-user ] && cp -a /etc/amavis/conf.d/50-user "$tmp/keys/amavis-50-user" || true',
-          '[ -f /root/.openship/mail-state.json ] && cp -a /root/.openship/mail-state.json "$tmp/keys/mail-state.json" || true',
+          // Whichever of the known locations this box actually uses, with the source
+          // path recorded alongside so the restore puts it back where amavis reads it.
+          // Every step `|| true`-guarded: this script runs under `set -e`, and a missing
+          // amavis config is a gap in the archive, not a reason to abandon the backup.
+          `for c in ${AMAVIS_CONF_PATHS.join(" ")}; do`,
+          `  [ -f "$c" ] || continue`,
+          `  cp -a "$c" "$tmp/${AMAVIS_IN_ARCHIVE}" || true`,
+          `  printf '%s' "$c" > "$tmp/${AMAVIS_IN_ARCHIVE}.path" || true`,
+          `  break`,
+          `done`,
+          `[ -f ${HOST_STATE_DIR}/mail-state.json ] && cp -a ${HOST_STATE_DIR}/mail-state.json "$tmp/keys/mail-state.json" || true`,
         ].join("\n")
       : "",
     // Stream one tar to stdout: the staged dir + (optionally) the maildirs
@@ -87,7 +117,21 @@ export function buildMailBackupPayload(
     'sudo -u postgres psql -d vmail -v ON_ERROR_STOP=1 -f "$tmp/vmail.data.sql"',
     // DKIM keys + amavis config (if the archive carried them).
     'if [ -d "$tmp/keys/dkim" ]; then mkdir -p /var/lib/dkim && cp -a "$tmp/keys/dkim/." /var/lib/dkim/ || true; fi',
-    'if [ -f "$tmp/keys/amavis-50-user" ]; then cp -a "$tmp/keys/amavis-50-user" /etc/amavis/conf.d/50-user || true; fi',
+    // Restore to the path the archive recorded — but only if it is one of the paths we
+    // know, checked against the list rather than trusted verbatim: this shell runs as
+    // root on the TARGET, and `cp -a` to a path read out of an archive would otherwise
+    // be an arbitrary root write. Unrecognized or absent → the Debian-family default,
+    // which is also what pre-2026-08 archives carried under the old fixed name.
+    `if [ -f "$tmp/${AMAVIS_IN_ARCHIVE}" ]; then`,
+    `  saved="$(cat "$tmp/${AMAVIS_IN_ARCHIVE}.path" 2>/dev/null || true)"`,
+    `  dest=${AMAVIS_CONF_DEFAULT}`,
+    // `if`, not `[ … ] && …`: under `set -e` a failed test as the last command of a loop
+    // body aborts the whole restore.
+    `  for c in ${AMAVIS_CONF_PATHS.join(" ")}; do if [ "$saved" = "$c" ]; then dest="$c"; break; fi; done`,
+    `  cp -a "$tmp/${AMAVIS_IN_ARCHIVE}" "$dest" || true`,
+    `elif [ -f "$tmp/${AMAVIS_IN_ARCHIVE_LEGACY}" ]; then`,
+    `  cp -a "$tmp/${AMAVIS_IN_ARCHIVE_LEGACY}" ${AMAVIS_CONF_DEFAULT} || true`,
+    `fi`,
     // Maildirs (if included). Ownership must be vmail:vmail for Dovecot.
     'if [ -d "$tmp/vmail1" ]; then cp -a "$tmp/vmail1" /var/vmail/ && chown -R vmail:vmail /var/vmail/vmail1 || true; fi',
     // Recompute per-domain counters (app-managed, not DB triggers).

@@ -8,6 +8,7 @@
   },
   "status": {
     "live": "Yayında",
+    "paused": "Duraklatıldı",
     "attention": "İşlem Gerekiyor",
     "queued": "Sıraya Alındı",
     "building": "Derleniyor",

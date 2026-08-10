@@ -1,5 +1,12 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { edgeRealIpConf, edgeRealIpHeader, edgeTrustedProxies } from "./edge-real-ip";
+import {
+  CLOUD_EDGE_REAL_IP_HEADER,
+  cloudEdgeRealIpConf,
+  edgeRealIpConf,
+  edgeRealIpHeader,
+  edgeTrustedProxies,
+  isCloudFrontedHost,
+} from "./edge-real-ip";
 import { CLOUDFLARE_IPV4, CLOUDFLARE_IPV6 } from "./cloudflare-ips.generated";
 import { bakedEdgeNginxConf } from "./edge-baked-conf";
 
@@ -87,6 +94,76 @@ describe("the emitted config", () => {
     const conf = edgeRealIpConf();
     expect(conf).toContain("does NOT mean");
     expect(conf).toMatch(/APPENDS/);
+  });
+});
+
+describe("a host fronted by Openship Cloud's edge", () => {
+  it("recognizes a free <slug>.opsh.io host and nothing else", () => {
+    expect(isCloudFrontedHost("myapp.opsh.io")).toBe(true);
+    expect(isCloudFrontedHost("MyApp-Web.OPSH.IO.")).toBe(true);
+    // A custom domain is fronted by the operator's own DNS (or Cloudflare) and keeps
+    // the http-scope CF-Connecting-IP block.
+    expect(isCloudFrontedHost("app.example.com")).toBe(false);
+    // The apex is not a routable free host, and a lookalike suffix must not match.
+    expect(isCloudFrontedHost("opsh.io")).toBe(false);
+    expect(isCloudFrontedHost("notopsh.io")).toBe(false);
+    expect(isCloudFrontedHost("myapp.opsh.io.evil.com")).toBe(false);
+  });
+
+  it("reads X-Real-IP, because that is the header that front overwrites", () => {
+    // CF-Connecting-IP is what the http-scope block reads, and Openship Cloud's edge
+    // does not send it — inheriting that scope is why every free-domain visitor read as
+    // the edge: one rate-limit bucket for the planet, bans that ban the edge, and one
+    // country for everyone.
+    const conf = cloudEdgeRealIpConf();
+    expect(CLOUD_EDGE_REAL_IP_HEADER).toBe("X-Real-IP");
+    expect(conf).toContain("real_ip_header X-Real-IP;");
+    expect(conf).not.toContain("CF-Connecting-IP;");
+  });
+
+  it("still anchors trust to the peer, so the header alone proves nothing", () => {
+    const conf = cloudEdgeRealIpConf();
+    for (const cidr of [...CLOUDFLARE_IPV4, ...CLOUDFLARE_IPV6]) {
+      expect(conf).toContain(`set_real_ip_from ${cidr};`);
+    }
+    const trusted = [...conf.matchAll(/set_real_ip_from (\S+);/g)].map((m) => m[1]);
+    expect(trusted).toHaveLength(CLOUDFLARE_IPV4.length + CLOUDFLARE_IPV6.length);
+    expect(trusted).not.toContain("0.0.0.0/0");
+  });
+
+  it("widens to the operator's own proxies too, since free traffic passes through them", () => {
+    process.env.OPENSHIP_EDGE_TRUSTED_PROXIES = "10.0.0.0/8, bogus";
+    const conf = cloudEdgeRealIpConf();
+    expect(conf).toContain("set_real_ip_from 10.0.0.0/8;");
+    expect(conf).not.toContain("bogus");
+  });
+
+  it("ignores the operator's header override — this front is never their proxy", () => {
+    // OPENSHIP_EDGE_REAL_IP_HEADER describes what the OPERATOR put in front of the box.
+    // A *.opsh.io host is served by Cloud's edge whatever else is installed, so honouring
+    // that value here would read a header nothing sets.
+    process.env.OPENSHIP_EDGE_REAL_IP_HEADER = "True-Client-IP";
+    expect(cloudEdgeRealIpConf()).toContain("real_ip_header X-Real-IP;");
+  });
+
+  it("indents every line so it can be dropped into a server block", () => {
+    for (const line of cloudEdgeRealIpConf().split("\n").filter(Boolean)) {
+      expect(line.startsWith("    ")).toBe(true);
+    }
+  });
+
+  it("trusts EXACTLY the peers the http-scope block does — one list, two fronts", () => {
+    // The header differs between the two fronts because they genuinely send different
+    // ones. WHO may be believed must not: both blocks read the same generated Cloudflare
+    // ranges and the same OPENSHIP_EDGE_TRUSTED_PROXIES, and this pins them together.
+    // A peer added to one and not the other is a divergence in who can name the client
+    // that only shows up on one kind of hostname — the quiet failure this file exists to
+    // prevent. The repetition in the OUTPUT is forced by nginx (a server-scope
+    // set_real_ip_from replaces the inherited list rather than extending it), not chosen.
+    process.env.OPENSHIP_EDGE_TRUSTED_PROXIES = "10.0.0.0/8, 2001:db8::/32";
+    const peers = (conf: string) =>
+      [...conf.matchAll(/set_real_ip_from (\S+);/g)].map((m) => m[1]).sort();
+    expect(peers(cloudEdgeRealIpConf())).toEqual(peers(edgeRealIpConf()));
   });
 });
 

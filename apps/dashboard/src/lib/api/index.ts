@@ -167,6 +167,11 @@ export type {
   MailComponentStatus,
   MailComponentDef,
   MailHealthResponse,
+  MailDeliveryHealth,
+  MailDeliveryStatus,
+  MailDeferral,
+  MailDeferralKind,
+  MailOutboundMode,
   WebmailTargetOption,
 } from "./mail";
 

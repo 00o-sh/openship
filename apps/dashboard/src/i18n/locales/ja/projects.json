@@ -8,6 +8,7 @@
   },
   "status": {
     "live": "稼働中",
+    "paused": "一時停止中",
     "attention": "要対応",
     "queued": "待機中",
     "building": "ビルド中",

@@ -23,6 +23,9 @@ import {
   cloudRequiredCode,
   CLOUD_UNREACHABLE_CODE,
   stackExpectsBuildCommand,
+  describeResourceFit,
+  fitsCapacity,
+  hasMinResources,
 } from "@repo/core";
 import { cloudClient } from "../../lib/cloud/client";
 import { isCloudConnectedForOrg } from "../../lib/cloud/session";
@@ -52,6 +55,8 @@ import { canResolveServerGitCredential } from "../github/server-github.service";
 import { parseRepoUrl } from "../github/github.service";
 import { resolveRecords, lookupAddresses } from "../../lib/dns-resolver";
 import { type RequestContext } from "../../lib/request-context";
+import { getTrustedHostCapacity } from "../../lib/host-capacity";
+import { getTemplateForOrg } from "../apps/catalog-source";
 import { repos } from "@repo/db";
 
 /**
@@ -107,6 +112,10 @@ export const PREFLIGHT_ERROR_CODES = {
    *  uses at deploy time. Failing here surfaces the missing-credential
    *  modal up-front instead of letting the build pipeline fail later. */
   GITHUB_REMOTE_TOKEN_REQUIRED: "GITHUB_REMOTE_TOKEN_REQUIRED",
+  /** The target machine is measurably smaller than the app's declared
+   *  `minResources` (catalog). Only ever raised for a FIRST deploy — see
+   *  `checkHostCapacity`. */
+  HOST_RESOURCES_INSUFFICIENT: "HOST_RESOURCES_INSUFFICIENT",
 } as const;
 
 export interface PreflightResult {
@@ -148,6 +157,13 @@ export interface PreflightOptions {
    *  target (`server`). For non-App auth modes, only `local` keeps the
    *  user's broad-scope token from leaving the API process. */
   buildStrategy?: "local" | "server";
+  /** Catalog app this project is an instance of (`project.appTemplateId`), so the
+   *  app's declared host minimum can be matched against the target machine. Null
+   *  for an ordinary project — nothing is declared, nothing is checked. */
+  appTemplateId?: string | null;
+  /** True when the project has never had a live deployment. A shortfall FAILS a
+   *  first deploy and only warns afterwards — see `checkHostCapacity`. */
+  firstDeploy?: boolean;
 }
 
 /** Resolve owner/repo for the public-ness probe: prefer the already-parsed
@@ -1335,6 +1351,57 @@ async function checkCloudRuntime(
   };
 }
 
+/**
+ * Match a catalog app's declared `minResources` against the machine it is about
+ * to be installed on. Generic: any app that declares a minimum gets this, and an
+ * app that declares none (almost all of them) is never checked.
+ *
+ * Two rules keep it from being a footgun of its own:
+ *
+ *   • It FAILS a first deploy and only WARNS afterwards. Refusing a redeploy
+ *     would brick an app already running on a box that turned out to be
+ *     undersized — the operator's way out of that is a deploy, not a refusal.
+ *   • An unknown capacity never fails (`fitsCapacity`). A box we couldn't probe
+ *     means we didn't look, not that the hardware is too small.
+ *
+ * Returns null when there is nothing to check, so no cosmetic row appears on the
+ * checklist of an ordinary project.
+ */
+async function checkHostCapacity(
+  organizationId: string,
+  appTemplateId: string,
+  serverId: string | undefined,
+  isLocalTarget: boolean,
+  firstDeploy: boolean,
+): Promise<PreflightCheck | null> {
+  const template = await getTemplateForOrg(organizationId, appTemplateId).catch(() => undefined);
+  const min = template?.minResources;
+  if (!template || !hasMinResources(min)) return null;
+
+  const capacity = await getTrustedHostCapacity(serverId, organizationId, { isLocalTarget });
+  const fit = fitsCapacity(min, capacity);
+  const check: PreflightCheck = { id: "host-capacity", label: "Host capacity", status: "pass" };
+  if (fit.ok) return check;
+
+  const shortfall = describeResourceFit(fit);
+  if (firstDeploy) {
+    return {
+      ...check,
+      status: "fail",
+      code: PREFLIGHT_ERROR_CODES.HOST_RESOURCES_INSUFFICIENT,
+      message: `${template.name} needs ${shortfall}. Install it on a bigger machine, or pick a different destination.`,
+    };
+  }
+  // Written for the day warns are surfaced: today `runDeploymentPreflight` acts
+  // only on `!ok`, so every preflight warn's message is dropped. The status is
+  // what matters here — it keeps this off the failure path.
+  return {
+    ...check,
+    status: "warn",
+    message: `${template.name} needs ${shortfall}. It will deploy, but expect it to be slow or OOM-killed on this machine.`,
+  };
+}
+
 export async function runPreflightChecks(
   snapshot: DeploymentConfigSnapshot,
   opts?: PreflightOptions,
@@ -1376,6 +1443,20 @@ export async function runPreflightChecks(
       ? { id: "stack", label: "Service stack", status: "pass" }
       : checkStack(snapshot),
   ];
+
+  // Does this machine meet what the app says it needs? Cloud is sized from the
+  // tier table, not from host hardware, so there is nothing to match there (and
+  // nothing to probe — a multi-tenant control plane must not dial a tenant's box).
+  if (opts?.appTemplateId && snapshot.organizationId && effectiveTarget !== "cloud") {
+    const hostCapacity = await checkHostCapacity(
+      snapshot.organizationId,
+      opts.appTemplateId,
+      snapshot.serverId,
+      effectiveTarget === "local",
+      opts.firstDeploy ?? false,
+    );
+    if (hostCapacity) checks.push(hostCapacity);
+  }
 
   if (!hasEndpointRouting && opts?.slug && !opts?.customDomain) {
     checks.push(checkSlugFormat(opts.slug));

@@ -92,8 +92,9 @@ export function MailSetupForm({
         {/* Always show the server picker. Even when the page auto-selected the
             sole server, the operator must be able to confirm WHICH server mail
             installs on, switch to a different one, or add a new server (the
-            selector's built-in "Add server" → /servers/new). Auto-select is a
-            convenient default, not a reason to hide the choice. */}
+            selector's built-in "Add server" opens the panel as a modal, so mail
+            setup survives). Auto-select is a convenient default, not a reason to
+            hide the choice. */}
         <ServerSelector value={selectedServerId} onSelect={onServerSelect} />
 
         <div className="space-y-4 mb-6">

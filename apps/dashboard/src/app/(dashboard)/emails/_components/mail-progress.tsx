@@ -9,8 +9,9 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { XCircle, RotateCcw, ArrowDown, Trash2 } from "lucide-react";
+import { XCircle, ArrowDown, Trash2 } from "lucide-react";
 import { useI18n, interpolate } from "@/components/i18n-provider";
+import { SetupErrorBanner } from "./setup-error-banner";
 
 interface LogEntry {
   stepId: number;
@@ -197,26 +198,12 @@ export function MailProgress({
       {/* Error banner - retry CTA is mirrored here so it's hard to miss
           even when the user's eye is on the logs. */}
       {error && (
-        <div className="bg-danger-bg border border-danger-border rounded-2xl p-5">
-          <div className="flex items-start gap-3">
-            <XCircle className="size-5 text-danger mt-0.5 shrink-0" />
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium text-danger">
-                {t.emails.progress.setupFailed}
-              </p>
-              <p className="text-xs text-muted-foreground mt-1 break-words">{error}</p>
-              {resumeStep && (
-                <button
-                  onClick={() => onResume(resumeStep)}
-                  className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
-                >
-                  <RotateCcw className="size-3.5" />
-                  {interpolate(t.emails.progress.retryFromStep, { resumeStep: String(resumeStep) })}
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
+        <SetupErrorBanner
+          title={t.emails.progress.setupFailed}
+          message={error}
+          resumeStep={resumeStep}
+          onResume={onResume}
+        />
       )}
     </div>
   );

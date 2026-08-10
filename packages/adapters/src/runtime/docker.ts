@@ -3438,17 +3438,18 @@ export class DockerRuntime implements RuntimeAdapter {
    */
   async joinServiceGroupContainers(
     slug: string,
-    members: Array<{ containerId: string; alias: string }>,
+    members: Array<{ containerId: string; aliases: string[] }>,
   ): Promise<void> {
     if (members.length === 0) return;
     const networkId = await this.ensureNetwork(slug);
     const network = this.docker.getNetwork(networkId);
     for (const m of members) {
       if (!m.containerId) continue;
+      const aliases = m.aliases.filter(Boolean);
       try {
         await network.connect({
           Container: m.containerId,
-          EndpointConfig: m.alias ? { Aliases: [m.alias] } : {},
+          EndpointConfig: aliases.length ? { Aliases: aliases } : {},
         });
       } catch (err) {
         // Already-on-network races are fine; anything else is swallowed — this is
@@ -3456,7 +3457,7 @@ export class DockerRuntime implements RuntimeAdapter {
         const msg = (err as { message?: string })?.message ?? "";
         if (!/already exists|already connected/i.test(msg)) {
           console.warn(
-            `[docker] group join failed for ${m.containerId.slice(0, 12)} (${m.alias}): ${msg}`,
+            `[docker] group join failed for ${m.containerId.slice(0, 12)} (${aliases.join(", ")}): ${msg}`,
           );
         }
       }

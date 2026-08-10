@@ -16,7 +16,8 @@
 
 import { repos, restoreSubgraph, PkCollisionError, type Service } from "@repo/db";
 import { slugify, safeErrorMessage } from "@repo/core";
-import type { ContainerStatus } from "@repo/adapters";
+import { buildNetworkAliases, type ContainerStatus } from "@repo/adapters";
+import { serviceAliasExtras } from "../../lib/deployable-service";
 import type { RequestContext } from "../../lib/request-context";
 import { ensureProject, createServicesProjectWithId } from "../projects/project-crud.service";
 import { getFileContent } from "../github/github.service";
@@ -722,7 +723,13 @@ export async function joinReusedContainersToGroup(opts: {
     const discByName = new Map(attach.map((c) => [renames?.[c.name] ?? c.name, c]));
     const members = serviceRows
       .filter((s) => discByName.has(s.name))
-      .map((s) => ({ containerId: discByName.get(s.name)?.containerId ?? "", alias: s.name }))
+      .map((s) => ({
+        containerId: discByName.get(s.name)?.containerId ?? "",
+        // The SAME alias set a natively-deployed container gets (row name +
+        // `advanced.alias`), so east-west by a custom alias resolves for a reused
+        // container too instead of only for deployed ones.
+        aliases: buildNetworkAliases(s.name, serviceAliasExtras(s)),
+      }))
       .filter((m) => m.containerId.length > 0);
     await rt.joinServiceGroupContainers(slug, members);
   } finally {
@@ -759,8 +766,12 @@ async function refreshRestoredRuntime(
         containerId: sd.containerId,
         status: status === "running" ? "success" : "failure",
         imageRef: sd.imageRef ?? null,
-        hostPort: info?.hostPort ?? sd.hostPort ?? null,
-        ip: info?.ip ?? sd.ip ?? null,
+        // A live inspect that ANSWERED replaces the snapshot outright, including
+        // "publishes nothing" → null. Keeping the restored port here is what made
+        // the row claim a 127.0.0.1 publish the container doesn't have (#506).
+        // `info === null` = couldn't ask → keep the last-known values.
+        hostPort: info ? (info.hostPort ?? null) : (sd.hostPort ?? null),
+        ip: info ? (info.ip ?? null) : (sd.ip ?? null),
       });
     }
     await repos.deployment.updateStatus(deploymentId, deriveDeploymentStatus(states));

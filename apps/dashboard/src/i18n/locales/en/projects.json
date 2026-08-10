@@ -8,6 +8,7 @@
   },
   "status": {
     "live": "Live",
+    "paused": "Paused",
     "attention": "Action Required",
     "queued": "Queued",
     "building": "Building",

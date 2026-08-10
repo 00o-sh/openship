@@ -319,7 +319,7 @@ export interface RuntimeAdapter {
    * touch. Best-effort + idempotent. Optional (docker only). */
   joinServiceGroupContainers?(
     slug: string,
-    members: Array<{ containerId: string; alias: string }>,
+    members: Array<{ containerId: string; aliases: string[] }>,
   ): Promise<void>;
 
   // ── Rollback primitives ──────────────────────────────────────────────

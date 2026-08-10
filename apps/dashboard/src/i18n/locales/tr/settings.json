@@ -153,10 +153,6 @@
     "noServers": "Henüz yapılandırılmış sunucu yok - dağıtım seçiciden bir tane ekleyin.",
     "clearDefault": "Varsayılanı temizle (her seferinde sor)",
     "targets": {
-      "local": {
-        "label": "Bu Bilgisayar",
-        "desc": "Yerel Docker / çalışma zamanı"
-      },
       "server": {
         "label": "Sunucum",
         "desc": "Yapılandırılmış bir SSH sunucusu"
@@ -168,8 +164,7 @@
     },
     "labelFor": {
       "yourServer": "sunucunuz",
-      "cloud": "Openship Bulut",
-      "local": "Bu Bilgisayar"
+      "cloud": "Openship Bulut"
     },
     "toast": {
       "pickServer": "Önce bir sunucu seçin",

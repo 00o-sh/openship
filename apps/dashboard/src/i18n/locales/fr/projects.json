@@ -8,6 +8,7 @@
   },
   "status": {
     "live": "En ligne",
+    "paused": "En pause",
     "attention": "Action requise",
     "queued": "En file d'attente",
     "building": "Compilation",

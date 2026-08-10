@@ -24,7 +24,7 @@ import {
   type CommandExecutor,
 } from "@repo/adapters";
 import { getRequestContext } from "../../lib/request-context";
-import { resolveDeploymentRuntime } from "../../lib/deployment-runtime";
+import { withDeploymentPlatform } from "../../lib/deployment-runtime";
 import { ensureEdgeChallengeReady } from "../../lib/edge-challenge";
 import { permission } from "../../lib/permission";
 import { param } from "../../lib/controller-helpers";
@@ -256,11 +256,12 @@ export async function ensureEdgeStream(c: Context) {
       await (async () => {
         const dep = await repos.deployment.findById(resolved.project.activeDeploymentId!);
         if (!dep) return;
-        const { routing } = await resolveDeploymentRuntime(dep);
-        await ensureEdgeChallengeReady(ctx.organizationId, routing, {
-          serverId,
-          onLog: (m) => appendEdgeLog(session.id, m.trim(), "warn"),
-        });
+        await withDeploymentPlatform(dep, ({ routing }) =>
+          ensureEdgeChallengeReady(ctx.organizationId, routing, {
+            serverId,
+            onLog: (m) => appendEdgeLog(session.id, m.trim(), "warn"),
+          }),
+        );
       })().catch(() => {});
       await applyProjectRouting(id).catch((e) =>
         appendEdgeLog(session.id, `Route apply warning: ${safeErrorMessage(e)}`, "warn"),

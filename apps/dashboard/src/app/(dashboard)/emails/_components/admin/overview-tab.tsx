@@ -95,11 +95,15 @@ export function OverviewTab({ status, serverId }: OverviewTabProps) {
  * Single editorial card at the top of the overview. Combines mail-server
  * identity (the hostname) with the webmail CTA.
  *
- * Webmail state is read from `status.webmail` - the openship API persists
- * the deploy record in the mail-state file on the VPS. If the record is
- * absent (or `installed=false`), the operator sees a Deploy webmail CTA
- * that opens a modal - domain + host picker + live SSE progress. Once
- * deployed, the same slot becomes an Open webmail link.
+ * Webmail state is read from `status.webmail` - the openship API derives it
+ * from the webmail project this mail server is linked to. If the record is
+ * absent (or `installed=false`), the operator sees a Deploy webmail CTA that
+ * opens /deploy/mail (host + domain picker, then the standard build screen).
+ * Once deployed, the same slot becomes an Open webmail link.
+ *
+ * `legacy` is the one state the CTA slot can't express: that webmail works, so
+ * the slot correctly says Open - but it predates the webmail app and can only be
+ * replaced, which is offered as a line under the hostname.
  */
 function MailServerCard({
   mailHost,
@@ -177,6 +181,20 @@ function MailServerCard({
               >
                 {webmail.hostname}
               </a>
+            </p>
+          )}
+          {/* A pre-catalog webmail serves fine, so `installed` is true and the
+              slot on the right stays Open-webmail. Without this line the only
+              path onto the webmail app would be one the operator can't see. */}
+          {webmail?.legacy && (
+            <p className="text-xs text-muted-foreground mt-1.5">
+              {t.emailsAdmin.overview.legacyWebmail}{" "}
+              <Link
+                href={`/deploy/mail?serverId=${encodeURIComponent(serverId)}`}
+                className="text-warning font-medium hover:underline"
+              >
+                {t.emailsAdmin.overview.upgradeWebmail}
+              </Link>
             </p>
           )}
         </div>

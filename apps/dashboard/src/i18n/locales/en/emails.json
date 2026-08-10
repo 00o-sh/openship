@@ -111,6 +111,8 @@
       "perDomainNote": "Applies to all domains. Per-domain routing + each domain's SES DKIM records are configured after install in the Sending tab."
     },
     "startSetup": "Start Setup",
+    "startFailed": "Setup couldn't start",
+    "startFailedFallback": "Setup couldn't start, and the server gave no reason. Check the API logs.",
     "adoptCta": "Already have a mail server? Adopt it",
     "whatInstalled": "What gets installed",
     "features": {
