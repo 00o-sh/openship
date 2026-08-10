@@ -1,0 +1,116 @@
+/**
+ * `POST /api/auth/mcp/token` — RFC 8707 wrapper around better-auth's MCP token
+ * endpoint.
+ *
+ * The plugin ignores the `resource` parameter entirely and mints an opaque
+ * token with no audience. A spec-strict MCP client (Claude.ai) sends `resource`
+ * on both the authorize and the token request and expects the token it gets
+ * back to belong to that resource. So this wrapper:
+ *
+ *   1. rejects a `resource` that doesn't name this instance's MCP endpoint with
+ *      the OAuth error the spec asks for (`invalid_target`) instead of silently
+ *      ignoring it;
+ *   2. delegates the whole grant to the plugin (PKCE, client auth, code
+ *      validation, refresh rotation — all unchanged);
+ *   3. re-issues the returned access token as an audience-bound JWT
+ *      (lib/mcp-token.ts), rewriting the stored row so introspection still
+ *      resolves it.
+ *
+ * Backward compatible in both directions: a client that sends no `resource`
+ * gets the canonical MCP URL as its audience, and a token minted before this
+ * existed keeps resolving (the audience gate treats "no audience" as
+ * unconstrained).
+ */
+
+import { repos } from "@repo/db";
+import { auth } from "../../lib/auth";
+import { isAllowedMcpResource, publicOriginFor, resolveTokenAudience } from "../../lib/mcp-resource";
+import { signMcpAccessToken } from "../../lib/mcp-token";
+
+/** Read `resource` out of a token request without consuming the body. */
+async function readResourceParam(request: Request): Promise<string | undefined> {
+  const contentType = request.headers.get("content-type") ?? "";
+  try {
+    if (contentType.includes("application/x-www-form-urlencoded")) {
+      const form = await request.clone().formData();
+      const value = form.get("resource");
+      return typeof value === "string" ? value : undefined;
+    }
+    if (contentType.includes("application/json")) {
+      const body = (await request.clone().json()) as Record<string, unknown> | null;
+      const value = body && typeof body === "object" ? body.resource : undefined;
+      return typeof value === "string" ? value : undefined;
+    }
+  } catch {
+    // Malformed body — let the plugin produce its own `invalid_request`.
+  }
+  return undefined;
+}
+
+function invalidTarget(resource: string): Response {
+  return Response.json(
+    {
+      error: "invalid_target",
+      error_description: `The requested resource "${resource}" is not served by this authorization server.`,
+    },
+    { status: 400, headers: { "Cache-Control": "no-store", Pragma: "no-cache" } },
+  );
+}
+
+/**
+ * Replace the opaque access token in a successful token response with an
+ * audience-bound JWT. Returns the response to send. Any failure leaves the
+ * plugin's response untouched — a token that works without an audience is
+ * strictly better than a failed authorization.
+ */
+async function bindAudience(response: Response, audience: string, issuer: string): Promise<Response> {
+  const body = (await response.clone().json()) as Record<string, unknown>;
+  const opaque = body.access_token;
+  if (typeof opaque !== "string" || opaque.length === 0) return response;
+
+  const row = await repos.oauth.findAccessToken(opaque);
+  if (!row?.userId) return response;
+
+  const now = Math.floor(Date.now() / 1000);
+  const jwt = signMcpAccessToken({
+    iss: issuer,
+    sub: row.userId,
+    aud: audience,
+    iat: now,
+    exp: Math.floor(row.accessTokenExpiresAt.getTime() / 1000),
+    jti: opaque,
+    client_id: row.clientId,
+    scope: row.scopes,
+  });
+
+  if (!(await repos.oauth.rebindAccessToken(opaque, jwt))) return response;
+
+  const headers = new Headers(response.headers);
+  headers.delete("content-length");
+  return new Response(JSON.stringify({ ...body, access_token: jwt }), {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+/**
+ * Handle an MCP token request. `request` is the (already redirect-normalized)
+ * request that would otherwise go straight to `auth.handler`.
+ */
+export async function handleMcpTokenRequest(request: Request): Promise<Response> {
+  const origin = publicOriginFor(request);
+  const resource = await readResourceParam(request);
+  if (resource && !isAllowedMcpResource(resource, origin)) return invalidTarget(resource);
+
+  const response = await auth.handler(request);
+  if (response.status !== 200) return response;
+  if (!(response.headers.get("content-type") ?? "").includes("application/json")) return response;
+
+  try {
+    return await bindAudience(response, resolveTokenAudience(resource, origin), origin);
+  } catch {
+    // Never turn a successful grant into a failure over the audience rebind.
+    return response;
+  }
+}

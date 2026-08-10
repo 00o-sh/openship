@@ -19,6 +19,7 @@ import { normalizeMcpRedirectUri } from "../../lib/oauth-redirect";
 import { internalAuth } from "../../middleware/internal-auth";
 import { isLoopbackRequest } from "../../middleware/loopback-peer";
 import * as ctrl from "./auth.controller";
+import { handleMcpTokenRequest } from "./mcp-token.handler";
 
 export const authRoutes = new Hono();
 
@@ -60,5 +61,11 @@ authRoutes.on(["GET", "POST"], "/*", async (c) => {
       .limit(1);
     return client?.redirectUrls.split(",");
   });
+  // MCP token grants go through the RFC 8707 wrapper (validates `resource`,
+  // audience-binds the issued token) before reaching the plugin. Everything
+  // else is delegated verbatim.
+  if (c.req.method === "POST" && new URL(request.url).pathname.endsWith("/mcp/token")) {
+    return handleMcpTokenRequest(request);
+  }
   return auth.handler(request);
 });
