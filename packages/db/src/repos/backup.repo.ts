@@ -10,12 +10,7 @@
 
 import { and, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Database } from "../client";
-import {
-  backupDestination,
-  backupPolicy,
-  backupRestore,
-  backupRun,
-} from "../schema";
+import { backupDestination, backupPolicy, backupRestore, backupRun } from "../schema";
 import { detailOf } from "./storable-detail";
 
 // ─── Inferred types ──────────────────────────────────────────────────────────
@@ -179,10 +174,7 @@ export function createBackupDestinationRepo(db: Database) {
 
     async findById(id: string): Promise<BackupDestination | undefined> {
       return db.query.backupDestination.findFirst({
-        where: and(
-          eq(backupDestination.id, id),
-          isNull(backupDestination.deletedAt),
-        ),
+        where: and(eq(backupDestination.id, id), isNull(backupDestination.deletedAt)),
       });
     },
 
@@ -206,11 +198,7 @@ export function createBackupDestinationRepo(db: Database) {
       return row;
     },
 
-    async setLastVerified(
-      id: string,
-      ok: boolean,
-      error?: string,
-    ): Promise<void> {
+    async setLastVerified(id: string, ok: boolean, error?: string): Promise<void> {
       await db
         .update(backupDestination)
         .set({
@@ -227,12 +215,7 @@ export function createBackupDestinationRepo(db: Database) {
       const referencingCount = await db
         .select({ count: sql<number>`count(*)::int` })
         .from(backupPolicy)
-        .where(
-          and(
-            eq(backupPolicy.destinationId, id),
-            isNull(backupPolicy.deletedAt),
-          ),
-        )
+        .where(and(eq(backupPolicy.destinationId, id), isNull(backupPolicy.deletedAt)))
         .then((rows) => Number(rows[0]?.count ?? 0));
 
       if (referencingCount > 0) {
@@ -259,10 +242,7 @@ export function createBackupPolicyRepo(db: Database) {
   return {
     async listByProject(projectId: string): Promise<BackupPolicy[]> {
       return db.query.backupPolicy.findMany({
-        where: and(
-          eq(backupPolicy.projectId, projectId),
-          isNull(backupPolicy.deletedAt),
-        ),
+        where: and(eq(backupPolicy.projectId, projectId), isNull(backupPolicy.deletedAt)),
       });
     },
 
@@ -270,10 +250,7 @@ export function createBackupPolicyRepo(db: Database) {
      *  detail page's "used by" view (which projects/services back up here). */
     async listByDestination(destinationId: string): Promise<BackupPolicy[]> {
       return db.query.backupPolicy.findMany({
-        where: and(
-          eq(backupPolicy.destinationId, destinationId),
-          isNull(backupPolicy.deletedAt),
-        ),
+        where: and(eq(backupPolicy.destinationId, destinationId), isNull(backupPolicy.deletedAt)),
       });
     },
 
@@ -324,23 +301,15 @@ export function createBackupPolicyRepo(db: Database) {
     },
 
     /** The single active policy for a mail server (mail_server source). */
-    async findActiveByMailServer(
-      mailServerId: string,
-    ): Promise<BackupPolicy | undefined> {
+    async findActiveByMailServer(mailServerId: string): Promise<BackupPolicy | undefined> {
       return db.query.backupPolicy.findFirst({
-        where: and(
-          eq(backupPolicy.mailServerId, mailServerId),
-          isNull(backupPolicy.deletedAt),
-        ),
+        where: and(eq(backupPolicy.mailServerId, mailServerId), isNull(backupPolicy.deletedAt)),
       });
     },
 
     async findByWebhookToken(token: string): Promise<BackupPolicy | undefined> {
       return db.query.backupPolicy.findFirst({
-        where: and(
-          eq(backupPolicy.webhookToken, token),
-          isNull(backupPolicy.deletedAt),
-        ),
+        where: and(eq(backupPolicy.webhookToken, token), isNull(backupPolicy.deletedAt)),
       });
     },
 
@@ -372,9 +341,7 @@ export function createBackupPolicyRepo(db: Database) {
       });
     },
 
-    async *iterateEnabledScheduled(
-      pageSize = 100,
-    ): AsyncIterableIterator<BackupPolicy> {
+    async *iterateEnabledScheduled(pageSize = 100): AsyncIterableIterator<BackupPolicy> {
       let offset = 0;
       while (true) {
         const page = await db.query.backupPolicy.findMany({
@@ -407,9 +374,7 @@ export function createBackupPolicyRepo(db: Database) {
      *
      * Paginated because the sweep runs against every org on the instance.
      */
-    async *iterateEnabledForRetention(
-      pageSize = 100,
-    ): AsyncIterableIterator<BackupPolicy> {
+    async *iterateEnabledForRetention(pageSize = 100): AsyncIterableIterator<BackupPolicy> {
       let offset = 0;
       while (true) {
         const page = await db.query.backupPolicy.findMany({
@@ -504,8 +469,7 @@ export function createBackupRunRepo(db: Database) {
       ];
       if (opts?.projectId) conditions.push(eq(backupRun.projectId, opts.projectId));
       if (opts?.serviceId) conditions.push(eq(backupRun.serviceId, opts.serviceId));
-      if (opts?.mailServerId)
-        conditions.push(eq(backupRun.mailServerId, opts.mailServerId));
+      if (opts?.mailServerId) conditions.push(eq(backupRun.mailServerId, opts.mailServerId));
       return db.query.backupRun.findMany({
         where: and(...conditions),
         orderBy: (t, { desc }) => [desc(t.startedAt)],
@@ -534,7 +498,14 @@ export function createBackupRunRepo(db: Database) {
      *  time. Powers the Backups page's per-destination size monitoring. */
     async statsByDestination(
       organizationId: string,
-    ): Promise<Array<{ destinationId: string | null; storedBytes: number; runCount: number; lastRunAt: Date | null }>> {
+    ): Promise<
+      Array<{
+        destinationId: string | null;
+        storedBytes: number;
+        runCount: number;
+        lastRunAt: Date | null;
+      }>
+    > {
       const rows = await db
         .select({
           destinationId: backupRun.destinationId,
@@ -590,12 +561,7 @@ export function createBackupRunRepo(db: Database) {
       status: BackupRunStatus,
       patch?: Partial<Omit<NewBackupRun, "id" | "startedAt">>,
     ): Promise<void> {
-      const TERMINAL: BackupRunStatus[] = [
-        "succeeded",
-        "failed",
-        "cancelled",
-        "server_error",
-      ];
+      const TERMINAL: BackupRunStatus[] = ["succeeded", "failed", "cancelled", "server_error"];
       const finishing = TERMINAL.includes(status);
       const now = new Date();
       await persistTransition(
@@ -623,10 +589,58 @@ export function createBackupRunRepo(db: Database) {
           lastEventAt: new Date(),
           errorMessage: reason,
         })
+        .where(and(inArray(backupRun.status, IN_FLIGHT_RUN_STATUSES), isNull(backupRun.finishedAt)))
+        .returning();
+      return result.length;
+    },
+
+    /**
+     * Fail in-flight runs whose `lastEventAt` heartbeat has gone stale. Unlike
+     * `sweepStaleRuns` (boot-only, marks everything in-flight), this is selective:
+     *   - queued rows nobody picked up within `queuedCutoff`
+     *   - preparing/snapshotting/verifying with no transition within `idleCutoff`
+     *     (brief hops between states — a stall there is genuinely stuck)
+     *   - any in-flight row past the absolute `ceilingCutoff`
+     *
+     * `uploading` is deliberately NOT idle-swept. A single-artifact dump
+     * (pg_dump/mysqldump/mongodump) streams the whole payload through one
+     * `destination.put`, and the orchestrator writes `bytesTransferred` / bumps
+     * `lastEventAt` only at artifact boundaries — never mid-stream. So for the
+     * entire upload the row sits `(uploading, bytesTransferred=NULL,
+     * lastEventAt=frozen)`, which is indistinguishable by DB state alone from a
+     * wedge. Idle-sweeping it here would kill honest multi-GB uploads that
+     * legitimately run past `idleCutoff` — the exact managed-postgres case #516
+     * is about. A genuinely wedged upload is reaped in-process by the executor's
+     * per-stream idle watchdog (which also frees the worker slot); this sweep
+     * only backstops `uploading` via the 6h `ceilingCutoff`.
+     */
+    async sweepRunsWithStaleHeartbeat(params: {
+      queuedCutoff: Date;
+      idleCutoff: Date;
+      ceilingCutoff: Date;
+      reason: string;
+    }): Promise<number> {
+      const { queuedCutoff, idleCutoff, ceilingCutoff, reason } = params;
+      const result = await db
+        .update(backupRun)
+        .set({
+          status: "server_error",
+          finishedAt: new Date(),
+          lastEventAt: new Date(),
+          errorMessage: reason,
+        })
         .where(
           and(
             inArray(backupRun.status, IN_FLIGHT_RUN_STATUSES),
             isNull(backupRun.finishedAt),
+            or(
+              and(eq(backupRun.status, "queued"), lt(backupRun.lastEventAt, queuedCutoff)),
+              and(
+                inArray(backupRun.status, ["preparing", "snapshotting", "verifying"]),
+                lt(backupRun.lastEventAt, idleCutoff),
+              ),
+              lt(backupRun.lastEventAt, ceilingCutoff),
+            ),
           ),
         )
         .returning();
@@ -634,10 +648,7 @@ export function createBackupRunRepo(db: Database) {
     },
 
     /** Used by the retention prune job (Chunk 2). */
-    async listSucceededOlderThan(
-      destinationId: string,
-      cutoff: Date,
-    ): Promise<BackupRun[]> {
+    async listSucceededOlderThan(destinationId: string, cutoff: Date): Promise<BackupRun[]> {
       return db.query.backupRun.findMany({
         where: and(
           eq(backupRun.destinationId, destinationId),
@@ -680,10 +691,7 @@ export function createBackupRunRepo(db: Database) {
     },
 
     async softDelete(id: string): Promise<void> {
-      await db
-        .update(backupRun)
-        .set({ deletedAt: new Date() })
-        .where(eq(backupRun.id, id));
+      await db.update(backupRun).set({ deletedAt: new Date() }).where(eq(backupRun.id, id));
     },
 
     /** Toggle the "protect this backup" flag. When set, retention
@@ -737,12 +745,7 @@ export function createBackupRestoreRepo(db: Database) {
       return db.query.backupRestore.findFirst({
         where: and(
           eq(backupRestore.runId, runId),
-          inArray(backupRestore.status, [
-            "queued",
-            "preparing",
-            "prepared",
-            "applying",
-          ]),
+          inArray(backupRestore.status, ["queued", "preparing", "prepared", "applying"]),
         ),
       });
     },
@@ -776,12 +779,7 @@ export function createBackupRestoreRepo(db: Database) {
       status: BackupRestoreStatus,
       patch?: Partial<Omit<NewBackupRestore, "id" | "userId" | "startedAt">>,
     ): Promise<void> {
-      const TERMINAL: BackupRestoreStatus[] = [
-        "succeeded",
-        "failed",
-        "cancelled",
-        "server_error",
-      ];
+      const TERMINAL: BackupRestoreStatus[] = ["succeeded", "failed", "cancelled", "server_error"];
       const finishing = TERMINAL.includes(status);
       const now = new Date();
       await persistTransition(

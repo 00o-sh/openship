@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import type { CommandExecutor, LogEntry } from "../types";
+import { resolveEnvironment } from "./environment";
 import { sq } from "./local-shell";
 
 // apt/dpkg non-interactive env, re-set INSIDE the sudo'd root shell. sudo
@@ -26,8 +27,9 @@ export function elevateCommand(command: string): string {
  */
 export const EXECUTOR_DELEGATE = Symbol.for("openship.executor.delegate");
 
-/** Parent directory of an absolute path (for `mkdir -p` before a move). */
-function dirOf(path: string): string {
+/** Parent directory of an absolute path (for `mkdir -p` before a move). POSIX-only
+ *  by contract — these are remote host paths, never native-joined. */
+export function dirOf(path: string): string {
   const idx = path.lastIndexOf("/");
   if (idx < 0) return ".";
   return idx === 0 ? "/" : path.slice(0, idx);
@@ -161,4 +163,73 @@ export function elevatedExecutor(inner: CommandExecutor): CommandExecutor {
       return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
     },
   });
+}
+
+/**
+ * Ensure `path` exists and the login user can write into it.
+ *
+ * Openship's host directories sit under `/opt`, which no non-root user may
+ * create in, and the ones Docker materialises for a bind mount are created by
+ * the daemon and so are root-owned. A plain `mkdir -p` fails on both, which is
+ * why this elevates and then hands the result over rather than only creating it.
+ *
+ * The chown targets the TOPMOST directory that had to be created, not `path`:
+ * renaming an entry needs write permission on its parent, so a leaf-only chown
+ * would still leave a later `mv` failing. When nothing had to be created — `path`
+ * exists but isn't ours — the leaf is the best available target; a caller that
+ * will RENAME `path` must therefore ensure `dirOf(path)`, not `path`.
+ */
+export async function ensureOwnedDir(executor: CommandExecutor, path: string): Promise<void> {
+  const quoted = sq(path);
+  try {
+    await executor.exec(`mkdir -p ${quoted} && [ -w ${quoted} ]`);
+    return;
+  } catch {
+    // Absent and uncreatable, or present and not ours — both need root.
+  }
+
+  const { isRoot, canSudo } = await resolveEnvironment(executor);
+  if (isRoot) {
+    await executor.exec(`mkdir -p ${quoted}`);
+    return;
+  }
+  if (!canSudo) {
+    throw new Error(
+      `Cannot create ${path} on the target server: the deploy user cannot write there and has no ` +
+        `passwordless sudo. Run these once on the server, then redeploy:\n` +
+        `  sudo mkdir -p ${path}\n` +
+        `  sudo chown -R "$(id -un)" ${path}`,
+    );
+  }
+  // Who to hand the tree to. `$SUDO_USER` is sudo's own answer, but a sudoers
+  // `env_delete` can strip it, and there is no safe in-shell default: root would
+  // leave the deploy user still unable to write — the fast path above would then
+  // re-elevate on every deploy and the real write would fail anyway — while an
+  // empty expansion makes `chown -R "" …` the thing that errors. So ask the
+  // UNELEVATED executor, which is the login we actually need, and keep
+  // `$SUDO_USER` only as a last resort so an empty owner still fails loudly.
+  const loginUser = await executor
+    .exec("id -un")
+    .then((out) => out.trim())
+    .catch(() => "");
+  const owner = loginUser ? sq(loginUser) : '"$SUDO_USER"';
+
+  await executor.exec(
+    elevateCommand(
+      [
+        // Without it the `;`-joined steps fall through a failed mkdir, and the
+        // chown's exit status — not the mkdir's — is what the caller sees. That
+        // reported a permission failure as success.
+        "set -e",
+        `p=${quoted}`,
+        "d=$p",
+        "top=",
+        'while [ ! -d "$d" ]; do top=$d; d=$(dirname "$d"); done',
+        'mkdir -p "$p"',
+        // Expansion, not `[ -z "$top" ] && top=…`: that AND-list returns 1 whenever
+        // $top is already set, which under `set -e` would exit before the chown.
+        `chown -R ${owner} "\${top:-$p}"`,
+      ].join("; "),
+    ),
+  );
 }

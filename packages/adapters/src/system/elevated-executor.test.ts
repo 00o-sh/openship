@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { elevatedExecutor, elevateCommand } from "./elevated-executor";
+import { elevatedExecutor, elevateCommand, ensureOwnedDir } from "./elevated-executor";
+import { probeOutput } from "./environment.fixtures";
 import { sq } from "./local-shell";
 import type { CommandExecutor, LogEntry } from "../types";
 
@@ -223,5 +224,87 @@ describe("elevatedExecutor", () => {
     const el = elevatedExecutor(inner) as unknown as { rawExec: (c: string) => Promise<unknown> };
     await el.rawExec("docker ps");
     expect(rawExec).toHaveBeenCalledWith("docker ps");
+  });
+});
+
+/**
+ * The two shapes that broke a remote non-root deploy (issue #514): the directory
+ * is absent under a `/opt` the user can't create in, or present and root-owned
+ * because Docker created it for the edge's bind mount.
+ */
+describe("ensureOwnedDir", () => {
+  const PATH = "/opt/openship/static";
+
+  /** A target that denies unelevated writes unless the tree is already ours. */
+  function target(opts: { canSudo: boolean; alreadyWritable?: boolean; loginUser?: string }) {
+    const commands: string[] = [];
+    const user = opts.loginUser ?? "deploy";
+    const executor = {
+      exec: vi.fn(async (command: string) => {
+        commands.push(command);
+        // `resolveEnvironment`'s single-shot probe: a non-root box whose passwordless-sudo
+        // capability is exactly what this case declares.
+        if (command.includes("opsh_begin")) {
+          return probeOutput({ uid: "1000", user, home: `/home/${user}`, sudo: opts.canSudo ? "y" : "n" });
+        }
+        // The chown owner comes from an UNELEVATED `id -un`, separate from the probe.
+        if (command === "id -un") return `${user}\n`;
+        if (command.startsWith("sudo -n ")) return "";
+        if (command.includes("mkdir -p") && !opts.alreadyWritable) {
+          throw new Error("mkdir: cannot create directory '/opt/openship': Permission denied");
+        }
+        return "";
+      }),
+    } as unknown as CommandExecutor;
+    return { executor, commands };
+  }
+
+  it("creates the directory and hands it to the login user when sudo is available", async () => {
+    const { executor, commands } = target({ canSudo: true });
+
+    await ensureOwnedDir(executor, PATH);
+
+    // Unwrap the one level of quoting elevateCommand added.
+    const inner = commands.find((c) => c.startsWith("sudo -n sh -c "))!.replace(/'\\''/g, "'");
+    expect(inner).toContain(`p='${PATH}'`);
+    // Without it, a failed mkdir falls through and the chown's exit status is
+    // what the caller sees.
+    expect(inner).toContain("set -e");
+    // Walks up to the TOPMOST dir it had to create: an `mv` needs write
+    // permission on the PARENT, so a leaf-only chown would still fail.
+    expect(inner).toMatch(/top=\$d/);
+    expect(inner).toContain("dirname");
+    // The owner comes from the UNELEVATED `id -un`, not from `$SUDO_USER`, which a
+    // sudoers env_delete can strip.
+    expect(inner).toContain(`chown -R 'deploy' "\${top:-$p}"`);
+    expect(inner).not.toContain("SUDO_USER");
+  });
+
+  it("falls back to $SUDO_USER when the login probe says nothing", async () => {
+    const { executor, commands } = target({ canSudo: true, loginUser: "" });
+
+    await ensureOwnedDir(executor, PATH);
+
+    const inner = commands.find((c) => c.startsWith("sudo -n sh -c "))!.replace(/'\\''/g, "'");
+    // Left unexpanded on purpose: an empty owner must fail loudly at chown rather
+    // than default to root, which would hand the tree back to a user who still
+    // cannot write it.
+    expect(inner).toContain('chown -R "$SUDO_USER" "${top:-$p}"');
+  });
+
+  it("stays unelevated when the directory is already writable", async () => {
+    const { executor, commands } = target({ canSudo: true, alreadyWritable: true });
+
+    await ensureOwnedDir(executor, PATH);
+
+    expect(commands).toEqual([`mkdir -p '${PATH}' && [ -w '${PATH}' ]`]);
+  });
+
+  it("names the commands an operator must run when there is no sudo", async () => {
+    const { executor } = target({ canSudo: false });
+
+    await expect(ensureOwnedDir(executor, PATH)).rejects.toThrow(
+      /sudo mkdir -p \/opt\/openship\/static/,
+    );
   });
 });

@@ -80,8 +80,17 @@ export interface ExecuteCommandOpts {
   user?: string;
   /** Working directory inside the service. */
   cwd?: string;
-  /** Kill the exec after this many milliseconds. Null = no timeout
-   *  (use cautiously — long-running dumps are legitimate). */
+  /**
+   * Give up after this long with NO stdout/stderr — not this long overall.
+   * Same reasoning as `StreamPathOpts.idleTimeoutMs`: a large `pg_dump` that is
+   * actively streaming must not be cut off by elapsed time alone, but a wedged
+   * exec that never prints a byte should fail within minutes, not hours.
+   * Executors own their defaults; `undefined` means "the executor's", never
+   * "unbounded".
+   */
+  idleTimeoutMs?: number;
+  /** Absolute ceiling regardless of traffic, behind `idleTimeoutMs`. Docker
+   *  exec default 6 hours, matching capture/restore helpers. */
   timeoutMs?: number;
 }
 
@@ -445,11 +454,7 @@ export interface BackupDestination {
    *  the API host. Only implemented when capabilities include
    *  `presignedGet`. */
   presignGet?(key: string, ttlSec: number): Promise<string>;
-  presignPut?(
-    key: string,
-    ttlSec: number,
-    opts?: { contentType?: string },
-  ): Promise<string>;
+  presignPut?(key: string, ttlSec: number, opts?: { contentType?: string }): Promise<string>;
 }
 
 export type DestinationFactory = (row: BackupDestinationRow) => BackupDestination;
