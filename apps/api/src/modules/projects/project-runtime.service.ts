@@ -20,6 +20,7 @@ import { sshManager } from "../../lib/ssh-manager";
 import { applyProjectRouting } from "../domains/routing-apply.service";
 import { reapplyProjectLiveRoutes } from "../domains/project-route.service";
 import { deploymentWorkload } from "../deployments/deployment-class";
+import { livePrimaryContainerId } from "../services/service-container";
 
 // ─── Runtime logs ────────────────────────────────────────────────────────────
 
@@ -36,12 +37,20 @@ export async function getRuntimeLogs(
   }
 
   const dep = await repos.deployment.findById(p.activeDeploymentId);
-  if (!dep?.containerId) {
+  if (!dep) {
     throw new NotFoundError("No running container for project", projectId);
   }
 
-  const containerId = dep.containerId;
-  return withDeploymentRuntime(dep, (runtime) => runtime.getRuntimeLogs(containerId, tail));
+  // Resolved live inside the runtime, not read off `dep.containerId`: on a
+  // multi-service project that column names one service, and in dependency order
+  // that was the database (#498) — so "the project's logs" were postgres's.
+  return withDeploymentRuntime(dep, async (runtime) => {
+    const containerId = await livePrimaryContainerId(runtime, dep);
+    if (!containerId) {
+      throw new NotFoundError("No running container for project", projectId);
+    }
+    return runtime.getRuntimeLogs(containerId, tail);
+  });
 }
 
 export async function streamRuntimeLogs(
@@ -58,7 +67,7 @@ export async function streamRuntimeLogs(
   }
 
   const dep = await repos.deployment.findById(p.activeDeploymentId);
-  if (!dep?.containerId) {
+  if (!dep) {
     throw new NotFoundError("No running container for project", projectId);
   }
 
@@ -66,7 +75,12 @@ export async function streamRuntimeLogs(
   // runtime is disposed in the stream's cleanup instead — same shape as
   // streamServiceRuntimeLogs. Disposing here would kill the live stream.
   const { runtime, serverId } = await resolveDeploymentRuntimeForRead(dep);
-  const stop = await runtime.streamRuntimeLogs(dep.containerId, onLog, opts);
+  const containerId = await livePrimaryContainerId(runtime, dep).catch(() => null);
+  if (!containerId) {
+    void Promise.resolve(runtime.dispose?.()).catch(() => {});
+    throw new NotFoundError("No running container for project", projectId);
+  }
+  const stop = await runtime.streamRuntimeLogs(containerId, onLog, opts);
   const cleanup = () => {
     try {
       stop();

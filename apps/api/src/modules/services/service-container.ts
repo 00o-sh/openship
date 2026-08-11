@@ -5,6 +5,8 @@ import {
   resolveDeploymentRuntimeForRead,
 } from "../../lib/deployment-runtime";
 import { resolveLiveServiceState } from "./live-state";
+import { isRealContainerRef } from "../../lib/container-ref";
+import { pickPrimaryServiceId } from "../../lib/public-endpoints";
 import type { DeploymentConfigSnapshot } from "../deployments/build.service";
 
 /**
@@ -113,6 +115,56 @@ export async function liveContainerIdWithRuntime(
       trackedIds: { [args.service.id]: args.tracked },
     }).get(args.service.id)?.containerId ?? null
   );
+}
+
+/**
+ * The container a PROJECT-level question means — "its logs", "its container info",
+ * "its resource usage" — resolved live, using a runtime the caller already holds.
+ *
+ * `deployment.containerId` cannot answer it for a multi-service project: it holds
+ * ONE service's container, and because the deploy loop walks services in
+ * dependency order that service was the database an app `dependsOn` — so project
+ * logs answered for postgres while the app served traffic (#498). It can also hold
+ * the `"compose"` sentinel, which is no container at all.
+ *
+ * So: pick the primary service the same way the access URL does, then resolve ITS
+ * container against the host and heal the record, exactly as the per-service path
+ * does. Single-app deployments (no service rows) short-circuit to the recorded id
+ * and issue no extra queries.
+ *
+ * Null means the primary service's container is genuinely gone — callers should
+ * surface "not deployed" rather than hand a dead id to docker.
+ */
+export async function livePrimaryContainerId(
+  runtime: HostContainerLister | null | undefined,
+  dep: { id: string; projectId: string; containerId: string | null },
+): Promise<string | null> {
+  const recorded = isRealContainerRef(dep.containerId) ? dep.containerId : null;
+  const services = (await repos.service.listByProject(dep.projectId).catch(() => [])).filter(
+    (svc) => svc.enabled,
+  );
+  if (services.length === 0) return recorded;
+
+  const [project, domainRows, rows] = await Promise.all([
+    repos.project.findById(dep.projectId).catch(() => null),
+    repos.domain.listByProject(dep.projectId).catch(() => []),
+    repos.service.listByDeployment(dep.id).catch(() => []),
+  ]);
+  const primaryId = pickPrimaryServiceId(services, domainRows);
+  const svc = services.find((s) => s.id === primaryId);
+  if (!svc || !project) return recorded;
+
+  const row = rows.find((r) => r.serviceId === svc.id);
+  const live = await liveContainerIdWithRuntime(runtime, {
+    service: { id: svc.id, name: svc.name },
+    projectId: dep.projectId,
+    slug: project.slug,
+    tracked: row?.containerId ?? null,
+  });
+  if (row && live && row.containerId !== live) {
+    await repos.service.updateServiceDeployment(row.id, { containerId: live }).catch(() => {});
+  }
+  return live ?? recorded;
 }
 
 /**

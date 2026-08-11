@@ -34,6 +34,7 @@ import {
   type RestorePlan,
 } from "./rollback";
 import { checkNoActiveBuild } from "./build.service";
+import { livePrimaryContainerId } from "../services/service-container";
 import { decryptEnvMap } from "../../lib/encryption";
 
 /**
@@ -522,9 +523,14 @@ export async function getDeploymentLogs(
     return buildSessions.logs as LogEntry[];
   }
 
-  const containerId = dep.containerId;
-  if (containerId) {
-    return withDeploymentRuntime(dep, (runtime) => runtime.getRuntimeLogs(containerId, tail));
+  if (dep.containerId) {
+    return withDeploymentRuntime(dep, async (runtime) => {
+      // Live, and the PRIMARY service on a compose release — `dep.containerId` is
+      // one service in dependency order, i.e. the database (#498).
+      const containerId = await livePrimaryContainerId(runtime, dep);
+      if (!containerId) throw new ForbiddenError("Deployment has no container");
+      return runtime.getRuntimeLogs(containerId, tail);
+    });
   }
 
   return [];
@@ -562,8 +568,11 @@ export async function getContainerInfo(
   if (!dep.containerId) {
     throw new ForbiddenError("Deployment has no container");
   }
-  const containerId = dep.containerId;
-  return withDeploymentRuntime(dep, (runtime) => runtime.getContainerInfo(containerId));
+  return withDeploymentRuntime(dep, async (runtime) => {
+    const containerId = await livePrimaryContainerId(runtime, dep);
+    if (!containerId) throw new ForbiddenError("Deployment has no container");
+    return runtime.getContainerInfo(containerId);
+  });
 }
 
 /**
@@ -587,8 +596,11 @@ export async function getContainerUsage(
   if (!dep.containerId) {
     throw new ForbiddenError("Deployment has no container");
   }
-  const containerId = dep.containerId;
-  return withDeploymentRuntime(dep, (runtime) => runtime.getUsage(containerId));
+  return withDeploymentRuntime(dep, async (runtime) => {
+    const containerId = await livePrimaryContainerId(runtime, dep);
+    if (!containerId) throw new ForbiddenError("Deployment has no container");
+    return runtime.getUsage(containerId);
+  });
 }
 
 export async function getBuildLogs(

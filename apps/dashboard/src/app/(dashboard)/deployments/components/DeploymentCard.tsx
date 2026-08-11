@@ -136,6 +136,7 @@ export const DeploymentCard: React.FC<DeploymentCardProps> = ({
     action_required: t.deployments.status.actionRequired,
     rejected: t.deployments.status.rejected,
     reconciling: t.deployments.status.verifying,
+    no_changes: t.deployments.status.noChanges,
   };
   const statusLabel = statusLabelMap[deployment.status] ?? t.deployments.status.pending;
 

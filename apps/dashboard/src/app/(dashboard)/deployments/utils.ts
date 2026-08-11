@@ -125,6 +125,18 @@ export const getStatusConfig = (status: string) => {
         borderColor: "border-border/50",
         label: "Canceled",
       };
+    case "no_changes":
+      // Nothing shipped because nothing had changed — a healthy outcome, so
+      // neutral rather than the warning tone a "didn't land" state gets. Kept out
+      // of `statusMap` above so it isn't folded into "canceled", which would tell
+      // the operator to redeploy something that is already current.
+      return {
+        icon: 'checkmark-72-1658234612.png',
+        color: "var(--color-neutral)",
+        bgColor: "bg-muted/60",
+        borderColor: "border-border/50",
+        label: "No changes",
+      };
     case "partial_failure":
       // Some services succeeded, others failed. Treated as a
       // deployed-with-warnings state — dashboard still shows the

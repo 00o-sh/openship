@@ -69,6 +69,7 @@
     "actionRequired": "Ação necessária",
     "rejected": "Rejeitada",
     "verifying": "A verificar",
+    "noChanges": "Sem alterações",
     "pending": "Pendente"
   },
   "serviceStatus": {

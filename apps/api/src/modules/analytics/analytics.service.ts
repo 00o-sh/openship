@@ -19,6 +19,7 @@ import { repos } from "@repo/db";
 import { NotFoundError, AppError, safeErrorMessage } from "@repo/core";
 import type { ResourceUsage } from "@repo/adapters";
 import { resolveDeploymentRuntimeForRead } from "../../lib/deployment-runtime";
+import { livePrimaryContainerId } from "../services/service-container";
 import {
   resolveProjectTrafficSources,
   fetchMgmt,
@@ -597,7 +598,10 @@ export async function getDeploymentStats(
  * Container info (status, IP, uptime) for a project's primary container.
  *
  * Genuinely single-container by nature — this describes the deployment's own
- * container, not the stack — so it is not duplicating the usage collector.
+ * container, not the stack — so it is not duplicating the usage collector. Which
+ * container that is comes from `livePrimaryContainerId`, for the same reason the
+ * usage collector was rewritten: `deployment.containerId` names one service in
+ * dependency order, so it answered for the database (#498).
  *
  * Uses the READ-ONLY resolver: building a full platform here runs
  * `detectOpenRestyPaths` plus the edge-Lua self-heal inside the provision lock,
@@ -617,7 +621,8 @@ export async function getContainerInfo(ctx: RequestContext, projectId: string) {
 
   const { runtime } = await resolveDeploymentRuntimeForRead(dep);
   try {
-    return await runtime.getContainerInfo(dep.containerId);
+    const containerId = await livePrimaryContainerId(runtime, dep);
+    return containerId ? await runtime.getContainerInfo(containerId) : null;
   } finally {
     void Promise.resolve(runtime.dispose?.()).catch(() => {});
   }

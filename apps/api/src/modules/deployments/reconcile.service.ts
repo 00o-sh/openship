@@ -23,6 +23,7 @@
 import { repos, type Deployment } from "@repo/db";
 import { safeErrorMessage } from "@repo/core";
 import { disposeRuntime, resolveDeploymentRuntime } from "../../lib/deployment-runtime";
+import { isRealContainerRef } from "../../lib/container-ref";
 import { createReachabilityProbe } from "../../lib/server-reachability";
 import { isConnectionLoss } from "../../lib/remote-state";
 
@@ -103,7 +104,7 @@ export async function reconcileDeployment(deploymentId: string): Promise<Reconci
         name: sd.serviceName ?? undefined,
         isService: true,
       }));
-    if (targets.length === 0 && dep.containerId && dep.containerId !== "compose") {
+    if (targets.length === 0 && isRealContainerRef(dep.containerId)) {
       targets.push({ rowId: dep.id, containerId: dep.containerId, name: undefined, isService: false });
     }
 

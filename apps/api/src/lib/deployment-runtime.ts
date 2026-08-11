@@ -22,6 +22,7 @@ import {
   type RuntimeMode,
 } from "@repo/core";
 import { env } from "../config";
+import { isRealContainerRef } from "./container-ref";
 import { cloudClient, getOrgCloudToken } from "./cloud/client";
 import { resolveOrgCloudUserId } from "./cloud/transport";
 import { platform } from "./controller-helpers";
@@ -109,6 +110,13 @@ export interface DeploymentMeta {
    * agree on one path.
    */
   staticServeOutputDir?: string;
+  /** This deploy carried every service forward and shipped nothing, so it never
+   *  became the active release (see `onNoChanges`). Mirrors the row's
+   *  `no_changes` status for clients reading meta rather than status. */
+  noChanges?: boolean;
+  /** Compose roll-up. Loosely typed on purpose — the pipeline writes a wider
+   *  object than any one reader needs. */
+  composeDeployment?: { warningMessage?: string } & Record<string, unknown>;
 }
 
 /**
@@ -791,7 +799,9 @@ export async function deploymentContainerIds(
   const rows = await repos.service.listByDeployment(dep.id);
   const serviceIds = [...new Set(rows.map((r) => r.containerId).filter((id): id is string => !!id))];
   if (serviceIds.length > 0) return serviceIds;
-  return dep.containerId ? [dep.containerId] : [];
+  // The compose sentinel is a marker, not a container: returning it made a pause
+  // report success having stopped nothing (docker 404 → `isAbsent` → swallowed).
+  return isRealContainerRef(dep.containerId) ? [dep.containerId] : [];
 }
 
 /**

@@ -71,7 +71,7 @@ export interface LifecycleContext {
    * through onFailure — that inverts a working deploy and tears down its
    * containers.
    */
-  settled?: "ready" | "failed" | "cancelled" | "reconciling";
+  settled?: "ready" | "failed" | "cancelled" | "reconciling" | "no_changes";
 }
 
 /** Build the persistable log array. Collapsing/sanitizing it is observability
@@ -303,6 +303,78 @@ export async function onReconciling(
     warningMessage:
       result.warningMessage ?? "Connection lost during deploy — verifying remote state.",
   });
+}
+
+/**
+ * NO-OP completion: a compose deploy that carried EVERY service forward, so it
+ * built, created and probed nothing (`composeDeployMadeNoChanges`).
+ *
+ * Like onReconciling and unlike onSuccess: does NOT advance the active pointer and
+ * does NOT record a container. The CURRENT active deployment still owns the live
+ * containers and the image they run; this row owns nothing, so promoting it would
+ * make an empty release the newest `ready` one and a rollback target.
+ *
+ * Tears nothing down, deliberately: `onFailure` and `onCancelled` both destroy the
+ * deployment's service containers, and the containers listed under THIS row are
+ * the ones still serving.
+ */
+export async function onNoChanges(
+  ctx: LifecycleContext,
+  result: { warningMessage?: string; durationMs?: number },
+): Promise<void> {
+  const { project, buildSessionId, dep } = ctx;
+
+  const collapsed = collectLogs(ctx);
+  const reason =
+    result.warningMessage ??
+    "No changes to deploy — every service was already up to date, so the current release stayed live.";
+  // Under `composeDeployment.warningMessage` because that is where the build-status
+  // refresh path reads a persisted deploy note from; `noChanges` is the flag
+  // clients branch on. Sanitized like onSuccess's meta — a NUL in the reason must
+  // not fail the write.
+  const previousMeta = (dep.meta as DeploymentMeta | null) ?? {};
+  const mergedMeta = sanitizeStorableStrings({
+    ...previousMeta,
+    noChanges: true,
+    composeDeployment: { ...(previousMeta.composeDeployment ?? {}), warningMessage: reason },
+  });
+  await recordOutcome(dep.id, "no_changes", { errorMessage: null, meta: mergedMeta }, ["meta"]);
+  ctx.settled = "no_changes";
+  // The SSE layer has no third terminal state, so the stream closes "ready" and
+  // the dashboard reads `no_changes` off the row (same split as onReconciling).
+  await finishSession(buildSessionId, "ready", result.durationMs ?? 0, collapsed);
+  sessionManager.updateStatus(dep.id, "ready", { warningMessage: reason });
+
+  notification.emit({
+    organizationId: dep.organizationId,
+    eventType: "deployment.no_changes",
+    resourceType: "deployment",
+    resourceId: dep.id,
+    payload: {
+      projectName: project.name,
+      branch: dep.branch,
+      commitSha: dep.commitSha,
+      durationMs: result.durationMs,
+      message: reason,
+    },
+  });
+
+  audit.recordAsync(
+    { organizationId: dep.organizationId, actorUserId: null, source: "system" },
+    {
+      eventType: "deployment.no_changes",
+      resourceType: "deployment",
+      resourceId: dep.id,
+      before: { status: dep.status },
+      after: {
+        status: "no_changes",
+        projectId: project.id,
+        branch: dep.branch,
+        commitSha: dep.commitSha,
+        durationMs: result.durationMs,
+      },
+    },
+  );
 }
 
 export async function onFailure(

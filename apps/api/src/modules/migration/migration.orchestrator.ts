@@ -236,6 +236,10 @@ const TERMINAL_DEPLOY = new Set([
   "failed",
   "action_required",
   "cancelled",
+  // A no-op settle, for the poll only. The `status !== "ready"` abort downstream is
+  // still right for a migration — a move must actually deploy — and unreachable in
+  // practice, since moveData stops the scanned containers so nothing can be carried.
+  "no_changes",
 ]);
 /** How many volumes move concurrently — a few in flight without saturating one SSH link. */
 const TRANSFER_CONCURRENCY = 3;

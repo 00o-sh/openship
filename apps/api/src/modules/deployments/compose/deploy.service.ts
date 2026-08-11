@@ -67,7 +67,11 @@ import {
   toRoutedDomainInputs,
   type PlannedRouteDomain,
 } from "../../../lib/routing-domains";
-import { resolveServiceEndpointUrls, resolveServicePublicEndpoints } from "../../../lib/public-endpoints";
+import {
+  pickPrimaryServiceId,
+  resolveServiceEndpointUrls,
+  resolveServicePublicEndpoints,
+} from "../../../lib/public-endpoints";
 import { ensureManagedEdgeProxy } from "../../../lib/managed-edge-proxy";
 import { ensureRoutingReady } from "../../../lib/edge-reconcile";
 import * as sessionManager from "../session-manager";
@@ -84,6 +88,7 @@ import {
   hostChannelDeployNotice,
   type PortCheckResult,
 } from "../../../lib/deployment-runtime";
+import { isRealContainerRef } from "../../../lib/container-ref";
 import { resolveServicePort } from "./domain-helpers";
 import { compileProjectRoutingFields } from "../../../lib/project-routing-fields";
 import { buildCompositeRegistration, buildDomainFanoutRegistrations } from "./composite-route";
@@ -98,13 +103,28 @@ export interface ComposeDeployResult {
   status: "ready" | "failed" | "reconciling";
   summary: {
     total: number;
+    /** Services that came up — INCLUDING the ones merely carried forward. */
     successful: number;
+    /** Services this pass actually (re)created or (re)served. Derived from the
+     *  per-service `carried` flag rather than counted alongside `successful`, so a
+     *  future success site can't forget to increment it. `deployed === 0` with
+     *  `successful > 0` is the all-carried no-op (`composeDeployMadeNoChanges`). */
+    deployed: number;
     failed: number;
     /** Services whose container started but whose outcome is unverified
      *  (connection lost mid-deploy). Neither success nor failure yet. */
     indeterminate: number;
+    /** This pass changed state OUTSIDE the per-service deploy branch — it reaped a
+     *  de-listed container or persisted env. Keeps such a run from being read as a
+     *  no-op just because every surviving service was carried. */
+    mutated: boolean;
     failedServices: string[];
   };
+  /** The container the project's canonical route points at — the primary service's
+   *  (`pickPrimaryServiceId`), not `services.find((s) => s.containerId)`, which
+   *  follows topoSort order and so named the database an app `dependsOn` (#498).
+   *  Undefined when no service came up with a container. */
+  primaryContainerId?: string;
   services: Array<{
     serviceId: string;
     serviceName: string;
@@ -113,6 +133,8 @@ export interface ComposeDeployResult {
     ip?: string;
     hostPort?: number;
     error?: string;
+    /** Kept running exactly as-is: nothing built, created, or port-probed. */
+    carried?: true;
     /**
      * Host directory this service's built files live in — set INSTEAD of
      * containerId/ip/hostPort for a self-hosted static sub-app, which the edge
@@ -130,6 +152,31 @@ export interface ComposeDeployResult {
   publicUrl?: string;
   /** Advisory per-service port-probe results (exposed services only). */
   portChecks?: PortCheckResult[];
+}
+
+/**
+ * True when this pass created, rebuilt, re-served, reaped and persisted NOTHING —
+ * every service was carried forward. Such a run owns no containers and no image of
+ * its own, so promoting it to the live release points the project at an empty
+ * record (#498).
+ *
+ * Gated POSITIVELY on `ready` + a non-empty service set rather than on
+ * `failed === 0`: the prepare-failure return reports `status: "failed"` with
+ * `failed === 0`, and the no-services return reports zeroes for everything, so a
+ * negative test would reclassify both as "no changes".
+ *
+ * Lives here rather than inside `deployComposeServices` because
+ * `provisionServiceContainer` calls that directly and needs a genuine failure to
+ * keep throwing — only the pipeline settles a deployment row.
+ */
+export function composeDeployMadeNoChanges(result: ComposeDeployResult): boolean {
+  return (
+    result.status === "ready" &&
+    result.summary.total > 0 &&
+    result.summary.deployed === 0 &&
+    result.summary.failed === 0 &&
+    !result.summary.mutated
+  );
 }
 
 /**
@@ -753,8 +800,10 @@ export async function deployComposeServices(
       summary: {
         total: 0,
         successful: 0,
+        deployed: 0,
         failed: 0,
         indeterminate: 0,
+        mutated: false,
         failedServices: [],
       },
       services: [],
@@ -922,6 +971,12 @@ export async function deployComposeServices(
   );
   const isExternalUnchanged = (svc: Service): boolean => {
     if (dep.trigger === "update") return false; // update = force re-pull + recreate every image service
+    // A rollback REPLAYS a release: its frozen env (`frozenEnvWins` above) and its
+    // pinned images only reach the container by recreating it. Carrying an
+    // external forward instead applies neither, so the restore reports success
+    // having changed nothing — the same silent-no-op `newerThanRestoredRelease`
+    // guards against from the other direction.
+    if (dep.trigger === "rollback") return false;
     if (opts?.targetServiceIds) return false; // smart subset already carries non-targets forward
     if (!carryAnchor) return false; // never deployed → deploy it
     if (svc.build || !svc.image) return false; // must be image-only (external); buildables always rebuild
@@ -929,7 +984,12 @@ export async function deployComposeServices(
     if (carryProjectEnvChanged || carryEnvChangedServiceIds.has(svc.id)) return false; // env changed
     const prev = previousByServiceId.get(svc.id);
     if (!prev?.containerId) return false; // nothing running to carry
-    if (prev.imageRef && prev.imageRef !== svc.image) return false; // image tag changed
+    // Against the image this deploy INTENDS, not the service row's: a pinned ref
+    // (rollback, `--image-version`) arrives via `builtImages` and is first read
+    // past the carry `continue`, so comparing `svc.image` carried a service whose
+    // intended image differed from the running one.
+    const intended = opts?.builtImages?.get(svc.id) ?? svc.image;
+    if (prev.imageRef && prev.imageRef !== intended) return false;
     return true;
   };
 
@@ -1006,6 +1066,9 @@ export async function deployComposeServices(
   // never fatal). Aggregated into the deployment's routing action-required signal.
   const composeRouteWarnings: string[] = [];
   let successful = 0;
+  /** Set by the state this pass changed OUTSIDE the per-service deploy branch — a
+   *  reaped container, persisted env. See `ComposeDeployResult.summary.mutated`. */
+  let mutated = false;
   let firstPublicUrl: string | undefined;
   const seenRouteDomains = new Set<string>();
   const unavailableServiceNames = new Set<string>();
@@ -1177,6 +1240,28 @@ export async function deployComposeServices(
           hostPort: carriedHostPort,
           ip: carriedIp,
         });
+        // The #506 correction above has to land on the ACTIVE deployment's row too:
+        // that is the row the next deploy reads (`previousByServiceId`), and an
+        // all-carried pass never becomes active — so writing it only under `dep.id`
+        // discards the fix and the stale binding comes back next time.
+        if (
+          project.activeDeploymentId &&
+          project.activeDeploymentId !== dep.id &&
+          (carriedIp !== (carried.ip ?? null) || carriedHostPort !== (carried.hostPort ?? null))
+        ) {
+          await repos.service
+            .upsertServiceDeployment({
+              deploymentId: project.activeDeploymentId,
+              serviceId: svc.id,
+              serviceName: svc.name,
+              containerId: carried.containerId,
+              status: "success",
+              imageRef: carried.imageRef ?? null,
+              hostPort: carriedHostPort,
+              ip: carriedIp,
+            })
+            .catch(() => {});
+        }
         // Decoupled single-service add on a mesh runtime (cloud): this peer is
         // carried (not redeployed), so it's absent from the group's in-memory
         // mesh state. Seed it so the finalize pass rewrites the FULL mesh and
@@ -1197,6 +1282,7 @@ export async function deployComposeServices(
           status: carried.status,
           ip: carriedIp ?? undefined,
           hostPort: carriedHostPort ?? undefined,
+          carried: true,
         });
         // A carried-forward container is a valid namespace provider — it's running,
         // which is the only thing a dependent needs from it.
@@ -2235,6 +2321,7 @@ export async function deployComposeServices(
             [],
             service.id,
           );
+          mutated = true; // persisted env — this pass is not a no-op
           logger.log(`Prepared ${step.capture} → ${step.persistAs.key}\n`, "info");
         }
       } catch (err) {
@@ -2253,6 +2340,30 @@ export async function deployComposeServices(
       sessionManager.broadcastInstallPhase(dep.id, { id: "app-setup", status: "done" });
     }
   }
+  // Services this pass actually stood up, derived from the results rather than
+  // counted next to `successful` — a future success branch that forgets to
+  // increment would otherwise re-open #498 silently.
+  const deployed = results.filter((r) => r.status !== "failed" && !r.carried).length;
+
+  // The container a project-level question resolves to, picked the same way the
+  // access URL is. The fallbacks cover a primary with no container of its own (a
+  // static-served app, a failed one): any other exposed service, then the
+  // topo-first row — for a worker-only stack there is no better answer, and a
+  // wrong container still beats the sentinel's guaranteed 404.
+  const primaryContainerId = await (async () => {
+    const withContainer = results.filter((r) => r.containerId);
+    if (withContainer.length === 0) return undefined;
+    const domainRows = needsDomainMap
+      ? [...domainByHostname.values()]
+      : await repos.domain.listByProject(project.id).catch(() => []);
+    const primaryId = pickPrimaryServiceId(ordered, domainRows);
+    return (
+      withContainer.find((r) => r.serviceId === primaryId)?.containerId ??
+      withContainer.find((r) => ordered.find((s) => s.id === r.serviceId)?.exposed)?.containerId ??
+      withContainer[0].containerId
+    );
+  })();
+
   if (prepareFailure) {
     sessionManager.broadcastInstallPhase(dep.id, { id: "app-setup", status: "failed" });
     const failedNow = results.filter((r) => r.status === "failed");
@@ -2262,11 +2373,14 @@ export async function deployComposeServices(
       summary: {
         total: ordered.length,
         successful,
+        deployed,
         failed: failedNow.length,
         indeterminate: 0,
+        mutated,
         failedServices: failedNow.map((r) => r.serviceName),
       },
       services: results,
+      primaryContainerId,
       error: prepareFailure,
       publicUrl: firstPublicUrl,
       portChecks,
@@ -2421,6 +2535,7 @@ export async function deployComposeServices(
       if (!previous.containerId || enabledServiceIds.has(previous.serviceId)) continue;
       try {
         await runtime.destroy(previous.containerId);
+        mutated = true; // reaped a container — this pass is not a no-op
         logger.log(`Stopped disabled service container (${previous.containerId.slice(0, 12)}).\n`);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unknown error";
@@ -2452,13 +2567,13 @@ export async function deployComposeServices(
       previousServiceDeps.map((row) => row.containerId).filter((id): id is string => !!id),
     );
     if (
-      prevContainerId &&
-      prevContainerId !== "compose" &&
+      isRealContainerRef(prevContainerId) &&
       !prevWasServices &&
       !handledContainerIds.has(prevContainerId)
     ) {
       try {
         await runtime.destroy(prevContainerId);
+        mutated = true; // reaped a container — this pass is not a no-op
         logger.log(`Stopped previous single-app container (${prevContainerId.slice(0, 12)}).\n`);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unknown error";
@@ -2501,11 +2616,14 @@ export async function deployComposeServices(
       summary: {
         total: ordered.length,
         successful,
+        deployed,
         failed: failed.length,
         indeterminate: indeterminate.length,
+        mutated,
         failedServices: failedNames,
       },
       services: results,
+      primaryContainerId,
       warning: `Connection lost — verifying ${indeterminate.length} service(s): ${names}`,
       publicUrl: firstPublicUrl,
       portChecks,
@@ -2534,11 +2652,14 @@ export async function deployComposeServices(
     summary: {
       total: ordered.length,
       successful,
+      deployed,
       failed: failed.length,
       indeterminate: 0,
+      mutated,
       failedServices: failedNames,
     },
     services: results,
+    primaryContainerId,
     warning,
     ...(composeRouteWarnings.length ? { routeWarnings: composeRouteWarnings } : {}),
     error: successful > 0 ? undefined : (firstFailure ?? "No services deployed successfully"),

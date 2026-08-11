@@ -49,6 +49,7 @@ import {
   resolveEffectiveTarget,
   hostChannelDeployNotice,
 } from "../../lib/deployment-runtime";
+import { isRealContainerRef } from "../../lib/container-ref";
 import { ensureRoutingReady } from "../../lib/edge-reconcile";
 import { sshManager } from "../../lib/ssh-manager";
 import {
@@ -236,7 +237,7 @@ async function markDeploymentFailedFromOutside(deploymentId: string, error: unkn
   try {
     const dep = await repos.deployment.findById(deploymentId).catch(() => null);
     if (!dep) return;
-    if (["failed", "ready", "cancelled", "action_required"].includes(dep.status)) {
+    if (["failed", "ready", "cancelled", "action_required", "no_changes"].includes(dep.status)) {
       // Inner onFailure already ran (or the deploy somehow succeeded). Nothing to do.
       // `action_required` counts as "already ran": onFailure wrote it deliberately
       // along with the blocker's code + details, and this function's blind
@@ -1884,7 +1885,7 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
       .listByDeployment(prevDep.id)
       .catch(() => []);
     for (const sd of prevServiceDeps) {
-      if (!sd.containerId || sd.containerId === "compose" || sd.containerId === prevDep.containerId) {
+      if (!isRealContainerRef(sd.containerId) || sd.containerId === prevDep.containerId) {
         continue;
       }
       try {
