@@ -14,7 +14,17 @@
  *  and made a project pause report success having stopped nothing. */
 export const COMPOSE_SENTINEL = "compose";
 
-/** True when a stored reference names something a runtime can actually act on. */
+/** The reference, trimmed, when it names something a runtime can actually act on
+ *  — else null. Trims because these come from stored columns and a whitespace-only
+ *  value is as unusable as an empty one. */
+export function usableRef(ref: string | null | undefined): string | null {
+  const trimmed = ref?.trim();
+  if (!trimmed || trimmed === COMPOSE_SENTINEL) return null;
+  return trimmed;
+}
+
+/** `usableRef` as a type guard, for the call sites that only need the question
+ *  answered and already hold a clean value. */
 export function isRealContainerRef(ref: string | null | undefined): ref is string {
-  return !!ref && ref !== COMPOSE_SENTINEL;
+  return usableRef(ref) !== null;
 }
