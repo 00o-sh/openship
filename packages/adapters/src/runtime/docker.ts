@@ -117,7 +117,7 @@ import type {
   DockerNetworkInfo,
   ContainerLifecycleEvent,
 } from "./types";
-import { BuildLogger, parseLogLevel, sq, assembleGitClone } from "./build-pipeline";
+import { BuildCancelledError, BuildLogger, parseLogLevel, sq, assembleGitClone } from "./build-pipeline";
 import { materializeGitSsh, shellGitSshWriter, type GitSshMaterial } from "./git-ssh-material";
 import { githubTarballUrl, downloadTarballOnRemote } from "./source-tarball";
 import { scopeVolumeBinds, isHostPathSource } from "./volume-namespace";
@@ -163,6 +163,15 @@ const RESTART_POLICIES: Record<string, { Name: string; MaximumRetryCount: number
 };
 
 const DOCKER_BUILD_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * A deployment build and its cancellation request may resolve separate
+ * DockerRuntime instances. Build session ids are process-wide, so cancellation
+ * state must be process-wide too or the cancelling runtime cannot reach the
+ * builder's controller.
+ */
+const activeDockerBuilds = new Map<string, AbortController>();
+const pendingDockerBuildCancellations = new Set<string>();
 
 /** Last-resort cap for a one-shot in-container exec. Every caller passes its own
  *  (5s probe / 15s prepare step); this only guards a stream that connects and
@@ -831,7 +840,6 @@ export class DockerRuntime implements RuntimeAdapter {
   readonly transport: DockerTransport;
   private readonly systemManager: DockerSystemManager | null;
   private readonly provisionLock?: ProvisionLock;
-
   private constructor(
     opts?: DockerConnectionOptions,
     systemManager?: DockerSystemManager | null,
@@ -1160,6 +1168,7 @@ export class DockerRuntime implements RuntimeAdapter {
     dockerfileName: string,
     tag: string,
     log: BuildLogger,
+    signal?: AbortSignal,
   ): Promise<void> {
     const executor = this.connectionOptions?.executor;
     if (!executor) throw new Error("SSH build path requires an executor on connectionOptions");
@@ -1197,12 +1206,21 @@ export class DockerRuntime implements RuntimeAdapter {
     log.log("─── docker build output ───");
     this.emitDockerStep(log, "install", "running", "Running install inside container (docker build)");
 
-    const { code } = await executor.streamExec(buildCmd, (entry) => {
-      // Pass docker's real output straight through.
-      log.log(entry.message, parseLogLevel(entry.message));
-    });
+    const { code } = await executor.streamExec(
+      buildCmd,
+      (entry) => {
+        // Pass docker's real output straight through.
+        log.log(entry.message, parseLogLevel(entry.message));
+      },
+      { signal },
+    );
 
     log.log("─── end docker build output ───");
+    // SshExecutor intentionally resolves an aborted stream so browser log
+    // teardown is not reported as a transport failure. A deployment cancel is
+    // different: surface it as a cancelled BuildResult instead of continuing
+    // through image verification and deploy.
+    if (signal?.aborted) throw new BuildCancelledError();
     if (code !== 0) throw new Error(`docker build exited with code ${code}`);
     this.emitDockerStep(log, "install", "completed", "Image build finished");
   }
@@ -1364,11 +1382,19 @@ export class DockerRuntime implements RuntimeAdapter {
     buildContext: Awaited<ReturnType<typeof createDockerBuildContext>>,
     tag: string,
     log: BuildLogger,
+    signal?: AbortSignal,
   ): Promise<void> {
     const remoteContextDir = `/tmp/openship-build-${config.sessionId}`;
     try {
       await this.transferBuildContext(buildContext.contextDir, remoteContextDir, log);
-      await this.buildImageOnRemote(config, remoteContextDir, buildContext.dockerfileName, tag, log);
+      await this.buildImageOnRemote(
+        config,
+        remoteContextDir,
+        buildContext.dockerfileName,
+        tag,
+        log,
+        signal,
+      );
     } finally {
       // Always clean up the remote context - even on failure. Don't await - if
       // cleanup fails we still want the build result.
@@ -1547,8 +1573,19 @@ export class DockerRuntime implements RuntimeAdapter {
     const log = logger ?? new BuildLogger();
     const startTime = Date.now();
     const tag = this.imageTag(config.slug, config.sessionId);
+    const abort = new AbortController();
+    if (pendingDockerBuildCancellations.delete(config.sessionId)) abort.abort();
+    activeDockerBuilds.set(config.sessionId, abort);
 
     try {
+      if (abort.signal.aborted) {
+        log.step("build", "failed", "Docker build cancelled");
+        return {
+          sessionId: config.sessionId,
+          status: "cancelled",
+          durationMs: Date.now() - startTime,
+        };
+      }
       log.log(`Build strategy: docker (${this.transport.description})\n`);
 
       // Ensure the host is provisioned for Docker, but avoid doing a second
@@ -1571,6 +1608,7 @@ export class DockerRuntime implements RuntimeAdapter {
         try {
           this.emitDockerStep(log, "clone", "running", "Cloning source on the server...");
           await this.cloneSourceOnRemote(config, remoteContextDir, log);
+          if (abort.signal.aborted) throw new BuildCancelledError();
           this.emitDockerStep(log, "clone", "completed", "Source cloned on the server");
           const dockerfileName = await this.resolveRemoteDockerfile(
             config,
@@ -1578,7 +1616,14 @@ export class DockerRuntime implements RuntimeAdapter {
             "Dockerfile.openship",
             config.stack === "docker",
           );
-          await this.buildImageOnRemote(config, remoteContextDir, dockerfileName, tag, log);
+          await this.buildImageOnRemote(
+            config,
+            remoteContextDir,
+            dockerfileName,
+            tag,
+            log,
+            abort.signal,
+          );
         } finally {
           sshExecutor.exec(`rm -rf ${sq(remoteContextDir)}`).catch(() => { /* best effort */ });
         }
@@ -1595,6 +1640,7 @@ export class DockerRuntime implements RuntimeAdapter {
         requireRepositoryDockerfile: config.stack === "docker",
         onLog: log.callback,
       });
+      if (abort.signal.aborted) throw new BuildCancelledError();
 
       // Report the size of the context so users know what they're paying
       // for over the SSH wire. Failure here is non-fatal - the build can
@@ -1646,7 +1692,7 @@ export class DockerRuntime implements RuntimeAdapter {
         // per-3s `~X% · Y MB sent · Z MB/s` progress), then run native
         // `docker build` on the remote so its real stdout/stderr streams
         // back uninterpreted.
-        await this.buildViaSshTarPipe(config, buildContext, tag, log);
+        await this.buildViaSshTarPipe(config, buildContext, tag, log, abort.signal);
       } else {
         // ── Dockerode path (local socket, TCP, or SSH without executor) ─
         await this.buildViaDockerode(config, buildContext, tag, log);
@@ -1660,9 +1706,21 @@ export class DockerRuntime implements RuntimeAdapter {
       const durationMs = Date.now() - startTime;
       return { sessionId: config.sessionId, status: "deploying", imageRef: tag, durationMs };
     } catch (err) {
+      if (abort.signal.aborted || err instanceof BuildCancelledError) {
+        log.step("build", "failed", "Docker build cancelled");
+        return {
+          sessionId: config.sessionId,
+          status: "cancelled",
+          durationMs: Date.now() - startTime,
+        };
+      }
       const msg = safeErrorMessage(err);
       log.step("build", "failed", `Docker build failed: ${msg}`);
       return { sessionId: config.sessionId, status: "failed", durationMs: Date.now() - startTime, errorMessage: `Docker build failed: ${msg}` };
+    } finally {
+      if (activeDockerBuilds.get(config.sessionId) === abort) {
+        activeDockerBuilds.delete(config.sessionId);
+      }
     }
   }
 
@@ -2216,6 +2274,28 @@ export class DockerRuntime implements RuntimeAdapter {
   }
 
   async cancelBuild(sessionId: string): Promise<void> {
+    const abort = activeDockerBuilds.get(sessionId);
+    if (abort) {
+      abort.abort();
+    } else {
+      pendingDockerBuildCancellations.add(sessionId);
+    }
+
+    // Closing an SSH channel normally sends SIGHUP to its remote shell, but a
+    // host-side `docker build` may outlive that channel while the daemon keeps
+    // working. Kill the command whose cwd is this session's private context,
+    // mirroring BareRuntime's remote-build cancellation. This is a no-op for
+    // local/TCP runtimes and when the command has already exited.
+    const executor =
+      this.transport.kind === "ssh" ? this.connectionOptions?.executor : undefined;
+    if (executor) {
+      const dir = sq(`/tmp/openship-build-${sessionId}`);
+      const scan = (signal: string) =>
+        `for p in /proc/[0-9]*; do c=$(readlink "$p/cwd" 2>/dev/null); ` +
+        `case "$c" in ${dir}|${dir}/*) kill -${signal} "\${p##*/}" 2>/dev/null || true;; esac; done`;
+      await executor.exec(`${scan("TERM")}; sleep 2; ${scan("KILL")}`).catch(() => {});
+    }
+
     // Attempt to find and kill the build container by label
     const containers = await this.docker.listContainers({
       all: true,
