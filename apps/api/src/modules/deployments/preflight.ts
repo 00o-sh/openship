@@ -975,14 +975,20 @@ function checkConfig(snapshot: DeploymentConfigSnapshot, opts?: PreflightOptions
   // Mirrors the multi-service branch's dockerfile/build check. #231
   if (snapshot.framework !== "docker" && !snapshot.buildImage) missing.push("build image");
 
-  if (snapshot.hasBuild && !snapshot.installCommand) {
+  // A single-project Dockerfile owns install, build, and process startup. Those
+  // buildpack commands are deliberately empty after repository/folder detection
+  // and are not consumed by the Docker pipeline. The workload-specific checks
+  // below still enforce a port for web apps.
+  const dockerOwnsBuild = snapshot.framework === "docker";
+  if (!dockerOwnsBuild && snapshot.hasBuild && !snapshot.installCommand) {
     missing.push("install command");
   }
 
   const cls = snapshotToClass(snapshot);
   if (cls.workload === "web") {
     // A web app is reached on a port and must declare how it starts and listens.
-    if (!snapshot.startCommand) missing.push("start command");
+    // Dockerfile apps inherit their process command from the image.
+    if (!dockerOwnsBuild && !snapshot.startCommand) missing.push("start command");
     if (!snapshot.port) missing.push("port");
   } else if (cls.workload === "worker") {
     // A worker is a portless long-running container (#538-B): it needs a command

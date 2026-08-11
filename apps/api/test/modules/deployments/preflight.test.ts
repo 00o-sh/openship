@@ -187,6 +187,66 @@ describe("runPreflightChecks", () => {
     expect(result.checks.some((check) => check.message?.includes("start command"))).toBe(false);
   });
 
+  it("does not require buildpack commands for a single Dockerfile web project", async () => {
+    const result = await runPreflightChecks(
+      {
+        repoUrl: "",
+        branch: "",
+        sourceStaged: true,
+        framework: "docker",
+        buildImage: "ubuntu:22.04",
+        installCommand: "",
+        buildCommand: "",
+        startCommand: "",
+        port: 8080,
+        hasBuild: true,
+        hasServer: true,
+        deployTarget: "server",
+        organizationId: "org-1",
+      } as any,
+      {
+        ctx: { userId: "user-1", organizationId: "org-1" } as any,
+        buildStrategy: "local",
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.checks).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "config", status: "pass" })]),
+    );
+    expect(result.checks.some((check) => check.message?.includes("install command"))).toBe(false);
+    expect(result.checks.some((check) => check.message?.includes("start command"))).toBe(false);
+  });
+
+  it("still requires a port for a single Dockerfile web project", async () => {
+    const result = await runPreflightChecks(
+      {
+        repoUrl: "",
+        branch: "",
+        sourceStaged: true,
+        framework: "docker",
+        installCommand: "",
+        buildCommand: "",
+        startCommand: "",
+        port: null,
+        hasBuild: true,
+        hasServer: true,
+        deployTarget: "server",
+        organizationId: "org-1",
+      } as any,
+      {
+        ctx: { userId: "user-1", organizationId: "org-1" } as any,
+        buildStrategy: "local",
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    const config = result.checks.find((check) => check.id === "config");
+    expect(config?.message).toContain("port");
+    expect(config?.message).not.toContain("install command");
+    expect(config?.message).not.toContain("start command");
+  });
+
   it("warns instead of failing on a monorepo sub-app that has never been deployed and has no commands", async () => {
     const result = await runPreflightChecks(
       {
