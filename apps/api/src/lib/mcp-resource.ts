@@ -85,6 +85,64 @@ export function canonicalMcpResource(origin: string): string {
   return `${origin.replace(/\/+$/, "")}${MCP_RESOURCE_PATH}`;
 }
 
+/** Swap an absolute http(s) URL's origin for `origin`, keeping path/query/hash.
+ *  A bare-origin value (pathname `/`) stays bare (no trailing slash). Anything
+ *  that isn't an absolute http(s) URL passes through untouched. */
+function rewriteUrlOrigin(value: string, origin: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return value;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return value;
+  const path = url.pathname === "/" ? "" : url.pathname;
+  return `${origin}${path}${url.search}${url.hash}`;
+}
+
+/** Recursive half of `rewriteMetadataOrigin`. Input is always `JSON.parse`
+ *  output, so only plain objects / arrays / scalars occur. */
+function rewriteNode(node: unknown, origin: string): unknown {
+  if (typeof node === "string") return rewriteUrlOrigin(node, origin);
+  if (Array.isArray(node)) return node.map((item) => rewriteNode(item, origin));
+  if (node !== null && typeof node === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(node)) out[key] = rewriteNode(value, origin);
+    return out;
+  }
+  return node;
+}
+
+/**
+ * Re-point every absolute http(s) URL in a discovery-metadata document onto
+ * `origin`, at ANY depth.
+ *
+ * Better Auth builds both MCP discovery documents from its STATIC baseURL —
+ * materialised at startup with no request in scope. On a box whose API container
+ * has no OPENSHIP_PUBLIC_URL that origin is the internal upstream
+ * (`http://api:4000`), so the advertised authorize/token endpoints name a host
+ * the external OAuth client can't reach (#543). Rewriting onto the origin the
+ * request actually arrived on lines discovery up with the request-scoped
+ * WWW-Authenticate hint, our own path-aware protected-resource metadata, and the
+ * `iss` the token handler already stamps — one reachable host end to end.
+ *
+ * The rule is one invariant applied uniformly: a string that parses as an
+ * absolute http(s) URL is re-pointed, anything else is returned as-is. That is
+ * what makes a blind full-document walk safe — every non-URL value in these
+ * documents (`scopes_supported`, `claims_supported`, the `urn:` values in
+ * `acr_values_supported`) fails the parse-or-protocol check and passes through
+ * untouched. Walking everything rather than the fields we know about today is
+ * deliberate: `authorization_servers` holds its URL inside an ARRAY, and the
+ * plugin spreads caller-supplied `options.metadata` into the document, so a
+ * top-level-strings-only pass would silently miss both.
+ */
+export function rewriteMetadataOrigin<T extends Record<string, unknown>>(
+  metadata: T,
+  origin: string,
+): T {
+  return rewriteNode(metadata, origin.replace(/\/+$/, "")) as T;
+}
+
 /**
  * Every resource identifier that names this instance's MCP endpoint, canonical
  * first. The bare origin is included as a LEGACY value: it is what the root

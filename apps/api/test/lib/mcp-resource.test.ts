@@ -10,6 +10,7 @@ import {
   protectedResourceMetadataUrl,
   publicRequestUrl,
   resolveTokenAudience,
+  rewriteMetadataOrigin,
 } from "../../src/lib/mcp-resource";
 
 /**
@@ -115,6 +116,130 @@ describe("protected resource metadata", () => {
     expect(protectedResourceMetadataUrl(ORIGIN, MCP_RESOURCE_PATH)).toBe(
       `${ORIGIN}/.well-known/oauth-protected-resource/api/mcp`,
     );
+  });
+});
+
+describe("rewriteMetadataOrigin", () => {
+  /**
+   * #543: Better Auth builds this document from its static baseURL, which on a
+   * box whose API container has no OPENSHIP_PUBLIC_URL is the internal
+   * `http://api:4000`. The advertised authorize/token endpoints then name a
+   * host the external OAuth client can't reach. Re-point the whole document at
+   * the request's public origin.
+   */
+  const INTERNAL = "http://api:4000";
+
+  /**
+   * Mirrors better-auth's `getMCPProviderMetadata` field-for-field (plugins/mcp
+   * — v1.5.4). Kept faithful on purpose: the "never leaks" assertion below is
+   * only load-bearing if the fixture carries every URL the real document does.
+   */
+  const metadata = () => ({
+    issuer: INTERNAL,
+    authorization_endpoint: `${INTERNAL}/api/auth/mcp/authorize`,
+    token_endpoint: `${INTERNAL}/api/auth/mcp/token`,
+    userinfo_endpoint: `${INTERNAL}/api/auth/mcp/userinfo`,
+    jwks_uri: `${INTERNAL}/api/auth/mcp/jwks`,
+    registration_endpoint: `${INTERNAL}/api/auth/mcp/register`,
+    scopes_supported: ["openid", "profile", "email", "offline_access"],
+    response_types_supported: ["code"],
+    response_modes_supported: ["query"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
+    acr_values_supported: ["urn:mace:incommon:iap:silver", "urn:mace:incommon:iap:bronze"],
+    subject_types_supported: ["public"],
+    id_token_signing_alg_values_supported: ["RS256", "none"],
+    code_challenge_methods_supported: ["S256"],
+  });
+
+  /** better-auth's `getMCPProtectedResourceMetadata` — note the URL nested in an ARRAY. */
+  const protectedResource = () => ({
+    resource: INTERNAL,
+    authorization_servers: [INTERNAL],
+    jwks_uri: `${INTERNAL}/api/auth/mcp/jwks`,
+    scopes_supported: ["openid", "profile", "email", "offline_access"],
+    bearer_methods_supported: ["header"],
+    resource_signing_alg_values_supported: ["RS256", "none"],
+  });
+
+  it("re-points issuer + every endpoint URL onto the public origin, keeping paths", () => {
+    const doc = rewriteMetadataOrigin(metadata(), ORIGIN);
+    expect(doc.issuer).toBe(ORIGIN);
+    expect(doc.authorization_endpoint).toBe(`${ORIGIN}/api/auth/mcp/authorize`);
+    expect(doc.token_endpoint).toBe(`${ORIGIN}/api/auth/mcp/token`);
+    expect(doc.userinfo_endpoint).toBe(`${ORIGIN}/api/auth/mcp/userinfo`);
+    expect(doc.registration_endpoint).toBe(`${ORIGIN}/api/auth/mcp/register`);
+    expect(doc.jwks_uri).toBe(`${ORIGIN}/api/auth/mcp/jwks`);
+  });
+
+  /**
+   * `authorization_servers` is the field a top-level-strings-only pass misses:
+   * its URL lives inside an array. A client that read the internal origin here
+   * would echo it back as `resource=` and get `invalid_target` from the token
+   * handler, which validates against the PUBLIC origin's resources.
+   */
+  it("re-points a URL nested inside an array (authorization_servers)", () => {
+    const doc = rewriteMetadataOrigin(protectedResource(), ORIGIN);
+    expect(doc.resource).toBe(ORIGIN);
+    expect(doc.authorization_servers).toEqual([ORIGIN]);
+    expect(doc.jwks_uri).toBe(`${ORIGIN}/api/auth/mcp/jwks`);
+    expect(JSON.stringify(doc)).not.toContain("api:4000");
+  });
+
+  it("re-points URLs nested in objects (the plugin's options.metadata spread)", () => {
+    const doc = rewriteMetadataOrigin(
+      { nested: { end_session_endpoint: `${INTERNAL}/api/auth/mcp/logout`, depth: { u: [INTERNAL] } } },
+      ORIGIN,
+    );
+    expect(doc).toEqual({
+      nested: { end_session_endpoint: `${ORIGIN}/api/auth/mcp/logout`, depth: { u: [ORIGIN] } },
+    });
+  });
+
+  it("keeps the issuer a bare origin — no trailing slash", () => {
+    expect(rewriteMetadataOrigin(metadata(), ORIGIN).issuer).toBe(ORIGIN);
+    expect((rewriteMetadataOrigin(metadata(), ORIGIN).issuer as string).endsWith("/")).toBe(false);
+  });
+
+  it("preserves query and fragment on a rewritten URL", () => {
+    const doc = rewriteMetadataOrigin(
+      { authorization_endpoint: `${INTERNAL}/api/auth/mcp/authorize?a=1#f` },
+      ORIGIN,
+    );
+    expect(doc.authorization_endpoint).toBe(`${ORIGIN}/api/auth/mcp/authorize?a=1#f`);
+  });
+
+  /**
+   * The walk is blind, so what keeps it safe is that non-URL strings fail the
+   * parse-or-protocol check. `acr_values_supported` is the one that proves the
+   * protocol half: `urn:…` PARSES as a URL, and must still pass through.
+   */
+  it("leaves non-URL values untouched, including urn: values that parse as URLs", () => {
+    const doc = rewriteMetadataOrigin(metadata(), ORIGIN);
+    expect(doc.scopes_supported).toEqual(["openid", "profile", "email", "offline_access"]);
+    expect(doc.response_types_supported).toEqual(["code"]);
+    expect(doc.id_token_signing_alg_values_supported).toEqual(["RS256", "none"]);
+    expect(doc.acr_values_supported).toEqual([
+      "urn:mace:incommon:iap:silver",
+      "urn:mace:incommon:iap:bronze",
+    ]);
+  });
+
+  it("passes non-string scalars through", () => {
+    expect(rewriteMetadataOrigin({ a: 1, b: true, c: null, d: [1, null] }, ORIGIN)).toEqual({
+      a: 1,
+      b: true,
+      c: null,
+      d: [1, null],
+    });
+  });
+
+  it("is idempotent — URLs already on the public origin are unchanged", () => {
+    const already = rewriteMetadataOrigin(metadata(), ORIGIN);
+    expect(rewriteMetadataOrigin(already, ORIGIN)).toEqual(already);
+  });
+
+  it("never leaks the internal upstream authority", () => {
+    expect(JSON.stringify(rewriteMetadataOrigin(metadata(), ORIGIN))).not.toContain("api:4000");
   });
 });
 
