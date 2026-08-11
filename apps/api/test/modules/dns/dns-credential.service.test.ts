@@ -44,6 +44,7 @@ const {
   sanitizeCredential,
   listCredentials,
   resolveDnsManager,
+  planRecords,
   provisionRecords,
   releaseRecords,
 } = await import("../../../src/modules/dns/dns-credential.service");
@@ -165,8 +166,114 @@ describe("resolveDnsManager", () => {
   });
 });
 
-describe("provisionRecords", () => {
+describe("planRecords", () => {
   beforeEach(() => dnsCredentialRepo.findActiveByOrg.mockResolvedValue([row()]));
+
+  const plan1 = (over: Record<string, unknown> = {}) =>
+    planRecords("org_1", "app.example.com", [
+      { type: "A", name: "app.example.com", content: "192.0.2.1", ...over },
+    ]);
+
+  it("classifies an empty zone as create — nothing is there yet", async () => {
+    provider.listRecords.mockResolvedValue([]);
+    const out = await plan1();
+    expect(out.status).toBe("matched");
+    expect(out.records[0]?.action).toBe("create");
+    expect(provider.upsertRecord).not.toHaveBeenCalled();
+  });
+
+  it("classifies a matching record as in-sync so apply can skip it", async () => {
+    provider.listRecords.mockResolvedValue([rec({ content: "192.0.2.1" })]);
+    const out = await plan1();
+    expect(out.records[0]?.action).toBe("in-sync");
+    expect(out.records[0]?.current).toBe("192.0.2.1");
+  });
+
+  it("classifies our own stale record as update — safe to rewrite in place", async () => {
+    provider.listRecords.mockResolvedValue([rec({ content: "192.0.2.99" })]);
+    const out = await plan1();
+    expect(out.records[0]?.action).toBe("update");
+    expect(out.records[0]?.current).toBe("192.0.2.99");
+  });
+
+  it("classifies a single foreign record as adopt — a consented repoint", async () => {
+    provider.listRecords.mockResolvedValue([
+      rec({ content: "192.0.2.99", comment: undefined }),
+    ]);
+    const out = await plan1();
+    expect(out.records[0]?.action).toBe("adopt");
+  });
+
+  it("classifies multiple foreign records as conflict — never silently overwritten", async () => {
+    // A round-robin A set the operator maintains: apply must refuse, not pick one.
+    provider.listRecords.mockResolvedValue([
+      rec({ id: "a", comment: undefined, content: "192.0.2.2" }),
+      rec({ id: "b", comment: undefined, content: "192.0.2.3" }),
+    ]);
+    const out = await plan1();
+    expect(out.records[0]?.action).toBe("conflict");
+  });
+
+  it("returns 'none' with no records when no connected provider hosts the zone", async () => {
+    dnsCredentialRepo.findActiveByOrg.mockResolvedValue([]);
+    const out = await plan1();
+    expect(out).toEqual({ status: "none", records: [] });
+    expect(provider.listRecords).not.toHaveBeenCalled();
+  });
+
+  it("drops value-less records — there is nothing to plan for an unknown target", async () => {
+    const out = await planRecords("org_1", "app.example.com", [
+      { type: "CNAME", name: "app.example.com", content: "" },
+    ]);
+    expect(out).toEqual({ status: "none", records: [] });
+    expect(provider.findZone).not.toHaveBeenCalled();
+  });
+
+  it("collapses an auth failure during the check to 'unauthorized', not a half-plan", async () => {
+    provider.listRecords.mockRejectedValue(new DnsApiError("cloudflare", 401, "Invalid token"));
+    dnsCredentialRepo.update.mockResolvedValue(row({ status: "invalid" }));
+    const out = await plan1();
+    expect(out.status).toBe("unauthorized");
+    expect(out.records).toEqual([]);
+  });
+});
+
+describe("provisionRecords", () => {
+  beforeEach(() => {
+    dnsCredentialRepo.findActiveByOrg.mockResolvedValue([row()]);
+    // Default: the zone is empty, so every desired record classifies as "create"
+    // and reaches the check-before-set upsert. Cases that need an existing record
+    // override this per-test.
+    provider.listRecords.mockResolvedValue([]);
+  });
+
+  it("skips a record already in place instead of rewriting it", async () => {
+    provider.listRecords.mockResolvedValue([rec({ content: "192.0.2.1" })]);
+
+    const out = await provisionRecords("org_1", "app.example.com", [
+      { type: "A", name: "app.example.com", content: "192.0.2.1" },
+    ]);
+
+    expect(provider.upsertRecord).not.toHaveBeenCalled();
+    expect(out.records[0]).toMatchObject({ outcome: "skipped", action: "in-sync" });
+    // Idempotent apply is still a success: everything the operator asked for is live.
+    expect(out.provisioned).toBe(true);
+  });
+
+  it("REFUSES a conflict rather than clobbering records it does not own", async () => {
+    provider.listRecords.mockResolvedValue([
+      rec({ id: "a", comment: undefined, content: "192.0.2.2" }),
+      rec({ id: "b", comment: undefined, content: "192.0.2.3" }),
+    ]);
+
+    const out = await provisionRecords("org_1", "app.example.com", [
+      { type: "A", name: "app.example.com", content: "192.0.2.1" },
+    ]);
+
+    expect(provider.upsertRecord).not.toHaveBeenCalled();
+    expect(out.records[0]).toMatchObject({ outcome: "failed", action: "conflict" });
+    expect(out.provisioned).toBe(false);
+  });
 
   it("writes every desired record and reports provisioned", async () => {
     provider.upsertRecord.mockResolvedValue(rec());

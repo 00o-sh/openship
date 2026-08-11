@@ -91,7 +91,13 @@ export default function DnsRecordsModal({
           <Loader2 className="size-4 animate-spin" /> {d.loadingRecords}
         </div>
       ) : (
-        <DnsConfiguration domain={hostname} records={shown} mode={mode} showHeader={false} />
+        <DnsConfiguration
+          domain={hostname}
+          records={shown}
+          mode={mode}
+          showHeader={false}
+          domainId={domainId ?? undefined}
+        />
       )}
 
       <div className="mt-5 flex items-center justify-end gap-2">

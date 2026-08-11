@@ -70,6 +70,7 @@ interface CfDnsRecordItem {
   content: string;
   ttl: number;
   proxied: boolean;
+  priority?: number;
   comment?: string | null;
 }
 
@@ -158,6 +159,7 @@ function toRecord(r: CfDnsRecordItem): DnsRecord {
     content: r.content,
     ttl: r.ttl,
     proxied: r.proxied ?? false,
+    ...(typeof r.priority === "number" ? { priority: r.priority } : {}),
     ...(r.comment ? { comment: r.comment } : {}),
   };
 }
@@ -303,6 +305,7 @@ export const cloudflareDnsProvider: DnsProvider = {
         target.content === input.content &&
         target.proxied === proxied &&
         target.ttl === desiredTtl &&
+        (input.priority == null || target.priority === input.priority) &&
         target.comment === comment;
       if (unchanged) return target;
 
@@ -317,6 +320,7 @@ export const cloudflareDnsProvider: DnsProvider = {
             content: input.content,
             ttl: desiredTtl,
             proxied,
+            ...(input.priority != null ? { priority: input.priority } : {}),
             comment,
           }),
         },
@@ -337,6 +341,7 @@ export const cloudflareDnsProvider: DnsProvider = {
           content: input.content,
           ttl: desiredTtl,
           proxied: input.proxied ?? false,
+          ...(input.priority != null ? { priority: input.priority } : {}),
           comment: ownMarker,
         }),
       },

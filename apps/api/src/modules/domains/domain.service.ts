@@ -49,8 +49,14 @@ import { edgeProxy, readEdgeFile, validateCertFor } from "@repo/adapters";
 import type { AdoptedCert, CloudRuntime, CommandExecutor, ManualCert } from "@repo/adapters";
 // Concrete modules, not the `../dns` barrel: importing a barrel that reaches a
 // routes file mounts the HTTP route table as a side effect of importing a service.
-import { provisionRecords, releaseRecords, type DnsProvisionResult } from "../dns/dns-credential.service";
-import type { DnsRecordType } from "../dns/types";
+import {
+  planRecords,
+  provisionRecords,
+  releaseRecords,
+  type DnsPlanResult,
+  type DnsProvisionResult,
+} from "../dns/dns-credential.service";
+import type { DnsRecordInput } from "../dns/types";
 
 // ─── List ────────────────────────────────────────────────────────────────────
 
@@ -110,12 +116,6 @@ export interface AddDomainResult {
   wwwError?: string;
   /** Present only when the edge was ALREADY serving this hostname untracked. */
   preexistingEdgeSite?: UntrackedEdgeSite;
-  /**
-   * Present only when a connected DNS provider manages the zone: what we wrote,
-   * per record. Absent means "nobody is automating this domain's DNS", which is
-   * the normal case and reads as "show the operator the records to paste".
-   */
-  autoDns?: DnsProvisionResult;
 }
 
 export async function addDomain(
@@ -300,54 +300,14 @@ export async function addDomain(
     !!data.includeWww,
   );
 
-  // ── Automatic DNS: write the records instead of printing them ────────────────
-  // Best-effort by the same rule routing/edge/SSL follow: a domain add does not
-  // fail because the automation did. The per-record outcome rides back on the
-  // response so "we wrote them" and "we tried and 2 were rejected" are different
-  // answers — a bare boolean made a half-written zone look like nothing happened.
-  //
-  // No verify is kicked off here on purpose. The records are seconds old, the
-  // resolver a verify would ask may still hold a negative answer for the name,
-  // and a failed check burns one of Let's Encrypt's per-hostname validation
-  // failures. The row stays pending and the `domains:verify-pending` cron picks
-  // it up after its 10-minute grace window, which is what that window is for.
-
-  // Only hostnames this call CLAIMED get written: addWwwSibling swallows a
-  // cross-project conflict and returns `wwwError`, so provisioning off the
-  // display list would point `www.<apex>` at this box while another project owns
-  // it — and removeDomain releases only the apex, so nothing here takes it back.
-  // Names via dnsRecordHosts so they can't drift from buildRecords.
-  const provisionable = new Set(
-    [domain.hostname, ...(www?.www ? [www.www.hostname] : [])].flatMap((h) => {
-      const { routeName, txtName } = dnsRecordHosts(h);
-      return [routeName.toLowerCase(), txtName.toLowerCase()];
-    }),
-  );
-
-  const autoDns = await provisionRecords(
-    ctx.organizationId,
-    domain.hostname,
-    records.records
-      .filter((rec) => provisionable.has(rec.name.toLowerCase()))
-      .map((rec) => ({
-        type: rec.type as DnsRecordType,
-        name: rec.name,
-        content: rec.value,
-      })),
-  ).catch((err: unknown) => {
-    console.warn(
-      `[dns] auto-provision failed for ${domain.hostname}:`,
-      safeErrorMessage(err),
-    );
-    return null;
-  });
+  // DNS is not written here. Auto-configuration is on-demand (planDomainDns /
+  // applyDomainDns): the operator sees what would change and presses to apply,
+  // so a fresh add always returns the records to paste and never silently touches
+  // a zone. removeDomain still releases what we wrote — cleanup is not a surprise.
 
   return {
     domain,
     records,
-    // Only when a provider actually manages the zone — absence is the signal to
-    // show the operator the records to paste.
-    ...(autoDns && (autoDns.records.length > 0 || autoDns.reason) ? { autoDns } : {}),
     ...www,
     // Only present when there IS something to say, so callers can spread it and
     // clients can treat its absence as "nothing was already serving this".
@@ -511,6 +471,64 @@ export async function getDomainRecords(ctx: RequestContext, domainId: string) {
   const { domain, project } = await getDomainWithAuth(domainId, ctx.organizationId);
   const token = domain.verificationToken ?? generateToken(domain.hostname);
   return buildRecords(domain.hostname, token, project, domain.externalIngress, ctx.organizationId);
+}
+
+// ─── Auto-configure DNS (on-demand) ──────────────────────────────────────────
+
+/**
+ * The records a connected provider would write for THIS domain, as provider
+ * inputs. Built from the same `buildRecords` the manual list shows, so the plan,
+ * the apply and the "records to paste" can never diverge. Empty-value records
+ * (target not yet resolved) are dropped — plan/provision treat "" as nothing to
+ * write, so they would only pad the plan with un-actionable rows. Names are
+ * restricted to this hostname's own route + challenge names via `dnsRecordHosts`:
+ * a per-domain panel provisions its own row, never a sibling's.
+ */
+async function desiredDnsInputs(
+  ctx: RequestContext,
+  domainId: string,
+): Promise<{ hostname: string; inputs: DnsRecordInput[] }> {
+  const { domain, project } = await getDomainWithAuth(domainId, ctx.organizationId);
+  const token = domain.verificationToken ?? generateToken(domain.hostname);
+  const built = await buildRecords(
+    domain.hostname,
+    token,
+    project,
+    domain.externalIngress,
+    ctx.organizationId,
+  );
+  const { routeName, txtName } = dnsRecordHosts(domain.hostname);
+  const own = new Set([routeName.toLowerCase(), txtName.toLowerCase()]);
+  const inputs = built.records
+    .filter((r) => r.value && own.has(r.name.toLowerCase()))
+    .map<DnsRecordInput>((r) => ({ type: r.type, name: r.name, content: r.value }));
+  return { hostname: domain.hostname, inputs };
+}
+
+/** Dry-run: what auto-configuring this domain's DNS would do. Reads only. */
+export async function planDomainDns(
+  ctx: RequestContext,
+  domainId: string,
+): Promise<DnsPlanResult> {
+  const { hostname, inputs } = await desiredDnsInputs(ctx, domainId);
+  return planRecords(ctx.organizationId, hostname, inputs);
+}
+
+/**
+ * Write this domain's records through the connected provider, on operator press.
+ *
+ * No verify is kicked here on purpose (the reason `addDomain` never provisioned
+ * inline): the records are seconds old, the resolver a verify would ask may still
+ * hold a negative answer for the name, and a failed check burns one of Let's
+ * Encrypt's per-hostname validation failures. The `domains:verify-pending` cron
+ * picks the row up after its grace window — which is what that window is for.
+ */
+export async function applyDomainDns(
+  ctx: RequestContext,
+  domainId: string,
+): Promise<DnsProvisionResult> {
+  const { hostname, inputs } = await desiredDnsInputs(ctx, domainId);
+  return provisionRecords(ctx.organizationId, hostname, inputs);
 }
 
 /**

@@ -64,6 +64,10 @@ import {
   listPendingDomainDns,
 } from "./domain-dns.service";
 import {
+  applyMailDomainDns,
+  planMailDomainDns,
+} from "./domain-dns-provider.service";
+import {
   configureOutboundRelay,
   disableOutboundRelay,
   getOutboundRelay,
@@ -279,6 +283,52 @@ export async function pendingDomainDnsHandler(c: Context) {
     return c.json({
       pending: pending.map(({ domain, state }) => ({ domain, ...state })),
     });
+  } catch (err) {
+    return errorJson(c, err);
+  }
+}
+
+/**
+ * GET a dry-run of auto-configuring this mail domain's DNS through a connected
+ * provider (Settings→DNS). Reads only — powers the on-demand button's preview.
+ */
+export async function planDomainDnsHandler(c: Context) {
+  const guard = assertNotCloud(c);
+  if (guard) return guard;
+  const serverId = param(c, "serverId");
+  await permission.assert(getRequestContext(c), { resourceType: "mail_server", resourceId: serverId, action: "read" });
+  const ctx = getRequestContext(c);
+  if (!(await isServerInOrg(ctx, serverId))) {
+    return c.json({ error: "Server not found" }, 404);
+  }
+  const domain = c.req.param("domain");
+  if (!domain) return c.json({ error: "domain required" }, 400);
+  try {
+    const plan = await planMailDomainDns(ctx.organizationId, serverId, domain.toLowerCase());
+    return c.json({ data: plan });
+  } catch (err) {
+    return errorJson(c, err);
+  }
+}
+
+/**
+ * POST auto-configure: write this domain's records through the connected
+ * provider on operator press, then clear the manual banner on full success.
+ */
+export async function applyDomainDnsHandler(c: Context) {
+  const guard = assertNotCloud(c);
+  if (guard) return guard;
+  const serverId = param(c, "serverId");
+  await permission.assert(getRequestContext(c), { resourceType: "mail_server", resourceId: serverId, action: "write" });
+  const ctx = getRequestContext(c);
+  if (!(await isServerInOrg(ctx, serverId))) {
+    return c.json({ error: "Server not found" }, 404);
+  }
+  const domain = c.req.param("domain");
+  if (!domain) return c.json({ error: "domain required" }, 400);
+  try {
+    const result = await applyMailDomainDns(ctx.organizationId, serverId, domain.toLowerCase());
+    return c.json({ data: result });
   } catch (err) {
     return errorJson(c, err);
   }

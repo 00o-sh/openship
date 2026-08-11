@@ -96,6 +96,7 @@ describe("addDomain retries", () => {
     domainRepo.listByProject.mockResolvedValue([]);
     projectRepo.findById.mockReset();
     projectRepo.findById.mockResolvedValue(project);
+    provisionRecords.mockClear();
   });
 
   it("reuses a pending domain owned by the same project", async () => {
@@ -224,12 +225,10 @@ describe("addDomain retries", () => {
 
     // The panel still LISTS www so the operator knows what it would need...
     expect(result.records.records.some((r: any) => r.name === "www.example.com")).toBe(true);
-    // ...but nothing is WRITTEN for a hostname another project owns. removeDomain
-    // releases only the apex and its challenge name, so such a record would be
-    // orphaned with nothing on this side able to take it back.
-    const written = (provisionRecords.mock.calls.at(-1)?.[2] ?? []) as { name: string }[];
-    expect(written.map((r) => r.name)).not.toContain("www.example.com");
-    expect(written.map((r) => r.name)).toContain("example.com");
+    // ...but NOTHING is written at add time: auto-configuration is on-demand now
+    // (planDomainDns/applyDomainDns), so adding a domain never touches the
+    // operator's zone until they press "apply".
+    expect(provisionRecords).not.toHaveBeenCalled();
   });
 
   it("never stacks www on www", async () => {

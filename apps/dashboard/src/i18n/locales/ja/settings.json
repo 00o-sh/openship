@@ -588,7 +588,11 @@
     "updatesOne": "更新 1 件あり",
     "updatesMany": "更新 {n} 件あり",
     "allHealthy": "すべてのプラットフォームコンポーネントは最新です",
-    "manageLink": "サーバーで管理"
+    "manageLink": "サーバーで管理",
+    "hostControlLabel": "このマシンにデプロイ",
+    "hostControlDesc": "接続済みのサーバーに加えて、OpenShip が動作しているサーバー自身にもアプリをデプロイできるようにします。--no-host-control（コントロールプレーンのみ）でインストールした場合はオフです。オンにするとこのマシンをデプロイ先として追加します。",
+    "hostControlEnvNote": "このマシンはインストール時にコントロールプレーン専用（--no-host-control）に設定されました。オンにするとその設定を上書きし、OpenShip がここにデプロイできるようになります。",
+    "hostControlError": "ホスト制御を変更できませんでした。変更できるのはこのマシンのワークスペースのオーナーだけです。"
   },
   "dataTransfer": {
     "export": {

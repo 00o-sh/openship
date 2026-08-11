@@ -235,6 +235,14 @@ export function registerSelfServerReconcile(): void {
     // "desktop"), so this only runs on a real server-host install.
     modes: ["selfhosted"],
     run: async () => {
+      // Overlay the operator's stored host-control choice onto the adapters gate
+      // BEFORE materializing the row: a box toggled ON in Settings then rebooted
+      // has host-control disabled by env but enabled in the DB, and ensureLocalServer
+      // reads the (now-synced) gate to decide whether to create the row. No cold
+      // window: until this runs the override is null and the env default governs,
+      // exactly as before the toggle existed.
+      const { syncHostControlOverride } = await import("../host-control");
+      await syncHostControlOverride().catch(() => {});
       await ensureLocalServer();
     },
   });

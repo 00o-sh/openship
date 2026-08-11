@@ -27,9 +27,11 @@ import { dirname, join } from "node:path";
 
 import {
   LocalExecutor,
+  DEFAULT_DOCKER_SOCKET_PATH,
   EDGE_CONTAINER_MOUNTS,
   EDGE_HOST_STATE_DIR,
   invalidateEdgeContainer,
+  resolveLocalDockerSocketPath,
   systemCatalog,
   resolveLocalEnvironmentSync,
 } from "@repo/adapters";
@@ -444,7 +446,14 @@ services:
     # (set by \`openship up\` when a public URL is configured for off-box access).
     ports: ["\${OPENSHIP_BIND_ADDR:-127.0.0.1}:\${API_PORT:-4000}:\${API_PORT:-4000}"]
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      # The daemon socket, at the path the api's own default expects INSIDE the
+      # container. The HOST side is a variable because it MOVES: a rootless daemon
+      # keeps its socket under the invoking user's runtime dir, and Docker creates a
+      # missing bind source as an empty DIRECTORY instead of failing — so the rootful
+      # path there brings the stack up and then fails every container operation in
+      # the transport, naming neither the path nor the cause (#482). \`openship up\`
+      # writes OPENSHIP_DOCKER_SOCKET when the detected path isn't this default.
+      - \${OPENSHIP_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
       # Routing state shared with the edge, as HOST BIND MOUNTS (generated from
       # EDGE_CONTAINER_MOUNTS): the vhost tree, /etc/letsencrypt, the ACME webroot
       # and the static doc-roots the API writes and the edge serves. Named volumes
@@ -1818,6 +1827,102 @@ function hostGatewayEnv(prev: Record<string, string>): string[] {
   return value ? [`OPENSHIP_HOST_GATEWAY=${value}`] : [];
 }
 
+/**
+ * Where a ROOTLESS daemon's socket lives, in the order worth trying — each one
+ * existence-checked by the caller, so a wrong guess costs nothing.
+ *
+ * `$SUDO_UID` is not redundant with `userInfo()`: under `sudo openship up` both
+ * `$XDG_RUNTIME_DIR` and the passwd entry describe ROOT, and /run/user/0 is not
+ * where the operator's rootless daemon is — the sudo trap plannedHostChannel and
+ * elevatedExecutor's owner lookup already work around.
+ */
+function rootlessSocketCandidates(): string[] {
+  const runtimeDir = process.env.XDG_RUNTIME_DIR?.trim();
+  const sudoUid = process.env.SUDO_UID?.trim();
+  let uid: number | undefined;
+  try {
+    uid = userInfo().uid;
+  } catch {
+    /* no passwd entry — the two env-derived candidates are all we have */
+  }
+  return [
+    ...(runtimeDir ? [join(runtimeDir, "docker.sock")] : []),
+    ...(sudoUid ? [`/run/user/${sudoUid}/docker.sock`] : []),
+    ...(uid !== undefined ? [`/run/user/${uid}/docker.sock`] : []),
+  ];
+}
+
+/**
+ * The HOST path of the Docker socket to mount into the api container, DETECTED.
+ *
+ * The docker CLI's own answer comes first, and that ordering is the point: `up`
+ * drives this install by shelling out to `docker compose`, so the api must get the
+ * socket of the daemon the CLI is already talking to — not whatever happens to sit
+ * at the rootful path. `resolveLocalDockerSocketPath` reads $DOCKER_HOST and the
+ * active docker context, which is how Colima / Rancher / Podman / rootless all
+ * advertise themselves, and is the same resolver the api uses for this question.
+ *
+ * A daemon that advertises itself NOWHERE still has to be found — the rootless case
+ * in #482, where the setup tool's `export DOCKER_HOST` lives in a shell profile no
+ * sudo or systemd invocation ever read. So take the rootful default only if that
+ * socket is actually there, and probe the rootless runtime dirs first if it isn't.
+ */
+function detectDockerSocketPath(): string {
+  const fromClient = resolveLocalDockerSocketPath(undefined, process.env);
+  if (fromClient !== DEFAULT_DOCKER_SOCKET_PATH) return fromClient;
+  if (existsSync(DEFAULT_DOCKER_SOCKET_PATH)) return DEFAULT_DOCKER_SOCKET_PATH;
+  return rootlessSocketCandidates().find((p) => existsSync(p)) ?? DEFAULT_DOCKER_SOCKET_PATH;
+}
+
+/** The socket this run mounts, and whether an operator pinned it rather than us detecting it. */
+function resolveDockerSocket(prev: Record<string, string>): { path: string; pinned: boolean } {
+  const pinned = process.env.OPENSHIP_DOCKER_SOCKET?.trim() || prev.OPENSHIP_DOCKER_SOCKET?.trim();
+  return pinned ? { path: pinned, pinned: true } : { path: detectDockerSocketPath(), pinned: false };
+}
+
+/**
+ * `OPENSHIP_DOCKER_SOCKET` for this run, or nothing.
+ *
+ * A PINNED value always round-trips (shell over `.env`): half of #482 was that every
+ * `openship up` rewrote a hand-fixed `.env` back to the value that didn't work. A
+ * DETECTED default is omitted, so the template's `:-/var/run/docker.sock` stays the
+ * one place the default lives and nothing pins a path a later daemon change breaks.
+ *
+ * Deliberately NOT in OMITTABLE_MANAGED_KEYS: it round-trips whenever set, so the run
+ * that omits it is exactly the run where `.env` didn't have it to carry.
+ *
+ * And deliberately not spelled `DOCKER_HOST`: `.env` is injected into the api
+ * container, where dockerode reads that variable — a HOST path there is a path the
+ * container doesn't have. Only the compose file consumes this key.
+ */
+function dockerSocketEnv(prev: Record<string, string>): string[] {
+  const { path, pinned } = resolveDockerSocket(prev);
+  return pinned || path !== DEFAULT_DOCKER_SOCKET_PATH ? [`OPENSHIP_DOCKER_SOCKET=${path}`] : [];
+}
+
+/**
+ * Say so when the socket this run is about to mount isn't on the box.
+ *
+ * Docker creates a missing bind source as a DIRECTORY, so nothing fails at `up` time
+ * — the stack comes up healthy, `/api/system/check` 502s, and the api log carries a
+ * transport error ("Was there a typo in the url or port?") naming no path at all,
+ * which is how #482 was reported. A warning rather than a refusal: detection can be
+ * wrong in ways an operator's `.env` fixes, and `openship update` on a live box must
+ * not become unrunnable over it.
+ */
+function warnMissingDockerSocket(path: string): void {
+  console.warn(
+    `\n  ! The Docker socket this install mounts into the api isn't there:\n` +
+      `      ${path}\n` +
+      `    Docker will create that path as an empty DIRECTORY, so the stack will come up\n` +
+      `    and then fail every container operation with a transport error naming neither\n` +
+      `    this path nor the cause (#482). Point it at the real socket:\n` +
+      `      docker context inspect --format '{{.Endpoints.docker.Host}}'\n` +
+      `      OPENSHIP_DOCKER_SOCKET=/run/user/$(id -u)/docker.sock openship up --compose\n` +
+      `    (a rootless daemon keeps its socket under the daemon user's runtime dir).\n`,
+  );
+}
+
 /** Preserve operator-owned ACME settings, with the current shell overriding .env. */
 function renderAcmeEnv(prev: Record<string, string>): string[] {
   return ACME_ENV_KEYS.flatMap((key) => {
@@ -2124,6 +2229,10 @@ function managedEnvLines(
     // Read by createHostExecutor (throws when false) and by the servers list
     // (hides the local row). Written explicitly so the policy is visible in .env.
     `OPENSHIP_HOST_CONTROL=${cfg.hostControl ? "true" : "false"}`,
+    // The host side of the api's docker socket mount, when it isn't the rootful
+    // default. Unlike the host channel above this is NOT optional plumbing — every
+    // deploy goes through it — so it is resolved on every run, host control or not.
+    ...dockerSocketEnv(prev),
     // Which shell the dashboard defaults to. Emitted on EVERY run, including the
     // "platform" default: that keeps the key permanently in the managed set, so
     // the #485 passthrough can never mistake it for operator config (which would
@@ -2280,6 +2389,9 @@ function materialize(opts: ComposeUpOpts): {
       }),
     );
   }
+  // Same once-per-run gate, same reason (one `up` materializes twice).
+  const socket = resolveDockerSocket(prev);
+  if (!opts.alreadyFetched && !existsSync(socket.path)) warnMissingDockerSocket(socket.path);
   let before = "";
   try {
     before = readFileSync(ENV_FILE, "utf8");

@@ -19,6 +19,7 @@ import {
   DnsProviderNotReadyError,
   isOpenshipManaged,
   type DnsProvider,
+  type DnsProviderName,
   type DnsRecordInput,
   type DnsZone,
 } from "./types";
@@ -198,11 +199,26 @@ export async function markCredentialInvalid(
 
 /* ────── Record provisioning ─────────────────────────────────────── */
 
+/**
+ * What we determined about a record relative to the zone, before touching it.
+ *
+ *   create   → nothing answers this name+type yet.
+ *   update   → an Openship-managed record exists; we rewrite it in place.
+ *   adopt    → one existing record we did NOT create; apply repoints it (that is
+ *              what connecting a domain means) but leaves its ownership alone.
+ *   in-sync  → a record already answers with exactly the value we'd write.
+ *   conflict → more than one record answers and none is ours (a round-robin A set
+ *              or multi-host MX the operator maintains); we never overwrite it.
+ */
+export type RecordPlanAction = "create" | "update" | "adopt" | "in-sync" | "conflict";
+
 export interface DnsRecordOutcome {
   name: string;
   type: string;
-  /** applied = created or updated; skipped = nothing to write; failed = see error. */
+  /** applied = created/updated/adopted; skipped = already in place or no value yet; failed = see error. */
   outcome: "applied" | "skipped" | "failed";
+  /** The pre-write classification, so a status log can say what happened. */
+  action?: RecordPlanAction;
   error?: string;
 }
 
@@ -214,13 +230,120 @@ export interface DnsProvisionResult {
   records: DnsRecordOutcome[];
 }
 
+export interface DnsRecordPlan {
+  name: string;
+  type: string;
+  action: RecordPlanAction;
+  /** The value apply would write. */
+  desired: string;
+  /** The value of the record apply would touch, when one already exists. */
+  current?: string;
+}
+
+/**
+ * A read-only preview of what apply would do — the on-demand button's input.
+ *
+ * `status` is the `resolveDnsManager` discriminant: `matched` means a connected
+ * provider owns the zone and `records` carries a per-record action; every other
+ * status means we can't (or don't) manage it and `records` is empty.
+ */
+export interface DnsPlanResult {
+  status: DnsManagerLookup["status"];
+  provider?: DnsProviderName;
+  zoneName?: string;
+  /** Present for unauthorized/unavailable — safe to show an operator. */
+  reason?: string;
+  records: DnsRecordPlan[];
+}
+
+/**
+ * Classify one desired record against the zone WITHOUT writing — the shared
+ * decision behind both the plan preview and the apply loop, so they can never
+ * disagree about what a press will do.
+ */
+async function classifyRecord(
+  provider: DnsProvider,
+  credentials: { apiToken: string },
+  zoneId: string,
+  desired: DnsRecordInput,
+): Promise<{ action: RecordPlanAction; current?: string }> {
+  const existing = await provider.listRecords(credentials, zoneId, {
+    name: desired.name,
+    type: desired.type,
+  });
+  // Mirrors the provider's upsert decision: >1 records none of which are ours is
+  // a set the operator maintains; a single foreign record is adopted (repointed);
+  // ours is updated in place.
+  const target = existing.length > 1 ? existing.find(isOpenshipManaged) : existing[0];
+  if (existing.length > 1 && !target) {
+    return { action: "conflict", current: `${existing.length} existing records` };
+  }
+  if (!target) return { action: "create" };
+  if (target.content === desired.content) return { action: "in-sync", current: target.content };
+  return { action: isOpenshipManaged(target) ? "update" : "adopt", current: target.content };
+}
+
+/**
+ * Preview what `apply` would do to `desired`, reading only. Powers the
+ * on-demand "Auto-configure DNS" button: the operator sees create/update/adopt/
+ * in-sync/conflict per record before anything is written.
+ *
+ * Records with no value yet (`buildRecords` uses "" for "unknown") are dropped —
+ * there is nothing to plan for a record whose target we can't determine.
+ */
+export async function planRecords(
+  organizationId: string,
+  hostname: string,
+  desired: DnsRecordInput[],
+): Promise<DnsPlanResult> {
+  const provisionable = desired.filter((r) => r.content);
+  if (provisionable.length === 0) return { status: "none", records: [] };
+
+  const lookup = await resolveDnsManager(organizationId, hostname);
+  if (lookup.status !== "matched") {
+    return {
+      status: lookup.status,
+      ...(lookup.status === "unauthorized" || lookup.status === "unavailable"
+        ? { reason: lookup.reason }
+        : {}),
+      records: [],
+    };
+  }
+
+  const { provider, zone, credentials } = lookup.manager;
+  const records: DnsRecordPlan[] = [];
+  for (const input of provisionable) {
+    try {
+      const { action, current } = await classifyRecord(provider, credentials, zone.id, input);
+      records.push({
+        name: input.name,
+        type: input.type,
+        action,
+        desired: input.content,
+        ...(current !== undefined ? { current } : {}),
+      });
+    } catch (err) {
+      // A list that failed on auth or transport is "couldn't check", never a
+      // half-plan the operator might apply against — collapse to the lookup's
+      // own vocabulary.
+      if (err instanceof DnsApiError && err.isAuthFailure) {
+        await markCredentialInvalid(organizationId, lookup.manager.credentialId);
+        return { status: "unauthorized", reason: safeErrorMessage(err), records: [] };
+      }
+      return { status: "unavailable", reason: safeErrorMessage(err), records: [] };
+    }
+  }
+
+  return { status: "matched", provider: provider.name, zoneName: zone.name, records };
+}
+
 /**
  * Write `desired` into whichever connected provider hosts the zone.
  *
- * Every record is attempted: one rejected value (a CNAME whose target we
- * couldn't resolve) must not suppress the ownership TXT that would have let the
- * domain verify. Failures are returned, not thrown — a domain add does not fail
- * because DNS automation did.
+ * Check-before-set: each record is classified first, so a record already in place
+ * is reported (skipped) rather than rewritten, and a conflict the operator owns is
+ * refused rather than clobbered. Every record is attempted independently — one
+ * rejected value must not suppress the others. Failures are returned, not thrown.
  */
 export async function provisionRecords(
   organizationId: string,
@@ -256,8 +379,24 @@ export async function provisionRecords(
     }
 
     try {
+      const { action } = await classifyRecord(provider, credentials, zone.id, input);
+      if (action === "in-sync") {
+        records.push({ name: input.name, type: input.type, outcome: "skipped", action });
+        continue;
+      }
+      if (action === "conflict") {
+        records.push({
+          name: input.name,
+          type: input.type,
+          outcome: "failed",
+          action,
+          error:
+            "Existing records here are not managed by Openship — remove or consolidate them first.",
+        });
+        continue;
+      }
       await provider.upsertRecord(credentials, zone.id, input);
-      records.push({ name: input.name, type: input.type, outcome: "applied" });
+      records.push({ name: input.name, type: input.type, outcome: "applied", action });
     } catch (err) {
       if (err instanceof DnsApiError && err.isAuthFailure) {
         await markCredentialInvalid(organizationId, lookup.manager.credentialId);
@@ -272,10 +411,13 @@ export async function provisionRecords(
   }
 
   const applied = records.filter((r) => r.outcome === "applied").length;
+  const inSync = records.filter((r) => r.outcome === "skipped" && r.action === "in-sync").length;
   const failed = records.filter((r) => r.outcome === "failed");
 
   return {
-    provisioned: failed.length === 0 && applied > 0,
+    // In place = applied now, or already correct. Empty-value skips don't count:
+    // "provisioned" must not be true for a domain whose records we never set.
+    provisioned: failed.length === 0 && applied + inSync > 0,
     ...(failed.length > 0
       ? { reason: `${failed.length} of ${records.length} records could not be written.` }
       : {}),

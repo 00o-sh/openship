@@ -32,6 +32,12 @@ import {
   isProductMode,
   resolveProductMode,
 } from "../../lib/product-mode";
+import {
+  clearHostControlCache,
+  resolveHostControlEnabled,
+  syncHostControlOverride,
+} from "../../lib/host-control";
+import { boxOwningOrgId } from "../../lib/box-org";
 import { encrypt } from "../../lib/encryption";
 import {
   sendInstanceTestEmail,
@@ -263,6 +269,12 @@ export async function getSetup(c: Context) {
     // next unrelated save.
     productMode: settings?.productMode ?? null,
     productModeEffective: await resolveProductMode(),
+    // Same raw+effective split as productMode, for the same reason (#527's runtime
+    // toggle): hostControl is the stored override (null = unset, env decides) and
+    // hostControlEffective is whether the box is actually a deploy target right now.
+    // The toggle needs both so an unset row isn't mistaken for an explicit choice.
+    hostControl: settings?.hostControlEnabled ?? null,
+    hostControlEffective: await resolveHostControlEnabled(),
     teamReachability,
   });
 }
@@ -325,6 +337,27 @@ export async function updateSettings(c: Context) {
     }
     patch.productMode = body.productMode;
   }
+  // Host control (#527): may OpenShip deploy to the machine it runs on? `null`
+  // clears the override so OPENSHIP_HOST_CONTROL governs again — a meaningful
+  // state, accepted explicitly like productMode.
+  //
+  // Unlike every other field here this grants PRIVILEGED behavior (host-root
+  // deploys via the container→host channel + mounted docker socket), so it is
+  // gated harder than requireInstanceAdmin: only the box-owning org may flip it,
+  // the exact gate createServer's loopback-adoption uses. A teammate admin in
+  // another org must not be able to self-grant a host-root deploy target.
+  if (body.hostControl !== undefined) {
+    if (body.hostControl !== null && typeof body.hostControl !== "boolean") {
+      return c.json({ error: "hostControl must be true, false, or null" }, 400);
+    }
+    if (getRequestContext(c).organizationId !== (await boxOwningOrgId())) {
+      return c.json(
+        { error: "Only the owner of this machine's workspace can change host control." },
+        403,
+      );
+    }
+    patch.hostControlEnabled = body.hostControl;
+  }
 
   if (Object.keys(patch).length === 0) {
     return c.json({ error: "No fields to update" }, 400);
@@ -334,6 +367,27 @@ export async function updateSettings(c: Context) {
 
   clearAuthModeCache();
   clearProductModeCache();
+
+  // Host-control write: push the new value into the adapters gate and reconcile
+  // the isLocal row so the change takes effect without a restart.
+  if (body.hostControl !== undefined) {
+    clearHostControlCache();
+    await syncHostControlOverride().catch(() => {});
+    if (await resolveHostControlEnabled()) {
+      // Enabled: materialize "This Server" now so it's a target immediately (the
+      // GET /servers self-heal would do it eventually, but the toggle should be
+      // instant). On Compose the row appears and container deploys work at once;
+      // host-OS ops still refuse with the "re-run `openship up`" advisory until the
+      // CLI provisions the channel — the deliberate degrade-and-advise behaviour.
+      await ensureLocalServer().catch(() => null);
+    } else {
+      // Disabled: drop the pooled host channel (and every other cached executor)
+      // so an already-connected channel can't keep serving host ops past the flip —
+      // the acquire fast-path returns before the gate runs, so a live cache would
+      // silently defer the disable until idle eviction.
+      sshManager.invalidate();
+    }
+  }
 
   if (authModeChange) {
     const ctx = getRequestContext(c);
@@ -496,6 +550,12 @@ export async function deleteSettings(c: Context) {
   sshManager.invalidate();
   await invalidateOpenRestyPaths();
   clearAuthModeCache();
+  // The row just dropped held host_control_enabled (#527). Without reconciling here
+  // the cached effective value and the pushed adapters override would both survive
+  // the delete and keep serving the deleted choice until the next boot — so re-sync
+  // to let the OPENSHIP_HOST_CONTROL env floor govern again.
+  clearHostControlCache();
+  await syncHostControlOverride().catch(() => {});
   return c.json({ ok: true });
 }
 

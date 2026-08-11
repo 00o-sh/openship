@@ -798,7 +798,11 @@
     "updatesOne": "1 update available",
     "updatesMany": "{n} updates available",
     "allHealthy": "All platform components are up to date",
-    "manageLink": "Manage in Servers"
+    "manageLink": "Manage in Servers",
+    "hostControlLabel": "Deploy to this machine",
+    "hostControlDesc": "Let OpenShip deploy apps to the server it runs on, alongside your connected servers. Off when installed with --no-host-control (control plane only) — turn it on to add this machine as a deploy target.",
+    "hostControlEnvNote": "This machine was set to control plane only at install (--no-host-control). Turning this on overrides that so OpenShip can deploy here.",
+    "hostControlError": "Couldn't change host control — only the owner of this machine's workspace can."
   },
   "dataTransfer": {
     "export": {

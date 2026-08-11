@@ -19,6 +19,11 @@ interface PlatformContextValue {
   /** OpenShip runs ON a server (self-hosted, non-desktop): the host is itself a
    *  deployable target, auto-registered as the isLocal "This Server". */
   isServerHost: boolean;
+  /** Whether the box is a deploy target for ITSELF right now (#527 runtime
+   *  toggle). isServerHost is fixed by DEPLOY_MODE; this tracks the operator's
+   *  Settings choice, so the "Add this machine" affordance reflects the live
+   *  state without a restart. */
+  hostControlEnabled: boolean;
   authMode: "cloud" | "local" | "none";
   /** What the INSTANCE declares it is (from /health/env). Used by the settings
    *  toggle to show the operator what the box-wide default currently is. */
@@ -65,6 +70,7 @@ interface PlatformProviderProps {
   selfHosted?: boolean;
   deployMode?: string;
   isServerHost?: boolean;
+  hostControlEnabled?: boolean;
   authMode?: "cloud" | "local" | "none";
   productMode?: ProductView;
   productView?: ProductView;
@@ -87,6 +93,7 @@ export function PlatformProvider({
   selfHosted: initialSelfHosted = true,
   deployMode = "docker",
   isServerHost = false,
+  hostControlEnabled = false,
   authMode = "local",
   productMode = "platform",
   productView = "platform",
@@ -125,6 +132,7 @@ export function PlatformProvider({
         selfHosted,
         deployMode,
         isServerHost,
+        hostControlEnabled,
         authMode,
         productMode,
         productView,

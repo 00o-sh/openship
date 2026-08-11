@@ -44,6 +44,10 @@ r.post("/:id/verify", { tag: "domain:write", mcp: { description: "Verify a domai
 r.post("/:id/verify/stream", { tag: "domain:write" }, ctrl.verifyStream);
 r.post("/:id/primary", { tag: "domain:write", mcp: { description: "Set this domain as the project's primary domain." } }, cloudDomainProxy, ctrl.setPrimary);
 r.get("/:id/records", { tag: "domain:read", mcp: { description: "Get the DNS records for a domain." } }, cloudDomainProxy, ctrl.records);
+// On-demand DNS auto-configure via a connected provider (Settings→DNS). Plan is a
+// read-only dry-run; apply writes the records on operator press (never silently).
+r.get("/:id/dns/plan", { tag: "domain:read", mcp: { description: "Preview what auto-configuring this domain's DNS through a connected provider would change." } }, cloudDomainProxy, ctrl.dnsPlan);
+r.post("/:id/dns/apply", { tag: "domain:write", mcp: { description: "Auto-configure this domain's DNS through a connected provider." } }, cloudDomainProxy, ctrl.dnsApply);
 r.post("/:id/renew", { tag: "domain:write", mcp: { description: "Renew the domain's SSL certificate." } }, cloudDomainProxy, ctrl.renewSsl);
 r.post("/:id/verify-ssl", { tag: "domain:write", mcp: { description: "Check/verify the domain's SSL certificate." } }, cloudDomainProxy, ctrl.verifySsl);
 // Self-hosted only: installs a cert into the box's OpenResty. On Openship Cloud

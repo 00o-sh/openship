@@ -154,6 +154,8 @@ export const endpoints = {
     certificate: (id: string) => `domains/${encodeURIComponent(id)}/certificate`,
     primary: (id: string) => `domains/${encodeURIComponent(id)}/primary`,
     records: (id: string) => `domains/${encodeURIComponent(id)}/records`,
+    dnsPlan: (id: string) => `domains/${encodeURIComponent(id)}/dns/plan`,
+    dnsApply: (id: string) => `domains/${encodeURIComponent(id)}/dns/apply`,
   },
 
   /* ---------------------------------------------------------------- */
@@ -375,6 +377,10 @@ export const endpoints = {
         `mail/admin/${encodeURIComponent(serverId)}/domains/${encodeURIComponent(domain)}/dns`,
       domainDnsAcknowledge: (serverId: string, domain: string) =>
         `mail/admin/${encodeURIComponent(serverId)}/domains/${encodeURIComponent(domain)}/dns/acknowledge`,
+      domainDnsPlan: (serverId: string, domain: string) =>
+        `mail/admin/${encodeURIComponent(serverId)}/domains/${encodeURIComponent(domain)}/dns/plan`,
+      domainDnsApply: (serverId: string, domain: string) =>
+        `mail/admin/${encodeURIComponent(serverId)}/domains/${encodeURIComponent(domain)}/dns/apply`,
       pendingDomainDns: (serverId: string) =>
         `mail/admin/${encodeURIComponent(serverId)}/domains-dns/pending`,
       mailboxes: (serverId: string) =>

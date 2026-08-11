@@ -397,6 +397,58 @@ describe("cloudflareDnsProvider", () => {
     });
   });
 
+  describe("MX priority", () => {
+    it("stamps the priority on create — an MX with no preference is invalid", async () => {
+      let posted: Record<string, unknown> | null = null;
+      global.fetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          posted = JSON.parse(init.body as string) as Record<string, unknown>;
+          return cfOk(record({ type: "MX", content: "mail.example.com", priority: 10 }));
+        }
+        return cfOk([]);
+      });
+
+      await cloudflareDnsProvider.upsertRecord({ apiToken: "t" }, "zone_123", {
+        type: "MX",
+        name: "example.com",
+        content: "mail.example.com",
+        priority: 10,
+      });
+
+      expect(posted).toMatchObject({ type: "MX", content: "mail.example.com", priority: 10 });
+    });
+
+    it("round-trips the priority back through listRecords", async () => {
+      global.fetch = vi
+        .fn()
+        .mockResolvedValue(cfOk([record({ type: "MX", content: "mail.example.com", priority: 20 })]));
+      const [r] = await cloudflareDnsProvider.listRecords({ apiToken: "t" }, "zone_123");
+      expect(r?.priority).toBe(20);
+    });
+
+    it("rewrites when only the priority differs from the desired MX", async () => {
+      let putBody: Record<string, unknown> | null = null;
+      global.fetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+        if (init?.method === "PUT") {
+          putBody = JSON.parse(init.body as string) as Record<string, unknown>;
+          return cfOk(record({ type: "MX", content: "mail.example.com", priority: 10 }));
+        }
+        return cfOk([
+          record({ type: "MX", content: "mail.example.com", priority: 50 }),
+        ]);
+      });
+
+      await cloudflareDnsProvider.upsertRecord({ apiToken: "t" }, "zone_123", {
+        type: "MX",
+        name: "example.com",
+        content: "mail.example.com",
+        priority: 10,
+      });
+
+      expect(putBody).toMatchObject({ priority: 10 });
+    });
+  });
+
   describe("deleteRecord", () => {
     it("issues a DELETE for the record id", async () => {
       const fetchMock = vi.fn().mockResolvedValue(cfOk({ id: "rec_1" }));

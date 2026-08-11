@@ -588,7 +588,11 @@
     "updatesOne": "1 atualização disponível",
     "updatesMany": "{n} atualizações disponíveis",
     "allHealthy": "Todos os componentes da plataforma estão atualizados",
-    "manageLink": "Gerenciar em Servidores"
+    "manageLink": "Gerenciar em Servidores",
+    "hostControlLabel": "Implantar nesta máquina",
+    "hostControlDesc": "Permite que o OpenShip implante aplicativos no servidor em que ele é executado, junto com os seus servidores conectados. Desativado se instalado com --no-host-control (apenas plano de controle) — ative para adicionar esta máquina como destino de implantação.",
+    "hostControlEnvNote": "Esta máquina foi definida como apenas plano de controle na instalação (--no-host-control). Ativar isto substitui essa opção para que o OpenShip possa implantar aqui.",
+    "hostControlError": "Não foi possível alterar o controle do host — apenas o proprietário do espaço de trabalho desta máquina pode."
   },
   "dataTransfer": {
     "export": {

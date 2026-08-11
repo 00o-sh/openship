@@ -45,6 +45,9 @@ export interface DnsRecordInput {
   ttl?: number;
   /** Provider-specific proxying (Cloudflare's orange cloud). */
   proxied?: boolean;
+  /** Preference for MX/SRV records. Required by the provider on an MX create;
+   *  omitted (and ignored) for A/CNAME/TXT. */
+  priority?: number;
   /** Ownership marker. Defaults to `OPENSHIP_RECORD_COMMENT`. */
   comment?: string;
 }
@@ -59,6 +62,8 @@ export interface DnsRecord {
   content: string;
   ttl: number;
   proxied: boolean;
+  /** Preference for MX/SRV records, when the provider reports one. */
+  priority?: number;
   /** Provider-side comment, when the provider supports one. */
   comment?: string;
 }

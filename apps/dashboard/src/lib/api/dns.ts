@@ -46,6 +46,59 @@ export interface VerifyZoneResult {
   message?: string;
 }
 
+/**
+ * What auto-configure would do to one record, decided before anything is
+ * written. Mirrors the API's `RecordPlanAction`.
+ *
+ *   create   → nothing answers this name+type yet.
+ *   update   → an Openship-managed record exists; apply rewrites it in place.
+ *   adopt    → one existing record we did NOT create; apply repoints it.
+ *   in-sync  → a record already answers with the value apply would write.
+ *   conflict → several records answer and none is ours; apply refuses to touch it.
+ */
+export type RecordPlanAction = "create" | "update" | "adopt" | "in-sync" | "conflict";
+
+export interface DnsRecordPlan {
+  name: string;
+  type: string;
+  action: RecordPlanAction;
+  /** The value apply would write. */
+  desired: string;
+  /** The value of the record apply would touch, when one already exists. */
+  current?: string;
+}
+
+/**
+ * Read-only preview of what apply would do — the on-demand button's input.
+ * `status` is the resolver discriminant: only `matched` carries a per-record
+ * plan; every other status means we can't (or don't) manage the zone.
+ */
+export interface DnsPlanResult {
+  status: "matched" | "none" | "unauthorized" | "unavailable";
+  provider?: string;
+  zoneName?: string;
+  /** Present for unauthorized/unavailable — safe to show an operator. */
+  reason?: string;
+  records: DnsRecordPlan[];
+}
+
+export interface DnsRecordOutcome {
+  name: string;
+  type: string;
+  /** applied = created/updated/adopted; skipped = in place or no value; failed = see error. */
+  outcome: "applied" | "skipped" | "failed";
+  action?: RecordPlanAction;
+  error?: string;
+}
+
+export interface DnsProvisionResult {
+  /** True only when a provider managed the zone AND every record is in place. */
+  provisioned: boolean;
+  /** Present when we did not (or could not) act — safe to show an operator. */
+  reason?: string;
+  records: DnsRecordOutcome[];
+}
+
 export const dnsApi = {
   /** List supported DNS providers and the token scopes they need. */
   listProviders: () => api.get<{ data: DnsProviderDescriptor[] }>(endpoints.dns.providers),

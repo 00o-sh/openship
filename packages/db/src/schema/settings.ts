@@ -213,6 +213,26 @@ export const instanceSettings = pgTable("instance_settings", {
   autoScanInfra: boolean("auto_scan_infra").notNull().default(true),
   lastSeenVersion: text("last_seen_version"),
 
+  // ── Host control ─────────────────────────────────────────────────────────────
+
+  /**
+   * May OpenShip deploy to the machine it runs on ("This Server")?
+   *
+   * Nullable ON PURPOSE — the exact contract as productMode above: null means
+   * "no instance override, use the OPENSHIP_HOST_CONTROL env default" (which the
+   * `openship up --no-host-control` install flag writes). A notNull default would
+   * write a concrete value on every instance and permanently shadow that env var.
+   * Resolved by apps/api/src/lib/host-control.ts, never read directly, so the
+   * env-fallback + selfhosted-target rules live in one place.
+   *
+   * Unlike productMode this DOES gate privileged behavior (host-root deploys via
+   * the container→host SSH channel + mounted docker socket), so the WRITE is
+   * gated to the box-owning org's owner in setup.controller. The precedence still
+   * lets the DB override env — the operator's stated need is to re-enable from
+   * Settings what `--no-host-control` turned off, "from settings again anytime".
+   */
+  hostControlEnabled: boolean("host_control_enabled"),
+
   // ── Timestamps ─────────────────────────────────────────────────────────────
 
   createdAt: timestamp("created_at").notNull().defaultNow(),

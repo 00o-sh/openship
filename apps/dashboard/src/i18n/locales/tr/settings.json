@@ -694,7 +694,11 @@
     "updatesOne": "1 güncelleme mevcut",
     "updatesMany": "{n} güncelleme mevcut",
     "allHealthy": "Tüm platform bileşenleri güncel",
-    "manageLink": "Sunucular'da yönet"
+    "manageLink": "Sunucular'da yönet",
+    "hostControlLabel": "Bu makineye dağıt",
+    "hostControlDesc": "OpenShip'in, bağlı sunucularınızın yanı sıra çalıştığı sunucuya da uygulama dağıtmasına izin verin. --no-host-control (yalnızca kontrol düzlemi) ile kurulduysa kapalıdır — bu makineyi dağıtım hedefi olarak eklemek için açın.",
+    "hostControlEnvNote": "Bu makine kurulumda yalnızca kontrol düzlemi (--no-host-control) olarak ayarlandı. Bunu açmak bu ayarı geçersiz kılar ve OpenShip'in buraya dağıtım yapmasına olanak tanır.",
+    "hostControlError": "Ana makine denetimi değiştirilemedi — bunu yalnızca bu makinenin çalışma alanının sahibi yapabilir."
   },
   "dataTransfer": {
     "export": {

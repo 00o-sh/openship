@@ -588,7 +588,11 @@
     "updatesOne": "1 actualización disponible",
     "updatesMany": "{n} actualizaciones disponibles",
     "allHealthy": "Todos los componentes de la plataforma están actualizados",
-    "manageLink": "Gestionar en Servidores"
+    "manageLink": "Gestionar en Servidores",
+    "hostControlLabel": "Desplegar en esta máquina",
+    "hostControlDesc": "Permite que OpenShip despliegue aplicaciones en el servidor donde se ejecuta, junto con tus servidores conectados. Desactivado si se instaló con --no-host-control (solo plano de control): actívalo para añadir esta máquina como destino de despliegue.",
+    "hostControlEnvNote": "Esta máquina se configuró como solo plano de control durante la instalación (--no-host-control). Al activarlo se anula esa opción para que OpenShip pueda desplegar aquí.",
+    "hostControlError": "No se pudo cambiar el control del host: solo el propietario del espacio de trabajo de esta máquina puede hacerlo."
   },
   "dataTransfer": {
     "export": {

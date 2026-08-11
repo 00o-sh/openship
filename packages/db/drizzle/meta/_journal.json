@@ -729,6 +729,13 @@
       "when": 1787869307325,
       "tag": "0103_dns_credential",
       "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1787955707325,
+      "tag": "0104_instance_host_control",
+      "breakpoints": true
     }
   ]
 }

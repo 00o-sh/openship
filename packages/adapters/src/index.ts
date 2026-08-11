@@ -399,6 +399,7 @@ export {
   createHostExecutor,
   unavailableExecutor,
   hostControlDisabled,
+  setHostControlOverride,
   hostChannelHealth,
   containerBridgeCidr,
   type HostChannelHealth,

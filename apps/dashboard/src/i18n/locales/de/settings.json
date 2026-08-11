@@ -588,7 +588,11 @@
     "updatesOne": "1 Update verfügbar",
     "updatesMany": "{n} Updates verfügbar",
     "allHealthy": "Alle Plattform-Komponenten sind aktuell",
-    "manageLink": "In Server verwalten"
+    "manageLink": "In Server verwalten",
+    "hostControlLabel": "Auf diesem Rechner bereitstellen",
+    "hostControlDesc": "Erlaube OpenShip, Apps auf dem Server bereitzustellen, auf dem es selbst läuft – zusätzlich zu deinen verbundenen Servern. Aus bei Installation mit --no-host-control (nur Steuerungsebene) – aktiviere es, um diesen Rechner als Bereitstellungsziel hinzuzufügen.",
+    "hostControlEnvNote": "Dieser Rechner wurde bei der Installation auf reine Steuerungsebene gesetzt (--no-host-control). Das Aktivieren überschreibt das, sodass OpenShip hier bereitstellen kann.",
+    "hostControlError": "Host-Steuerung konnte nicht geändert werden – nur der Eigentümer des Arbeitsbereichs dieses Rechners darf das."
   },
   "dataTransfer": {
     "export": {

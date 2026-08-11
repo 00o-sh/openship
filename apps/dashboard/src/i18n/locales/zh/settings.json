@@ -588,7 +588,11 @@
     "updatesOne": "有 1 项更新",
     "updatesMany": "有 {n} 项更新",
     "allHealthy": "所有平台组件均为最新",
-    "manageLink": "在服务器中管理"
+    "manageLink": "在服务器中管理",
+    "hostControlLabel": "部署到本机",
+    "hostControlDesc": "允许 OpenShip 将应用部署到其自身运行的服务器上，与你已连接的服务器一并使用。若安装时使用了 --no-host-control（仅控制平面）则为关闭 — 打开后即可将本机添加为部署目标。",
+    "hostControlEnvNote": "本机在安装时被设置为仅控制平面（--no-host-control）。打开此项将覆盖该设置，使 OpenShip 可以部署到此处。",
+    "hostControlError": "无法更改主机控制 — 只有本机工作区的所有者才能更改。"
   },
   "dataTransfer": {
     "export": {

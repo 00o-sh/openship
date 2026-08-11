@@ -88,6 +88,12 @@ export interface InstanceSettings {
   productMode?: "platform" | "mail" | null;
   /** What the instance actually resolves to right now (override ?? env). */
   productModeEffective?: "platform" | "mail";
+  /** Stored host-control override — may OpenShip deploy to the machine it runs
+   *  on ("This Server")? null = unset (the OPENSHIP_HOST_CONTROL env decides). */
+  hostControl?: boolean | null;
+  /** What host control actually resolves to right now (override ?? env), already
+   *  false off a non-selfhosted target so the UI agrees with the backend. */
+  hostControlEffective?: boolean;
 }
 
 /** Instance SMTP config as returned by the API — password is never included. */
@@ -830,6 +836,26 @@ export const systemApi = {
   /** Set the instance-wide auto-scan-infra toggle. */
   setInfraAutoScan: (enabled: boolean) =>
     api.patch<{ ok: boolean }>(endpoints.system.settings, { autoScanInfra: enabled }),
+
+  /**
+   * Read the host-control state (#527): the stored override plus what it
+   * effectively resolves to right now. `effective` is what the toggle shows;
+   * `stored === null` means "no instance override, the env default governs" and
+   * lets the UI note when the env is what's holding it off.
+   */
+  getHostControl: async (): Promise<{ stored: boolean | null; effective: boolean }> => {
+    const s = await api.get<InstanceSettings>(endpoints.system.settings);
+    return { stored: s.hostControl ?? null, effective: Boolean(s.hostControlEffective) };
+  },
+
+  /**
+   * Set the host-control override. Accepts a boolean to pin it, or null to clear
+   * the override and follow the env default again. The API hard-gates this to the
+   * box-owning org's owner (403 otherwise) — only they may make this box a
+   * host-root deploy target.
+   */
+  setHostControl: (enabled: boolean | null) =>
+    api.patch<{ ok: boolean }>(endpoints.system.settings, { hostControl: enabled }),
 
   /** Org-wide managed-container drift summary for the home nudge. */
   containersBehind: () =>
