@@ -36,7 +36,6 @@ import {
   isHostChannelUnavailableError,
   runDeployPipeline,
   isMultiServiceRuntime,
-  waitForReady,
   ensureEdge,
 } from "@repo/adapters";
 import { platform } from "../../lib/controller-helpers";
@@ -58,6 +57,8 @@ import {
   type DeployRouting,
 } from "./build-execution-plan";
 import { attachLinkedNetworks } from "./attach-linked-networks";
+import { resolveReadinessTarget } from "./readiness-target";
+import { waitForReadyFromExecutor } from "./forwarded-readiness";
 import { syncProjectToServerManifest } from "../../lib/openship-manifest-sync";
 import { syncManagedEdgeRoutes, edgeUnsyncedWarning } from "../../lib/managed-edge-proxy";
 import { decryptEnvMap } from "../../lib/encryption";
@@ -1590,25 +1591,12 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
         },
         resolveRoute: undefined,
         readiness: async (containerId, cfg) => {
-          let host = "127.0.0.1";
-          // An explicit `readiness.port` overrides; otherwise probe the app port
-          // and let the container-runtime lookup below remap it to the published one.
-          let port = readinessGate.probe.port ?? cfg.port;
-          if (runtime.name !== "bare" && readinessGate.probe.port === undefined) {
-            // Container runtime: prefer the published host port; fall back to the
-            // container's bridge IP:port (reachable on the local daemon).
-            try {
-              const info = await runtime.getContainerInfo(containerId);
-              if (info?.hostPort) {
-                port = info.hostPort;
-              } else if (runtime.supports("containerIp")) {
-                const ip = await runtime.getContainerIp(containerId);
-                if (ip) host = ip;
-              }
-            } catch {
-              /* fall back to 127.0.0.1:cfg.port */
-            }
-          }
+          const { host, port } = await resolveReadinessTarget({
+            runtime,
+            containerId,
+            primaryPort: cfg.port,
+            probePort: readinessGate.probe.port,
+          });
           // Name the address actually dialed. Reporting `cfg.port` here sent
           // operators to look at the app's own port (3000) when the probe had
           // really been talking to the published host port, so a wrong-port or
@@ -1619,11 +1607,25 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
             `Health check: waiting up to ${seconds}s for the app to answer at ${target}` +
               `${readinessGate.probe.path ? "" : " (TCP connect)"}…\n`,
           );
-          const ready = await waitForReady(host, port, {
-            path: readinessGate.probe.path,
-            timeoutMs: readinessGate.probe.timeoutMs,
-            intervalMs: readinessGate.probe.intervalMs,
-          });
+          let ready: boolean;
+          try {
+            // A containerized OpenShip API has its own loopback/network namespace.
+            // Probe from the host through the same pooled SSH channel used for
+            // local host operations; a non-containerized install transparently
+            // falls back to the executor process's direct socket path.
+            ready = await sshManager.withHostExecutor((executor) =>
+              waitForReadyFromExecutor(executor, host, port, {
+                path: readinessGate.probe.path,
+                timeoutMs: readinessGate.probe.timeoutMs,
+                intervalMs: readinessGate.probe.intervalMs,
+              }),
+            );
+          } catch (error) {
+            return (
+              `OpenShip could not probe ${target} from the deployment host: ` +
+              `${safeErrorMessage(error)}. Check the local host-control channel.`
+            );
+          }
           if (!ready) {
             return (
               `The app never answered at ${target} within ${seconds}s` +
