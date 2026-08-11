@@ -690,9 +690,12 @@ export async function buildComposeImages(opts: {
       );
     }
 
-    if (buildable.length > 0 && cancelledServices.size > 0) {
-      // Cancelled: no "failed" step and no phase result — the deployment's own
-      // cancelled status is the outcome the user is waiting on.
+    // Non-empty only for services derived from `buildable`, so it implies there was
+    // something to build.
+    if (cancelledServices.size > 0) {
+      // "failed" is the closest step state there is — BuildLogger has no cancelled
+      // one — but no install phase is marked done: the deployment's own cancelled
+      // status is the outcome the user is waiting on.
       opts.logger.step("build", "failed", "Image build cancelled");
       opts.logger.log("Compose image build cancelled. Deployment will not continue.\n", "error");
     } else if (buildable.length > 0) {
