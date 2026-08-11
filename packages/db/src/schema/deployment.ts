@@ -59,8 +59,8 @@ export const deployment = pgTable("deployment", {
    * Build status.
    *
    * Values: `queued | building | deploying | ready | failed | cancelled |
-   * partial_failure | action_required | rejected` (plus `reconciling`, written
-   * by onReconciling).
+   * partial_failure | action_required | rejected | no_changes` (plus
+   * `reconciling`, written by onReconciling).
    * `rejected` is terminal: the operator declined a finished (ready /
    * partial_failure) deploy; its runtime is torn down but the row + logs are
    * kept for history (see rejectDeployment).
@@ -74,6 +74,10 @@ export const deployment = pgTable("deployment", {
    * reads "Action Required" instead of a dead end. Like `partial_failure` it is
    * a DB-ONLY status: the SSE session still reports `failed`, so the build
    * stream closes normally.
+   * `no_changes` is a terminal SUCCESS that shipped nothing: a compose redeploy
+   * carried every service forward, so it owns no container and no image and is
+   * deliberately NOT promoted to the active release (see onNoChanges). DB-only
+   * too — the SSE session reports `ready`.
    * Free-text column (no DB check constraint) so callers can extend
    * without a migration; keep values lowercase + snake_case.
    *

@@ -544,7 +544,12 @@ export async function getDeploymentStats(
   });
 
   const total = deployments.length;
-  const success = deployments.filter((d) => d.status === "ready").length;
+  // `no_changes` counts as success: nothing failed, and the release it declined to
+  // replace is still live. Left out, every unchanged redeploy would lower the rate
+  // AND land in the `pending` residue below, which is `total - success - failed`.
+  const success = deployments.filter(
+    (d) => d.status === "ready" || d.status === "no_changes",
+  ).length;
   const failed = deployments.filter((d) => d.status === "failed").length;
 
   // Average build duration of successful deployments
@@ -643,7 +648,8 @@ export async function getDashboardStats(ctx: RequestContext) {
 
   let totalDeployments = 0;
   for (const count of Object.values(deploymentsByStatus)) totalDeployments += count;
-  const successDeployments = deploymentsByStatus["ready"] ?? 0;
+  const successDeployments =
+    (deploymentsByStatus["ready"] ?? 0) + (deploymentsByStatus["no_changes"] ?? 0);
   const failedDeployments = deploymentsByStatus["failed"] ?? 0;
 
   return {

@@ -119,52 +119,62 @@ export async function liveContainerIdWithRuntime(
 
 /**
  * The container a PROJECT-level question means — "its logs", "its container info",
- * "its resource usage" — resolved live, using a runtime the caller already holds.
+ * "its resource usage" — for the deployment `dep`.
  *
- * `deployment.containerId` cannot answer it for a multi-service project: it holds
- * ONE service's container, and because the deploy loop walks services in
- * dependency order that service was the database an app `dependsOn` — so project
- * logs answered for postgres while the app served traffic (#498). It can also hold
- * the `"compose"` sentinel, which is no container at all.
+ * `dep.containerId` cannot answer it for a multi-service release: it holds ONE
+ * service's container, chosen without reference to which service the project's URL
+ * points at, so it named the database an app `dependsOn` (#498). It can also hold
+ * the `"compose"` sentinel, which is no container at all. So the primary service is
+ * picked the way the access URL is picked, and its container read from `dep`'s own
+ * rows.
  *
- * So: pick the primary service the same way the access URL does, then resolve ITS
- * container against the host and heal the record, exactly as the per-service path
- * does. Single-app deployments (no service rows) short-circuit to the recorded id
- * and issue no extra queries.
+ * Resolved LIVE against the host, and the row healed, for the ACTIVE release only.
+ * The live matcher keys on identity (project+service label) rather than deployment,
+ * so it answers with whatever runs NOW — right for the current release, wrong for a
+ * historical one, whose recorded container is the point of asking. These endpoints
+ * accept any deployment id, so healing unconditionally would rewrite history from a
+ * GET.
  *
- * Null means the primary service's container is genuinely gone — callers should
- * surface "not deployed" rather than hand a dead id to docker.
+ * Null means the primary service's container is genuinely gone.
  */
 export async function livePrimaryContainerId(
   runtime: HostContainerLister | null | undefined,
   dep: { id: string; projectId: string; containerId: string | null },
 ): Promise<string | null> {
   const recorded = isRealContainerRef(dep.containerId) ? dep.containerId : null;
-  const services = (await repos.service.listByProject(dep.projectId).catch(() => [])).filter(
-    (svc) => svc.enabled,
-  );
-  if (services.length === 0) return recorded;
-
-  const [project, domainRows, rows] = await Promise.all([
+  const [project, rows] = await Promise.all([
     repos.project.findById(dep.projectId).catch(() => null),
-    repos.domain.listByProject(dep.projectId).catch(() => []),
     repos.service.listByDeployment(dep.id).catch(() => []),
   ]);
-  const primaryId = pickPrimaryServiceId(services, domainRows);
-  const svc = services.find((s) => s.id === primaryId);
-  if (!svc || !project) return recorded;
+  // THIS release's own rows decide whether it was a service deploy. The project's
+  // current service list would misread a single-app release that later gained a
+  // sidecar, and answer for the sidecar.
+  if (!project || rows.length === 0) return recorded;
 
-  const row = rows.find((r) => r.serviceId === svc.id);
+  const [services, domainRows] = await Promise.all([
+    repos.service.listByProject(dep.projectId).catch(() => []),
+    repos.domain.listByProject(dep.projectId).catch(() => []),
+  ]);
+  const candidates = services.filter(
+    (svc) => svc.enabled && rows.some((r) => r.serviceId === svc.id && r.containerId),
+  );
+  const primaryId = pickPrimaryServiceId(candidates, domainRows);
+  const svc = candidates.find((s) => s.id === primaryId);
+  const row = svc ? rows.find((r) => r.serviceId === svc.id) : undefined;
+  if (!svc || !row?.containerId) return recorded;
+
+  if (project.activeDeploymentId !== dep.id) return row.containerId;
+
   const live = await liveContainerIdWithRuntime(runtime, {
     service: { id: svc.id, name: svc.name },
     projectId: dep.projectId,
     slug: project.slug,
-    tracked: row?.containerId ?? null,
+    tracked: row.containerId,
   });
-  if (row && live && row.containerId !== live) {
+  if (live && live !== row.containerId) {
     await repos.service.updateServiceDeployment(row.id, { containerId: live }).catch(() => {});
   }
-  return live ?? recorded;
+  return live;
 }
 
 /**

@@ -329,13 +329,11 @@ export async function onNoChanges(
     result.warningMessage ??
     "No changes to deploy — every service was already up to date, so the current release stayed live.";
   // Under `composeDeployment.warningMessage` because that is where the build-status
-  // refresh path reads a persisted deploy note from; `noChanges` is the flag
-  // clients branch on. Sanitized like onSuccess's meta — a NUL in the reason must
-  // not fail the write.
+  // refresh path reads a persisted deploy note from. Sanitized like onSuccess's
+  // meta — a NUL in the reason must not fail the write.
   const previousMeta = (dep.meta as DeploymentMeta | null) ?? {};
   const mergedMeta = sanitizeStorableStrings({
     ...previousMeta,
-    noChanges: true,
     composeDeployment: { ...(previousMeta.composeDeployment ?? {}), warningMessage: reason },
   });
   await recordOutcome(dep.id, "no_changes", { errorMessage: null, meta: mergedMeta }, ["meta"]);

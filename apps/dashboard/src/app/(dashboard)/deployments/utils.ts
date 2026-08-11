@@ -246,7 +246,12 @@ export const filterDeployments = (
 export const calculateDeploymentStats = (deployments: Deployment[]) => {
   return {
     total: deployments.length,
-    success: deployments.filter((d) => d.status === "success").length,
+    // `no_changes` is a success that shipped nothing — counted here for the same
+    // reason `action_required` is counted as failed below: it is in `total`, so
+    // leaving it in no bucket would quietly deflate the success rate, and an
+    // unchanged redeploy of an image-only stack is routine.
+    success: deployments.filter((d) => d.status === "success" || d.status === "no_changes")
+      .length,
     // Blocked deploys count as failed here for the same reason they show under
     // the Failed filter — they didn't ship. Keeping them out would quietly
     // inflate the success rate.

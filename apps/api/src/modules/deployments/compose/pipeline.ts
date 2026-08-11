@@ -262,7 +262,6 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
       composeDeployment: {
         totalServices: composeResult.summary.total,
         successfulServices: composeResult.summary.successful,
-        deployedServices: composeResult.summary.deployed,
         failedServices: composeResult.summary.failed,
         failedServiceNames: composeResult.summary.failedServices,
         warningMessage: composeResult.warning,

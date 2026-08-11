@@ -675,7 +675,10 @@ export default function AppInstallPage() {
             status,
           )
         ) {
-          await resolveTerminal({ ok: status === "ready", message: s.failureMessage });
+          await resolveTerminal({
+            ok: status === "ready" || status === "no_changes",
+            message: s.failureMessage,
+          });
           return;
         }
       } catch {
