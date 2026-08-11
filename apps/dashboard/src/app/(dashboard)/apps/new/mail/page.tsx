@@ -126,7 +126,9 @@ export default function MailWizardPage() {
         const status: string = s.deploymentStatus ?? s.status ?? "queued";
         setProgress(typeof s.progress === "number" ? s.progress : 0);
         setPhaseLabel(labelForStatus(status, w));
-        if (status === "ready") {
+        // `no_changes` settles as a success: nothing shipped because the stack was
+        // already up to date, so the install is done.
+        if (status === "ready" || status === "no_changes") {
           setLiveUrl(firstPublicHost(s?.config?.publicEndpoints, baseDomain));
           setPhase("done");
         } else if (

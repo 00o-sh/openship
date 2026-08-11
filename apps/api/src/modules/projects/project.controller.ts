@@ -18,6 +18,7 @@ import {
   isLoopbackHost,
   isReservedLoopbackPort,
   pickCanonicalDomainRow,
+  pickPrimaryServiceId,
   resolveProjectAccess,
 } from "../../lib/public-endpoints";
 import {
@@ -1793,8 +1794,24 @@ async function reRegisterDomainRoute(
 
     // Find the service deployment to get the container target. Prefer a row with
     // a container to inspect — a stored ip alone is just the last-known value.
+    //
+    // Which service is "primary" comes from the same picker the access URL uses:
+    // `service_deployment` rows come back in insertion (dependency) order, so
+    // taking the first one with a container pointed the webhook vhost at whatever
+    // an exposed app depends on — its database (#498).
     const svcDeps = await repos.service.listByDeployment(project.activeDeploymentId);
-    const primarySvc = svcDeps.find((s) => s.containerId) ?? svcDeps.find((s) => s.ip);
+    const [projectServices, domainRows] = await Promise.all([
+      repos.service.listByProject(project.id).catch(() => []),
+      repos.domain.listByProject(project.id).catch(() => []),
+    ]);
+    const primaryId = pickPrimaryServiceId(
+      projectServices.filter((s) => s.enabled),
+      domainRows,
+    );
+    const primarySvc =
+      svcDeps.find((s) => s.serviceId === primaryId && (s.containerId || s.ip)) ??
+      svcDeps.find((s) => s.containerId) ??
+      svcDeps.find((s) => s.ip);
     if (!primarySvc) return;
 
     // The port the app LISTENS on. `hostPort` is a publish, not a container port,

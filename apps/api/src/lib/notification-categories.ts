@@ -247,6 +247,10 @@ const EVENT_TYPE_TO_CATEGORY: Record<string, string> = {
   // Deploy
   "deployment.failed": "deploy.failed",
   "deployment.succeeded": "deploy.succeeded",
+  // A no-op redeploy is a SUCCESSFUL outcome, so it rides the succeeded toggle —
+  // not "cancelled", which tells the operator to try again. Its own headline below
+  // keeps the message honest about nothing having shipped.
+  "deployment.no_changes": "deploy.succeeded",
   "deployment.cancelled": "deploy.cancelled",
   "build.failed": "deploy.failed",
   "build.fatal_error": "deploy.failed",
@@ -317,6 +321,12 @@ export const EVENT_HEADLINES: Record<string, { title: string; description: strin
   "server.reachable": {
     title: "Server reachable",
     description: "A server's Docker daemon is answering again, with how long it was gone.",
+  },
+  // Same reasoning: it subscribes as a success, but "Deploy succeeded" over a body
+  // saying nothing shipped is the exact mismatch this override exists for.
+  "deployment.no_changes": {
+    title: "No changes to deploy",
+    description: "A redeploy found every service already up to date; the live release didn't move.",
   },
 };
 

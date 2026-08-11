@@ -929,6 +929,25 @@ export function pickCanonicalDomainRow<
 }
 
 /**
+ * The service a PROJECT-level question about "the container" means — its logs,
+ * its container info, the upstream a project-level domain proxies to. Keyed off
+ * the canonical domain row first, so the answer agrees with the access URL.
+ *
+ * The thing it replaces is `find((s) => s.containerId)` over a service list in
+ * topoSort order: dependencies come first there, so for an app that `dependsOn`
+ * its database that find answered "postgres" (#498).
+ */
+export function pickPrimaryServiceId<S extends { id: string; exposed?: boolean | null }>(
+  services: S[],
+  domainRows?: Array<Pick<ProjectDomainRow, "verified" | "isPrimary" | "serviceId">> | null,
+): string | null {
+  if (services.length === 0) return null;
+  const canonical = pickCanonicalDomainRow(domainRows)?.serviceId;
+  if (canonical && services.some((svc) => svc.id === canonical)) return canonical;
+  return (services.find((svc) => svc.exposed) ?? services[0]).id;
+}
+
+/**
  * The canonical access URL for a project, computed from ALL its domain rows +
  * the effective deploy target + port. Correct for a project whose only domains
  * are service-scoped — the project-level publicEndpoints resolver excludes those,

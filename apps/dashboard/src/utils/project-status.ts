@@ -116,10 +116,12 @@ export function projectStatusLabel(status: ProjectStatus, t: Dictionary): string
  * the literal "failed" only, so `partial_failure`, `rejected`, `reconciling` —
  * and any status added later — still came back green "Live" over a deploy that
  * never landed. `ready` is a landed deploy; `cancelled` is the operator's own
- * deliberate stop, which needs nothing from them and must not nag forever.
+ * deliberate stop, which needs nothing from them and must not nag forever;
+ * `no_changes` found every service already up to date and deliberately kept the
+ * live release, so the project is exactly as healthy as before it ran.
  * Everything else is "the newest deploy did not land".
  */
-const SETTLED_HEALTHY_STATUSES = new Set(["ready", "cancelled"]);
+const SETTLED_HEALTHY_STATUSES = new Set(["ready", "cancelled", "no_changes"]);
 
 /** Why a project reads "attention". Null when it doesn't. */
 export type ProjectAttentionReason =

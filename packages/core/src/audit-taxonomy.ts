@@ -113,6 +113,14 @@ export const AUDIT_EVENTS: Record<string, AuditEventDef> = {
     tone: "warning",
     description: "A deployment was stopped before it finished.",
   },
+  "deployment.no_changes": {
+    category: "deployments",
+    action: "found no changes to deploy for",
+    label: "No changes to deploy",
+    tone: "info",
+    description:
+      "A redeploy found every service already up to date, so the current release stayed live.",
+  },
   "deployment:write": {
     category: "deployments",
     action: "started a deploy for",

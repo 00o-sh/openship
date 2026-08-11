@@ -69,6 +69,7 @@
     "actionRequired": "İşlem gerekiyor",
     "rejected": "Reddedildi",
     "verifying": "Doğrulanıyor",
+    "noChanges": "Değişiklik yok",
     "pending": "Beklemede"
   },
   "serviceStatus": {

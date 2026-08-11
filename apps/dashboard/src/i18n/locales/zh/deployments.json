@@ -69,6 +69,7 @@
     "actionRequired": "需要处理",
     "rejected": "已拒绝",
     "verifying": "验证中",
+    "noChanges": "无变更",
     "pending": "待处理"
   },
   "serviceStatus": {

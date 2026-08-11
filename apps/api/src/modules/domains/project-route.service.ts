@@ -13,6 +13,7 @@ import {
 } from "../../lib/public-endpoints";
 import { assertValidCustomDomain, assertValidCustomDomains } from "../../lib/custom-domain-guard";
 import { resolveLiveUpstreamUrl, resolveRouteStrategy } from "../../lib/upstream-url";
+import { isRealContainerRef } from "../../lib/container-ref";
 import { deregisterManagedEdgeRoutes, syncManagedEdgeRoutes } from "../../lib/managed-edge-proxy";
 import { syncProjectPublicRoutes } from "../../lib/project-route-store";
 import { resolveRouteRedirect } from "../../lib/domain-redirect";
@@ -451,11 +452,14 @@ export async function reapplyProjectLiveRoutes(
     };
 
     const containerId = deployment.containerId;
-    if (!containerId) {
+    if (!isRealContainerRef(containerId)) {
       // Compose/multi-service deployments track containers per-service, so the
-      // parent deployment row has no containerId — nothing to point a single-app
-      // route at (per-service routes are handled in updateService). Still tear
-      // down any dropped hostnames on the correct host.
+      // parent row carries the `"compose"` sentinel or one service's container —
+      // never a single-app upstream to point a project-level route at (per-service
+      // routes are handled in updateService). Testing only for null let a compose
+      // project's project-level domain fall through to the port published by
+      // whichever service the row named, which in dependency order was its database.
+      // Still tear down any dropped hostnames on the correct host.
       console.warn(
         `[project-route] ${project.slug}: deployment ${deployment.id} has no containerId (target=${effectiveTarget}) — skipping single-app route registration`,
       );

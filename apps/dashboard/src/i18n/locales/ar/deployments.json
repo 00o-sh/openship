@@ -69,6 +69,7 @@
     "actionRequired": "إجراء مطلوب",
     "rejected": "مرفوضة",
     "verifying": "قيد التحقق",
+    "noChanges": "لا تغييرات",
     "pending": "قيد الانتظار"
   },
   "serviceStatus": {

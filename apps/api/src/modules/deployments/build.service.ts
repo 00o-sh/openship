@@ -251,10 +251,16 @@ export interface DeploymentConfigSnapshot {
   /** STATIC twin: a retained release DIRECTORY on the host to promote again
    *  (static releases have no image). Set by a rollback restore. */
   handoverStaticDir?: string;
+  /** This deploy carried every service forward and shipped nothing, so it never
+   *  became the active release (`onNoChanges`). Mirrors the row's `no_changes`
+   *  status for clients reading the snapshot rather than the status. */
+  noChanges?: boolean;
   /** Summary of a compose deployment fan-out, when applicable. */
   composeDeployment?: {
     totalServices: number;
     successfulServices: number;
+    /** Of those, the ones actually (re)created — the rest were carried forward. */
+    deployedServices?: number;
     failedServices: number;
     failedServiceNames: string[];
     warningMessage?: string;
@@ -1579,7 +1585,7 @@ export async function startBuild(deploymentId: string) {
   // be overwritten mid-flight. Resolving a blocker creates a NEW deployment
   // (redeploy), it never restarts this one.
   if (
-    ["building", "deploying", "ready", "failed", "cancelled", "action_required"].includes(
+    ["building", "deploying", "ready", "failed", "cancelled", "action_required", "no_changes"].includes(
       dep.status,
     )
   ) {

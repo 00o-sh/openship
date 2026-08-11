@@ -35,11 +35,9 @@
  * same shape as image-gc's `computeKeepSet`.
  */
 
-/** Compose deploys store this in `deployment.container_id` / `image_ref` when
- *  there is no single primary container/image for the release. It is a marker,
- *  never a real Docker reference — treating it as one is what made compose
- *  rollback try to `createContainer({ Image: "compose" })`. */
-export const COMPOSE_SENTINEL = "compose";
+import { COMPOSE_SENTINEL } from "../../../lib/container-ref";
+
+export { COMPOSE_SENTINEL };
 
 export const ROLLBACK_ERROR_CODES = {
   NOT_READY: "ROLLBACK_NOT_READY",

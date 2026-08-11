@@ -54,7 +54,7 @@ const SETTLED_STATUS_GUARDS: Array<{
   {
     what: "markDeploymentFailedFromOutside already-settled guard",
     file: "apps/api/src/modules/deployments/build-pipeline.ts",
-    anchor: '["failed", "ready", "cancelled", "action_required"]',
+    anchor: '["failed", "ready", "cancelled", "action_required"',
     breaks: "an outer throw overwrites the recorded blocker with a bare `failed`",
   },
   {
@@ -156,14 +156,21 @@ describe("the in-flight vocabulary stays one vocabulary", () => {
   });
 });
 
-describe("settled-status guards know about action_required", () => {
+/**
+ * Every settled status a guard list has to name. Parameterized rather than
+ * hardcoded so adding the NEXT value is one line here and then seven failing
+ * tests naming exactly what to teach — the mistake this ratchet exists to catch.
+ */
+const SETTLED_STATUSES = ["action_required", "no_changes"] as const;
+
+describe("settled-status guards know about every settled status", () => {
   for (const guard of SETTLED_STATUS_GUARDS) {
     it(`${guard.what} — else ${guard.breaks}`, () => {
       const source = readFileSync(join(REPO_ROOT, guard.file), "utf8");
       expect(source, `${guard.file}: guard moved or was rewritten`).toContain(guard.anchor);
-      expect(source, `${guard.file}: guard no longer handles action_required`).toContain(
-        "action_required",
-      );
+      for (const status of SETTLED_STATUSES) {
+        expect(source, `${guard.file}: guard no longer handles ${status}`).toContain(status);
+      }
     });
   }
 });

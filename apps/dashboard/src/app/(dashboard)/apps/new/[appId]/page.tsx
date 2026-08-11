@@ -600,7 +600,10 @@ export default function AppInstallPage() {
       /* fall back to the SSE outcome below */
     }
     const failed = ["failed", "cancelled", "partial_failure", "action_required", "rejected"];
-    if (status === "ready" || (status === "" && fallback.ok)) {
+    // `no_changes` is a SUCCESS: every service was already up to date and the live
+    // stack is the one this install wanted. Treating it as terminal-but-unhandled
+    // would show "Install failed" over a working app.
+    if (status === "ready" || status === "no_changes" || (status === "" && fallback.ok)) {
       await deriveLiveUrl(s?.config);
       setPhase("done");
     } else if (failed.includes(status) || (status === "" && !fallback.ok)) {
@@ -668,7 +671,7 @@ export default function AppInstallPage() {
         const status: string = s.deploymentStatus ?? s.status ?? "";
         if (typeof s.progress === "number") setProgress(s.progress);
         if (
-          ["ready", "failed", "cancelled", "partial_failure", "action_required", "rejected"].includes(
+          ["ready", "failed", "cancelled", "partial_failure", "action_required", "rejected", "no_changes"].includes(
             status,
           )
         ) {

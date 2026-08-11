@@ -69,6 +69,7 @@
     "actionRequired": "対応が必要",
     "rejected": "却下",
     "verifying": "検証中",
+    "noChanges": "変更なし",
     "pending": "保留中"
   },
   "serviceStatus": {
