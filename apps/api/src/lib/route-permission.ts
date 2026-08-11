@@ -572,14 +572,38 @@ export function requirePermission(spec: PermissionSpec): MiddlewareHandler {
       // record below is byte-identical to the collection branch's.
       leafId = "*";
     } else if (parsed.isList) {
-      // List scope — org from request (X-Organization-Id header or
-      // session default). No specific resource id.
-      await permission.assert(getRequestContext(c), {
-        resourceType: parsed.leaf,
-        resourceId: "*",
-        action: "read",
-        scope: "list",
-      });
+      if (parsed.root !== parsed.leaf) {
+        // A nested collection belongs to the concrete parent named in the URL.
+        // Authorizing `{service,"*"}` here made project-scoped tokens unable to
+        // list that project's services or deployments even though they could
+        // read every concrete child. The parent grant is the collection scope.
+        const parentParamName =
+          idsMap[parsed.root] ?? DEFAULT_ID_PARAMS[parsed.root] ?? "id";
+        const parentId = c.req.param(parentParamName);
+        if (!parentId) {
+          return c.json(
+            {
+              error: `Missing route param :${parentParamName} required by tag "${spec.tag}"`,
+            },
+            400,
+          );
+        }
+        await permission.assert(getRequestContext(c), {
+          resourceType: parsed.root,
+          resourceId: parentId,
+          action: "read",
+        });
+        leafId = "*";
+      } else {
+        // Top-level list scope — org from request (X-Organization-Id header or
+        // session default). No specific resource id.
+        await permission.assert(getRequestContext(c), {
+          resourceType: parsed.leaf,
+          resourceId: "*",
+          action: "read",
+          scope: "list",
+        });
+      }
     } else if (ORG_SINGLETON_RESOURCES.has(parsed.leaf as string)) {
       // Org-singleton resources (billing, settings, analytics, etc.) —
       // no resource id in the URL. Pass "*" so the permission resolver
