@@ -6,12 +6,12 @@ import { Checkbox } from "@/components/ui/Checkbox";
 import { TagListInput, ChipMultiSelect } from "@/components/ui/TagListInput";
 import { useI18n } from "@/components/i18n-provider";
 import ReadinessSection from "@/components/project-settings/ReadinessSection";
+import { healthcheckFromForm, healthcheckTestToText } from "@/lib/healthcheck-test";
 import {
   serviceKind,
   type Service,
   type ServiceInput,
   type ComposeAdvancedPatch,
-  type ComposeHealthcheck,
   type OpenshipReadiness,
 } from "@/lib/api/services";
 
@@ -113,7 +113,7 @@ export function ServiceSettingsForm({ service, siblingServiceNames = [], onSubmi
     setRestart(service.restart ?? "unless-stopped");
     setAlias(service.advanced?.alias ?? "");
     const hc = service.advanced?.healthcheck;
-    setHcTest(hc ? (Array.isArray(hc.test) ? hc.test.join(" ") : hc.test ?? "") : "");
+    setHcTest(healthcheckTestToText(hc?.test));
     setHcInterval(hc?.interval ?? "");
     setHcTimeout(hc?.timeout ?? "");
     setHcRetries(hc?.retries != null ? String(hc.retries) : "");
@@ -174,18 +174,20 @@ export function ServiceSettingsForm({ service, siblingServiceNames = [], onSubmi
      * say "the user cleared this one".
      */
     const buildAdvanced = (): ComposeAdvancedPatch => {
-      const test = hcTest.trim();
-      let healthcheck: ComposeHealthcheck | null = null;
-      if (test) {
-        healthcheck = { test };
-        if (hcInterval.trim()) healthcheck.interval = hcInterval.trim();
-        if (hcTimeout.trim()) healthcheck.timeout = hcTimeout.trim();
-        if (hcStartPeriod.trim()) healthcheck.startPeriod = hcStartPeriod.trim();
-        const retries = Number(hcRetries);
-        if (hcRetries.trim() && Number.isInteger(retries) && retries >= 0) {
-          healthcheck.retries = retries;
-        }
-      }
+      // The command field is one line of text over a `test` that may be argv with
+      // Docker's own prefix, so both directions live in one place (see
+      // @/lib/healthcheck-test) — rendering and saving have to agree or a save
+      // rewrites the stored command into something Docker can't run.
+      const healthcheck = healthcheckFromForm(
+        {
+          test: hcTest,
+          interval: hcInterval,
+          timeout: hcTimeout,
+          startPeriod: hcStartPeriod,
+          retries: hcRetries,
+        },
+        service.advanced?.healthcheck,
+      );
       // Empty → null so a cleared alias removes the stored key (mergeAdvanced
       // treats null as "delete"). Server normalizes + collision-checks it.
       return { healthcheck, readiness: readiness ?? null, alias: alias.trim() || null };
