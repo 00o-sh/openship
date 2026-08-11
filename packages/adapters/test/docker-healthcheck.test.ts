@@ -43,6 +43,15 @@ describe("toDockerHealthcheck", () => {
     expect(hc).toMatchObject({ Test: ["NONE"] });
   });
 
+  it("treats a NONE test array as disabled instead of exec'ing NONE", () => {
+    expect(toDockerHealthcheck({ test: ["NONE"] })).toEqual({ Test: ["NONE"] });
+    // Durations are meaningless once the check is off, so they're dropped —
+    // same as `disable: true`.
+    expect(toDockerHealthcheck({ test: ["NONE"], interval: "5s", retries: 3 })).toEqual({
+      Test: ["NONE"],
+    });
+  });
+
   it("carries duration fields through unchanged", () => {
     const hc = toDockerHealthcheck({
       test: ["CMD", "pg_isready"],

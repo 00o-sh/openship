@@ -510,9 +510,10 @@ function parseDurationNs(value: string | undefined): number | undefined {
  * undefined when there's nothing to configure so the image default stands.
  *
  * App catalog and migration payloads can preserve the original Docker
- * `CMD` / `CMD-SHELL` prefix in the `test` array, so an array that already
- * starts with one of those prefixes is used as-is instead of having an extra
- * `CMD` prepended.
+ * `CMD` / `CMD-SHELL` / `NONE` prefix in the `test` array, so an array that
+ * already starts with one of those is honored as written instead of having an
+ * extra `CMD` prepended — which is what `docker compose` does with the same
+ * list, and what the engine needs to run the check at all.
  */
 export function toDockerHealthcheck(hc?: ComposeHealthcheck):
   | { Test: string[]; Interval?: number; Timeout?: number; Retries?: number; StartPeriod?: number }
@@ -525,11 +526,11 @@ export function toDockerHealthcheck(hc?: ComposeHealthcheck):
     Test = ["CMD-SHELL", hc.test];
   } else if (Array.isArray(hc.test) && hc.test.length > 0) {
     const head = hc.test[0];
-    if (head === "CMD" || head === "CMD-SHELL") {
-      Test = [...hc.test];
-    } else {
-      Test = ["CMD", ...hc.test];
-    }
+    // `["NONE"]` is compose's other way to say `disable` — prepending `CMD` to it
+    // asks the engine to exec a binary named NONE, so the container the author
+    // wanted UNchecked reports unhealthy forever.
+    if (head === "NONE") return { Test: ["NONE"] };
+    Test = head === "CMD" || head === "CMD-SHELL" ? [...hc.test] : ["CMD", ...hc.test];
   }
   if (!Test) return undefined;
 

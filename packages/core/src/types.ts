@@ -93,12 +93,16 @@ export interface PaginatedResponse<T> extends ApiResponse<T[]> {
 
 /**
  * A container healthcheck as authored in compose (`services.<name>.healthcheck`),
- * shaped after the Docker Engine Healthcheck object. `test` is normalized to
- * either a shell string (compose `test: "curl ..."` / the `CMD-SHELL` array
- * form) or an argv array (the `CMD` array form). Durations stay as compose
- * strings ("30s", "1m30s") — the runtime converts them to nanoseconds at
- * container-create time. `disable` mirrors compose `healthcheck.disable: true`
- * (turns off an image's baked-in check → Docker `Test: ["NONE"]`).
+ * shaped after the Docker Engine Healthcheck object. `test` is either a shell
+ * string (compose `test: "curl ..."`) or an array. The compose parser reduces an
+ * array to bare argv, but an array reaching the runtime MAY still carry its
+ * original `CMD` / `CMD-SHELL` / `NONE` prefix — app-catalog services and API
+ * callers pass compose's own form through verbatim — so the runtime honors both
+ * (see `toDockerHealthcheck`) and no producer has to normalize first. Durations
+ * stay as compose strings ("30s", "1m30s") — the runtime converts them to
+ * nanoseconds at container-create time. `disable` mirrors compose
+ * `healthcheck.disable: true` (turns off an image's baked-in check → Docker
+ * `Test: ["NONE"]`).
  */
 export type ComposeHealthcheck = {
   test?: string | string[];
