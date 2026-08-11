@@ -866,17 +866,18 @@ export class DockerBackupExecutor implements BackupExecutor {
 
     docker.modem.demuxStream(stream as unknown as NodeJS.ReadableStream, stdout, stderrSink);
 
-    // #openship-exec-stream-eof: docker-modem's demuxStream only forwards
-    // 'data' events — it never calls .end() on the destination streams
-    // when the source attach stream ends. demuxContainerStream (used for
-    // volume/tar backups, below) already works around this; this
-    // exec-based path (pg_dump, mysqldump, mongodump, custom commands)
-    // never got the same fix. Observed in production: a finished pg_dump
-    // (fully written, correct byte count) left the SFTP destination's
-    // .pipe() waiting forever for an EOF that never arrives — the temp
-    // file looked "stuck uploading" when in fact 100% of the data had
-    // already been sent and the process had already exited. Mirror the
-    // same endSinks() fix used below.
+    // demuxStream only forwards 'data' — it never ends the destinations when the
+    // source attach stream ends. Without this, a consumer piping stdout (pg_dump,
+    // mysqldump, mongodump, custom commands → the destination writer) waits on an
+    // EOF that never comes: the dump is fully written, the exec has exited, and
+    // the run still sits in `uploading` forever (#516). demuxContainerStream
+    // below carries the same fix for the volume/tar path.
+    //
+    // Safe to end here, and ONLY here: this path learns the exit code from the
+    // attach stream's own 'end' (see awaitExit below), so by the time it fires
+    // every byte has already been demuxed. Do not move this to a daemon-side exit
+    // signal — an exec can exit with bytes still in flight, and ending early
+    // truncates the artifact (the trap demuxContainerStream documents).
     let sinksEnded = false;
     const endSinks = () => {
       if (sinksEnded) return;
@@ -911,18 +912,11 @@ export class DockerBackupExecutor implements BackupExecutor {
       });
 
       try {
-        const result = await withTimeout(
+        return await withTimeout(
           Promise.race([onEnd, watchdog.promise]),
           timeoutMs,
           `${label} exceeded its ${Math.round(timeoutMs / 1000)}s ceiling and was abandoned.`,
         );
-        // Backstop: over an SSH-tunneled Docker connection (e.g. a remote
-        // server managed over SSH) the attach stream's 'end'/'close' is
-        // not always delivered promptly even though the exec has already
-        // exited and pushed all its output. The exit code is known now —
-        // force the sinks closed so a downstream .pipe() consumer sees EOF.
-        endSinks();
-        return result;
       } catch (err) {
         stdout.destroy(err as Error);
         throw err;
