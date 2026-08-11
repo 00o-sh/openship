@@ -123,7 +123,9 @@ vi.mock("@repo/adapters", async () => {
   const lua = await import("../../../../packages/adapters/src/infra/openresty-lua");
   const ops = await import("../../../../packages/adapters/src/system/environment-ops");
   const fixtures = await import("../../../../packages/adapters/src/system/environment.fixtures");
+  const { dockerSocketMock } = await import("../helpers/harness");
   return {
+    ...dockerSocketMock,
     systemCatalog: { installs: { docker: () => ({ supported: false }) } },
     EDGE_HOST_STATE_DIR: lua.EDGE_HOST_STATE_DIR,
     EDGE_CONTAINER_MOUNTS: lua.EDGE_CONTAINER_MOUNTS,
@@ -216,13 +218,32 @@ const CONFIGURED = {
   OPENSHIP_ACME_TOS_AGREED: "true",
 };
 
+/**
+ * The socket detector reads the ambient environment, so leaving any of these set
+ * would make every `.env` in this file depend on the developer's own daemon.
+ */
+const DOCKER_SOCK = "/var/run/docker.sock";
+const DOCKER_ENV_KEYS = [
+  "OPENSHIP_DOCKER_SOCKET",
+  "DOCKER_HOST",
+  "DOCKER_CONTEXT",
+  "XDG_RUNTIME_DIR",
+  "SUDO_UID",
+] as const;
+const clearDockerEnv = () => {
+  for (const key of DOCKER_ENV_KEYS) delete process.env[key];
+};
+
 /** `CONFIGURED` minus the keys named — an install whose `.env` stopped yielding them. */
 const without = (...keys: string[]) =>
   Object.fromEntries(Object.entries(CONFIGURED).filter(([k]) => !keys.includes(k)));
 
 beforeEach(() => {
   h.sourceInstall = null;
-  h.existing = new Set();
+  // An ordinary rootful box: the daemon socket is where the api's mount defaults to,
+  // so the #482 detection has nothing to write and nothing to warn about. The rootless
+  // cases below take it back out.
+  h.existing = new Set([DOCKER_SOCK]);
   h.written = new Map();
   h.composeCalls = [];
   h.dockerPsPorts = "";
@@ -237,10 +258,12 @@ beforeEach(() => {
     stderr: "",
   });
   delete process.env.OPENSHIP_VERSION;
+  clearDockerEnv();
 });
 
 afterEach(() => {
   delete process.env.OPENSHIP_VERSION;
+  clearDockerEnv();
 });
 
 describe("resolveEnvConfig", () => {
@@ -340,6 +363,120 @@ describe("the host alias is overridable in the compose file", () => {
     expect(yaml).toContain(
       'extra_hosts: ["host.docker.internal:${OPENSHIP_HOST_GATEWAY:-host-gateway}"]',
     );
+  });
+});
+
+/**
+ * The other half of #482: the api drives every deploy through the mounted Docker
+ * socket, and a ROOTLESS daemon doesn't keep its socket at /var/run/docker.sock.
+ * Docker creates a missing bind source as a DIRECTORY, so the wrong path here is a
+ * stack that comes up healthy and then fails every container operation with a
+ * transport error naming neither the path nor the cause.
+ */
+describe("composeUp — the api's docker socket mount (#482)", () => {
+  const ROOTLESS = "/run/user/1000/docker.sock";
+  /** The rootless box: nothing at the rootful path, whatever the operator's shell says. */
+  const noRootfulDaemon = () => h.existing.delete(DOCKER_SOCK);
+
+  it("templates the host side of the mount instead of hardcoding it", () => {
+    const { yaml } = composePlan({});
+    expect(yaml).toContain(
+      "- ${OPENSHIP_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock",
+    );
+    expect(yaml).not.toContain(`- ${DOCKER_SOCK}:${DOCKER_SOCK}`);
+  });
+
+  it("writes no key at all on an ordinary rootful box", async () => {
+    // Nothing pinned → the compose file's own default stays in charge, so a later
+    // daemon move isn't frozen into `.env` by a run that had no reason to write it.
+    await composeUp({});
+    expect(writtenEnv().OPENSHIP_DOCKER_SOCKET).toBeUndefined();
+  });
+
+  it("follows the daemon the docker CLI is talking to", async () => {
+    // `up` shells out to `docker compose`, so the api must get THAT daemon's socket.
+    process.env.DOCKER_HOST = `unix://${ROOTLESS}`;
+    h.existing.add(ROOTLESS);
+    await composeUp({});
+    expect(writtenEnv().OPENSHIP_DOCKER_SOCKET).toBe(ROOTLESS);
+  });
+
+  it("finds a rootless socket the daemon advertises nowhere", async () => {
+    // The reported box: rootless dockerd, and the `export DOCKER_HOST` its setup
+    // printed lives in a shell profile this invocation never read.
+    process.env.XDG_RUNTIME_DIR = "/run/user/1000";
+    noRootfulDaemon();
+    h.existing.add(ROOTLESS);
+    await composeUp({});
+    expect(writtenEnv().OPENSHIP_DOCKER_SOCKET).toBe(ROOTLESS);
+  });
+
+  it("prefers the invoking user's runtime dir over root's under sudo", async () => {
+    // Under `sudo openship up` both XDG_RUNTIME_DIR and the passwd entry describe
+    // root, and /run/user/0 is not where the operator's rootless daemon is.
+    process.env.XDG_RUNTIME_DIR = "/run/user/0";
+    process.env.SUDO_UID = "1000";
+    noRootfulDaemon();
+    h.existing.add(ROOTLESS);
+    await composeUp({});
+    expect(writtenEnv().OPENSHIP_DOCKER_SOCKET).toBe(ROOTLESS);
+  });
+
+  it("keeps an operator's pinned path across a flagless re-run", async () => {
+    // The fix for #482 went in `.env` by hand, and the next `up` overwrote it.
+    // Detection would answer the rootful default here; the pin outranks it.
+    seedEnv({ ...CONFIGURED, OPENSHIP_DOCKER_SOCKET: ROOTLESS });
+    h.existing.add(ROOTLESS);
+
+    await composeUp({});
+
+    expect(writtenEnv().OPENSHIP_DOCKER_SOCKET).toBe(ROOTLESS);
+    // Carried as a MANAGED key, not adopted as operator config: the #485 passthrough
+    // copies lines verbatim, so a run that stopped emitting this would pin it forever.
+    expect(h.written.get(composePaths.env)).not.toContain("# Preserved from your existing .env");
+  });
+
+  it("lets the shell override the pinned .env value", async () => {
+    seedEnv({ ...CONFIGURED, OPENSHIP_DOCKER_SOCKET: ROOTLESS });
+    process.env.OPENSHIP_DOCKER_SOCKET = "/var/run/docker-alt.sock";
+    h.existing.add("/var/run/docker-alt.sock");
+    await composeUp({});
+    expect(writtenEnv().OPENSHIP_DOCKER_SOCKET).toBe("/var/run/docker-alt.sock");
+  });
+
+  describe("the socket isn't there", () => {
+    let warned: string[];
+    beforeEach(() => {
+      warned = [];
+      vi.spyOn(console, "warn").mockImplementation((...a: unknown[]) => warned.push(a.join(" ")));
+    });
+    afterEach(() => vi.restoreAllMocks());
+    const said = () => warned.filter((w) => w.includes("empty DIRECTORY"));
+
+    it("names the path, the silent failure and the override", async () => {
+      process.env.DOCKER_HOST = `unix://${ROOTLESS}`;
+      await composeUp({});
+
+      const msg = said().join("\n");
+      expect(msg).toContain(ROOTLESS);
+      expect(msg).toContain("OPENSHIP_DOCKER_SOCKET=");
+      expect(msg).toContain("#482");
+    });
+
+    it("says it once per run, not once per materialize", async () => {
+      // `up` materializes twice (the prefetch has to write `.env` before it can pull).
+      process.env.DOCKER_HOST = `unix://${ROOTLESS}`;
+      composePrefetch({});
+      expect(said()).toHaveLength(1);
+
+      await composeUp({ alreadyFetched: true });
+      expect(said()).toHaveLength(1);
+    });
+
+    it("stays quiet when the socket is on the box", async () => {
+      await composeUp({});
+      expect(said()).toEqual([]);
+    });
   });
 });
 

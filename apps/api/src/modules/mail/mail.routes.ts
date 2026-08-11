@@ -86,6 +86,18 @@ r.post(
   { tag: "mail_server:write" },
   admin.acknowledgeDomainDnsHandler,
 );
+// On-demand DNS auto-configure via a connected provider (Settings→DNS). Plan is
+// a read-only dry-run; apply writes the records on operator press (never on add).
+r.get(
+  "/admin/:serverId/domains/:domain/dns/plan",
+  { tag: "mail_server:read" },
+  admin.planDomainDnsHandler,
+);
+r.post(
+  "/admin/:serverId/domains/:domain/dns/apply",
+  { tag: "mail_server:write" },
+  admin.applyDomainDnsHandler,
+);
 r.get(
   "/admin/:serverId/domains-dns/pending",
   { tag: "mail_server:read" },

@@ -21,10 +21,12 @@ import {
   ExternalLink,
   Layers,
   MapPin,
+  HardDrive,
 } from "lucide-react";
 import { systemApi } from "@/lib/api";
 import type { ContainerApplyIntent } from "@/lib/api/system";
 import { PageContainer } from "@/components/ui/PageContainer";
+import DropdownMenu from "@/components/ui/DropdownMenu";
 import { Tabs, type TabDef } from "@/components/ui/Tabs";
 import { usePlatform } from "@/context/PlatformContext";
 import { useI18n, interpolate } from "@/components/i18n-provider";
@@ -75,7 +77,7 @@ const STATUS: Record<Reachability, { dot: string; text: string }> = {
 export default function ServersPage() {
   const { t } = useI18n();
   const router = useRouter();
-  const { selfHosted, deployMode } = usePlatform();
+  const { selfHosted, deployMode, isServerHost, hostControlEnabled } = usePlatform();
   const { toast } = useToast();
   const isDesktop = deployMode === "desktop";
   /** Managed edge/mail containers exist only where we operate the boxes. */
@@ -122,6 +124,26 @@ export default function ServersPage() {
   useEffect(() => {
     fetchServers();
   }, [fetchServers]);
+
+  // "Add → This machine" (#527): register the box OpenShip runs on as a deploy
+  // target. Server-host only (desktop derives "here" without a row; the SaaS
+  // control plane is never its own target), and only while host control is on —
+  // with it off the create call 400s. Once the isLocal row exists it's already in
+  // the list, so the affordance collapses back to the plain "Add server" button.
+  const hasLocalServer = servers.some((s) => s.isLocal);
+  const canAddThisMachine = isServerHost && hostControlEnabled && !hasLocalServer;
+
+  const addThisMachine = useCallback(async () => {
+    try {
+      // Loopback triggers the backend's isLocal-adoption branch (box-org gated),
+      // never a plain SSH row — see createServer in servers.controller.ts.
+      const created = await systemApi.createServerEntry({ sshHost: "127.0.0.1", sshPort: 22 });
+      await fetchServers();
+      if (created?.id) router.push(`/servers/${created.id}`);
+    } catch {
+      toast("error", t.servers.list.addThisMachineError);
+    }
+  }, [fetchServers, router, toast, t]);
 
   // Real reachability: seed every server to "checking", then probe each in
   // parallel and flip its dot as the probe resolves (mirrors the tunnel fan-out).
@@ -257,15 +279,41 @@ export default function ServersPage() {
           </h1>
           <p className="text-sm text-muted-foreground/70 mt-1">{t.servers.list.subtitle}</p>
         </div>
-        {activeTab === "servers" && (
-          <button
-            onClick={() => router.push("/servers/new")}
-            className="inline-flex items-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-xl hover:bg-primary/90 transition-all hover:shadow-lg hover:shadow-primary/25"
-          >
-            <Plus className="size-4" />
-            {t.servers.list.addServer}
-          </button>
-        )}
+        {activeTab === "servers" &&
+          (canAddThisMachine ? (
+            <DropdownMenu
+              align="right"
+              triggerClassName="inline-flex items-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-xl hover:bg-primary/90 transition-all hover:shadow-lg hover:shadow-primary/25"
+              trigger={
+                <>
+                  <Plus className="size-4" />
+                  {t.servers.list.addServer}
+                </>
+              }
+              actions={[
+                {
+                  id: "remote",
+                  label: t.servers.list.addRemoteServer,
+                  icon: <Server className="size-4" />,
+                  onClick: () => router.push("/servers/new"),
+                },
+                {
+                  id: "this-machine",
+                  label: t.servers.list.addThisMachine,
+                  icon: <HardDrive className="size-4" />,
+                  onClick: () => void addThisMachine(),
+                },
+              ]}
+            />
+          ) : (
+            <button
+              onClick={() => router.push("/servers/new")}
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-primary text-primary-foreground text-sm font-medium rounded-xl hover:bg-primary/90 transition-all hover:shadow-lg hover:shadow-primary/25"
+            >
+              <Plus className="size-4" />
+              {t.servers.list.addServer}
+            </button>
+          ))}
       </div>
 
       <Tabs tabs={tabs} value={activeTab} onChange={setActiveTab} className="mb-6" />
@@ -295,7 +343,10 @@ export default function ServersPage() {
           </div>
         ) : servers.length === 0 ? (
           // Empty state stands alone (no Quick Info card) and centers.
-          <EmptyState onAdd={() => router.push("/servers/new")} />
+          <EmptyState
+            onAdd={() => router.push("/servers/new")}
+            onAddThisMachine={canAddThisMachine ? () => void addThisMachine() : undefined}
+          />
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-6">
             {/* ── LEFT COLUMN ── */}
@@ -511,7 +562,15 @@ export default function ServersPage() {
 
 /** No-servers illustration + primer. Unchanged from the original list view,
  *  now scoped to the Servers tab. */
-function EmptyState({ onAdd }: { onAdd: () => void }) {
+function EmptyState({
+  onAdd,
+  onAddThisMachine,
+}: {
+  onAdd: () => void;
+  /** Present only on a server-host with host control on — offers registering the
+   *  box OpenShip runs on right from the empty state (#527). */
+  onAddThisMachine?: () => void;
+}) {
   const { t } = useI18n();
   return (
     <div className="py-16 text-center">
@@ -562,6 +621,15 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
           <Plus className="size-4" />
           {t.servers.list.addFirstServer}
         </button>
+        {onAddThisMachine && (
+          <button
+            onClick={onAddThisMachine}
+            className="inline-flex items-center gap-2 rounded-xl bg-muted/50 px-6 py-3 text-sm font-medium text-foreground transition-colors hover:bg-muted"
+          >
+            <HardDrive className="size-4" />
+            {t.servers.list.addThisMachine}
+          </button>
+        )}
         <a
           href="https://openship.io/docs/guides/custom-servers"
           target="_blank"

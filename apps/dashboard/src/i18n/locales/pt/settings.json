@@ -21,6 +21,7 @@
       "cloud": "Cloud",
       "defaults": "Padrões",
       "settings": "Configurações",
+      "dns": "DNS",
       "notifications": "Notificações",
       "team": "Equipe",
       "members": "Membros",
@@ -51,6 +52,7 @@
       "mcp": "MCP",
       "team": "Equipe",
       "notifications": "Notificações",
+      "dns": "DNS",
       "audit": "Registro de auditoria",
       "cloud": "Cloud",
       "infrastructure": "Infraestrutura",
@@ -586,7 +588,11 @@
     "updatesOne": "1 atualização disponível",
     "updatesMany": "{n} atualizações disponíveis",
     "allHealthy": "Todos os componentes da plataforma estão atualizados",
-    "manageLink": "Gerenciar em Servidores"
+    "manageLink": "Gerenciar em Servidores",
+    "hostControlLabel": "Implantar nesta máquina",
+    "hostControlDesc": "Permite que o OpenShip implante aplicativos no servidor em que ele é executado, junto com os seus servidores conectados. Desativado se instalado com --no-host-control (apenas plano de controle) — ative para adicionar esta máquina como destino de implantação.",
+    "hostControlEnvNote": "Esta máquina foi definida como apenas plano de controle na instalação (--no-host-control). Ativar isto substitui essa opção para que o OpenShip possa implantar aqui.",
+    "hostControlError": "Não foi possível alterar o controle do host — apenas o proprietário do espaço de trabalho desta máquina pode."
   },
   "dataTransfer": {
     "export": {
@@ -774,6 +780,42 @@
     "toast": {
       "setTo": "Estratégia de roteamento definida como {mode}",
       "failed": "Falha ao atualizar a estratégia de roteamento"
+    }
+  },
+  "dns": {
+    "title": "Provedores de DNS",
+    "description": "Deixe o Openship escrever os registos DNS dos seus domínios",
+    "explainer": "Com um provedor ligado, adicionar um domínio próprio escreve os registos de imediato, pelo que o domínio é verificado e recebe o certificado sem que cole nada.",
+    "explainerOwnership": "O Openship só remove registos que ele próprio criou.",
+    "addProvider": "Ligar um provedor",
+    "connect": "Ligar",
+    "namePlaceholder": "Etiqueta, p. ex. Cloudflare produção",
+    "tokenPlaceholder": "Token de API da Cloudflare",
+    "scopesHint": "Precisa de um token com as permissões {scopes}.",
+    "createTokenLink": "Criar um",
+    "noneConnected": "Nenhum provedor de DNS ligado. Os domínios mostrarão os registos para adicionar manualmente.",
+    "badgeActive": "Ativo",
+    "badgeInvalid": "Requer atenção",
+    "invalidHint": "O provedor rejeitou este token. Ligue-o novamente para retomar os registos automáticos.",
+    "metaLine": " · {provider} · verificado por último {verified}",
+    "zoneCheck": {
+      "title": "Verificar um domínio",
+      "description": "Veja se um provedor ligado gere a zona de um nome de host antes de o adicionar.",
+      "placeholder": "app.example.com",
+      "check": "Verificar",
+      "matched": "Gerido aqui — zona {zone}. Os registos deste domínio serão escritos automaticamente.",
+      "none": "Nenhum provedor ligado gere a zona deste domínio. Vai adicionar os registos manualmente.",
+      "unauthorized": "Um token guardado foi rejeitado. Ligue-o novamente e tente outra vez.",
+      "unavailable": "Não foi possível contactar o provedor de DNS, por isso isto é desconhecido — não significa que algo esteja mal configurado."
+    },
+    "toast": {
+      "loadFailed": "Não foi possível carregar os provedores de DNS",
+      "needBoth": "Introduza uma etiqueta e um token de API",
+      "connected": "{name} ligado",
+      "connectFailed": "Não foi possível ligar o provedor",
+      "disconnected": "{name} desligado",
+      "disconnectFailed": "Não foi possível desligar o provedor",
+      "checkFailed": "Não foi possível verificar esse domínio"
     }
   }
 }

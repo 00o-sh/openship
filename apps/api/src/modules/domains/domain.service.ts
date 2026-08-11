@@ -31,6 +31,7 @@ import { resolveProjectServerHost, resolveLocalServerHost, resolveInstancePublic
 import { reconcileProjectRoutes } from "../../lib/route-apply.service";
 import { generateToken } from "../../lib/domain-token";
 import { untrackedSiteFor } from "../../lib/edge-orphans.service";
+import type { UntrackedEdgeSite } from "@repo/core";
 import { publicEndpointHostname, resolveServicePublicEndpoints } from "../../lib/public-endpoints";
 import { sshManager } from "../../lib/ssh-manager";
 import {
@@ -46,6 +47,16 @@ import {
 import type { TAddDomainBody } from "./domain.schema";
 import { edgeProxy, readEdgeFile, validateCertFor } from "@repo/adapters";
 import type { AdoptedCert, CloudRuntime, CommandExecutor, ManualCert } from "@repo/adapters";
+// Concrete modules, not the `../dns` barrel: importing a barrel that reaches a
+// routes file mounts the HTTP route table as a side effect of importing a service.
+import {
+  planRecords,
+  provisionRecords,
+  releaseRecords,
+  type DnsPlanResult,
+  type DnsProvisionResult,
+} from "../dns/dns-credential.service";
+import type { DnsRecordInput } from "../dns/types";
 
 // ─── List ────────────────────────────────────────────────────────────────────
 
@@ -89,6 +100,24 @@ export async function setPrimaryDomain(ctx: RequestContext, domainId: string) {
 
 // ─── Add ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Stated rather than inferred, because `addDomain` returns from two places (the
+ * interrupted-connect resave path and the normal path) and the optional keys
+ * differ between them. Left to inference, adding a key to one branch silently
+ * changes what callers can read off the other — which is how `preexistingEdgeSite`
+ * stopped resolving in the controller the moment an unrelated field was added.
+ */
+export interface AddDomainResult {
+  domain: Domain;
+  records: { mode: "cloud" | "selfhosted" | "external"; records: DnsRecord[] };
+  /** The `www.` sibling, when `includeWww` asked for one and it was created. */
+  www?: { id: string; hostname: string };
+  /** Why the `www.` sibling could not be created. */
+  wwwError?: string;
+  /** Present only when the edge was ALREADY serving this hostname untracked. */
+  preexistingEdgeSite?: UntrackedEdgeSite;
+}
+
 export async function addDomain(
   ctx: RequestContext,
   data: TAddDomainBody,
@@ -106,7 +135,7 @@ export async function addDomain(
      */
     extraOwnedHostnames?: string[];
   } = {},
-) {
+): Promise<AddDomainResult> {
   const project = await repos.project.findById(data.projectId);
   assertResourceInOrg(project, "Project", ctx.organizationId, data.projectId);
 
@@ -270,6 +299,12 @@ export async function addDomain(
     ctx.organizationId,
     !!data.includeWww,
   );
+
+  // DNS is not written here. Auto-configuration is on-demand (planDomainDns /
+  // applyDomainDns): the operator sees what would change and presses to apply,
+  // so a fresh add always returns the records to paste and never silently touches
+  // a zone. removeDomain still releases what we wrote — cleanup is not a surprise.
+
   return {
     domain,
     records,
@@ -436,6 +471,64 @@ export async function getDomainRecords(ctx: RequestContext, domainId: string) {
   const { domain, project } = await getDomainWithAuth(domainId, ctx.organizationId);
   const token = domain.verificationToken ?? generateToken(domain.hostname);
   return buildRecords(domain.hostname, token, project, domain.externalIngress, ctx.organizationId);
+}
+
+// ─── Auto-configure DNS (on-demand) ──────────────────────────────────────────
+
+/**
+ * The records a connected provider would write for THIS domain, as provider
+ * inputs. Built from the same `buildRecords` the manual list shows, so the plan,
+ * the apply and the "records to paste" can never diverge. Empty-value records
+ * (target not yet resolved) are dropped — plan/provision treat "" as nothing to
+ * write, so they would only pad the plan with un-actionable rows. Names are
+ * restricted to this hostname's own route + challenge names via `dnsRecordHosts`:
+ * a per-domain panel provisions its own row, never a sibling's.
+ */
+async function desiredDnsInputs(
+  ctx: RequestContext,
+  domainId: string,
+): Promise<{ hostname: string; inputs: DnsRecordInput[] }> {
+  const { domain, project } = await getDomainWithAuth(domainId, ctx.organizationId);
+  const token = domain.verificationToken ?? generateToken(domain.hostname);
+  const built = await buildRecords(
+    domain.hostname,
+    token,
+    project,
+    domain.externalIngress,
+    ctx.organizationId,
+  );
+  const { routeName, txtName } = dnsRecordHosts(domain.hostname);
+  const own = new Set([routeName.toLowerCase(), txtName.toLowerCase()]);
+  const inputs = built.records
+    .filter((r) => r.value && own.has(r.name.toLowerCase()))
+    .map<DnsRecordInput>((r) => ({ type: r.type, name: r.name, content: r.value }));
+  return { hostname: domain.hostname, inputs };
+}
+
+/** Dry-run: what auto-configuring this domain's DNS would do. Reads only. */
+export async function planDomainDns(
+  ctx: RequestContext,
+  domainId: string,
+): Promise<DnsPlanResult> {
+  const { hostname, inputs } = await desiredDnsInputs(ctx, domainId);
+  return planRecords(ctx.organizationId, hostname, inputs);
+}
+
+/**
+ * Write this domain's records through the connected provider, on operator press.
+ *
+ * No verify is kicked here on purpose (the reason `addDomain` never provisioned
+ * inline): the records are seconds old, the resolver a verify would ask may still
+ * hold a negative answer for the name, and a failed check burns one of Let's
+ * Encrypt's per-hostname validation failures. The `domains:verify-pending` cron
+ * picks the row up after its grace window — which is what that window is for.
+ */
+export async function applyDomainDns(
+  ctx: RequestContext,
+  domainId: string,
+): Promise<DnsProvisionResult> {
+  const { hostname, inputs } = await desiredDnsInputs(ctx, domainId);
+  return provisionRecords(ctx.organizationId, hostname, inputs);
 }
 
 /**
@@ -935,6 +1028,28 @@ export async function removeDomain(ctx: RequestContext, domainId: string) {
     });
   } catch (err) {
     console.error(`[DOMAIN] Failed to remove route for ${domain.hostname}:`, err);
+  }
+
+  // ── Take back the DNS records we wrote, and only those ───────────────────────
+  // Above the service-scoped branch below on purpose: that branch returns early,
+  // so cleanup placed after it never runs for a per-service domain and leaves the
+  // records pointing at this box forever.
+  //
+  // `releaseRecords` deletes only records carrying our ownership marker. Matching
+  // on the name alone is what makes this dangerous: for an apex custom domain
+  // these names ARE the zone apex, where the operator's MX, SPF TXT and CAA live,
+  // and "remove this domain from Openship" must never take their mail with it.
+  const released = await releaseRecords(ctx.organizationId, domain.hostname, [
+    domain.hostname,
+    `_openship-challenge.${domain.hostname}`,
+  ]).catch((err: unknown) => ({ deleted: 0, reason: safeErrorMessage(err) }));
+  if (released.reason) {
+    // Not fatal: a domain must stay removable from Openship when the provider is
+    // unreachable. An orphan record is visible in the zone; a blocked delete isn't.
+    console.warn(
+      `[dns] could not fully clean up records for ${domain.hostname}:`,
+      released.reason,
+    );
   }
 
   // A service-scoped row is only HALF the routing config — the owning SERVICE row

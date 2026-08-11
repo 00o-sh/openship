@@ -33,7 +33,8 @@ vi.mock("node:child_process", () => ({
   })),
 }));
 
-vi.mock("@repo/adapters", () => ({
+vi.mock("@repo/adapters", async () => ({
+  ...(await import("../helpers/harness")).dockerSocketMock,
   systemCatalog: { installs: { docker: () => h.plan } },
   resolveLocalEnvironmentSync: () => ({ os: "linux", distro: "alpine", isRoot: true }),
   LocalExecutor: class {},

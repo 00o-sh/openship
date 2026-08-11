@@ -46,6 +46,14 @@ vi.mock("../../../src/lib/domain-ssl", () => ({
   manageDomainSsl: vi.fn(),
 }));
 
+// Stubbed so the provisioning ARGUMENTS are assertable: which hostnames Openship
+// actually writes records for is the thing that matters, not what Cloudflare says.
+const provisionRecords = vi.fn().mockResolvedValue({ provisioned: true, records: [] });
+vi.mock("../../../src/modules/dns/dns-credential.service", () => ({
+  provisionRecords: (...args: unknown[]) => provisionRecords(...args),
+  releaseRecords: vi.fn().mockResolvedValue({ deleted: 0 }),
+}));
+
 vi.mock("../../../src/lib/dns-resolver", () => ({
   resolveRecords: vi.fn(),
 }));
@@ -88,6 +96,7 @@ describe("addDomain retries", () => {
     domainRepo.listByProject.mockResolvedValue([]);
     projectRepo.findById.mockReset();
     projectRepo.findById.mockResolvedValue(project);
+    provisionRecords.mockClear();
   });
 
   it("reuses a pending domain owned by the same project", async () => {
@@ -213,6 +222,13 @@ describe("addDomain retries", () => {
     expect(result.domain.hostname).toBe("example.com");
     expect(result.www).toBeUndefined();
     expect(result.wwwError).toContain("www.example.com");
+
+    // The panel still LISTS www so the operator knows what it would need...
+    expect(result.records.records.some((r: any) => r.name === "www.example.com")).toBe(true);
+    // ...but NOTHING is written at add time: auto-configuration is on-demand now
+    // (planDomainDns/applyDomainDns), so adding a domain never touches the
+    // operator's zone until they press "apply".
+    expect(provisionRecords).not.toHaveBeenCalled();
   });
 
   it("never stacks www on www", async () => {

@@ -203,6 +203,34 @@ export async function records(c: Context) {
   return c.json({ data: result });
 }
 
+/** GET /domains/:id/dns/plan — dry-run what auto-configure would write. */
+export async function dnsPlan(c: Context) {
+  const ctx = getRequestContext(c);
+  const id = param(c, "id");
+  await permission.assert(getRequestContext(c), { resourceType: "domain", resourceId: id, action: "read" });
+  const result = await domainService.planDomainDns(ctx, id);
+  return c.json({ data: result });
+}
+
+/** POST /domains/:id/dns/apply — write this domain's records, on operator press. */
+export async function dnsApply(c: Context) {
+  const ctx = getRequestContext(c);
+  const id = param(c, "id");
+  await permission.assert(getRequestContext(c), { resourceType: "domain", resourceId: id, action: "write" });
+  const result = await domainService.applyDomainDns(ctx, id);
+  audit.recordAsync(auditContextFrom(c, ctx.organizationId, ctx.userId), {
+    eventType: "domain.dns_provisioned",
+    resourceType: "domain",
+    resourceId: id,
+    after: {
+      provisioned: result.provisioned,
+      applied: result.records.filter((r) => r.outcome === "applied").length,
+      failed: result.records.filter((r) => r.outcome === "failed").length,
+    },
+  });
+  return c.json({ data: result });
+}
+
 /** POST /domains/:id/primary - make this domain the project's primary */
 export async function setPrimary(c: Context) {
   const ctx = getRequestContext(c);

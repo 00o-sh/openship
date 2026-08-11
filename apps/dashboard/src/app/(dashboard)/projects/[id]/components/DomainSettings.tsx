@@ -34,6 +34,7 @@ import { useCloud } from "@/context/CloudContext";
 import { serviceDisplayHost } from "@/utils/route-display";
 import PublicEndpointsCard from "@/components/routing/PublicEndpointsCard";
 import DnsRecordCard from "@/components/domains/DnsRecordCard";
+import { AutoDnsPanel } from "@/components/shared/AutoDnsPanel";
 import { RoutingSettingsCard } from "@/components/routing/RoutingSettingsCard";
 import { useEdgeModal, useVerifyModal } from "@/hooks/useSystemPrepareModal";
 import { useLocalhostForward } from "@/hooks/useLocalhostForward";
@@ -2884,6 +2885,13 @@ function DomainOverviewCard({
 
             {recordsOpen ? (
               <div className="space-y-2">
+                {domain.domainId ? (
+                  <AutoDnsPanel
+                    plan={() => domainsApi.dnsPlan(domain.domainId!).then((r) => r.data)}
+                    apply={() => domainsApi.dnsApply(domain.domainId!).then((r) => r.data)}
+                    reloadKey={domain.domainId}
+                  />
+                ) : null}
                 <p className="text-[12px] text-muted-foreground">{d.records.hint}</p>
                 {recordsLoading ? (
                   <div className="flex items-center gap-2 py-2 text-[12px] text-muted-foreground">

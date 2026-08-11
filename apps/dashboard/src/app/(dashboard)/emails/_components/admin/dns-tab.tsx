@@ -36,6 +36,7 @@ import {
   type MailSetupStatus,
 } from "@/lib/api";
 import { DnsRecordsView } from "@/components/shared/DnsRecordsView";
+import { AutoDnsPanel } from "@/components/shared/AutoDnsPanel";
 import { SectionCard } from "./_shared/section-card";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import { useMailRailOwnsTabs } from "../../_lib/mail-section";
@@ -182,6 +183,15 @@ export function DnsTab({
           <span className="text-xs text-muted-foreground/70">{t.emailsAdmin.dns.primary}</span>
         )}
       </div>
+
+      {/* On-demand auto-configure via a connected DNS provider (Settings→DNS). */}
+      {activeDomain ? (
+        <AutoDnsPanel
+          plan={() => mailAdminApi.domains.dnsPlan(serverId, activeDomain).then((r) => r.data)}
+          apply={() => mailAdminApi.domains.dnsApply(serverId, activeDomain).then((r) => r.data)}
+          reloadKey={activeDomain}
+        />
+      ) : null}
 
       {/* Records for publishing */}
       <SectionCard

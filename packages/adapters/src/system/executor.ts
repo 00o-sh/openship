@@ -53,9 +53,33 @@ export function createExecutor(ssh?: SshConfig): CommandExecutor {
  * pipeline (`SshExecutor`), so foreign-proxy handover / host system config land
  * on the host. Not more privilege than the mounted docker socket already grants.
  */
-/** Host control explicitly switched off by the operator (`--no-host-control`). */
+/**
+ * Runtime override of the env default, pushed in from apps/api.
+ *
+ * `null` → no override, fall back to OPENSHIP_HOST_CONTROL (the install-time
+ * default). `true`/`false` → the operator's Settings toggle wins. adapters is a
+ * leaf package and MUST NOT import @repo/db, so the resolved value is PUSHED here
+ * (the same injector pattern as {@link setDefaultEdgeImage} /
+ * setManagedImagesFromSource) rather than pulled — which keeps
+ * {@link hostControlDisabled} synchronous, so `createHostExecutor` and
+ * `hostChannelHealth` don't have to change their contracts. Polarity matches the
+ * function name: `true` means "disabled".
+ */
+let hostControlOverride: boolean | null = null;
+
+/** Set (or clear, with `null`) the runtime host-control override. Called by
+ *  apps/api at boot and on every Settings toggle write. See lib/host-control.ts. */
+export function setHostControlOverride(disabled: boolean | null): void {
+  hostControlOverride = disabled;
+}
+
+/** Host control explicitly switched off — by the operator's Settings toggle
+ *  (runtime override) or, absent that, by `--no-host-control` at install. */
 export function hostControlDisabled(): boolean {
-  return process.env.OPENSHIP_HOST_CONTROL?.trim().toLowerCase() === "false";
+  return (
+    hostControlOverride ??
+    process.env.OPENSHIP_HOST_CONTROL?.trim().toLowerCase() === "false"
+  );
 }
 
 /**

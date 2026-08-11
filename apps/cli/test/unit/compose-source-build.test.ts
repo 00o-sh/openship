@@ -60,7 +60,9 @@ vi.mock("@repo/adapters/proxy", () => ({
 
 vi.mock("@repo/adapters", async () => {
   const lua = await import("../../../../packages/adapters/src/infra/openresty-lua");
+  const { dockerSocketMock } = await import("../helpers/harness");
   return {
+    ...dockerSocketMock,
     systemCatalog: { installs: { docker: () => ({ supported: false }) } },
     // compose.ts imports these for the edge's host state mounts — a partial
     // mock makes the import undefined and vitest fails the whole file.
@@ -99,7 +101,9 @@ const verbs = () =>
 
 beforeEach(() => {
   h.sourceInstall = null;
-  h.existing = new Set();
+  // An ordinary rootful box: the daemon socket is where the mount defaults to, so the
+  // #482 detection has nothing to report here.
+  h.existing = new Set(["/var/run/docker.sock"]);
   h.written = new Map();
   h.composeCalls = [];
 });

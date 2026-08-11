@@ -11,6 +11,7 @@ import type { RelayProviderId } from "@repo/core";
 import { api } from "./client";
 import { endpoints } from "./endpoints";
 import type { DnsRecords, DnsRecord } from "./mail";
+import type { DnsPlanResult, DnsProvisionResult } from "./dns";
 import type { BackupRun } from "./backups";
 
 // ─── Mail backup (plugs into the general backup system) ──────────────────────
@@ -280,6 +281,18 @@ export const mailAdminApi = {
     acknowledgeDns: (serverId: string, domain: string) =>
       api.post<{ ok: boolean }>(
         endpoints.mail.admin.domainDnsAcknowledge(serverId, domain),
+      ),
+    /** Dry-run auto-configure: preview what a connected provider would write for
+     *  this mail domain (MX/SPF/DKIM/DMARC), before touching anything. */
+    dnsPlan: (serverId: string, domain: string) =>
+      api.get<{ data: DnsPlanResult }>(
+        endpoints.mail.admin.domainDnsPlan(serverId, domain),
+      ),
+    /** Write this mail domain's records through the connected provider, on
+     *  press. On full success the manual "publish DNS" banner is cleared. */
+    dnsApply: (serverId: string, domain: string) =>
+      api.post<{ data: DnsProvisionResult }>(
+        endpoints.mail.admin.domainDnsApply(serverId, domain),
       ),
     /** List every additional-domain that still needs DNS published. */
     pendingDns: (serverId: string) =>
