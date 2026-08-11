@@ -35,7 +35,9 @@
  * same shape as image-gc's `computeKeepSet`.
  */
 
-import { COMPOSE_SENTINEL } from "../../../lib/container-ref";
+import { COMPOSE_SENTINEL, usableRef } from "../../../lib/container-ref";
+
+export { usableRef };
 
 export const ROLLBACK_ERROR_CODES = {
   NOT_READY: "ROLLBACK_NOT_READY",
@@ -109,13 +111,6 @@ export interface RestorePlanInput {
   imagePresent?: (imageRef: string) => boolean;
   /** Does this release DIRECTORY still exist on the host? Static releases only. */
   pathPresent?: (path: string) => boolean;
-}
-
-/** A real, dial-able artifact reference (not a compose marker, not blank). */
-export function usableRef(ref: string | null | undefined): string | null {
-  const trimmed = ref?.trim();
-  if (!trimmed || trimmed === COMPOSE_SENTINEL) return null;
-  return trimmed;
 }
 
 /**

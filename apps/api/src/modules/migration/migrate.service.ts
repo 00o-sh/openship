@@ -18,6 +18,7 @@ import { repos, restoreSubgraph, PkCollisionError, type Service } from "@repo/db
 import { slugify, safeErrorMessage, type ComposeAdvanced } from "@repo/core";
 import { buildNetworkAliases, type ContainerStatus } from "@repo/adapters";
 import { serviceAliasExtras } from "../../lib/deployable-service";
+import { COMPOSE_SENTINEL } from "../../lib/container-ref";
 import type { RequestContext } from "../../lib/request-context";
 import { ensureProject, createServicesProjectWithId } from "../projects/project-crud.service";
 import { getFileContent } from "../github/github.service";
@@ -597,7 +598,7 @@ async function reattachRuntime(opts: {
       branch: group.source?.gitBranch ?? "main",
       environment: "production",
       status: deriveDeploymentStatus(placements.map((p) => p.status)),
-      containerId: "compose", // multi-service sentinel (single-app modeled as 1 service)
+      containerId: COMPOSE_SENTINEL, // single-app is modeled as 1 service
       imageRef: chosen.find((c) => c.image)?.image ?? null,
       trigger: "manual",
       // deployTarget:"server" is REQUIRED, not implied by serverId: target
@@ -698,7 +699,7 @@ export async function attachLiveRuntime(opts: {
         branch: "main",
         environment: "production",
         status: deriveDeploymentStatus(placements.map((p) => p.status)),
-        containerId: "compose", // multi-service sentinel
+        containerId: COMPOSE_SENTINEL,
         imageRef: attach.find((c) => c.image)?.image ?? null,
         trigger: "manual",
         // deployTarget:"server" required — see reattachRuntime above; without it a

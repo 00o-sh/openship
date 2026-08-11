@@ -2337,6 +2337,30 @@ export async function deployComposeServices(
   }
   const deployed = results.filter((r) => r.status !== "failed" && !r.carried).length;
 
+  if (prepareFailure) {
+    sessionManager.broadcastInstallPhase(dep.id, { id: "app-setup", status: "failed" });
+    const failedNow = results.filter((r) => r.status === "failed");
+    logger.step("deploy", "failed", prepareFailure);
+    return {
+      status: "failed",
+      summary: {
+        total: ordered.length,
+        successful,
+        deployed,
+        failed: failedNow.length,
+        indeterminate: 0,
+        mutated,
+        failedServices: failedNow.map((r) => r.serviceName),
+      },
+      services: results,
+      // No primary container: this return goes to onFailure, which ignores it —
+      // resolving one would cost a domain query on the failure path for nothing.
+      error: prepareFailure,
+      publicUrl: firstPublicUrl,
+      portChecks,
+    };
+  }
+
   // The container a project-level question resolves to, picked the same way the
   // access URL is — and over `enabled`, NOT `ordered`: `pickPrimaryServiceId`'s
   // last resort is the first element, and `ordered` is topo-sorted, so for a
@@ -2360,29 +2384,6 @@ export async function deployComposeServices(
       withContainer[0].containerId
     );
   })();
-
-  if (prepareFailure) {
-    sessionManager.broadcastInstallPhase(dep.id, { id: "app-setup", status: "failed" });
-    const failedNow = results.filter((r) => r.status === "failed");
-    logger.step("deploy", "failed", prepareFailure);
-    return {
-      status: "failed",
-      summary: {
-        total: ordered.length,
-        successful,
-        deployed,
-        failed: failedNow.length,
-        indeterminate: 0,
-        mutated,
-        failedServices: failedNow.map((r) => r.serviceName),
-      },
-      services: results,
-      primaryContainerId,
-      error: prepareFailure,
-      publicUrl: firstPublicUrl,
-      portChecks,
-    };
-  }
 
   // Final service-mesh convergence pass (cloud only — docker has live DNS and
   // implements no finalize). Now that every service's workspace exists, this
