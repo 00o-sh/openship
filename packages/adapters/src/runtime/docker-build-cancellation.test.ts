@@ -47,8 +47,13 @@ function buildConfig(sessionId: string): BuildConfig {
   };
 }
 
+// Every test uses a DISTINCT session id on purpose: the cancellation registry and
+// the pending-cancel map are module-level (cancelBuildSession resolves a different
+// runtime instance than the one that built, so they have to be), and a pending
+// entry outlives the test that recorded it. Reusing an id across tests would let
+// one test's cancel pre-abort another's build.
 describe("DockerRuntime build cancellation", () => {
-  function runtimeWith(executor: CommandExecutor) {
+  function runtimeWith(executor: CommandExecutor, extra?: Record<string, unknown>) {
     const verifyImageBuilt = vi.fn(async () => {});
     const cloneSourceOnRemote = vi.fn(async () => {});
     const runtime = Object.create(DockerRuntime.prototype) as DockerRuntime &
@@ -63,6 +68,7 @@ describe("DockerRuntime build cancellation", () => {
       cloneSourceOnRemote,
       resolveRemoteDockerfile: vi.fn(async () => "Dockerfile"),
       verifyImageBuilt,
+      ...extra,
     });
     return { runtime, verifyImageBuilt, cloneSourceOnRemote };
   }
@@ -184,6 +190,98 @@ describe("DockerRuntime build cancellation", () => {
     expect(executor.streamExec).toHaveBeenCalledTimes(1);
     expect(verifyImageBuilt).not.toHaveBeenCalled();
   });
+
+  it("skips the shared clone entirely when the cancel beat the batch", async () => {
+    const executor = {
+      exec: vi.fn(async () => ""),
+      streamExec: vi.fn(async () => ({ code: 0, output: "" })),
+    } as unknown as CommandExecutor;
+    const { runtime: buildRuntime, cloneSourceOnRemote } = runtimeWith(executor);
+    const { runtime: cancelRuntime } = runtimeWith(executor);
+
+    const specs = ["svc-a", "svc-b"].map((serviceId) => ({
+      config: buildConfig(`parent-clone-${serviceId}`),
+      serviceName: serviceId,
+      logger: new BuildLogger(),
+    }));
+
+    await cancelRuntime.cancelBuild("parent-clone");
+    const results = await buildRuntime.buildImages(specs, new BuildLogger());
+
+    expect(results.map((entry) => entry.result.status)).toEqual(["cancelled", "cancelled"]);
+    // The clone is the most expensive thing the batch does on the host; a build
+    // nobody is waiting for must not pay for it.
+    expect(cloneSourceOnRemote).not.toHaveBeenCalled();
+    expect(executor.streamExec).not.toHaveBeenCalled();
+  });
+
+  it("returns cancelled when the cancel lands during a static service's extract", async () => {
+    const executor = {
+      exec: vi.fn(async () => ""),
+      streamExec: vi.fn(async () => ({ code: 0, output: "" })),
+    } as unknown as CommandExecutor;
+
+    // The image builds fine; the cancel arrives while the output tree is being
+    // copied off the builder. The pre-verify gate has already been passed, so only
+    // the post-extract gate can stop this from coming back "deploying".
+    const moveStaticBuildToHost = vi.fn(async () => {
+      await cancelRuntime.cancelBuild("parent-static");
+    });
+    const { runtime: buildRuntime } = runtimeWith(executor, { moveStaticBuildToHost });
+    const { runtime: cancelRuntime } = runtimeWith(executor);
+
+    const results = await buildRuntime.buildImages(
+      [
+        {
+          config: {
+            ...buildConfig("parent-static-svc-a"),
+            staticExtractOnly: true,
+            staticOutDir: "/var/lib/openship/static/.builds/parent-static-svc-a",
+          },
+          serviceName: "svc-a",
+          logger: new BuildLogger(),
+        },
+      ],
+      new BuildLogger(),
+    );
+
+    expect(moveStaticBuildToHost).toHaveBeenCalledTimes(1);
+    expect(results[0]!.result).toMatchObject({ status: "cancelled" });
+    // No imageRef: the host dir must not be handed to the deploy phase.
+    expect(results[0]!.result.imageRef).toBeUndefined();
+  });
+
+  it("returns cancelled when the cancel lands during buildStaticToHost's extract", async () => {
+    const executor = {
+      exec: vi.fn(async () => ""),
+      streamExec: vi.fn(async () => ({ code: 0, output: "" })),
+    } as unknown as CommandExecutor;
+
+    // build() releases its controller before returning, so the extract that runs
+    // after it is only cancellable because buildStaticToHost re-registers.
+    const moveStaticBuildToHost = vi.fn(async () => {
+      await cancelRuntime.cancelBuild("session-static-solo");
+    });
+    const { runtime: buildRuntime } = runtimeWith(executor, {
+      moveStaticBuildToHost,
+      build: vi.fn(async () => ({
+        sessionId: "session-static-solo",
+        status: "deploying" as const,
+        imageRef: "openship/static:session-static-solo",
+        durationMs: 1,
+      })),
+    });
+    const { runtime: cancelRuntime } = runtimeWith(executor);
+
+    const result = await buildRuntime.buildStaticToHost(
+      buildConfig("session-static-solo"),
+      "/var/lib/openship/static/session-static-solo",
+    );
+
+    expect(moveStaticBuildToHost).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ sessionId: "session-static-solo", status: "cancelled" });
+    expect(result.imageRef).toBeUndefined();
+  });
 });
 
 describe("DockerRuntime build cancellation — dockerode path", () => {
@@ -235,6 +333,45 @@ describe("DockerRuntime build cancellation — dockerode path", () => {
     // "deploying" — a "failed"/"deploying" result here deploys a cancelled deploy.
     await expect(resultPromise).resolves.toMatchObject({
       sessionId: "session-dockerode",
+      status: "cancelled",
+    });
+    expect(verifyImageBuilt).not.toHaveBeenCalled();
+  });
+
+  it("returns cancelled when the abort lands after the daemon already finished", async () => {
+    contextDir = await mkdtemp(join(tmpdir(), "openship-cancel-"));
+    await writeFile(join(contextDir, "Dockerfile"), "FROM scratch\n");
+    fakeBuildContext.current = { contextDir, cleanup: async () => {} };
+
+    const verifyImageBuilt = vi.fn(async () => {});
+    const runtime = Object.create(DockerRuntime.prototype) as DockerRuntime &
+      Record<string, unknown>;
+    Object.assign(runtime, {
+      connectionOptions: {},
+      transport: { kind: "socket", description: "local socket" },
+      systemManager: null,
+      _docker: {
+        buildImage: vi.fn(async (body: { resume?: () => void }) => {
+          body.resume?.();
+          return {};
+        }),
+        listContainers: vi.fn(async () => []),
+      },
+      estimateContextSize: vi.fn(async () => 0),
+      verifyImageBuilt,
+      // Nothing throws: the daemon accepted the build and its output drained
+      // cleanly, and the cancel lands during that drain. So the ONLY thing that can
+      // stop a usable image from being reported "deploying" is build()'s last gate —
+      // the branch that keeps a cancelled deployment from being deployed.
+      streamDockerodeBuild: vi.fn(async () => {
+        await (runtime as DockerRuntime).cancelBuild("session-late-abort");
+      }),
+    });
+
+    const config = { ...buildConfig("session-late-abort"), cloneOnServer: false };
+
+    await expect(runtime.build(config)).resolves.toMatchObject({
+      sessionId: "session-late-abort",
       status: "cancelled",
     });
     expect(verifyImageBuilt).not.toHaveBeenCalled();
