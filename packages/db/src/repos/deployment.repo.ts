@@ -226,11 +226,33 @@ export function createDeploymentRepo(db: Database) {
       });
     },
 
-    async updateStatus(id: string, status: string, extra?: Partial<NewDeployment>) {
-      await db
+    /**
+     * Returns false when the row was left alone because it is already
+     * `cancelled`.
+     *
+     * A cancel is the user's last word on a deployment, but the build/deploy work
+     * it interrupted keeps running for a while — cancellation is cooperative, and
+     * the deploy phase doesn't check for it at all. Without this guard that
+     * in-flight work reaches its own lifecycle hook and writes `ready` (or a
+     * failure) over the cancellation, so the deploy the user stopped goes green.
+     * Guarded HERE because every status write funnels through this one method:
+     * a caller cannot forget it, and a new caller inherits it.
+     *
+     * `cancelled` is the only terminal state pinned this way. The others are
+     * legitimately re-written (`reconciling` settles later; a partial failure is
+     * superseded), and those paths don't route through here.
+     */
+    async updateStatus(
+      id: string,
+      status: string,
+      extra?: Partial<NewDeployment>,
+    ): Promise<boolean> {
+      const rows = await db
         .update(deployment)
         .set({ status, ...extra, updatedAt: new Date() })
-        .where(eq(deployment.id, id));
+        .where(and(eq(deployment.id, id), ne(deployment.status, "cancelled")))
+        .returning();
+      return rows.length > 0;
     },
 
     /**
