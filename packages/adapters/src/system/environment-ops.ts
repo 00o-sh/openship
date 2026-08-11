@@ -419,7 +419,18 @@ function dockerInstallSteps(profile: EnvironmentProfile): Op {
   const id = profile.distroId?.trim().toLowerCase() ?? "";
   if (GET_DOCKER_IDS.has(id)) {
     // The script pulls `docker-compose-plugin` itself on both its apt and its rpm paths,
-    // so these hosts need no second step; the arms below are the ones that do.
+    // so these hosts need no second step; the arms below are the ones that do. That holds
+    // because both plugin lines sit behind `version_gte "20.10"`, and `version_gte` returns
+    // true when `$VERSION` is unset — so it is true only while we invoke the script BARE.
+    // Passing a VERSION to pin an engine would re-gate the plugin and quietly make this
+    // arm the thing {@link withComposePlugin} exists to prevent.
+    //
+    // The point-release hazard {@link dockerCeRepoSteps} pins is NOT closed here, on
+    // purpose: the script fetches `/linux/$ID/docker-ce.repo` and leaves `$releasever` to
+    // dnf, so a host pinning one in /etc/dnf/vars fails inside the vendor script — and for
+    // `rocky` there is no dotted-path redirect to save it, where `rhel` gets one. Pinning it
+    // would mean replacing the vendor path with our own recipe, losing dnf5-vs-dnf syntax,
+    // channel handling and makecache to cover an image shape nothing on the host declares.
     return answered(["curl -fsSL https://get.docker.com | sh"]);
   }
 
