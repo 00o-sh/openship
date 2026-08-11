@@ -96,7 +96,12 @@ const CASES: readonly Case[] = [
     libc: "glibc",
     versionPrefix: "2",
     installGit: ["yum install -y git"],
-    dockerEngine: ["amazon-linux-extras install -y docker"],
+    // Braced, and tolerating a non-zero exit when the binary is there: AL2's
+    // `amazon-linux-extras` exits 13 AFTER yum has installed dockerd, and
+    // `opScript` joins with `&&`, so a bare command aborted the compose-plugin
+    // steps that follow and provisioned an engine with no `docker compose`.
+    // Pinned as one step on purpose — the braces are what keep it one.
+    dockerEngine: ["{ amazon-linux-extras install -y docker || command -v docker >/dev/null 2>&1; }"],
     composeFrom: "plugin",
   },
   {
