@@ -21,6 +21,7 @@ import {
   MCP_RESOURCE_PATHS,
   protectedResourceMetadata,
   publicOriginFor,
+  rewriteMetadataOrigin,
 } from "./lib/mcp-resource";
 import { projectRoutes } from "./modules/projects/project.routes";
 import { appRoutes } from "./modules/apps/app.routes";
@@ -67,6 +68,42 @@ export const app = new Hono();
 
 const oauthAuthServerMetadata = oAuthDiscoveryMetadata(auth);
 const oauthProtectedResourceMetadata = oAuthProtectedResourceMetadata(auth);
+
+/**
+ * Serve one of the plugin's discovery documents re-pointed at the origin THIS
+ * request arrived on, instead of the static baseURL it was built from (#543 —
+ * see `rewriteMetadataOrigin` for why that origin is unreachable).
+ *
+ * `no-store` because the document now varies by request origin on a box with no
+ * OPENSHIP_PUBLIC_URL: the plugin sets `Access-Control-Allow-Origin: *` and no
+ * cache directives, so a shared cache keyed on path alone could otherwise hand
+ * one client's resolved origin to another.
+ */
+function requestScopedMetadata(
+  handler: (req: Request) => Promise<Response>,
+): (req: Request) => Promise<Response> {
+  return async (req) => {
+    const res = await handler(req);
+    const body = await res.text();
+    const headers = new Headers(res.headers);
+    headers.set("Cache-Control", "no-store");
+    headers.delete("content-length");
+    let metadata: Record<string, unknown>;
+    try {
+      metadata = JSON.parse(body) as Record<string, unknown>;
+    } catch {
+      // Non-JSON (an upstream error page): pass the plugin's own body through.
+      return new Response(body, { status: res.status, headers });
+    }
+    return new Response(
+      JSON.stringify(rewriteMetadataOrigin(metadata, publicOriginFor(req))),
+      { status: res.status, headers },
+    );
+  };
+}
+
+const serveAuthServerMetadata = requestScopedMetadata(oauthAuthServerMetadata);
+const serveProtectedResourceMetadata = requestScopedMetadata(oauthProtectedResourceMetadata);
 
 /* ---------- Global middleware ---------- */
 app.use(
@@ -162,10 +199,18 @@ app.route("/api/notices", noticeRoutes);
 
 /* ---------- OAuth 2.1 discovery (MCP) ---------- */
 // The mcp() plugin serves these under /api/auth, but MCP/OAuth 2.1 clients look
-// for them at the ORIGIN ROOT. Re-serve the plugin's own metadata handlers here
-// so `Authorization`-less requests to /api/mcp can be discovered end-to-end.
-app.get("/.well-known/oauth-authorization-server", (c) => oauthAuthServerMetadata(c.req.raw));
-app.get("/.well-known/oauth-protected-resource", (c) => oauthProtectedResourceMetadata(c.req.raw));
+// for them at the ORIGIN ROOT. Re-serve the plugin's documents here — through the
+// request-scoped rewrite — so `Authorization`-less requests to /api/mcp can be
+// discovered end-to-end.
+//
+// The protected-resource one needs the rewrite as much as the authorization-server
+// one: the plugin builds its `resource` + `authorization_servers` from the same
+// static baseURL, so a client that probes here instead of following our 401 hint
+// would echo the INTERNAL origin back as `resource=` on the token request — which
+// mcp-token.handler rejects as `invalid_target`, validating against the PUBLIC
+// origin's resources.
+app.get("/.well-known/oauth-authorization-server", (c) => serveAuthServerMetadata(c.req.raw));
+app.get("/.well-known/oauth-protected-resource", (c) => serveProtectedResourceMetadata(c.req.raw));
 
 // RFC 9728 §3.1: metadata for a resource whose identifier has a PATH lives at
 // the well-known prefix FOLLOWED BY that path. A client configured with
@@ -178,6 +223,9 @@ const OAUTH_DISCOVERY_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  // Origin-dependent when no OPENSHIP_PUBLIC_URL is set — never let a shared
+  // cache serve one client's resolved origin to another.
+  "Cache-Control": "no-store",
 } as const;
 
 for (const path of MCP_RESOURCE_PATHS) {
@@ -190,7 +238,7 @@ for (const path of MCP_RESOURCE_PATHS) {
   // root one — served here so a client that only probes the path-aware location
   // finds it instead of falling back.
   app.get(`/.well-known/oauth-authorization-server${path}`, (c) =>
-    oauthAuthServerMetadata(c.req.raw),
+    serveAuthServerMetadata(c.req.raw),
   );
 }
 

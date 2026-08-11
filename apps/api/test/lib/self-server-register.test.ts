@@ -140,9 +140,17 @@ describe("ensureLocalServer", () => {
 describe("wiring", () => {
   it("bootstrap-admin registers AFTER the admin row is written", async () => {
     const src = await readSrc("../../src/modules/system/setup.controller.ts");
+    // Scope to bootstrapAdmin — other handlers (the host-control toggle in
+    // updateSettings) legitimately call ensureLocalServer() earlier in the file.
+    const bootstrap = src.slice(
+      src.indexOf("export async function bootstrapAdmin"),
+      src.indexOf("export async function resetAdminPassword"),
+    );
     // order matters: the helper reads the founding admin, which only resolves once
     // autoProvisioned is cleared.
-    expect(src.indexOf("autoProvisioned: false")).toBeLessThan(src.indexOf("await ensureLocalServer()"));
+    expect(bootstrap.indexOf("autoProvisioned: false")).toBeLessThan(
+      bootstrap.indexOf("await ensureLocalServer()"),
+    );
   });
 
   it("reset-admin-password registers too — the free-domain install lands there", async () => {
