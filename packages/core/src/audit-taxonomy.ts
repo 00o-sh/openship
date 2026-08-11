@@ -275,11 +275,30 @@ export const AUDIT_EVENTS: Record<string, AuditEventDef> = {
     tone: "warning",
     description: "DNS records for this domain don't point here yet.",
   },
+  // The name the AUDIT row carries — `verify` and `verifyStream` both write it,
+  // while the notification namespace uses `verification_failed` above. Both are
+  // catalogued rather than renamed: the event type is a stored, queryable column,
+  // so a rename would orphan every row already written on an operator's instance.
+  "domain.verify_failed": {
+    category: "domains",
+    action: "failed to verify the domain",
+    label: "Domain verification failed",
+    tone: "warning",
+    description: "DNS records for this domain don't point here yet.",
+  },
   "domain.set_primary": {
     category: "domains",
     action: "made primary the domain",
     label: "Primary domain changed",
     description: "The domain other addresses now redirect to.",
+  },
+  "domain.dns_provisioned": {
+    category: "domains",
+    action: "provisioned DNS for",
+    label: "DNS records provisioned",
+    tone: "info",
+    description:
+      "Openship wrote this domain's records at the connected DNS provider. The counts of applied and failed records are in the details.",
   },
   "domain.cert_uploaded": {
     category: "domains",
@@ -808,6 +827,18 @@ export const AUDIT_EVENTS: Record<string, AuditEventDef> = {
     category: "system",
     action: "failed to back up",
     label: "Backup failed",
+    tone: "danger",
+  },
+  "backup_restore.completed": {
+    category: "system",
+    action: "restored",
+    label: "Restore completed",
+    tone: "success",
+  },
+  "backup_restore.failed": {
+    category: "system",
+    action: "failed to restore",
+    label: "Restore failed",
     tone: "danger",
   },
   "backup.webhook.fired": {

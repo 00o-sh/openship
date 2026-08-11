@@ -44,19 +44,36 @@ function apiSourceFiles(dir: string): string[] {
 }
 
 /**
- * Event types emitted as literals: `eventType: "..."` outside a comment.
+ * Event types emitted as literals: every string in the `eventType:` expression.
  *
  * Deliberately over-inclusive — it also catches the notification dispatcher's
  * literals, which are mostly audit types too. A catalog entry for a type that
  * never reaches audit_event costs nothing; a missing one costs a readable row.
+ *
+ * BOTH branches of a ternary, not just a bare literal: `eventType: ok ? "a" : "b"`
+ * is how ~half the pass/fail pairs are written, and a regex anchored on a quote
+ * right after the colon saw neither. That blind spot is what let
+ * `domain.verify_failed` ship uncatalogued while its `domain.verified` twin —
+ * written on the same line — looked covered.
+ *
+ * Scoped twice, so the scan stays over-inclusive about event types without
+ * inventing ones: to the expression (up to the first comma), so the sibling keys
+ * of a single-line `{ eventType: "x", resourceType: "y" }` aren't read as types;
+ * and past the `?`, so the operand of a `status === "succeeded" ? …` condition
+ * isn't either.
  */
 function emittedEventTypes(): Map<string, string> {
   const found = new Map<string, string>();
   for (const file of apiSourceFiles(API_SRC)) {
     for (const line of readFileSync(file, "utf8").split("\n")) {
       if (/^\s*\*/.test(line)) continue; // jsdoc example, not a call site
-      const match = line.match(/eventType:\s*"([^"]+)"/);
-      if (match?.[1] && !found.has(match[1])) found.set(match[1], file);
+      const at = line.indexOf("eventType:");
+      if (at === -1) continue;
+      const expr = line.slice(at + "eventType:".length).split(",")[0]!;
+      const branches = expr.includes("?") ? expr.slice(expr.indexOf("?") + 1) : expr;
+      for (const [, type] of branches.matchAll(/"([^"]+)"/g)) {
+        if (type && !found.has(type)) found.set(type, file);
+      }
     }
   }
   return found;

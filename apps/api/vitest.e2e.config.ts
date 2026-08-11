@@ -1,3 +1,5 @@
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { configDefaults, defineConfig } from "vitest/config";
 import { sharedTestOptions, testAlias } from "./vitest.config";
 
@@ -23,6 +25,19 @@ const HEAVY = "test/e2e/rollback-build-restore.e2e.test.ts";
 const scope = process.env.E2E_SCOPE;
 const include = scope === "heavy" ? [HEAVY] : ["test/e2e/**/*.e2e.test.ts"];
 
+/**
+ * The sandbox `backup-volume-roundtrip` puts its destination inside, read back
+ * from `env.BACKUP_LOCAL_ROOT` by the test rather than recomputed there.
+ *
+ * A dedicated directory, not `tmpdir()` itself: the root is what the deny-list in
+ * local-path.ts screens, and "point it at a dedicated directory" is the advice the
+ * product gives an operator — the suite should be configured the way one would be.
+ *
+ * Per-process, because the suite removes this whole tree when it finishes: a fixed
+ * name would let one run delete the sandbox another was mid-backup in.
+ */
+const BACKUP_ROOT = join(tmpdir(), `openship-e2e-backup-root-${process.pid}`);
+
 export default defineConfig({
   resolve: {
     alias: testAlias,
@@ -30,6 +45,15 @@ export default defineConfig({
   test: {
     ...sharedTestOptions,
     include,
+    env: {
+      ...sharedTestOptions.env,
+      // A `kind: 'local'` destination is gated on EVERY path that uses one, not
+      // just the ones that create one (local-gate.ts), so the suite has to opt in
+      // the way an operator does. It belongs here and not in a hook: config/env.ts
+      // parses process.env eagerly at import, which a `beforeAll` runs after.
+      BACKUP_ALLOW_LOCAL_DESTINATION: "true",
+      BACKUP_LOCAL_ROOT: BACKUP_ROOT,
+    },
     exclude: [...configDefaults.exclude, ...(scope === "fast" ? [HEAVY] : [])],
     // Pulling and building images and streaming volumes all happen in
     // beforeAll. There is no sane default here, which is why every E2E hook
