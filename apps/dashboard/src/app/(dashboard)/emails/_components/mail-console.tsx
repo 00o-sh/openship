@@ -28,6 +28,8 @@ import {
   type MailSSEEvent,
   type PortConflict,
 } from "@/lib/api";
+import { relayProvider } from "@repo/core";
+import { mailProvider } from "@/lib/mail-providers";
 import type { ServerOption } from "@/components/shared/ServerSelector";
 import { PageContainer } from "@/components/ui/PageContainer";
 import { useModal } from "@/context/ModalContext";
@@ -93,10 +95,15 @@ function MailConsoleInner() {
   const [domain, setDomain] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
   const { showToast } = useToast();
-  // Optional outbound relay chosen at install time (SES, all domains). Fired
-  // once via the relay API on the `complete` SSE event. A ref keeps the latest
-  // value available inside the long-lived install callback without stale closure.
-  const [setupRelay, setSetupRelay] = useState<SetupRelay>({ enabled: false, region: "us-east-1", username: "", password: "" });
+  // Optional outbound relay chosen at install time (any provider, all domains).
+  // Fired once via the relay API on the `complete` SSE event. A ref keeps the
+  // latest value available inside the long-lived install callback without stale
+  // closure. Defaults mirror the SES preset — the most common pick — but the
+  // form's picker can switch to any registry provider before install.
+  // Relay is on by default — sending from a fresh-server IP without one is the
+  // #1 reason mail lands in spam or never leaves (blocklisted IP, provider
+  // blocking outbound :25). The operator can still uncheck it.
+  const [setupRelay, setSetupRelay] = useState<SetupRelay>({ enabled: true, provider: "ses", region: "us-east-1", host: "", port: "587", username: "", password: "" });
   const setupRelayRef = useRef(setupRelay);
   setupRelayRef.current = setupRelay;
   const [logs, setLogs] = useState<Array<{ stepId: number; level: string; message: string }>>([]);
@@ -566,12 +573,18 @@ function MailConsoleInner() {
                     setServerInUrl(selectedServer.id);
                   };
                   if (r.enabled) {
+                    // Resolve the chosen provider through the shared registry:
+                    // regional providers send a region (host derived server-side),
+                    // fixed-host/custom send the host. Same payload the Sending tab
+                    // posts — no provider hardcoded here.
+                    const spec = relayProvider(mailProvider(r.provider).backendProvider);
                     mailAdminApi.relay
                       .save(selectedServer.id, {
-                        provider: "ses",
+                        provider: spec.id,
                         scope: "all",
-                        region: r.region.trim(),
-                        port: 587,
+                        region: spec.regional ? r.region.trim() : undefined,
+                        host: spec.regional ? undefined : r.host.trim() || spec.hostTemplate || undefined,
+                        port: Number(r.port) || spec.defaultPort,
                         username: r.username.trim(),
                         password: r.password,
                       })

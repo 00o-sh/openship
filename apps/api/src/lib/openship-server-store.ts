@@ -15,6 +15,7 @@ import {
   HOST_STATE_DIR,
   privilegedExecutor,
   type CommandExecutor,
+  type Privileged,
 } from "@repo/adapters";
 
 /**
@@ -53,10 +54,44 @@ function sq(v: string): string {
  * so the atomic write survives it), and this state is read back later — sometimes by a
  * different login user — so a host provisioned before this fix must still be found.
  */
-async function storeExecutor(exec: CommandExecutor, purpose: string): Promise<CommandExecutor> {
+async function storeExecutor(exec: CommandExecutor, purpose: string): Promise<Privileged> {
   const grant = await privilegedExecutor(exec, purpose, { onRefusedHost: "proceed" });
   if (!grant.supported) throw new Error(grant.reason);
-  return grant.value.executor;
+  return grant.value;
+}
+
+/**
+ * The one host shape where a read here CANNOT be attempted, recognized in TypeScript
+ * because the shell cannot see it.
+ *
+ * A login that is neither root nor sudo-capable, against a 0700 root-owned directory.
+ * From inside the remote shell that is invisible: the login user cannot traverse /root,
+ * so `cat` fails with EACCES, `test -e` on the path answers "no", and `test -d` on the
+ * dir answers "no" too. Absent and forbidden are the SAME observation down there, and
+ * the reads below then reported exit 0 with empty stdout — so `unreadable` never fired
+ * and the one distinction this module exists to keep vanished into a successful-looking
+ * empty answer. The fact is known up here, before the command is sent.
+ *
+ * Narrow on purpose. A *supported* host with no route to root never reaches here at all —
+ * `privilegedExecutor` refuses it and `storeExecutor` throws. `elevation: "none"` is
+ * reachable only on a REFUSED host (privilege.ts:147), and that covers two opposite boxes.
+ */
+function cannotAttemptRead(p: Privileged): Error | null {
+  // Unmeasurable — a banner, a forced command, a probe that never came back. `isRoot` and
+  // `canSudo` are then absences rather than facts: the login may well BE root, and every
+  // release before the resolver existed simply tried. Refusing on this arm would turn a
+  // readable manifest into a missing one on any chatty box, which is the regression
+  // `onRefusedHost: "proceed"` is documented to prevent — and `scan` reads a missing
+  // manifest as "this server has no Openship projects".
+  if (p.profile.probeError || p.profile.forcedCommand) return null;
+
+  // Measured, and measured as having no route to root: an unsupported distro or arch whose
+  // login is unprivileged. Here the two flags above ARE facts, and the read cannot work.
+  return p.elevation === "none"
+    ? new Error(
+        `no route to root on this host (login is ${p.profile.loginUser}, passwordless sudo unavailable) and ${OPENSHIP_DIR} is root-only`,
+      )
+    : null;
 }
 
 /** The dir, created through an executor a caller has already gated. */
@@ -65,24 +100,49 @@ async function mkdirOpenship(e: CommandExecutor): Promise<void> {
 }
 
 /**
+ * A read that cannot be performed, answered with the caller's "not there" value.
+ *
+ * The non-throwing contract is deliberate (see `readOpenshipFile`) and callers
+ * depend on it — but a REFUSED read and an ABSENT file must not be silently the
+ * same event. The value has to stay ambiguous; the log must not. Without this,
+ * a host that merely denies elevation reads as a host with no Openship state,
+ * which is the exact confusion this module's header says it exists to end.
+ */
+function unreadable<T>(name: string, err: unknown, fallback: T): T {
+  const reason = err instanceof Error ? err.message : String(err);
+  console.warn(
+    `[openship-server-store] cannot read ${OPENSHIP_DIR}/${name} — reporting it as absent: ${reason}`,
+  );
+  return fallback;
+}
+
+/**
  * Ensure the `.openship` dir exists, root-only (0700). Idempotent. THE single
  * place the folder is created — callers never `mkdir` it themselves.
  */
 export async function ensureOpenshipDir(exec: CommandExecutor): Promise<void> {
-  await mkdirOpenship(await storeExecutor(exec, "Writing Openship server state"));
+  await mkdirOpenship((await storeExecutor(exec, "Writing Openship server state")).executor);
 }
 
 /**
  * Read a file from `.openship` by bare name (e.g. "mail-state.json"). Returns
  * "" when absent — never throws on a missing file.
+ *
+ * Also "" when the read could not be ATTEMPTED (elevation refused, transport
+ * down). That is a compromise, not an equivalence: refusing here would turn a
+ * readable manifest into a missing one on any host we can't measure, which is a
+ * regression dressed as a safety check. The distinction is kept in the log —
+ * see `unreadable`.
  */
 export async function readOpenshipFile(exec: CommandExecutor, name: string): Promise<string> {
   const path = `${OPENSHIP_DIR}/${name}`;
   try {
-    const e = await storeExecutor(exec, "Reading Openship server state");
-    return (await e.exec(`cat ${sq(path)} 2>/dev/null || echo ""`)).trim();
-  } catch {
-    return "";
+    const p = await storeExecutor(exec, "Reading Openship server state");
+    const blocked = cannotAttemptRead(p);
+    if (blocked) return unreadable(name, blocked, "");
+    return (await p.executor.exec(`cat ${sq(path)} 2>/dev/null || echo ""`)).trim();
+  } catch (err) {
+    return unreadable(name, err, "");
   }
 }
 
@@ -99,7 +159,10 @@ export async function writeOpenshipFile(
   const tmp = `${path}.tmp`;
   // One grant for all three steps: the staged write must land under the dir this same
   // grant just created, and re-gating per step would re-probe for nothing.
-  const e = await storeExecutor(exec, "Writing Openship server state");
+  // No `cannotAttemptRead` gate here on purpose: a write that cannot be elevated must
+  // FAIL, and it does — `mkdir -p /root/.openship` throws on its own. Only the reads
+  // have a non-throwing contract to protect, and only they can be fooled by it.
+  const { executor: e } = await storeExecutor(exec, "Writing Openship server state");
   await mkdirOpenship(e);
   await e.writeFile(tmp, content);
   await e.exec(`mv -f ${sq(tmp)} ${sq(path)} && chmod 0600 ${sq(path)}`);
@@ -108,17 +171,22 @@ export async function writeOpenshipFile(
 /** Remove a file (and any stale temp) from `.openship`. Idempotent. */
 export async function removeOpenshipFile(exec: CommandExecutor, name: string): Promise<void> {
   const path = `${OPENSHIP_DIR}/${name}`;
-  const e = await storeExecutor(exec, "Removing Openship server state");
+  const { executor: e } = await storeExecutor(exec, "Removing Openship server state");
   await e.exec(`rm -f ${sq(path)} ${sq(`${path}.tmp`)}`);
 }
 
-/** Cheap existence check (no read) — `true` iff `.openship/<name>` is a file. */
+/** Existence check — `true` iff `.openship/<name>` is a file. One `test -f`
+ *  rather than a read, but it still costs the same privilege grant as one
+ *  (0700 root-owned), so it is not free on a non-root login. Same
+ *  refused-reads-as-absent compromise as `readOpenshipFile`. */
 export async function openshipFileExists(exec: CommandExecutor, name: string): Promise<boolean> {
   const path = `${OPENSHIP_DIR}/${name}`;
   try {
-    const e = await storeExecutor(exec, "Reading Openship server state");
-    return (await e.exec(`test -f ${sq(path)} && echo yes || echo no`)).trim() === "yes";
-  } catch {
-    return false;
+    const p = await storeExecutor(exec, "Reading Openship server state");
+    const blocked = cannotAttemptRead(p);
+    if (blocked) return unreadable(name, blocked, false);
+    return (await p.executor.exec(`test -f ${sq(path)} && echo yes || echo no`)).trim() === "yes";
+  } catch (err) {
+    return unreadable(name, err, false);
   }
 }

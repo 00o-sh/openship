@@ -442,6 +442,7 @@ export function parseEnvironmentProbe(probe: EnvironmentProbe): EnvironmentProfi
   const probeError = unanswered ? (said ?? SILENT_PROBE) : null;
 
   const os = complete ? parseSystemOs(keys.opsh_os) : "unknown";
+  const osRaw = complete ? keys.opsh_os?.trim() || null : null;
   const archRaw = complete ? keys.opsh_arch?.trim() || null : null;
   const arch = complete ? parseSystemArch(keys.opsh_arch) : "unknown";
 
@@ -458,6 +459,7 @@ export function parseEnvironmentProbe(probe: EnvironmentProbe): EnvironmentProfi
 
   const profile: EnvironmentProfile = {
     os,
+    osRaw,
     arch,
     archRaw,
     // `distro` stays null off Linux, where the concept doesn't apply — the existing
@@ -518,7 +520,16 @@ export async function resolveEnvironment(
 
   systemDebug("environment", cached ? "cache:stale" : "cache:miss");
   const promise = (async () => {
-    const profile = parseEnvironmentProbe(await runProbe(executor));
+    // `key`, not `executor`: the cache key must also be the thing measured. Unwrapping the
+    // decorator made one box = one entry, but the probe still ran through whichever view
+    // arrived first, and an `elevatedExecutor` view runs every command through `sudo -n`.
+    // So `id -u` answers 0 and the profile reads `isRoot: true` / `loginUser: "root"` for a
+    // non-root box — then serves that to every later caller of the BASE executor until the
+    // TTL expires. Unwrapping had widened the blast radius of that mismeasurement from the
+    // elevated view to the whole host. The house rule is elevate the write, never the
+    // verify; a profile describes the login we actually have, and elevation is a capability
+    // derived from it, not a different machine.
+    const profile = parseEnvironmentProbe(await runProbe(key));
     // A refresh that could not MEASURE the box must not overwrite one that did: a
     // `probeError` renders as `supported: false`, so a single slow moment would otherwise
     // turn a host that has been deploying happily for an hour into "Openship cannot

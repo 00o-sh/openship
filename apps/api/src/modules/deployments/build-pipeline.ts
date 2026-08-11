@@ -9,6 +9,7 @@ import {
   normalizeServiceLabel,
 } from "@repo/core";
 import { ensureEdgeChallengeReady } from "../../lib/edge-challenge";
+import { repairEdgeVhosts } from "../../lib/edge-vhost-repair";
 import type {
   BuildResult,
   CommandExecutor,
@@ -1343,6 +1344,13 @@ function buildDeployEnvironment(
               await ensureEdgeChallengeReady(phase.project.organizationId, phase.routing, {
                 serverId: phase.serverId ?? undefined,
                 onLog: (m) => logger.log(m, "warn"),
+              });
+              // Bring the box's OTHER vhosts up to this build's shape while we're here.
+              // This project's own routes are rewritten by the deploy anyway; the ones
+              // that need it are the projects nobody is redeploying, which is where a
+              // generated-config fix otherwise never lands. No-op once converged.
+              await repairEdgeVhosts(phase.routing, {
+                onLog: (m, level) => logger.log(m, level ?? "info"),
               });
             } catch (err) {
               logger.log(

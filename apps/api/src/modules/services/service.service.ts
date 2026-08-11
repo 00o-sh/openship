@@ -261,6 +261,12 @@ export async function acceptServiceDrift(
     environment: theirs.environment ?? {},
     volumes: theirs.volumes ?? [],
     command: theirs.command ?? null,
+    // #332: this list has to cover EVERY field of ComposeServiceSpec, or accepting
+    // drift advances the baseline while quietly keeping the old value — the change
+    // then never re-flags, because the baseline now says it was applied. That is
+    // what happened to `commandArgv`: accepting an upstream argv change discarded
+    // it permanently. Same field-by-field omission as #533.
+    commandArgv: theirs.commandArgv ?? null,
     restart: theirs.restart ?? "unless-stopped",
     advanced: theirs.advanced ?? {},
     importedSpec: theirs,
@@ -996,7 +1002,12 @@ export async function syncComposeServices(
     environment?: Record<string, string>;
     volumes?: string[];
     command?: string;
+    commandArgv?: string[] | null;
     restart?: string;
+    /** Extended compose block (healthcheck, resource caps, shared namespaces).
+     *  Declared so it isn't merely passing through untyped — the wire schema has
+     *  always accepted it and the repo has always stored it. */
+    advanced?: ComposeAdvanced;
     exposed?: boolean;
     exposedPort?: string;
     domain?: string;
@@ -1031,7 +1042,13 @@ export async function syncComposeServices(
       : svc,
   );
 
-  const synced = await repos.service.syncFromCompose(projectId, reconciled);
+  // composeAuthoritative: this endpoint's contract is "the FULL service list from
+  // the compose file" — it already removes services missing from it. So an absent
+  // compose-owned key (a `network_mode` the author deleted) is a deletion here,
+  // not silence, and must not survive the sync.
+  const synced = await repos.service.syncFromCompose(projectId, reconciled, {
+    composeAuthoritative: true,
+  });
   return synced.map(maskServiceEnv);
 }
 

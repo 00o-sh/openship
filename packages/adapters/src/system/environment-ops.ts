@@ -304,10 +304,17 @@ const SERVICE: Readonly<Record<SystemServiceManager, ServiceRules>> = {
 /**
  * The os-release IDs `get.docker.com` accepts.
  *
- * Verified against the script's own source: it sets `lsb_dist` from `ID` **verbatim,
- * with no `ID_LIKE` fallback**, then switches on it. Anything else exits 1 with
- * `ERROR: Unsupported distribution`. So this set is not a preference — it is the
- * script's contract, and running it on `amzn` was always going to fail.
+ * Verified against the script's own source: it sets `lsb_dist` from `ID` verbatim with no
+ * `ID_LIKE` fallback, then switches on it, and its `*)` arm exits 1 with
+ * `ERROR: Unsupported distribution`. So `amzn` was always going to fail here.
+ *
+ * The set is narrower than the script's true reach, and deliberately: `check_forked` runs
+ * BEFORE that switch and rewrites `lsb_dist` from `lsb_release -a -u`, falling back to
+ * forcing `debian` for any readable `/etc/debian_version`. A Debian derivative therefore
+ * does reach the apt arm — but the codename it lands on is one the script derives at
+ * runtime, and Docker's apt repo 404s on a suite it doesn't publish. Listing only the IDs
+ * whose suite we can name from os-release keeps that guess out; the derivative arm below
+ * takes the distro's own package instead, which needs no suite at all.
  */
 const GET_DOCKER_IDS: ReadonlySet<string> = new Set([
   "ubuntu",
@@ -319,10 +326,37 @@ const GET_DOCKER_IDS: ReadonlySet<string> = new Set([
   "rocky",
 ]);
 
-/** Docker CE's rpm repo, for the RHEL-family IDs `get.docker.com` won't take. */
-const DOCKER_CE_REPO =
-  "curl -fsSL https://download.docker.com/linux/centos/docker-ce.repo " +
-  "-o /etc/yum.repos.d/docker-ce.repo";
+const DOCKER_CE_REPO_FILE = "/etc/yum.repos.d/docker-ce.repo";
+
+/**
+ * Docker CE's rpm repo, for the RHEL-family IDs `get.docker.com` won't take.
+ *
+ * The vendor file interpolates `$releasever`, and that is the hazard. The `centos` tree
+ * publishes only major-version directories, so a host where `$releasever` expands to `9.4`
+ * requests `/linux/centos/9.4/$basearch/stable` and gets a hard 404 — unlike
+ * `/linux/rhel/9.4/…`, which 301s to the major. Probing says the opposite of the truth:
+ * `/linux/centos/9.4/` answers 200, but that is an S3 redirect covering the index page
+ * only. `alma`, `rocky` and `oracle` have no dotted redirect either, and `centos` is the
+ * one tree with a 7 in it — which is why this stays on centos rather than picking a tree
+ * per rebuild.
+ *
+ * Every el9 rebuild checked expands `$releasever` to the major on its own and ships no
+ * `/etc/dnf/vars/releasever`, so the default path works. What reaches the 404 is an image
+ * that pins a point release there — kickstart and subscription-style templates do — and
+ * nothing on the host says so. So the major we already detected is substituted into the
+ * file we just wrote, and nowhere else: `--releasever` on the transaction would repoint
+ * the BASE repos of exactly the host that pinned them on purpose.
+ */
+function dockerCeRepoSteps(profile: EnvironmentProfile): readonly string[] {
+  const write =
+    "curl -fsSL https://download.docker.com/linux/centos/docker-ce.repo " +
+    `-o ${DOCKER_CE_REPO_FILE}`;
+  // Digits only by construction, so it needs no quoting of its own. A host with no
+  // VERSION_ID keeps `$releasever` — today's behaviour, and right wherever one is reported.
+  const major = /^(\d+)/.exec(profile.versionId ?? "")?.[1];
+  if (!major) return [write];
+  return [write, `sed -i 's|\\$releasever|${major}|g' ${DOCKER_CE_REPO_FILE}`];
+}
 
 const DOCKER_CE_PACKAGES =
   "docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin";
@@ -340,8 +374,8 @@ const DOCKER_CE_PACKAGES =
  * - The Debian-family fallback: it installs the DISTRO's `docker.io`, and the archive's
  *   plugin is `docker-compose-v2` on Ubuntu derivatives (universe, jammy-updates onward),
  *   `docker-compose` ≥ 2 on Debian trixie, and nothing at all on bookworm. Picking between
- *   those means mapping a derivative's VERSION_ID onto an upstream suite — the guess this
- *   module exists to not make.
+ *   those turns on the upstream suite and on whether universe is enabled, neither of which
+ *   this arm acts on today — see the `debian` case for what is known and why it waits.
  *
  * So both take the binary Docker documents for a system-wide manual install. Pinned rather
  * than `releases/latest` for the reason every other recipe here is pinned: a provisioning
@@ -398,7 +432,15 @@ function dockerInstallSteps(profile: EnvironmentProfile): Op {
         return withComposePlugin(
           profile,
           profile.packageManager === "yum"
-            ? ["amazon-linux-extras install -y docker"]
+            ? // `amazon-linux-extras` exits 13 with "Installation failed" AFTER yum has
+              // printed "Complete!" and left dockerd on disk — seen once in four runs
+              // against a real amazonlinux:2. `opScript` joins with `&&`, so that exit
+              // aborted the plugin steps below and produced the engine-without-`docker
+              // compose` host {@link withComposePlugin} exists to prevent. Tolerate a
+              // non-zero exit only when the binary is actually there; a real failure has
+              // nothing to find and still aborts. Braced so it stays one step if a step
+              // is ever prepended — `&&` and `||` bind equally and left-associatively.
+              ["{ amazon-linux-extras install -y docker || command -v docker >/dev/null 2>&1; }"]
             : ["dnf install -y docker"],
         );
       }
@@ -406,14 +448,32 @@ function dockerInstallSteps(profile: EnvironmentProfile): Op {
       // repo is the one Docker publishes for the rebuilds; adding the .repo file
       // directly works on dnf4 and dnf5 alike, where `dnf config-manager --add-repo`
       // changed syntax in Fedora 41 and needs dnf-plugins-core installed first.
-      return answered([DOCKER_CE_REPO, `${profile.packageManager} install -y ${DOCKER_CE_PACKAGES}`]);
+      return answered([
+        ...dockerCeRepoSteps(profile),
+        `${profile.packageManager} install -y ${DOCKER_CE_PACKAGES}`,
+      ]);
 
     case "debian":
-      // Mint, Pop!_OS and friends: `get.docker.com` refuses their IDs, and Docker's own
-      // apt repo is keyed on a codename they don't share with Ubuntu. The distro's
-      // `docker.io` is older than docker-ce but real, and MIN_DOCKER_VERSION gates it. It
-      // carries no compose plugin under any name we can derive here — see
-      // {@link COMPOSE_PLUGIN_VERSION}.
+      // Mint, Pop!_OS and friends. Not because `get.docker.com` refuses them — it
+      // normalizes them (see {@link GET_DOCKER_IDS}) — but because the suite it derives at
+      // runtime is one we cannot check first, and Docker's apt repo 404s on a suite it does
+      // not publish.
+      //
+      // The suite is no longer the unknown it was. Every derivative checked — Mint
+      // 21.3/22/22.1/22.2, Pop 22.04/24.04, Zorin 17, elementary 7/8 — ships
+      // UBUNTU_CODENAME set to the upstream Ubuntu codename, which IS a published suite,
+      // while VERSION_CODENAME is the distro's own name (`virginia`, `wilma`, `circe`) and
+      // is a suite nowhere; Docker's own documented command reads them in that order, and
+      // Mint mints a fresh VERSION_CODENAME per point release, so the derivative name could
+      // never have been enumerated anyway. What is unverified is the OUTCOME of authoring
+      // an apt source here against a real derivative, and the trade is lopsided: this path
+      // provisions a working engine today, so a wrong recipe turns hosts that work into
+      // hosts with no Docker in exchange for a newer one. Rewire it from a host, not from a
+      // repo listing.
+      //
+      // So this stays a deliberate downgrade: the distro's `docker.io` is older than
+      // docker-ce but real, and MIN_DOCKER_VERSION gates it. It carries no compose plugin
+      // under any name we can derive here — see {@link COMPOSE_PLUGIN_VERSION}.
       return withComposePlugin(profile, [
         "apt-get update -qq",
         "apt-get install -y -qq docker.io",

@@ -264,6 +264,7 @@ export function unansweredProbe(text: string): EnvironmentProbe {
 /** A plain root Ubuntu box: supported, no firewall, systemd, amd64. */
 const BASE: EnvironmentProfile = {
   os: "linux",
+  osRaw: "Linux",
   arch: "amd64",
   archRaw: "x86_64",
   distro: "ubuntu",
@@ -297,14 +298,17 @@ const BASE: EnvironmentProfile = {
  */
 export function profileFixture(over: Partial<EnvironmentProfile> = {}): EnvironmentProfile {
   const merged: EnvironmentProfile = { ...BASE, ...over };
-  // `arch` and `archRaw` are one observation, and the arch refusal quotes the raw half —
-  // so overriding only the narrowed half would produce a fixture that refuses a riscv box
-  // by the name `x86_64`. Inherit the base's raw value only when the arch is still the base's.
+  // `arch`/`archRaw` and `os`/`osRaw` are each ONE observation, and both refusals quote the
+  // raw half — so overriding only the narrowed half would produce a fixture that refuses a
+  // riscv box by the name `x86_64`, or a FreeBSD one by the name `Linux`. Inherit the base's
+  // raw value only while the narrowed value is still the base's.
   const archRaw = "archRaw" in over || merged.arch === BASE.arch ? merged.archRaw : null;
-  const verdict = assessHostSupport({ ...merged, archRaw });
+  const osRaw = "osRaw" in over || merged.os === BASE.os ? merged.osRaw : null;
+  const verdict = assessHostSupport({ ...merged, archRaw, osRaw });
   return {
     ...merged,
     archRaw,
+    osRaw,
     supported: over.supported ?? verdict.supported,
     unsupportedReason:
       "unsupportedReason" in over ? (over.unsupportedReason ?? null) : verdict.unsupportedReason,

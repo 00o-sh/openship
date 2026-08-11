@@ -593,6 +593,38 @@ describe("two hosts at once", () => {
     expect(vi.mocked(alpine.exec)).toHaveBeenCalledTimes(1);
   });
 
+  it("measures the host, not the view — an elevated executor does not make the box root", async () => {
+    // The box a real `sudo -n` changes the answer of: uid 1000 as the login user, uid 0
+    // under sudo. `hostFake` ignores its command, so it cannot show this.
+    // `startsWith`, not `includes`: the probe script has its own `sudo -n true` inside it,
+    // so only the wrapper's leading `sudo -n sh -c` distinguishes the elevated view.
+    const exec = vi.fn(async (command: string) =>
+      command.startsWith("sudo -n")
+        ? probeOutput({ uid: "0", user: "root", home: "/root", sudo: "n" })
+        : probeOutput({ uid: "1000", user: "deploy", home: "/home/deploy", sudo: "y" }),
+    );
+    const box = { exec } as unknown as CommandExecutor;
+
+    // COLD cache reached through the elevated view first — the only ordering where this
+    // is observable, and the one `cacheKeyFor`'s unwrap made reachable for the whole host
+    // rather than just for the view.
+    const profile = await resolveEnvironment(elevatedExecutor(box));
+
+    expect(profile.isRoot).toBe(false);
+    expect(profile.loginUser).toBe("deploy");
+    expect(profile.home).toBe("/home/deploy");
+    // The one that matters downstream: `privilegedExecutor` short-circuits on `isRoot` and
+    // hands back the UNELEVATED executor, so a true-here profile runs root-owned work
+    // unprivileged — the #514 non-root failure re-entered through the cache.
+    expect(profile.canSudo).toBe(true);
+
+    // Cache key and measured subject are the same thing, so the base view is already
+    // answered — with the profile of the box, not of the view that happened to ask.
+    expect(await resolveEnvironment(box)).toBe(profile);
+    expect(exec).toHaveBeenCalledTimes(1);
+    expect(exec.mock.calls[0]?.[0]?.startsWith("sudo -n")).toBe(false);
+  });
+
   it("invalidates through an elevated view, reaching the host underneath", async () => {
     const debian = hostFake({ osRelease: OS_RELEASE.debian12 });
     const alpine = hostFake({ osRelease: OS_RELEASE.alpine320, pm: "apk", sm: "openrc" });

@@ -26,6 +26,7 @@ import {
 import { getRequestContext } from "../../lib/request-context";
 import { withDeploymentPlatform } from "../../lib/deployment-runtime";
 import { ensureEdgeChallengeReady } from "../../lib/edge-challenge";
+import { repairEdgeVhosts } from "../../lib/edge-vhost-repair";
 import { permission } from "../../lib/permission";
 import { param } from "../../lib/controller-helpers";
 import { streamSSE } from "../../lib/sse";
@@ -256,12 +257,17 @@ export async function ensureEdgeStream(c: Context) {
       await (async () => {
         const dep = await repos.deployment.findById(resolved.project.activeDeploymentId!);
         if (!dep) return;
-        await withDeploymentPlatform(dep, ({ routing }) =>
-          ensureEdgeChallengeReady(ctx.organizationId, routing, {
+        await withDeploymentPlatform(dep, async ({ routing }) => {
+          await ensureEdgeChallengeReady(ctx.organizationId, routing, {
             serverId,
             onLog: (m) => appendEdgeLog(session.id, m.trim(), "warn"),
-          }),
-        );
+          });
+          // The edge was just (re)installed, so this is the moment its vhosts can be
+          // behind the shape this build emits. No-op on a converged box.
+          await repairEdgeVhosts(routing, {
+            onLog: (m, level) => appendEdgeLog(session.id, m.trim(), level ?? "info"),
+          });
+        });
       })().catch(() => {});
       await applyProjectRouting(id).catch((e) =>
         appendEdgeLog(session.id, `Route apply warning: ${safeErrorMessage(e)}`, "warn"),

@@ -83,25 +83,49 @@ export function buildMailBackupPayload(
     flags.keys
       ? [
           'mkdir -p "$tmp/keys"',
-          '[ -d /var/lib/dkim ] && cp -a /var/lib/dkim "$tmp/keys/dkim" || true',
+          // Every read here is `sudo -n`, and every copy is allowed to FAIL the backup.
+          //
+          // These are root-owned paths — `${HOST_STATE_DIR}` sits under /root (mode 0700)
+          // and is itself created 0700, and /var/lib/dkim holds private keys. On a host
+          // Openship logs into as a sudoer rather than as root, the old
+          // `[ -f … ] && cp … || true` could not even stat them: the test failed for lack
+          // of privilege, `|| true` absorbed it, and the run exited 0 having recorded
+          // `keys: true` on an archive containing no keys. mail-state.json is the ONLY
+          // copy of the DKIM state and the encrypted mailbox/admin credentials, so that
+          // is a disaster-recovery archive which is silently not one. Same shape as the
+          // amavis bug this file's own header documents.
+          //
+          // `sudo -n` needs no new capability: `sudo -u postgres pg_dump` above already
+          // makes sudo a hard requirement, and under `set -e` a host without it fails
+          // there — so reaching this line means sudo works, and a `test` that says "no"
+          // now means genuinely absent rather than merely unreadable. That is what makes
+          // dropping `|| true` safe: absence still skips, and only a real failure to
+          // collect a secret the operator explicitly asked for stops the backup.
+          'if sudo -n test -d /var/lib/dkim; then sudo -n cp -a /var/lib/dkim "$tmp/keys/dkim"; fi',
           // Whichever of the known locations this box actually uses, with the source
           // path recorded alongside so the restore puts it back where amavis reads it.
-          // Every step `|| true`-guarded: this script runs under `set -e`, and a missing
-          // amavis config is a gap in the archive, not a reason to abandon the backup.
           `for c in ${AMAVIS_CONF_PATHS.join(" ")}; do`,
-          `  [ -f "$c" ] || continue`,
-          `  cp -a "$c" "$tmp/${AMAVIS_IN_ARCHIVE}" || true`,
-          `  printf '%s' "$c" > "$tmp/${AMAVIS_IN_ARCHIVE}.path" || true`,
+          `  sudo -n test -f "$c" || continue`,
+          `  sudo -n cp -a "$c" "$tmp/${AMAVIS_IN_ARCHIVE}"`,
+          `  printf '%s' "$c" > "$tmp/${AMAVIS_IN_ARCHIVE}.path"`,
           `  break`,
           `done`,
-          `[ -f ${HOST_STATE_DIR}/mail-state.json ] && cp -a ${HOST_STATE_DIR}/mail-state.json "$tmp/keys/mail-state.json" || true`,
+          `if sudo -n test -f ${HOST_STATE_DIR}/mail-state.json; then`,
+          `  sudo -n cp -a ${HOST_STATE_DIR}/mail-state.json "$tmp/keys/mail-state.json"`,
+          `fi`,
         ].join("\n")
       : "",
     // Stream one tar to stdout: the staged dir + (optionally) the maildirs
     // read in place (not re-copied), so the source needs no extra disk.
+    //
+    // `sudo -n` for the same reason the staging above uses it, and it is not optional
+    // here: `cp -a` as root stages root-owned 0600 files, so an unprivileged tar could not
+    // read back what was just collected. /var/vmail is vmail:vmail 0700 and was already in
+    // that position — and tar's exit status is masked by `zstd`'s in this pipeline, so on a
+    // non-root login the maildirs were being dropped from the artifact just as quietly.
     flags.messageData
-      ? 'tar -c -C "$tmp" . -C /var/vmail vmail1 | zstd -c -3'
-      : 'tar -c -C "$tmp" . | zstd -c -3',
+      ? 'sudo -n tar -c -C "$tmp" . -C /var/vmail vmail1 | zstd -c -3'
+      : 'sudo -n tar -c -C "$tmp" . | zstd -c -3',
   ]
     .filter(Boolean)
     .join("\n");
@@ -117,20 +141,39 @@ export function buildMailBackupPayload(
     'sudo -u postgres psql -d vmail -v ON_ERROR_STOP=1 -f "$tmp/vmail.data.sql"',
     // DKIM keys + amavis config (if the archive carried them).
     'if [ -d "$tmp/keys/dkim" ]; then mkdir -p /var/lib/dkim && cp -a "$tmp/keys/dkim/." /var/lib/dkim/ || true; fi',
-    // Restore to the path the archive recorded — but only if it is one of the paths we
-    // know, checked against the list rather than trusted verbatim: this shell runs as
-    // root on the TARGET, and `cp -a` to a path read out of an archive would otherwise
-    // be an arbitrary root write. Unrecognized or absent → the Debian-family default,
-    // which is also what pre-2026-08 archives carried under the old fixed name.
+    // Where to put it is decided by THIS box, not by the box the archive came from.
+    //
+    // The archive records its source path, and honouring that verbatim restores a Debian
+    // archive's /etc/amavis/conf.d/50-user onto a RHEL target, which reads a monolithic
+    // /etc/amavisd.conf and never looks at the file we just wrote — restored, inert, and
+    // `|| true` covering it. Cross-family is the NORMAL case here: the reason to restore
+    // is usually a different machine. The recorded path only breaks the tie when the
+    // target has no amavis at all, and is still matched against the known list rather
+    // than trusted, because this shell runs as root on the target.
+    //
+    // The probe is each candidate's own `test`, which is the family detector the rest of
+    // the system already uses — the first is keyed on the include DIRECTORY because
+    // 50-user is ours to CREATE, so testing for the file would misread a Debian box that
+    // has no override yet and fall through to the RHEL path. Deliberately NOT the
+    // produce side's expression: collecting asks "is there a file to copy", placing asks
+    // "which layout is this box".
+    `dest=""`,
+    ...HOST_AMAVIS_CONF_CANDIDATES.map(
+      (c, i) => `${i === 0 ? "if" : "elif"} [ ${c.test} ]; then dest=${c.path}`,
+    ),
+    `fi`,
     `if [ -f "$tmp/${AMAVIS_IN_ARCHIVE}" ]; then`,
     `  saved="$(cat "$tmp/${AMAVIS_IN_ARCHIVE}.path" 2>/dev/null || true)"`,
-    `  dest=${AMAVIS_CONF_DEFAULT}`,
-    // `if`, not `[ … ] && …`: under `set -e` a failed test as the last command of a loop
-    // body aborts the whole restore.
-    `  for c in ${AMAVIS_CONF_PATHS.join(" ")}; do if [ "$saved" = "$c" ]; then dest="$c"; break; fi; done`,
+    `  if [ -z "$dest" ]; then`,
+    `    dest=${AMAVIS_CONF_DEFAULT}`,
+    `    for c in ${AMAVIS_CONF_PATHS.join(" ")}; do if [ "$saved" = "$c" ]; then dest="$c"; break; fi; done`,
+    `  fi`,
     `  cp -a "$tmp/${AMAVIS_IN_ARCHIVE}" "$dest" || true`,
+    // Pre-2026-08 archives carried the Debian path under a fixed name, so they name no
+    // source at all — which makes the target probe the only thing that can place them.
     `elif [ -f "$tmp/${AMAVIS_IN_ARCHIVE_LEGACY}" ]; then`,
-    `  cp -a "$tmp/${AMAVIS_IN_ARCHIVE_LEGACY}" ${AMAVIS_CONF_DEFAULT} || true`,
+    `  if [ -z "$dest" ]; then dest=${AMAVIS_CONF_DEFAULT}; fi`,
+    `  cp -a "$tmp/${AMAVIS_IN_ARCHIVE_LEGACY}" "$dest" || true`,
     `fi`,
     // Maildirs (if included). Ownership must be vmail:vmail for Dovecot.
     'if [ -d "$tmp/vmail1" ]; then cp -a "$tmp/vmail1" /var/vmail/ && chown -R vmail:vmail /var/vmail/vmail1 || true; fi',

@@ -369,12 +369,27 @@ export function planInstallRouting(
 export function serviceRoutingPatch(routing: {
   exposed: boolean;
   publicEndpoints: PlannedEndpoint[];
-}): { exposed: boolean; publicEndpoints: PlannedEndpoint[]; domainType?: "free" | "custom" } {
+}): {
+  exposed: boolean;
+  publicEndpoints: PlannedEndpoint[];
+  domainType?: "free" | "custom";
+  domain?: null;
+  customDomain?: null;
+} {
+  const primary = routing.publicEndpoints[0];
   return {
     exposed: routing.exposed,
     publicEndpoints: routing.publicEndpoints,
-    // The scalar column mirrors entry[0] — the template's primary route.
-    ...(routing.publicEndpoints[0] ? { domainType: routing.publicEndpoints[0].domainType } : {}),
+    ...(primary
+      ? // The scalar column mirrors entry[0] — the template's primary route.
+        { domainType: primary.domainType }
+      : // An empty plan is a DECISION, not an absence — the webmail proxy variant's
+        // deliberate no-hostname. Omitting the scalars made it unsayable: for an
+        // existing row `mergeServiceRoutingPatch` resolves an absent `domainType`
+        // from `stored`, so `"custom"` survived, and `customDomain` then resolved
+        // from `stored` too. The array cleared while the row kept the hostname it
+        // was redeployed to drop — alive in its derived domain row.
+        { domainType: "free" as const, domain: null, customDomain: null }),
   };
 }
 

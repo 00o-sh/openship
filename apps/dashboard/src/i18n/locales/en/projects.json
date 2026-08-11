@@ -205,7 +205,7 @@
     "subtextOther": "This project has no live deployment yet. Review the source and try again.",
     "deployNow": "Deploy now",
     "connectSource": "Connect a source",
-    "settings": "Settings",
+    "settings": "Deployment settings",
     "detailsTitle": "Details",
     "detailsDescription": "What this project deploys and where",
     "type": "Type",

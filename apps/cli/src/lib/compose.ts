@@ -277,7 +277,8 @@ export function dockerInstallPreview(state: DockerState = dockerState()): Docker
  */
 export async function ensureDocker(opts: EnsureDockerOpts = {}): Promise<boolean> {
   const notice = opts.onNotice ?? ((line: string) => process.stderr.write(`  ${line}\n`));
-  const { state, gap, wouldInstall, installCommand, startCommand } = dockerInstallPreview();
+  const { state, gap, wouldInstall, installCommand, startCommand, unsupportedReason, startBlockedReason } =
+    dockerInstallPreview();
   if (!gap) return true;
   if (process.platform !== "linux") return false;
   // An unreachable daemon is not an installation problem — say what to do and
@@ -287,7 +288,14 @@ export async function ensureDocker(opts: EnsureDockerOpts = {}): Promise<boolean
     if (gap.hint) notice(gap.hint);
     return false;
   }
-  if (!wouldInstall || !installCommand) return false;
+  if (!wouldInstall || !installCommand) {
+    // A REFUSED plan is not an absent one. `dockerInstallPreview` already names the
+    // distro or arch it won't install on, and `wizard.ts` prints it on the preview
+    // path — dropping it here meant the mutating path fell back to the bare service
+    // in silence, which is the failure this whole layer exists to stop.
+    if (unsupportedReason) notice(unsupportedReason);
+    return false;
+  }
 
   const asRoot = typeof process.getuid === "function" && process.getuid() === 0;
   const sudo = !asRoot && hasCmd("sudo") ? "sudo " : "";
@@ -326,6 +334,10 @@ export async function ensureDocker(opts: EnsureDockerOpts = {}): Promise<boolean
   if ((await sh(installCommand)) !== 0) return false;
   // Best-effort daemon start (get.docker.com already enables it on systemd).
   if (startCommand) await sh(startCommand);
+  // No start command because the start step REFUSED — a box with no init we recognise.
+  // The re-probe below reports only that Docker still isn't usable; without this the
+  // one message that says WHY (and that the install itself worked) had no consumer at all.
+  else if (startBlockedReason) notice(startBlockedReason);
 
   const after = dockerGap();
   if (!after) {

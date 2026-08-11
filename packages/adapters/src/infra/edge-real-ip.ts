@@ -215,6 +215,9 @@ export function isCloudFrontedHost(hostname: string): boolean {
  * the app behind the route sees the edge too — including this API's own login limiter
  * when the instance is served on its free URL.
  *
+ * Trust here is anchored to the VHOST, not to a peer address — see the emitted comment for
+ * why a peer list cannot work for this front and what that costs.
+ *
  * `indent` is applied to every line so the caller can drop the result straight into a
  * generated `server { }` body.
  */
@@ -225,17 +228,24 @@ export function cloudEdgeRealIpConf(indent = "    "): string {
     "# reads CF-Connecting-IP for Cloudflare-fronted custom domains, and there is one",
     "# real_ip_header per scope — hence this override.",
     "#",
-    "# The list below REPLACES the inherited one (nginx list directives override, they do",
-    "# not merge) and is what makes the header safe: it is believed only from these peers,",
-    "# and only for a request whose Host matched this vhost. A forged X-Real-IP from",
-    "# anywhere else keeps the client's real address.",
+    "# Trust is scoped to this VHOST instead of to a peer list, deliberately. The Cloud",
+    "# edge reaches origins from its own address, which this box has no way to know and",
+    "# which Cloudflare's ranges (the visitor→edge leg) do not contain — so a peer list",
+    "# here silently ignores the header and every free-domain visitor stays the edge.",
+    "#",
+    "# What bounds it is the server_name: this block exists only inside a <slug>.opsh.io",
+    "# vhost, a hostname whose only legitimate path is that edge. Someone who reaches this",
+    "# box directly on :80 with a forged Host AND a forged X-Real-IP can choose their own",
+    "# apparent address for THIS vhost — accepted, because the alternative is the address",
+    "# being wrong for every visitor all the time. Custom domains keep the peer-anchored",
+    "# http-scope block; do not widen this to them.",
     `real_ip_header ${CLOUD_EDGE_REAL_IP_HEADER};`,
-    "real_ip_recursive on;",
-    ...CLOUDFLARE_IPV4.map((c) => `set_real_ip_from ${c};`),
-    ...CLOUDFLARE_IPV6.map((c) => `set_real_ip_from ${c};`),
-    // Operator-declared proxies apply here too: a box behind an operator's own LB gets
-    // free-host traffic through that LB as well, so the peer is theirs, not the edge's.
-    ...edgeTrustedProxies().map((c) => `set_real_ip_from ${c};`),
+    // OFF, unlike the http-scope block: the Cloud edge OVERWRITES X-Real-IP with a single
+    // address, so there is no list to walk, and "skip trusted addresses from the right"
+    // has no meaning once every address is trusted.
+    "real_ip_recursive off;",
+    "set_real_ip_from 0.0.0.0/0;",
+    "set_real_ip_from ::/0;",
   ];
 
   return lines.map((l) => `${indent}${l}`).join("\n") + "\n";

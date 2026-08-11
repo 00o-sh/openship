@@ -152,6 +152,7 @@ describe("createDockerSshBridge — a failed request is answered, not reset", ()
     expect(reply).toContain("exit code 1");
   });
 
+
   it("names a forced command that answers instead of the daemon", async () => {
     // The AWS AMI root key: an authorized_keys `command=` that echoes a banner intercepts
     // every exec, so dial-stdio's stdout carries prose, not an HTTP response. Piped
@@ -189,6 +190,35 @@ describe("createDockerSshBridge — a failed request is answered, not reset", ()
           channel.push(null); // EOF first, close after — the real ssh2 order
           setImmediate(() => channel.destroy());
         }, 3_400); // > DIAL_STDIO_ANSWER_TIMEOUT_MS, so the socket is committed unanswered
+        return channel;
+      }),
+    );
+
+    expect(reply).toContain("HTTP/1.1 502 Bad Gateway");
+    expect(reply).toContain("permission denied");
+  }, 20_000);
+
+  it("answers 502 when a committed channel ERRORS instead of EOFing", async () => {
+    // The same committed-unanswered channel as above, ending the other way it can end.
+    // An `error` on the upstream ran the shared teardown, which destroyed the CLIENT
+    // socket — and `respondBadGateway` refuses a destroyed socket, so the `close` that
+    // followed answered nothing and dockerode got `socket hang up` regardless. The 502
+    // was reachable only for an upstream that failed POLITELY, while a reset peer, a
+    // killed exec and a broken channel all arrive as an error.
+    //
+    // Before the answer window this is unreachable — `awaitFirstByte` classifies an early
+    // error as `closed` and fails there. It is only after the commit that `pipeThrough`
+    // owns the outcome, which is exactly the window the sibling test above covers for EOF.
+    const reply = await request(
+      bridgeWith(async () => {
+        const channel = fakeChannel();
+        setTimeout(() => {
+          channel.stderr.write(
+            "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock\n",
+          );
+          channel.emit("exit", 1);
+          channel.destroy(new Error("channel closed by peer"));
+        }, 3_400);
         return channel;
       }),
     );

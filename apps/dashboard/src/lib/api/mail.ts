@@ -129,6 +129,13 @@ export interface MailWebmailSummary {
   hostname: string;
   url: string;
   /**
+   * `hostname` is "" because the API could not read the routing, not because there
+   * is none. Optional for the same reason `projectId` is nullable below: an older
+   * API doesn't send it, and absent must read as "routing is known" — the state
+   * every release before this one was in.
+   */
+  routingUnknown?: boolean;
+  /**
    * The webmail catalog project that owns this deploy — webmail is an ordinary
    * openship app, and the projects UI is where it's managed.
    *

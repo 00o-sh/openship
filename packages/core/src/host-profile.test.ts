@@ -145,6 +145,7 @@ describe("parseSystemOs", () => {
 describe("assessHostSupport", () => {
   const ok: HostSupportFacts = {
     os: "linux",
+    osRaw: "Linux",
     arch: "amd64",
     archRaw: "x86_64",
     distroId: "ubuntu",
@@ -221,6 +222,19 @@ describe("assessHostSupport", () => {
       .toContain("armv7l");
     expect(assessHostSupport({ ...ok, arch: "unknown", archRaw: null }).unsupportedReason)
       .toContain("architecture");
+  });
+
+  it("distinguishes an OS it won't drive from one it couldn't read", () => {
+    // A BSD answers `uname -s` perfectly well; it is simply not a host Openship provisions.
+    // Reporting that as "could not determine" sends its operator to debug our probe, which
+    // is the same wrong turn the arch pair above exists to prevent.
+    const bsd = assessHostSupport({ ...ok, os: "unknown", osRaw: "FreeBSD" });
+    expect(bsd.supported).toBe(false);
+    expect(bsd.unsupportedReason).toContain("FreeBSD");
+
+    const silent = assessHostSupport({ ...ok, os: "unknown", osRaw: null });
+    expect(silent.unsupportedReason).toContain("nothing usable");
+    expect(silent.unsupportedReason).not.toContain("FreeBSD");
   });
 
   it("refuses suse and arch by name, with the package manager it lacks", () => {

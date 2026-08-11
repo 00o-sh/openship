@@ -85,8 +85,15 @@ export default function DeployMailPage() {
         // An existing webmail's own hostname wins: a redeploy (or a replace) that
         // silently defaulted to `mail.<domain>` would MOVE a webmail the operator
         // came here to redeploy in place.
+        //
+        // `routingUnknown` is that same move by a different route: the API returns no
+        // hostname when it could not READ the routing, which is indistinguishable here
+        // from having none. So an unknown one prefills nothing and the operator types
+        // the address — an empty field asks a question, a guessed one relocates a live
+        // webmail without ever asking.
         const existing = st.webmail?.hostname;
         if (existing) setDomain(existing);
+        else if (st.webmail?.routingUnknown) setDomain("");
         else if (st.domain) setDomain(`mail.${st.domain}`);
         if (st.webmail?.legacy) setReplacing(true);
       }

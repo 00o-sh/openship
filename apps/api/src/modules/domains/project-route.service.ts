@@ -576,9 +576,9 @@ export async function reapplyProjectLiveRoutes(
     // hostnames. Best-effort — the DB is the source of truth; a failure defers to
     // the next reconcile. previousHostnames clears rules for any dropped hostname.
     await pushProjectRules(project.id, serverId ?? null, previousHostnames).catch(() => {});
-      // Shared-dict state is RAM: the analytics collection switches have to be re-pushed
-      // whenever routing is applied, or an nginx restart silently reverts them to off.
-      await pushProjectAnalyticsConfig(project.id, serverId ?? null, previousHostnames).catch(() => {});
+    // Shared-dict state is RAM: the analytics collection switches have to be re-pushed
+    // whenever routing is applied, or an nginx restart silently reverts them to off.
+    await pushProjectAnalyticsConfig(project.id, serverId ?? null, previousHostnames).catch(() => {});
 
     // Register the newly-added managed slug(s) on the cloud edge (the "add" half
     // of the edit; dropped slugs were deregistered above). Per-route — unchanged

@@ -1,6 +1,8 @@
 import { describe, expect, test, vi } from "vitest";
 import {
   NginxProvider,
+  VHOST_GENERATION,
+  readVhostGeneration,
   renderProxyOptions,
   renderProxyTlsOptions,
   type NginxProviderOptions,
@@ -78,6 +80,25 @@ function makeExecutor(
         if (c !== undefined) { files.set(`${dir}/${src.split("/").pop()}`, c); files.delete(src); }
       }
       return "";
+    }
+    // `grep -L <pattern> <dir>/*.conf` — files that do NOT contain the pattern, which is
+    // how reapplyStoredRoutes asks "which vhosts are behind?" in one round trip.
+    const grepL = command.match(/^grep -L '([^']*)' '([^']+)'\/\*\.conf/);
+    if (grepL) {
+      const pattern = new RegExp(grepL[1]!, "m");
+      return [...files.keys()]
+        .filter((k) => k.startsWith(`${grepL[2]}/`) && k.endsWith(".conf"))
+        .filter((k) => !pattern.test(files.get(k)!))
+        .join("\n");
+    }
+    // Directory listing for reapplyStoredRoutes: basenames of everything under the dir.
+    const ls = command.match(/^ls -1 '([^']+)'/);
+    if (ls) {
+      const prefix = `${ls[1]}/`;
+      return [...files.keys()]
+        .filter((k) => k.startsWith(prefix))
+        .map((k) => k.slice(prefix.length))
+        .join("\n");
     }
     const mv = command.match(/^mv '([^']+)' '([^']+)'$/);
     if (mv) {
@@ -199,9 +220,19 @@ describe("NginxProvider real-ip for a Cloud-fronted free host", () => {
     // Server scope, not location scope: realip has to run for the rules guard, the
     // logger and `location /` alike.
     expect(c.indexOf("real_ip_header")).toBeLessThan(c.indexOf("location / {"));
-    // Peer-anchored — the header is believed only from the Cloud edge's ranges.
-    expect(c).toContain("set_real_ip_from 173.245.48.0/20;");
-    expect(c).not.toContain("set_real_ip_from 0.0.0.0/0;");
+    // Vhost-anchored rather than peer-anchored: the Cloud edge's egress address is not
+    // knowable from this box, and a peer list that misses it ignores the header silently.
+    // Bounded by the server_name — see cloudEdgeRealIpConf.
+    expect(c).toContain("set_real_ip_from 0.0.0.0/0;");
+  });
+
+  test("a custom domain does NOT get the blanket trust", async () => {
+    // The bound that makes the free-host block acceptable. On a custom domain the peer list
+    // is the security property, and trusting any peer would let a visitor choose their own
+    // rate-limit bucket and dodge IP bans.
+    const { nginx, conf } = setup({ certDomains: ["app.example.com"] });
+    await nginx.registerRoute(PROXY);
+    expect(conf("app-example-com")).not.toContain("set_real_ip_from");
   });
 
   test("puts it in the same block as the rules guard, which is what reads the result", async () => {
@@ -235,6 +266,102 @@ describe("NginxProvider real-ip for a Cloud-fronted free host", () => {
     const [httpBlock, tlsBlock] = c.split("listen 443 ssl;");
     expect(httpBlock).toContain("real_ip_header X-Real-IP;");
     expect(tlsBlock).toContain("real_ip_header X-Real-IP;");
+  });
+});
+
+/**
+ * A generated-config fix reaches a running box ONLY through this sweep. `registerRoute` is
+ * the sole writer and only a deploy, a domain save, a Retry or cert issuance calls it — so
+ * a project nobody redeploys keeps the vhost its first deploy produced, which is how the
+ * Cloud-fronted X-Real-IP block shipped and applied to nothing.
+ */
+describe("NginxProvider.reapplyStoredRoutes", () => {
+  const FREE_ROUTE: RouteConfig = {
+    domain: "myapp.opsh.io",
+    tls: false,
+    targetUrl: "http://127.0.0.1:3009",
+  };
+  /** What a pre-marker build left on disk: no generation line, no realip block. */
+  const age = (conf: string) =>
+    conf
+      .replace(/^# openship-vhost-gen: \d+\n/m, "")
+      .replace(/^\s*(real_ip_header|real_ip_recursive|set_real_ip_from) .*$/gm, "");
+
+  test("stamps the generation it wrote, so staleness is readable off the file", async () => {
+    const { nginx, conf } = setup();
+    await nginx.registerRoute(FREE_ROUTE);
+    expect(readVhostGeneration(conf("myapp-opsh-io")!)).toBe(VHOST_GENERATION);
+  });
+
+  test("re-emits a stale vhost from its own sidecar", async () => {
+    const { nginx, files, conf } = setup();
+    await nginx.registerRoute(FREE_ROUTE);
+    files.set(`${SITES}/myapp-opsh-io.conf`, age(conf("myapp-opsh-io")!));
+    expect(conf("myapp-opsh-io")).not.toContain("real_ip_header X-Real-IP;");
+
+    const result = await nginx.reapplyStoredRoutes();
+    expect(result.repaired).toEqual(["myapp.opsh.io"]);
+    expect(result.failed).toEqual([]);
+    // The whole point: the fix landed without a deploy, and the route kept its target.
+    expect(conf("myapp-opsh-io")).toContain("real_ip_header X-Real-IP;");
+    expect(conf("myapp-opsh-io")).toContain("proxy_pass http://127.0.0.1:3009");
+  });
+
+  test("a converged box writes nothing and reloads nothing", async () => {
+    // This runs on the ordinary edge-ensure path, so the steady state has to be free.
+    const { nginx, calls, writes } = setup();
+    await nginx.registerRoute(FREE_ROUTE);
+    const reloads = calls.filter((c) => c.includes("-s reload")).length;
+    const written = writes.length;
+
+    const result = await nginx.reapplyStoredRoutes();
+    expect(result).toEqual({ scanned: 1, repaired: [], failed: [] });
+    expect(calls.filter((c) => c.includes("-s reload")).length).toBe(reloads);
+    expect(writes.length).toBe(written);
+  });
+
+  test("asks which vhosts are behind in ONE command", async () => {
+    // It runs on the deploy path against a possibly-remote box, where every read is a round
+    // trip. Reading 50 confs to learn that all 50 are current would put seconds on every
+    // deploy — a cost nobody would attribute to a repair sweep that repairs nothing.
+    const { nginx, calls } = setup();
+    await nginx.registerRoute(FREE_ROUTE);
+    calls.length = 0;
+    await nginx.reapplyStoredRoutes();
+    expect(calls.filter((c) => c.startsWith("grep -L")).length).toBe(1);
+  });
+
+  test("does not resurrect a route whose conf was removed", async () => {
+    // removeRoute deletes the conf and the sidecar together; a leftover sidecar must
+    // never bring a vhost an operator removed back to life.
+    const { nginx, files, conf } = setup();
+    await nginx.registerRoute(FREE_ROUTE);
+    files.set(`${SITES}/myapp-opsh-io.conf`, age(conf("myapp-opsh-io")!));
+    files.delete(`${SITES}/myapp-opsh-io.conf`);
+
+    expect(await nginx.reapplyStoredRoutes()).toEqual({ scanned: 1, repaired: [], failed: [] });
+    expect(conf("myapp-opsh-io")).toBeUndefined();
+  });
+
+  test("one unusable sidecar does not stop the rest of the sweep", async () => {
+    const { nginx, files, conf } = setup();
+    await nginx.registerRoute(FREE_ROUTE);
+    files.set(`${SITES}/myapp-opsh-io.conf`, age(conf("myapp-opsh-io")!));
+    files.set(`${SITES}/broken.conf`, "server {}");
+    files.set(`${SITES}/broken.route.json`, "{not json");
+
+    const result = await nginx.reapplyStoredRoutes();
+    expect(result.repaired).toEqual(["myapp.opsh.io"]);
+    expect(result.failed.map((f) => f.slug)).toEqual(["broken"]);
+  });
+
+  test("leaves a legacy route with no sidecar untouched", async () => {
+    // Scraping its conf would recover only the primary target, dropping composite
+    // locations and the webhook proxy — worse than leaving it as it is.
+    const { nginx, files } = setup();
+    files.set(`${SITES}/legacy.conf`, "server { listen 80; server_name legacy.test; }");
+    expect(await nginx.reapplyStoredRoutes()).toEqual({ scanned: 0, repaired: [], failed: [] });
+    expect(files.get(`${SITES}/legacy.conf`)).toBe("server { listen 80; server_name legacy.test; }");
   });
 });
 

@@ -636,9 +636,9 @@ function validateSetupConfig(config: IRedMailConfig | undefined): string | null 
   if (!config) return null;
   if (config.adminPassword !== undefined) {
     if (typeof config.adminPassword !== "string") {
-      return "config.adminPassword must be a string";
+      return "Admin password must be a string";
     }
-    const err = mailPasswordError(config.adminPassword, "config.adminPassword");
+    const err = mailPasswordError(config.adminPassword, "Admin password");
     if (err) return err;
   }
   if (

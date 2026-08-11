@@ -269,6 +269,26 @@ export type ComposeAdvanced = {
    */
   resources?: { cpuCores?: number; memoryMb?: number };
   /**
+   * Compose `network_mode` — the network namespace this service SHARES instead of
+   * getting its own. `"none"`, `"service:<name>"` (a sibling in this stack), or
+   * `"container:<id>"`. Absent = the normal case: its own endpoint on the project
+   * network. `host` is refused at import, not stored — see compose-namespace.ts
+   * for that decision and for the parsing rules.
+   *
+   * Sharing has consequences the runtime enforces, because Docker rejects the
+   * combinations outright: a shared-netns container publishes no ports, joins no
+   * network, and carries no DNS alias. Its provider must also be created FIRST,
+   * so this doubles as a start-order dependency (`composeNamespaceDependencies`).
+   */
+  networkMode?: string;
+  /**
+   * Compose `pid` — the PID namespace to share (`"service:<name>"` /
+   * `"container:<id>"`). Same resolution and ordering rules as `networkMode`, and
+   * the same `host` refusal; unlike it, sharing a pid namespace costs the service
+   * nothing else (it keeps its own network identity, ports, and aliases).
+   */
+  pidMode?: string;
+  /**
    * Custom east-west DNS alias for this service, resolving ALONGSIDE the default
    * `service.name` on the project network — both names reach the container. Set
    * so another service can address this one by a stable, operator-chosen name

@@ -20,6 +20,9 @@ import {
   getAppPrepareSteps,
   resolveProjectVolumes,
   sanitizeProxySettings,
+  composeNamespaceDependencies,
+  composeNamespaceRef,
+  ownsNetworkEndpoint,
   UNLIMITED_RESOURCES,
   type ComposeAdvanced,
   type ProxySettings,
@@ -129,7 +132,25 @@ export interface ComposeDeployResult {
   portChecks?: PortCheckResult[];
 }
 
-function topoSort(services: Service[]): Service[] {
+/**
+ * Every service that must be RUNNING before this one is created.
+ *
+ * `depends_on` is the declared half. The other half is implicit and mandatory: a
+ * service sharing a sibling's network or PID namespace resolves to that sibling's
+ * container id, and Docker resolves it at create time — so the provider existing
+ * is a hard precondition, not a preference. Folding both into one list is what
+ * lets the topological sort and the "dependency didn't come up" guard treat them
+ * identically, instead of each growing its own idea of what a dependency is.
+ */
+export function effectiveDependencies(svc: Pick<Service, "dependsOn" | "advanced">): string[] {
+  const declared = (svc.dependsOn as string[] | null) ?? [];
+  const namespaces = composeNamespaceDependencies(svc.advanced as ComposeAdvanced | null);
+  return namespaces.length === 0
+    ? declared
+    : [...declared, ...namespaces.filter((n) => !declared.includes(n))];
+}
+
+export function topoSort(services: Service[]): Service[] {
   const byName = new Map(services.map((s) => [s.name, s]));
   const sorted: Service[] = [];
   const visited = new Set<string>();
@@ -138,14 +159,18 @@ function topoSort(services: Service[]): Service[] {
   function visit(svc: Service) {
     if (visited.has(svc.name)) return;
     if (visiting.has(svc.name)) {
-      // Circular dependency - break cycle
-      sorted.push(svc);
-      visited.add(svc.name);
+      // Circular dependency — break the cycle by returning, and let this node be
+      // emitted by the frame that is ALREADY on the stack for it. Pushing it here
+      // instead emitted it twice (once now, once when that frame completed), and a
+      // duplicate in `ordered` means the deploy loop runs one service twice —
+      // second pass hits the UNIQUE(deploymentId, serviceId) index on its
+      // service_deployment row. `visiting` still holds the name, so a deeper
+      // re-entry keeps terminating here; there is no order that satisfies a cycle,
+      // but every service appears exactly once.
       return;
     }
     visiting.add(svc.name);
-    const deps = (svc.dependsOn as string[]) ?? [];
-    for (const depName of deps) {
+    for (const depName of effectiveDependencies(svc)) {
       const dep = byName.get(depName);
       if (dep) visit(dep);
     }
@@ -158,6 +183,62 @@ function topoSort(services: Service[]): Service[] {
     visit(svc);
   }
   return sorted;
+}
+
+/**
+ * Turn a service's stored namespace modes into the values Docker takes, or say why
+ * it can't be done.
+ *
+ * `service:<name>` is resolved HERE, against what this deployment actually
+ * produced, for two reasons: a reference to a service that isn't in the stack (or
+ * that didn't come up) has to fail the dependent rather than reach the daemon as
+ * an unresolvable id, and the container id is the unambiguous handle — a name
+ * would be re-resolved by the daemon later, after we've stopped watching.
+ */
+export function resolveServiceNamespaces(
+  svc: Pick<Service, "name" | "advanced">,
+  containerIdByServiceName: Map<string, string>,
+  stackServiceNames: Set<string>,
+): { namespaces?: { network?: string; pid?: string }; error?: string } {
+  const advanced = svc.advanced as ComposeAdvanced | null;
+  const namespaces: { network?: string; pid?: string } = {};
+
+  for (const [key, value, field] of [
+    ["network", advanced?.networkMode, "network_mode"],
+    ["pid", advanced?.pidMode, "pid"],
+  ] as const) {
+    const ref = composeNamespaceRef(value, field);
+    if (!ref) continue;
+    if (ref.kind === "none") {
+      namespaces[key] = "none";
+      continue;
+    }
+    if (ref.kind === "container") {
+      namespaces[key] = `container:${ref.container}`;
+      continue;
+    }
+    if (ref.service === svc.name) {
+      return { error: `${field}: service:${ref.service} refers to itself.` };
+    }
+    if (!stackServiceNames.has(ref.service)) {
+      return {
+        error:
+          `${field}: service:${ref.service} is not a service in this stack. ` +
+          `Reference one of its own services, or use container:<id>.`,
+      };
+    }
+    const containerId = containerIdByServiceName.get(ref.service);
+    if (!containerId) {
+      return {
+        error:
+          `${field}: service:${ref.service} has no running container to share, so ` +
+          `this service cannot start.`,
+      };
+    }
+    namespaces[key] = `container:${containerId}`;
+  }
+
+  return Object.keys(namespaces).length > 0 ? { namespaces } : {};
 }
 
 function resolveServicePublicPort(service: Service): number | undefined {
@@ -353,7 +434,9 @@ function serviceDeployPublicEndpoints(
     customDomain?: string;
     domainType: "free" | "custom";
   }> = [];
-  for (const endpoint of resolveServicePublicEndpoints(service)) {
+  for (const endpoint of resolveServicePublicEndpoints(service, {
+    projectSlug: project.slug ?? project.name,
+  })) {
     if (endpoint.port === undefined) continue;
     if (endpoint.domainType === "custom") {
       out.push({ port: endpoint.port, customDomain: endpoint.customDomain, domainType: "custom" });
@@ -452,10 +535,13 @@ function createServiceRuntimeConfig(opts: {
   image: string;
   environment: Record<string, string>;
   resources?: ResourceConfig;
+  /** Docker-ready shared namespaces (`container:<id>` / `none`), pre-resolved. */
+  namespaces?: { network?: string; pid?: string };
   /** Previous deployment's workspace id (cloud) — reuse to keep the disk. */
   previousWorkspaceId?: string;
 }): MultiServiceDeployConfig {
-  const { project, dep, service, image, environment, resources, previousWorkspaceId } = opts;
+  const { project, dep, service, image, environment, resources, namespaces, previousWorkspaceId } =
+    opts;
   // Monorepo sub-apps store their long-running process in `startCommand`;
   // compose services in `command`. The DB invariant is that compose rows
   // never have `startCommand` set, so a single `??` chain covers both:
@@ -490,6 +576,7 @@ function createServiceRuntimeConfig(opts: {
     // collapses to the service name (no extra alias needed).
     extraAliases: serviceAliasExtras(service),
     resources,
+    ...(namespaces && { namespaces }),
     expose: service.exposed,
     publicPort: resolveServicePublicPort(service),
     publicSlug: resolveServicePublicSlug(project, service),
@@ -922,6 +1009,30 @@ export async function deployComposeServices(
   let firstPublicUrl: string | undefined;
   const seenRouteDomains = new Set<string>();
   const unavailableServiceNames = new Set<string>();
+  /**
+   * serviceName → the container id currently backing it, for resolving a sibling's
+   * `network_mode: service:<name>` / `pid: service:<name>`. Filled as each service
+   * settles — both the ones this deploy created and the ones it carried forward,
+   * since a namespace provider left running is just as valid a target. The topo
+   * sort guarantees a provider is visited before its dependents, so a miss here
+   * means the provider genuinely has no container, not that we asked too early.
+   */
+  const containerIdByServiceName = new Map<string, string>();
+  /**
+   * Services this pass REPLACED the container of, rather than carrying forward.
+   * Read only to decide whether a namespace dependent may still be carried — see
+   * the carry-forward guard in the loop.
+   */
+  const recreatedServiceNames = new Set<string>();
+  /**
+   * Names in THIS stack — the boundary a `service:` reference may not cross.
+   *
+   * Every service, not just the enabled ones: a reference to a DISABLED sibling is
+   * in-stack but unsatisfiable, and it should say so ("no running container to
+   * share") rather than claim the service doesn't exist, which would send the
+   * operator looking for a typo they didn't make.
+   */
+  const stackServiceNames = new Set(services.map((s) => s.name));
   // Services whose container STARTED but whose outcome we couldn't confirm
   // because the connection dropped mid-deploy. Not counted as failed — the
   // deploy resolves to `reconciling` and reconciliation reads the true state.
@@ -1000,12 +1111,33 @@ export async function deployComposeServices(
     // the de-listed reaper won't kill it) and out of `unavailableServiceNames`
     // (so dependents aren't blocked). The liveness check below still redeploys
     // it if its container turns out to be gone.
+    //
+    // Unless its NAMESPACE PROVIDER was just recreated. A container joined to
+    // another's netns is bound to that specific container, so when the provider is
+    // replaced the dependent keeps a handle on a destroyed namespace — it loses
+    // networking entirely while still reporting `running`, so the liveness check
+    // below waves it through and the deploy calls it "unchanged - kept running".
+    // That is #533's exact failure (a sidecar silently off its tunnel) arriving
+    // through the partial-deploy path, so the dependent is recreated too. Safe to
+    // read here: topoSort visits providers first, so the answer is already known.
+    const providerRecreated = composeNamespaceDependencies(
+      svc.advanced as ComposeAdvanced | null,
+    ).some((name) => recreatedServiceNames.has(name));
     const carried =
-      (opts?.targetServiceIds && !opts.targetServiceIds.has(svc.id)) ||
-      isExternalUnchanged(svc) ||
-      isNewerThanRelease(svc)
+      !providerRecreated &&
+      ((opts?.targetServiceIds && !opts.targetServiceIds.has(svc.id)) ||
+        isExternalUnchanged(svc) ||
+        isNewerThanRelease(svc))
         ? previousByServiceId.get(svc.id)
         : undefined;
+    if (providerRecreated) {
+      logger.log(
+        `Service "${svc.name}" shares a namespace with a service that was just recreated — ` +
+          `recreating it too so it isn't left attached to a destroyed namespace.\n`,
+        "info",
+        { serviceName: svc.name },
+      );
+    }
     if (carried?.containerId) {
       // Only carry a service forward if its container is ACTUALLY running.
       // A prior rollback / partial deploy / external `docker rm` could have
@@ -1066,6 +1198,9 @@ export async function deployComposeServices(
           ip: carriedIp ?? undefined,
           hostPort: carriedHostPort ?? undefined,
         });
+        // A carried-forward container is a valid namespace provider — it's running,
+        // which is the only thing a dependent needs from it.
+        containerIdByServiceName.set(svc.name, carried.containerId);
         successful += 1;
         sessionManager.broadcastServiceStatus(dep.id, {
           serviceName: svc.name,
@@ -1097,7 +1232,9 @@ export async function deployComposeServices(
       continue;
     }
 
-    const blockedDependencies = ((svc.dependsOn as string[]) ?? []).filter((dependency) =>
+    // Includes the namespace provider: a service whose netns/pidns host failed is
+    // not "degraded", it cannot be created at all.
+    const blockedDependencies = effectiveDependencies(svc).filter((dependency) =>
       unavailableServiceNames.has(dependency),
     );
     if (blockedDependencies.length > 0) {
@@ -1309,6 +1446,10 @@ export async function deployComposeServices(
     logger.log(`Deploying service "${svc.name}" (${image})...\n`, "info", {
       serviceName: svc.name,
     });
+    // Past every skip path: this service's container is about to be replaced
+    // (deployServiceWorkload removes the same-named one first), so any dependent
+    // sharing its namespace must be recreated rather than carried.
+    recreatedServiceNames.add(svc.name);
 
     // Broadcast per-service "deploying" status to SSE subscribers
     sessionManager.broadcastServiceStatus(dep.id, {
@@ -1331,6 +1472,47 @@ export async function deployComposeServices(
       );
     }
 
+    // Shared namespaces, resolved against what this deployment actually produced.
+    // Skipped entirely on a runtime that can't honor them — the warn-and-drop above
+    // already told the operator, and resolving a reference we're about to discard
+    // would only manufacture a failure (a "provider has no container" error on
+    // cloud, where no container exists by design).
+    const namespacesUnsupported =
+      runtime.unsupportedComposeKeys.has("networkMode") ||
+      runtime.unsupportedComposeKeys.has("pidMode");
+    const resolvedNamespaces = namespacesUnsupported
+      ? {}
+      : resolveServiceNamespaces(svc, containerIdByServiceName, stackServiceNames);
+    if (resolvedNamespaces.error) {
+      // A namespace it can't get is fatal for THIS service, not the stack: same
+      // shape as a blocked dependency, so dependents of this one are held back too.
+      const message = resolvedNamespaces.error;
+      logger.log(`Service "${svc.name}" skipped: ${message}\n`, "warn", { serviceName: svc.name });
+      sessionManager.broadcastServiceStatus(dep.id, {
+        serviceName: svc.name,
+        serviceId: svc.id,
+        status: "failed",
+        error: message,
+      });
+      await repos.service.createServiceDeployment({
+        deploymentId: dep.id,
+        serviceId: svc.id,
+        serviceName: svc.name,
+        status: "failure",
+        imageRef: image ?? null,
+      });
+      results.push({ serviceId: svc.id, serviceName: svc.name, status: "failed", error: message });
+      unavailableServiceNames.add(svc.name);
+      continue;
+    }
+    // Its ports and domains are inert the moment it has no endpoint of its own —
+    // whether because another container owns the interfaces or because there are
+    // none (`network_mode: none`). Traffic has to be published and routed on the
+    // PROVIDER. Derived from the RESOLVED mode, the same value the runtime keys its
+    // own suppression on, so the two can't disagree about which services are
+    // routable (see ownsNetworkEndpoint).
+    const hasNoRoutableAddress = !ownsNetworkEndpoint(resolvedNamespaces.namespaces?.network);
+
     const serviceRuntimeConfig = createServiceRuntimeConfig({
       project,
       dep,
@@ -1338,6 +1520,7 @@ export async function deployComposeServices(
       image,
       environment: mergedEnv,
       resources: resolveServiceResources(svc, opts?.resources),
+      namespaces: resolvedNamespaces.namespaces,
       // Cloud stores the workspace id as the service's containerId. Reuse the
       // previous deployment's workspace so its disk (volume data) survives the
       // redeploy. Only meaningful on cloud; docker recreates containers.
@@ -1404,13 +1587,31 @@ export async function deployComposeServices(
       resources: resolveServiceResources(svc, opts?.resources),
       buildSessionId: opts?.buildSessionId,
     });
-    const { routes: preparedRoutes, warnings: routeClaimWarnings } = await prepareServiceRoutes({
-      project,
-      service: svc,
-      runtimeName: runtime.name,
-      routeContext,
-      logger,
-    });
+    // Route PREPARATION is skipped outright for a service with no address, not just
+    // route registration: prepareServiceRoutes creates and force-activates the
+    // domain rows, so filtering afterwards left an active domain in the Domains tab
+    // with no vhost behind it — exactly the dishonest state the suppression exists
+    // to avoid. The operator setting a domain here isn't a mistake to punish; it
+    // just belongs on the service that owns the interfaces, and the log says so.
+    if (hasNoRoutableAddress) {
+      const providers = composeNamespaceDependencies(svc.advanced as ComposeAdvanced | null);
+      const where = providers.length > 0 ? `shares ${providers.join(", ")}'s network namespace` : "has no network of its own";
+      logger.log(
+        `Service "${svc.name}" ${where}, so it has no address to route to — skipping its ` +
+          `domains and its published ports. Move them to the service it shares.\n`,
+        "warn",
+        { serviceName: svc.name },
+      );
+    }
+    const { routes: preparedRoutes, warnings: routeClaimWarnings } = hasNoRoutableAddress
+      ? { routes: [] as Awaited<ReturnType<typeof prepareServiceRoutes>>["routes"], warnings: [] }
+      : await prepareServiceRoutes({
+          project,
+          service: svc,
+          runtimeName: runtime.name,
+          routeContext,
+          logger,
+        });
     composeRouteWarnings.push(...routeClaimWarnings);
     // Drop hostnames already claimed earlier in this deployment (two services
     // can't share a domain).
@@ -1454,6 +1655,9 @@ export async function deployComposeServices(
       composeRouteStrategy === "loopback-port" &&
       runtime.name !== "cloud" &&
       routedContainerPort !== undefined &&
+      // A container with no endpoint of its own publishes nothing — allocating a
+      // host port would burn it and pin a route to an upstream that never binds.
+      !hasNoRoutableAddress &&
       opts?.executor
     ) {
       const carried = previousByServiceId.get(svc.id)?.hostPort;
@@ -1615,6 +1819,9 @@ export async function deployComposeServices(
         ip: result.ip,
         hostPort: persistedHostPort ?? undefined,
       });
+      // Now resolvable as a namespace provider for the services after it. Set only
+      // on success: a dependent must never be pointed at a container that failed.
+      if (result.containerId) containerIdByServiceName.set(svc.name, result.containerId);
       successful += 1;
       if (result.containerId) {
         stabilityTargets.push({

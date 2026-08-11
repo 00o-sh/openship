@@ -152,6 +152,13 @@ export interface WebmailSummary {
   /** Hostname the operator opens. "" when nothing is routed yet. */
   hostname: string;
   url: string;
+  /**
+   * The route list could not be read, so `hostname` is "" because we don't KNOW —
+   * not because there is none. Callers that treat an empty hostname as "unrouted"
+   * must check this first: the redeploy form prefills `mail.<domain>` on an absent
+   * hostname, which on a webmail that already has one MOVES it.
+   */
+  routingUnknown: boolean;
   /** Webmail is an ordinary project; this is where it's managed. */
   projectId: string | null;
   /**
@@ -509,21 +516,31 @@ export async function resolveWebmailSummary(
   );
   if (!project) return undefined;
 
-  const rows: Domain[] = await listProjectRouteRows(project.id).catch(() => []);
+  // `null`, not `[]`, on a failed read: the proxy variant is DERIVED from having no
+  // route rows, so an unreadable list would otherwise be indistinguishable from an
+  // unrouted project and this would hand back `mail.<domain>` for a self-hosted
+  // webmail that has a hostname of its own — an Open-webmail CTA pointing at the
+  // mail box instead of the webmail. Unknown routing yields no hostname at all.
+  const rows: Domain[] | null = await listProjectRouteRows(project.id).catch(() => null);
   // The hostname the operator ROUTED, not the one we've verified: a custom
   // domain behind a CDN may never verify, yet its vhost is written and it is
   // still the address they open. `resolveProjectAccess` is deliberately
   // stricter — it feeds the projects UI, where "unverified" is the point.
-  const routed = pickCanonicalDomainRow(rows) ?? rows[0] ?? null;
+  const routed = rows ? pickCanonicalDomainRow(rows) ?? rows[0] ?? null : null;
   // No route of its own + running on the cloud = the mail VPS fronts it (see
   // the proxy variant above). Derived, so nothing has to be stored.
-  const proxied = !routed && !!project.cloudWorkspaceId;
+  const proxied = rows !== null && !routed && !!project.cloudWorkspaceId;
   const hostname = routed?.hostname ?? (proxied ? `mail.${mailServer.domain}` : "");
 
   return {
     installed: await isLiveDeploymentReady(project.activeDeploymentId),
     hostname,
     url: hostname ? `https://${hostname}` : "",
+    // Withholding the hostname is the safe half; saying so is the other half. Without
+    // this the caller sees the same shape as a deployed-but-unrouted webmail, and the
+    // two want opposite handling — one needs an address chosen, the other must not
+    // have one chosen for it.
+    routingUnknown: rows === null,
     projectId: project.id,
     legacy: isLegacyWebmailProject(project),
   };
@@ -557,28 +574,25 @@ export async function onWebmailDeployed(
     const mailServer = await repos.mailServer.findByWebmailProject(project.id);
     if (!mailServer?.domain) return;
     // A cloud webmail that DID take a hostname of its own is already served by
-    // the edge; the proxy is for the routeless variant only.
+    // the edge; the proxy is for the routeless variant only. Uncaught on purpose:
+    // this decides whether to WRITE a vhost, so a read we could not perform must
+    // reach the catch below and be logged, never be read as "no routes".
     const rows = await listProjectRouteRows(project.id);
     if (rows.length > 0) return;
 
-    await withMailVpsRouting(
-      mailServer.serverId,
-      project.organizationId,
-      async (platform) => {
-        await platform.routing.registerRoute({
-          domain: `mail.${mailServer.domain}`,
-          tls: true,
-          // We issue this host's cert right below, so the edge must keep a :443
-          // listener up meanwhile — a routed host with no TLS listener refuses
-          // the handshake (Cloudflare 525, #308), which also blocks issuance.
-          terminatesTlsLocally: true,
-          targetUrl: deployedUrl,
-        });
-        // The mail box already holds certs for IMAP/SMTP; this adds the HTTPS
-        // one for the webmail UI, through the same Let's Encrypt feature.
-        await platform.ssl.provisionCert(`mail.${mailServer.domain}`);
-      },
-    );
+    const platform = await resolveMailVpsPlatform(mailServer.serverId, project.organizationId);
+    await platform.routing.registerRoute({
+      domain: `mail.${mailServer.domain}`,
+      tls: true,
+      // We issue this host's cert right below, so the edge must keep a :443
+      // listener up meanwhile — a routed host with no TLS listener refuses
+      // the handshake (Cloudflare 525, #308), which also blocks issuance.
+      terminatesTlsLocally: true,
+      targetUrl: deployedUrl,
+    });
+    // The mail box already holds certs for IMAP/SMTP; this adds the HTTPS
+    // one for the webmail UI, through the same Let's Encrypt feature.
+    await platform.ssl.provisionCert(`mail.${mailServer.domain}`);
   } catch (err) {
     console.warn(
       `[webmail] could not front mail.<domain> for project ${project.id}: ${safeErrorMessage(err)}`,
@@ -607,34 +621,36 @@ export async function cleanupWebmailInstall(project: Project): Promise<string | 
   const mailServer = await repos.mailServer.findByWebmailProject(project.id);
   if (!mailServer?.domain) return null;
 
-  // Same derivation as the install: no route rows + cloud = we fronted it.
+  // Same derivation as the install, but `[]` on a failed read rather than the
+  // summary's `null`: here the two mistakes are not symmetric. Attempting the
+  // removal for a project that had its own hostname is a no-op (we never wrote
+  // that vhost), while skipping it leaves a proxy vhost on the mail VPS with no
+  // project left to ever remove it.
   const rows: Domain[] = await listProjectRouteRows(project.id).catch(() => []);
   if (rows.length > 0 || !project.cloudWorkspaceId) return null;
 
   const hostname = `mail.${mailServer.domain}`;
-  await withMailVpsRouting(mailServer.serverId, project.organizationId, (platform) =>
-    platform.routing.removeRoute(hostname),
-  );
+  const platform = await resolveMailVpsPlatform(mailServer.serverId, project.organizationId);
+  await platform.routing.removeRoute(hostname);
   return `removed ${hostname} proxy`;
 }
 
 /**
- * Resolve the mail VPS's own edge (the same OpenResty that fronts IMAP/SMTP for
- * this hostname) and run one routing operation against it. `resolveTargetPlatform`
- * verifies the server is in the org; the import is dynamic to keep the mail
- * module out of the deployment runtime's import cycle.
+ * The mail VPS's own edge — the same OpenResty that fronts IMAP/SMTP for this
+ * hostname — as a platform to route against. `resolveTargetPlatform` verifies the
+ * server is in the org; the import is dynamic to keep the mail module out of the
+ * deployment runtime's import cycle.
  */
-async function withMailVpsRouting<T>(
-  mailServerId: string,
-  organizationId: string,
-  fn: (platform: Awaited<ReturnType<typeof resolveMailVpsPlatform>>) => Promise<T>,
-): Promise<T> {
-  return fn(await resolveMailVpsPlatform(mailServerId, organizationId));
-}
-
 async function resolveMailVpsPlatform(mailServerId: string, organizationId: string) {
-  const { resolveTargetPlatform } = await import("../../../lib/deployment-runtime");
-  return resolveTargetPlatform("server", "bare", mailServerId, organizationId);
+  const { resolveTargetPlatform, disposePlatform } = await import("../../../lib/deployment-runtime");
+  const platform = await resolveTargetPlatform("server", "bare", mailServerId, organizationId);
+  // Released here rather than at each caller, because a caller that only wants `.routing`
+  // is exactly the one that forgets: `createPlatform` builds its runtime EAGERLY, so an
+  // SSH one has already bound a loopback bridge that only `dispose()` closes. A no-op
+  // while this is `"bare"` — and disposal only releases `runtime`, never the pooled
+  // `executor` that `.routing`/`.ssl` drive through, so both stay usable after it.
+  disposePlatform(platform);
+  return platform;
 }
 
 // ─── Legacy (pre-catalog) webmail ────────────────────────────────────────────

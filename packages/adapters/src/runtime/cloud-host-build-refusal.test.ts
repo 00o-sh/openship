@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { CloudRuntime, isHostBuildForbiddenError } from "./cloud";
+import { blankComments } from "../system/source-scan.fixtures";
 
 /**
  * `CloudRuntime` has TWO arms that do work on the machine the API process runs on:
@@ -116,10 +117,13 @@ describe("CloudRuntime refuses host work unless explicitly allowed", () => {
    * gate — instead of the gate silently not covering it.
    */
   it("ratchet: every host-touching call in cloud.ts is accounted for", () => {
-    const src = readFileSync(fileURLToPath(new URL("./cloud.ts", import.meta.url)), "utf8")
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/(^|[^:])\/\/[^\n]*/g, "$1")
-      .replace(/^\s*import\s[\s\S]*?;\s*$/gm, "");
+    // Not a `replace(/\/\*[\s\S]*?\*\//g, "")`: `cloud.ts:215` holds the regex literal
+    // `/^[A-Za-z0-9_@%+=:,./*?[\]-]+$/`, whose `./*?` reads as a comment opener to that
+    // pattern and blanked the next 61 lines — so a new host-touching call anywhere in
+    // 215-317 would have been invisible to the very ratchet that exists to catch it.
+    const src = blankComments(
+      readFileSync(fileURLToPath(new URL("./cloud.ts", import.meta.url)), "utf8"),
+    ).replace(/^\s*import\s[\s\S]*?;\s*$/gm, "");
 
     const count = (re: RegExp) => [...src.matchAll(re)].length;
 

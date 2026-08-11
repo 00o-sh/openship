@@ -100,6 +100,8 @@ export type SystemSelinux = "enforcing" | "permissive" | "disabled" | "absent";
 export interface EnvironmentProfile {
   // ── identity ──
   os: SystemOs;
+  /** `uname -s` verbatim. The only thing that can name an OS we don't carry. */
+  osRaw: string | null;
   arch: SystemArch;
   /** `uname -m` verbatim. The only thing that can name an architecture we don't carry. */
   archRaw: string | null;
@@ -302,6 +304,7 @@ export function parseSystemArch(uname: string | null | undefined): SystemArch {
 /** The facts the support verdict depends on. A subset of the profile, so it can be reused. */
 export interface HostSupportFacts {
   os: SystemOs;
+  osRaw: string | null;
   arch: SystemArch;
   archRaw: string | null;
   distroId: string | null;
@@ -364,7 +367,17 @@ export function assessHostSupport(facts: HostSupportFacts): HostSupportVerdict {
   }
 
   if (facts.os === "unknown") {
-    return refuse("Could not determine this host's operating system (`uname -s` returned nothing usable).");
+    // Same split as the arch refusal below, for the same reason: a host that answered
+    // `FreeBSD` plainly is not a host we failed to measure, and telling its operator that
+    // `uname -s` "returned nothing usable" sends them to debug a probe that worked. Only
+    // one of these two sentences can be true of any given box.
+    const observed = facts.osRaw?.trim();
+    return refuse(
+      observed
+        ? `Openship drives Linux hosts (and macOS locally); this one reports \`uname -s\` as ` +
+            `${JSON.stringify(observed)}, which it has no provisioning path for.`
+        : "Could not determine this host's operating system (`uname -s` returned nothing usable).",
+    );
   }
 
   // Before the distro check: an unknown arch is fatal regardless of how well we know

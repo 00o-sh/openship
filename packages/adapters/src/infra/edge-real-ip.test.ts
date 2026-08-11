@@ -121,21 +121,30 @@ describe("a host fronted by Openship Cloud's edge", () => {
     expect(conf).not.toContain("CF-Connecting-IP;");
   });
 
-  it("still anchors trust to the peer, so the header alone proves nothing", () => {
+  it("trusts the header from ANY peer, because the edge's own address is unknowable here", () => {
+    // The deliberate difference from the Cloudflare path. The Cloud edge reaches origins
+    // from its own address; opsh.io's Cloudflare-proxied A records are the visitor→edge
+    // leg and say nothing about it. A peer list that doesn't contain the real egress
+    // address does not fail loudly — it ignores the header, and every free-domain visitor
+    // stays logged as the edge, which is the bug this block exists to fix.
     const conf = cloudEdgeRealIpConf();
-    for (const cidr of [...CLOUDFLARE_IPV4, ...CLOUDFLARE_IPV6]) {
-      expect(conf).toContain(`set_real_ip_from ${cidr};`);
-    }
-    const trusted = [...conf.matchAll(/set_real_ip_from (\S+);/g)].map((m) => m[1]);
-    expect(trusted).toHaveLength(CLOUDFLARE_IPV4.length + CLOUDFLARE_IPV6.length);
-    expect(trusted).not.toContain("0.0.0.0/0");
+    expect(conf).toContain("set_real_ip_from 0.0.0.0/0;");
+    expect(conf).toContain("set_real_ip_from ::/0;");
   });
 
-  it("widens to the operator's own proxies too, since free traffic passes through them", () => {
-    process.env.OPENSHIP_EDGE_TRUSTED_PROXIES = "10.0.0.0/8, bogus";
+  it("does not walk the header recursively", () => {
+    // The front OVERWRITES X-Real-IP with one address, so there is no list to walk — and
+    // "skip trusted addresses from the right" has no meaning once every address is trusted.
+    expect(cloudEdgeRealIpConf()).toContain("real_ip_recursive off;");
+  });
+
+  it("says in the file what the blanket trust costs", () => {
+    // A bare `set_real_ip_from 0.0.0.0/0` looks like a mistake to anyone reading the vhost
+    // — including a future us. The reason it is scoped to this server_name, and what a
+    // forged Host + forged header buys an attacker, has to travel WITH the directive.
     const conf = cloudEdgeRealIpConf();
-    expect(conf).toContain("set_real_ip_from 10.0.0.0/8;");
-    expect(conf).not.toContain("bogus");
+    expect(conf).toContain("forged Host");
+    expect(conf).toMatch(/do not widen this to them/);
   });
 
   it("ignores the operator's header override — this front is never their proxy", () => {
@@ -152,18 +161,14 @@ describe("a host fronted by Openship Cloud's edge", () => {
     }
   });
 
-  it("trusts EXACTLY the peers the http-scope block does — one list, two fronts", () => {
-    // The header differs between the two fronts because they genuinely send different
-    // ones. WHO may be believed must not: both blocks read the same generated Cloudflare
-    // ranges and the same OPENSHIP_EDGE_TRUSTED_PROXIES, and this pins them together.
-    // A peer added to one and not the other is a divergence in who can name the client
-    // that only shows up on one kind of hostname — the quiet failure this file exists to
-    // prevent. The repetition in the OUTPUT is forced by nginx (a server-scope
-    // set_real_ip_from replaces the inherited list rather than extending it), not chosen.
-    process.env.OPENSHIP_EDGE_TRUSTED_PROXIES = "10.0.0.0/8, 2001:db8::/32";
-    const peers = (conf: string) =>
-      [...conf.matchAll(/set_real_ip_from (\S+);/g)].map((m) => m[1]).sort();
-    expect(peers(cloudEdgeRealIpConf())).toEqual(peers(edgeRealIpConf()));
+  it("keeps the blanket trust OUT of the http-scope block", () => {
+    // The one thing that must not leak. http scope covers every custom domain on the box,
+    // where the peer list IS the security property: trusting any peer there would let a
+    // visitor to any site pick their own rate-limit bucket and dodge IP bans.
+    const http = edgeRealIpConf();
+    expect(http).not.toContain("set_real_ip_from 0.0.0.0/0;");
+    expect(http).not.toContain("set_real_ip_from ::/0;");
+    expect(http).toContain(`set_real_ip_from ${CLOUDFLARE_IPV4[0]};`);
   });
 });
 

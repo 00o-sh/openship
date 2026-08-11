@@ -255,7 +255,21 @@ function pipeThrough(
     upstream.destroy();
   };
   client.on("error", teardown);
-  upstream.on("error", teardown);
+  // NOT `teardown`. An upstream error is the most common way a bridged request fails —
+  // sshd's ForceCommand exiting 142, `docker` missing, the exec channel dying — and
+  // `teardown` destroyed the CLIENT, which is the one socket the cause has to travel
+  // down. `respondBadGateway` refuses a destroyed socket, so the `close` handler below
+  // then answered nothing and dockerode got the bare `socket hang up` this whole path
+  // exists to eliminate. The 502 was only ever reachable on a *clean* unanswered close.
+  //
+  // Answer here rather than leaving it to `close`: under Node `close` follows `error`,
+  // but this file documents three Bun-only stream divergences and an unanswered request
+  // hanging is worse than a duplicate attempt — `respondBadGateway` is idempotent
+  // (`writableEnded` short-circuits it), so the `close` path staying as-is costs nothing.
+  upstream.on("error", () => {
+    if (!answered) respondBadGateway(client, handoff.unansweredReason());
+    upstream.destroy();
+  });
   client.once("close", () => upstream.destroy());
   upstream.once("close", () => {
     // An upstream that closes without ever answering is a FAILED request, and the

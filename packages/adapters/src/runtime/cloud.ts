@@ -448,6 +448,12 @@ export class CloudRuntime implements MultiServiceRuntimeAdapter {
    */
   readonly unsupportedComposeKeys: ReadonlySet<keyof ComposeAdvanced> = new Set<keyof ComposeAdvanced>([
     "healthcheck",
+    // Namespace sharing has no Oblien equivalent — a workspace is not a container
+    // whose netns/pidns a peer can join. Declared here so the deploy warns once
+    // per service and continues, rather than the workload coming up on its own
+    // network with nothing having said so (#533).
+    "networkMode",
+    "pidMode",
   ]);
 
   private readonly client: Oblien;

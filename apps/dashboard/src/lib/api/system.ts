@@ -1,6 +1,45 @@
 import { api, getApiBaseUrl, getActiveOrganizationId } from "./client";
 import { endpoints } from "./endpoints";
 
+/**
+ * Client budget for an ad-hoc SSH probe.
+ *
+ * Deliberately far above the 15s default: a probe's whole job is a COLD SSH
+ * connect, and the API's own budget for one already exceeds 15s (a 20s ssh2
+ * `readyTimeout`, then a 15s `echo`). On the default the browser aborted first
+ * every time, so a firewalled or slow host could never deliver the server's
+ * classified answer ("Host is not reachable", "Authentication failed") — the
+ * operator saw only the abort. The client budget must stay above the server's,
+ * or the diagnosis this endpoint exists to produce is unreachable.
+ */
+const SSH_PROBE_TIMEOUT_MS = 45_000;
+
+/**
+ * Raw credentials for an ad-hoc SSH probe.
+ *
+ * One shape for both probe endpoints — authed and onboarding land on the same
+ * `buildEphemeralSshConfig`, so a field one of them accepts is a field both do.
+ */
+export interface SshProbeInput {
+  sshHost: string;
+  sshPort?: number;
+  sshUser?: string;
+  sshAuthMethod: string;
+  sshPassword?: string;
+  sshKeyPath?: string;
+  /** Pasted/uploaded private-key material (paste sub-mode). */
+  sshPrivateKey?: string;
+  sshKeyPassphrase?: string;
+  sshJumpHost?: string;
+  sshArgs?: string;
+}
+
+/** `ok:false` is a REACHED verdict with a reason; a throw is a failure to ask. */
+export interface SshProbeResult {
+  ok: boolean;
+  message: string;
+}
+
 export interface BrowseEntry {
   name: string;
   path: string;
@@ -592,19 +631,17 @@ export const systemApi = {
   sendTestEmail: (to: string) =>
     api.post<{ ok: boolean; error?: string }>(endpoints.system.emailSettingsTest, { to }),
 
-  /** Test SSH connection with credentials (without saving) */
-  testConnection: (data: {
-    sshHost: string;
-    sshPort?: number;
-    sshUser?: string;
-    sshAuthMethod: string;
-    sshPassword?: string;
-    sshKeyPath?: string;
-    /** Pasted/uploaded private-key material (paste sub-mode). */
-    sshPrivateKey?: string;
-    sshKeyPassphrase?: string;
-  }) =>
-    api.post<{ ok: boolean; message: string }>(endpoints.system.testConnection, data),
+  /** Test SSH connection with credentials (without saving). */
+  testConnection: (data: SshProbeInput) =>
+    api.post<SshProbeResult>(endpoints.system.testConnection, data, {
+      timeout: SSH_PROBE_TIMEOUT_MS,
+    }),
+
+  /** The same probe, pre-auth, for the onboarding wizard's first server. */
+  onboardingTestConnection: (data: SshProbeInput) =>
+    api.post<SshProbeResult>(endpoints.system.onboardingTestConnection, data, {
+      timeout: SSH_PROBE_TIMEOUT_MS,
+    }),
 
   /** Run system health checks on a specific server */
   checkServer: (serverId: string, components?: string[]) =>

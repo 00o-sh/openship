@@ -125,8 +125,13 @@ function resolveInfraComponents(): string[] {
  * **without** persisting them to the database. Used by the server
  * form to validate before saving.
  *
- * Body: { sshHost, sshPort?, sshUser?, sshAuthMethod, sshPassword?, sshKeyPath?, sshKeyPassphrase? }
- * Returns: { ok: boolean, message: string }
+ * Body: { sshHost, sshPort?, sshUser?, sshAuthMethod, sshPassword?, sshKeyPath?,
+ *         sshPrivateKey?, sshKeyPassphrase?, sshJumpHost?, sshArgs? }
+ * Returns: { ok: boolean, message: string, code?: ConnectivityCode }
+ *
+ * `sshJumpHost`/`sshArgs` are not optional decoration: a host only reachable
+ * through a bastion must be PROBED through it, or the test contradicts the save.
+ * The dashboard's `SshProbeInput` is this list.
  */
 /**
  * Run an ephemeral SSH echo test from request-body credentials (no DB row).

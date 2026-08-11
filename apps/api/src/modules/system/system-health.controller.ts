@@ -21,6 +21,8 @@ import { db, getDriver, sql, count, eq, schema } from "@repo/db";
 import { hostChannelHealth, type HostChannelHealth } from "@repo/adapters";
 import { HOST_CHANNEL_NOT_PROVISIONED, safeErrorMessage } from "@repo/core";
 
+import { env } from "../../config";
+
 /**
  * The container→host SSH channel, as a monitor can see it (#509).
  *
@@ -131,10 +133,16 @@ export async function systemHealth(c: Context) {
   // no host channel is degraded, not down (HOST_CHANNEL_UNAFFECTED), and folding it
   // in would make `openship doctor --fix` reach for the database repair.
   let hostChannel: HostChannelReport | null = null;
-  try {
-    hostChannel = reportHostChannel(await hostChannelHealth());
-  } catch {
-    /* diagnostic failed — say nothing rather than blame the host */
+  // On the SaaS control plane there is no host to drive. `hostChannelHealth` already
+  // returns before any key read when OPENSHIP_HOST_SSH_HOST is unset — which it is on
+  // the SaaS — but gate on CLOUD_MODE explicitly so this endpoint can never call
+  // readFileSync on a host key path, rather than relying on that env staying absent.
+  if (!env.CLOUD_MODE) {
+    try {
+      hostChannel = reportHostChannel(await hostChannelHealth());
+    } catch {
+      /* diagnostic failed — say nothing rather than blame the host */
+    }
   }
 
   return c.json({

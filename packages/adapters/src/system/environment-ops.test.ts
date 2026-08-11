@@ -300,10 +300,30 @@ describe("envOps docker install", () => {
   it("uses amazon-linux-extras on Amazon Linux 2", () => {
     // Told apart from AL2023 by package manager (yum vs dnf), never by parsing
     // VERSION_ID: plain `yum install docker` finds no matching package on AL2.
-    expect(steps(envOps(HOSTS.amzn2).dockerInstall())).toEqual([
-      "amazon-linux-extras install -y docker",
-      ...composePluginSteps("x86_64"),
-    ]);
+    const install = steps(envOps(HOSTS.amzn2).dockerInstall());
+    expect(install[0]).toContain("amazon-linux-extras install -y docker");
+    expect(install.slice(1)).toEqual(composePluginSteps("x86_64"));
+  });
+
+  it("does not let amazon-linux-extras' exit code abort the plugin steps", () => {
+    // Observed on a real amazonlinux:2: one run in four printed "Installation failed" and
+    // exited 13 AFTER yum printed "Complete!", with dockerd on disk. Because opScript
+    // joins with `&&`, that aborted mkdir/curl/chmod and left an engine with no
+    // `docker compose` — provisioning green, first deploy dead. The step must survive a
+    // non-zero exit when the binary landed, and only then.
+    const first = steps(envOps(HOSTS.amzn2).dockerInstall())[0] as string;
+    expect(first).toMatch(/\|\|\s*command -v docker\b/);
+    // Braced, so prepending a step can't turn `a && b || c` into a fallthrough: `&&` and
+    // `||` bind equally and left-to-right, so an unbraced form would run the `||` arm
+    // when an EARLIER step failed.
+    expect(first.startsWith("{ ") && first.endsWith("; }")).toBe(true);
+    // The tolerance is scoped to the one installer known to lie about its exit code.
+    for (const name of HOST_NAMES) {
+      if (name === "amzn2") continue;
+      const other = envOps(HOSTS[name]).dockerInstall();
+      if (!other.supported) continue;
+      expect(opScript(other.value as readonly string[]), name).not.toContain("|| command -v docker");
+    }
   });
 
   it("downloads the plugin for the arch the host actually is", () => {
@@ -326,7 +346,7 @@ describe("envOps docker install", () => {
   it.each(["alma9", "oracle9"] as const)("adds Docker's rpm repo on %s", (hostName) => {
     const install = steps(envOps(HOSTS[hostName]).dockerInstall());
     expect(install[0]).toContain("download.docker.com/linux/centos/docker-ce.repo");
-    expect(install[1]).toBe(
+    expect(install.at(-1)).toBe(
       "dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin",
     );
     // `dnf config-manager --add-repo` would need dnf-plugins-core first and changed
@@ -334,9 +354,34 @@ describe("envOps docker install", () => {
     expect(opScript(install)).not.toContain("config-manager");
   });
 
-  it("installs the distro's docker.io on a Debian derivative get.docker.com refuses", () => {
-    // Mint's ID is `linuxmint` and its codename is `virginia`, so neither the script nor
-    // Docker's apt repo will take it. It reached the debian family via ID_LIKE.
+  it.each(["alma9", "oracle9"] as const)("pins the repo to a major version on %s", (hostName) => {
+    // Both report a DOTTED VERSION_ID (9.4), and the centos tree has no 9.4 — it hard-404s
+    // where the rhel tree would 301 to the major. dnf substitutes the major on its own
+    // here, so this is the image that pinned a point release in /etc/dnf/vars/releasever,
+    // which nothing on the host advertises. The major, not VERSION_ID: substituting what
+    // was detected verbatim would REQUEST the 404 rather than avoid it.
+    const install = steps(envOps(HOSTS[hostName]).dockerInstall());
+    expect(HOSTS[hostName].versionId).toBe("9.4");
+    expect(install[1]).toBe("sed -i 's|\\$releasever|9|g' /etc/yum.repos.d/docker-ce.repo");
+    // Single-quoted, or the shell expands it away before sed ever sees the pattern.
+    expect(install[1]).not.toContain('"$releasever"');
+  });
+
+  it("leaves $releasever alone on a host that reports no version", () => {
+    // Degrade to what shipped before, never to a refusal: `$releasever` is correct on every
+    // distro that reports a VERSION_ID, so a host missing one is no worse off than it was.
+    const install = steps(
+      envOps(host({ osRelease: `ID="almalinux"\nID_LIKE="rhel"`, pm: "dnf" })).dockerInstall(),
+    );
+    expect(install).toHaveLength(2);
+    expect(opScript(install)).not.toContain("sed -i");
+  });
+
+  it("installs the distro's docker.io on a Debian derivative", () => {
+    // Mint's ID is `linuxmint` and its codename is `virginia`, so Docker's apt repo has no
+    // matching suite. `get.docker.com` would take it — `check_forked` rewrites the ID
+    // before its switch — but only by deriving a codename at runtime that we cannot check
+    // first, so this arm deliberately trades docker-ce for a package that needs no suite.
     expect(HOSTS.mint213.distroFamily).toBe("debian");
     expect(steps(envOps(HOSTS.mint213).dockerInstall())).toEqual([
       "apt-get update -qq",

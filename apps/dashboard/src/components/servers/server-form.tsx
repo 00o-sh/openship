@@ -13,9 +13,11 @@ import {
   X,
   ClipboardPaste,
   Upload,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import { getApiErrorMessage, systemApi } from "@/lib/api";
-import type { ServerInfo } from "@/lib/api/system";
+import type { ServerInfo, SshProbeInput } from "@/lib/api/system";
 import { useToast } from "@/context/ToastContext";
 import { useI18n } from "@/components/i18n-provider";
 
@@ -73,6 +75,7 @@ export function ServerForm({
         : "password",
   );
   const [sshPassword, setSshPassword] = useState("");
+  const [showSshPassword, setShowSshPassword] = useState(false);
   const [sshKeyPath, setSshKeyPath] = useState(server?.sshKeyPath ?? "");
   // Pasted / uploaded private-key material. Held only in component state and
   // sent on save/test; never prefilled (the API never returns key material).
@@ -88,6 +91,7 @@ export function ServerForm({
   // say "a key is stored — paste to replace" and skip the require-a-key check.
   const hasStoredKey = !!server?.hasStoredKeyMaterial;
   const [sshKeyPassphrase, setSshKeyPassphrase] = useState("");
+  const [showPassphrase, setShowPassphrase] = useState(false);
   const keyFileInputRef = useRef<HTMLInputElement>(null);
   const [showAdvanced, setShowAdvanced] = useState(
     !!(server?.sshJumpHost || server?.sshArgs),
@@ -240,7 +244,7 @@ export function ServerForm({
     setTesting(true);
     setTestResult(null);
     try {
-      const payload: Record<string, unknown> = {
+      const payload: SshProbeInput = {
         sshHost: sshHost.trim(),
         sshPort: parseInt(sshPort, 10) || 22,
         sshUser: sshUser.trim() || "root",
@@ -257,7 +261,13 @@ export function ServerForm({
         }
         if (sshKeyPassphrase) payload.sshKeyPassphrase = sshKeyPassphrase;
       }
-      const result = await systemApi.testConnection(payload as Parameters<typeof systemApi.testConnection>[0]);
+      // Same route the save will dial. Omitting these tested DIRECT reachability
+      // for a host only reachable through a bastion — a red "Test connection" on
+      // a configuration that works.
+      if (jumpHost.trim()) payload.sshJumpHost = jumpHost.trim();
+      if (extraArgs.trim()) payload.sshArgs = extraArgs.trim();
+
+      const result = await systemApi.testConnection(payload);
       setTestResult(result);
       if (result.ok) {
         showToast(t.servers.form.toastConnectionSuccess, "success", t.servers.toastTitles.server);
@@ -459,18 +469,29 @@ export function ServerForm({
           {sshAuthMethod === "password" ? (
             <div>
               <label className={LABEL}>{t.servers.form.password}</label>
-              <input
-                type="password"
-                value={sshPassword}
-                onChange={(e) => setSshPassword(e.target.value)}
-                placeholder={
-                  isEditing && server?.sshAuthMethod === "password"
-                    ? t.servers.form.passwordPlaceholderKeep
-                    : t.servers.form.passwordPlaceholderEnter
-                }
-                autoComplete="off"
-                className={INPUT}
-              />
+              <div className="relative">
+                <input
+                  type={showSshPassword ? "text" : "password"}
+                  value={sshPassword}
+                  onChange={(e) => setSshPassword(e.target.value)}
+                  placeholder={
+                    isEditing && server?.sshAuthMethod === "password"
+                      ? t.servers.form.passwordPlaceholderKeep
+                      : t.servers.form.passwordPlaceholderEnter
+                  }
+                  autoComplete="off"
+                  className={`${INPUT} pe-10`}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowSshPassword((v) => !v)}
+                  tabIndex={-1}
+                  className="absolute end-3 top-1/2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
+                  aria-label={showSshPassword ? t.auth.hidePassword : t.auth.showPassword}
+                >
+                  {showSshPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                </button>
+              </div>
             </div>
           ) : sshAuthMethod === "agent" ? (
             <div className="flex items-start gap-2.5 rounded-xl border border-border/50 bg-muted/30 px-3.5 py-3">
@@ -586,14 +607,25 @@ export function ServerForm({
                     {t.servers.form.optional}
                   </span>
                 </label>
-                <input
-                  type="password"
-                  value={sshKeyPassphrase}
-                  onChange={(e) => setSshKeyPassphrase(e.target.value)}
-                  placeholder={t.servers.form.passphrasePlaceholder}
-                  autoComplete="off"
-                  className={INPUT}
-                />
+                <div className="relative">
+                  <input
+                    type={showPassphrase ? "text" : "password"}
+                    value={sshKeyPassphrase}
+                    onChange={(e) => setSshKeyPassphrase(e.target.value)}
+                    placeholder={t.servers.form.passphrasePlaceholder}
+                    autoComplete="off"
+                    className={`${INPUT} pe-10`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassphrase((v) => !v)}
+                    tabIndex={-1}
+                    className="absolute end-3 top-1/2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
+                    aria-label={showPassphrase ? t.auth.hidePassword : t.auth.showPassword}
+                  >
+                    {showPassphrase ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                  </button>
+                </div>
               </div>
             </div>
           )}

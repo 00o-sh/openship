@@ -58,9 +58,9 @@ describe("mailPasswordError", () => {
     expect(mailPasswordError("a".repeat(128))).toBeNull();
   });
 
-  it("labels the field so the setup path reports config.adminPassword", () => {
-    expect(mailPasswordError("short", "config.adminPassword")).toMatch(
-      /^config\.adminPassword/,
-    );
+  it("labels the field so the setup path reports a human-readable name", () => {
+    // POST /mail/setup passes "Admin password" so the surfaced 400 reads cleanly
+    // ("Admin password must be at least 12 characters"), not the internal path.
+    expect(mailPasswordError("short", "Admin password")).toMatch(/^Admin password/);
   });
 });
