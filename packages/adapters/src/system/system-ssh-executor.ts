@@ -238,14 +238,29 @@ export class SystemSshExecutor implements CommandExecutor {
   async streamExec(
     command: string,
     onLog: (log: LogEntry) => void,
+    opts?: { signal?: AbortSignal },
   ): Promise<{ code: number; output: string }> {
     await this.ensureMaster();
+    const signal = opts?.signal;
+    if (signal?.aborted) return { code: 0, output: "" };
     return new Promise((resolve) => {
       const child = spawn(
         "ssh",
         [...this.baseArgs(), sshTarget(this.config), SystemSshExecutor.ENV_PREFIX + command],
         { env: sshChildEnv(this.config), stdio: ["ignore", "pipe", "pipe"] },
       );
+
+      // Abort = kill the ssh client, which tears the channel down. Resolve with
+      // code 0 like SshExecutor does: an abort is the caller's own decision, not
+      // a transport failure, and callers that care (a cancelled build) re-check
+      // `signal.aborted` themselves. Without this the signal was ignored outright
+      // and a cancelled remote build streamed to completion.
+      let aborted = false;
+      const onAbort = () => {
+        aborted = true;
+        child.kill("SIGKILL");
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
 
       // Raw passthrough (see LocalExecutor.streamExec): forward the untouched
       // byte stream as rawData so the client's xterm renders "\r"/ANSI natively
@@ -262,11 +277,13 @@ export class SystemSshExecutor implements CommandExecutor {
       child.stdout.on("data", (chunk: Buffer) => onChunk(chunk, "info"));
       child.stderr.on("data", (chunk: Buffer) => onChunk(chunk, "warn"));
       child.on("error", (err) => {
+        signal?.removeEventListener("abort", onAbort);
         onLog(logEntry(`Process error: ${err.message}`, "error"));
         resolve({ code: 1, output: err.message });
       });
       child.on("close", (code) => {
-        const c = code ?? 1;
+        signal?.removeEventListener("abort", onAbort);
+        const c = aborted ? 0 : (code ?? 1);
         void this.maybeSignalDisconnect(c).catch(() => {});
         resolve({ code: c, output: chunks.join("") });
       });

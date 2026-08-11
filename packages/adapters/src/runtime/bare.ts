@@ -41,7 +41,15 @@ import type {
   RollbackInput,
   MakeActiveResult,
 } from "./types";
-import { BuildCancelledError, BuildLogger, detectBuildKillHint, runBuildPipeline, sq, type BuildEnvironment } from "./build-pipeline";
+import {
+  BuildCancelledError,
+  BuildLogger,
+  detectBuildKillHint,
+  killProcessesUnderDir,
+  runBuildPipeline,
+  sq,
+  type BuildEnvironment,
+} from "./build-pipeline";
 import { runLocalBuild } from "./local-build";
 import { transferLocalDirectory } from "./transfer";
 import { prepareStackOutput, resolveProjectDir, resolveStaticOutputPath } from "./stack-output";
@@ -588,16 +596,10 @@ export class BareRuntime implements RuntimeAdapter {
       abort.abort();
       this.activeBuilds.delete(sessionId);
     }
-    // Aborting only gates the API BETWEEN commands — the in-flight remote
-    // command (git/npm/vite) keeps running on the target until killed. Kill every
-    // process whose CWD is (under) this build's dir — SIGTERM, then SIGKILL the
-    // survivors. Killing it closes the streamExec channel so the pipeline unwinds
-    // to a cancelled result. Best-effort; a no-op for local builds / non-Linux
-    // targets (nothing runs under this dir there).
-    const dir = sq(this.buildDir(sessionId));
-    const scan = (sig: string) =>
-      `for p in /proc/[0-9]*; do c=$(readlink "$p/cwd" 2>/dev/null); case "$c" in ${dir}|${dir}/*) kill -${sig} "\${p##*/}" 2>/dev/null || true;; esac; done`;
-    await this.executor.exec(`${scan("TERM")}; sleep 2; ${scan("KILL")}`).catch(() => {});
+    // Aborting only gates the API BETWEEN commands — the in-flight remote command
+    // (git/npm/vite) keeps running on the target until killed. Shared with the
+    // docker runtime so both remote-build cancels kill the same way.
+    await killProcessesUnderDir(this.executor, this.buildDir(sessionId));
   }
 
   async getBuildLogs(sessionId: string): Promise<LogEntry[]> {

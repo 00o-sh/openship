@@ -28,6 +28,7 @@ import { BuildLogger } from "@repo/adapters";
 import type { BuildConfigSnapshotLike } from "../build-config";
 import {
   cleanupBuildArtifact,
+  onCancelled,
   onFailure,
   onReconciling,
   onSuccess,
@@ -140,6 +141,20 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
     targetServiceIds,
     refreshServiceIds,
   });
+
+  // Cancelled during the image phase: stop here. setDeploymentStatus below has no
+  // terminal-state guard, so without this the cancelled row would be flipped back
+  // to "deploying" and the services the user cancelled would start anyway.
+  if (composeBuild.cancelled) {
+    for (const [serviceId, imageRef] of composeBuild.builtImageRefs) {
+      await cleanupBuildArtifact(runtime, imageRef).catch((err) => {
+        const detail = safeErrorMessage(err);
+        logger.log(`Warning: failed to clean up built service image ${serviceId}: ${detail}\n`, "warn");
+      });
+    }
+    await onCancelled(ctx, composeBuild.durationMs);
+    return;
+  }
 
   if (composeBuild.buildFailures.size > 0) {
     logger.log(
