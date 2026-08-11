@@ -117,7 +117,14 @@ import type {
   DockerNetworkInfo,
   ContainerLifecycleEvent,
 } from "./types";
-import { BuildCancelledError, BuildLogger, parseLogLevel, sq, assembleGitClone } from "./build-pipeline";
+import {
+  BuildCancelledError,
+  BuildLogger,
+  killProcessesUnderDir,
+  parseLogLevel,
+  sq,
+  assembleGitClone,
+} from "./build-pipeline";
 import { materializeGitSsh, shellGitSshWriter, type GitSshMaterial } from "./git-ssh-material";
 import { githubTarballUrl, downloadTarballOnRemote } from "./source-tarball";
 import { scopeVolumeBinds, isHostPathSource } from "./volume-namespace";
@@ -166,12 +173,64 @@ const DOCKER_BUILD_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
  * A deployment build and its cancellation request may resolve separate
- * DockerRuntime instances. Build session ids are process-wide, so cancellation
- * state must be process-wide too or the cancelling runtime cannot reach the
- * builder's controller.
+ * DockerRuntime instances — the cancel endpoint takes `platform().runtime`, not
+ * the per-server runtime that ran the build. Build session ids are process-wide
+ * and globally unique, so cancellation state must be process-wide too or the
+ * cancelling runtime cannot reach the builder's controller.
  */
 const activeDockerBuilds = new Map<string, AbortController>();
-const pendingDockerBuildCancellations = new Set<string>();
+const pendingDockerBuildCancellations = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** How long a cancel that landed before its build waits for that build to start. */
+const PENDING_CANCEL_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Cancelling `<parent>` also cancels every `<parent>-<serviceId>` sub-build: a
+ * compose deploy builds one image per service under that derived id, while the
+ * cancel endpoint only ever knows the parent build-session id.
+ */
+function cancelCovers(cancelledId: string, sessionId: string): boolean {
+  return sessionId === cancelledId || sessionId.startsWith(`${cancelledId}-`);
+}
+
+/**
+ * Remember a cancel whose build hasn't registered yet, so the build exits instead
+ * of starting work.
+ *
+ * Entries EXPIRE rather than being consumed on first match: one compose cancel has
+ * to reach every per-service build that hasn't started, so no single build can own
+ * the entry. Nothing else would ever evict it — a build session id is single-use,
+ * so a surviving entry can't cancel an unrelated build, but the map would grow for
+ * the life of the process.
+ */
+function recordPendingCancellation(sessionId: string): void {
+  clearTimeout(pendingDockerBuildCancellations.get(sessionId));
+  const timer = setTimeout(
+    () => pendingDockerBuildCancellations.delete(sessionId),
+    PENDING_CANCEL_TTL_MS,
+  );
+  // Never let a pending cancel hold the process open.
+  (timer as { unref?: () => void }).unref?.();
+  pendingDockerBuildCancellations.set(sessionId, timer);
+}
+
+/** Register a build as active; the controller comes pre-aborted if a cancel beat it here. */
+function registerDockerBuild(sessionId: string): AbortController {
+  const abort = new AbortController();
+  for (const cancelledId of pendingDockerBuildCancellations.keys()) {
+    if (cancelCovers(cancelledId, sessionId)) {
+      abort.abort();
+      break;
+    }
+  }
+  activeDockerBuilds.set(sessionId, abort);
+  return abort;
+}
+
+/** Deregister, but only if this build still owns the slot (never evict a newer one). */
+function releaseDockerBuild(sessionId: string, abort: AbortController): void {
+  if (activeDockerBuilds.get(sessionId) === abort) activeDockerBuilds.delete(sessionId);
+}
 
 /** Last-resort cap for a one-shot in-container exec. Every caller passes its own
  *  (5s probe / 15s prepare step); this only guards a stream that connects and
@@ -468,6 +527,7 @@ export function parsePortBindings(portSpecs: string[]): {
 export function packBuildContext(
   contextDir: string,
   entries: string[],
+  cancelSignal?: AbortSignal,
 ): { body: NodeJS.ReadableStream; abortSignal: AbortSignal; takeError: () => Error | null } {
   const controller = new AbortController();
   const pack = tarFs.pack(contextDir, { entries });
@@ -477,6 +537,13 @@ export function packBuildContext(
     contextError ??= err instanceof Error ? err : new Error(String(err));
     if (!controller.signal.aborted) controller.abort();
   };
+  // A cancelled build has to abort the in-flight buildImage request too: dockerode
+  // forwards `abortSignal` to it, and on this path there is no remote process to
+  // kill — aborting the request is the only thing that stops the daemon's build.
+  if (cancelSignal) {
+    if (cancelSignal.aborted) controller.abort();
+    else cancelSignal.addEventListener("abort", () => controller.abort(), { once: true });
+  }
   // pipe() does NOT forward source errors, so a tar-fs walk failure is only
   // observable on the pack itself — this listener is what keeps it from killing
   // the process. Guard the gzip side too for completeness.
@@ -1419,12 +1486,14 @@ export class DockerRuntime implements RuntimeAdapter {
     buildContext: Awaited<ReturnType<typeof createDockerBuildContext>>,
     tag: string,
     log: BuildLogger,
+    cancelSignal?: AbortSignal,
   ): Promise<void> {
     log.log(`Streaming build context to Docker daemon - image tag: ${tag}`);
 
     const { body, abortSignal, takeError } = packBuildContext(
       buildContext.contextDir,
       buildContext.contextEntries,
+      cancelSignal,
     );
 
     try {
@@ -1573,19 +1642,18 @@ export class DockerRuntime implements RuntimeAdapter {
     const log = logger ?? new BuildLogger();
     const startTime = Date.now();
     const tag = this.imageTag(config.slug, config.sessionId);
-    const abort = new AbortController();
-    if (pendingDockerBuildCancellations.delete(config.sessionId)) abort.abort();
-    activeDockerBuilds.set(config.sessionId, abort);
+    const abort = registerDockerBuild(config.sessionId);
+    const cancelled = (): BuildResult => {
+      log.step("build", "failed", "Docker build cancelled");
+      return {
+        sessionId: config.sessionId,
+        status: "cancelled",
+        durationMs: Date.now() - startTime,
+      };
+    };
 
     try {
-      if (abort.signal.aborted) {
-        log.step("build", "failed", "Docker build cancelled");
-        return {
-          sessionId: config.sessionId,
-          status: "cancelled",
-          durationMs: Date.now() - startTime,
-        };
-      }
+      if (abort.signal.aborted) return cancelled();
       log.log(`Build strategy: docker (${this.transport.description})\n`);
 
       // Ensure the host is provisioned for Docker, but avoid doing a second
@@ -1628,6 +1696,9 @@ export class DockerRuntime implements RuntimeAdapter {
           sshExecutor.exec(`rm -rf ${sq(remoteContextDir)}`).catch(() => { /* best effort */ });
         }
 
+        // Same last gate as the transferred-context path below: a cancel that lands
+        // after the build command finished must not hand back a deployable image.
+        if (abort.signal.aborted) return cancelled();
         await this.verifyImageBuilt(tag);
         log.log(`Image ${tag} is ready.\n`);
         log.step("build", "completed", `Finalizing image ${tag}`);
@@ -1695,8 +1766,16 @@ export class DockerRuntime implements RuntimeAdapter {
         await this.buildViaSshTarPipe(config, buildContext, tag, log, abort.signal);
       } else {
         // ── Dockerode path (local socket, TCP, or SSH without executor) ─
-        await this.buildViaDockerode(config, buildContext, tag, log);
+        await this.buildViaDockerode(config, buildContext, tag, log, abort.signal);
       }
+
+      // Last gate before the image counts as deployable. Cancelling mid-build is
+      // best-effort on every path — an abort that lands after the daemon finished
+      // still leaves a usable image here — so without this check a cancel would
+      // return "deploying", and the pipeline (which stops ONLY on "cancelled" and
+      // re-writes the row to "deploying" without checking for a terminal state)
+      // would deploy the deployment the user just cancelled.
+      if (abort.signal.aborted) return cancelled();
 
       await this.verifyImageBuilt(tag);
 
@@ -1706,21 +1785,12 @@ export class DockerRuntime implements RuntimeAdapter {
       const durationMs = Date.now() - startTime;
       return { sessionId: config.sessionId, status: "deploying", imageRef: tag, durationMs };
     } catch (err) {
-      if (abort.signal.aborted || err instanceof BuildCancelledError) {
-        log.step("build", "failed", "Docker build cancelled");
-        return {
-          sessionId: config.sessionId,
-          status: "cancelled",
-          durationMs: Date.now() - startTime,
-        };
-      }
+      if (abort.signal.aborted || err instanceof BuildCancelledError) return cancelled();
       const msg = safeErrorMessage(err);
       log.step("build", "failed", `Docker build failed: ${msg}`);
       return { sessionId: config.sessionId, status: "failed", durationMs: Date.now() - startTime, errorMessage: `Docker build failed: ${msg}` };
     } finally {
-      if (activeDockerBuilds.get(config.sessionId) === abort) {
-        activeDockerBuilds.delete(config.sessionId);
-      }
+      releaseDockerBuild(config.sessionId, abort);
     }
   }
 
@@ -2075,20 +2145,31 @@ export class DockerRuntime implements RuntimeAdapter {
     const cloneOnServer = isSsh && !!source.cloneOnServer;
     const remoteContextDir = `/tmp/openship-build-${source.sessionId}`;
 
-    // Acquire the shared source ONCE: clone-on-server clones directly on the
-    // remote host (no transfer); otherwise clone on the orchestrator (and
-    // transfer the tree below).
-    let tree: Awaited<ReturnType<typeof prepareSourceTree>> | null = null;
-    if (cloneOnServer) {
-      prepareLogger.step("clone", "running", "Cloning source on the server...");
-      await this.cloneSourceOnRemote(source, remoteContextDir, prepareLogger);
-      prepareLogger.step("clone", "completed", "Source cloned on the server");
-    } else {
-      prepareLogger.step("clone", "running", "Preparing shared build context...");
-      tree = await prepareSourceTree(source, { onLog: prepareLogger.callback });
-    }
+    // Register EVERY service's build up front, before the shared clone/transfer:
+    // a cancel that lands during that shared phase must be seen by all of them,
+    // and cancelBuild() only reaches builds that are already registered.
+    const abortControllers = new Map(
+      specs.map((spec) => [spec.config.sessionId, registerDockerBuild(spec.config.sessionId)]),
+    );
+    const isCancelled = (sessionId: string): boolean =>
+      abortControllers.get(sessionId)?.signal.aborted === true;
+    const anyCancelled = (): boolean =>
+      [...abortControllers.values()].some((c) => c.signal.aborted);
 
+    let tree: Awaited<ReturnType<typeof prepareSourceTree>> | null = null;
     try {
+      // Acquire the shared source ONCE: clone-on-server clones directly on the
+      // remote host (no transfer); otherwise clone on the orchestrator (and
+      // transfer the tree below).
+      if (cloneOnServer) {
+        prepareLogger.step("clone", "running", "Cloning source on the server...");
+        await this.cloneSourceOnRemote(source, remoteContextDir, prepareLogger);
+        prepareLogger.step("clone", "completed", "Source cloned on the server");
+      } else {
+        prepareLogger.step("clone", "running", "Preparing shared build context...");
+        tree = await prepareSourceTree(source, { onLog: prepareLogger.callback });
+      }
+
       // Resolve/generate each service's Dockerfile INTO the shared tree, with a
       // per-service generated name so concurrent builds never clobber each other.
       const resolvedList = await Promise.all(
@@ -2144,7 +2225,8 @@ export class DockerRuntime implements RuntimeAdapter {
         } catch {
           prepareLogger.step("clone", "completed", "Shared build context ready");
         }
-        if (isSsh) {
+        // Don't push megabytes at a host whose build the user already cancelled.
+        if (isSsh && !anyCancelled()) {
           await this.transferBuildContext(tree.contextDir, remoteContextDir, prepareLogger);
         }
       }
@@ -2160,6 +2242,21 @@ export class DockerRuntime implements RuntimeAdapter {
       for (const { spec, dockerfileName, contextEntries, error } of resolvedList) {
         const startedAt = Date.now();
         const tag = this.imageTag(spec.config.slug, spec.config.sessionId);
+        const signal = abortControllers.get(spec.config.sessionId)?.signal;
+
+        // Cancelled before this service's turn came up (builds are sequential, so
+        // most services of a cancelled compose deploy land here). Reported as
+        // "cancelled", never "failed" — the pipeline branches on it.
+        if (isCancelled(spec.config.sessionId)) {
+          const result: BuildResult = {
+            sessionId: spec.config.sessionId,
+            status: "cancelled",
+            durationMs: Date.now() - startedAt,
+          };
+          spec.onResult?.(result);
+          results.push({ serviceName: spec.serviceName, result });
+          continue;
+        }
 
         if (error || !dockerfileName) {
           const result: BuildResult = {
@@ -2184,6 +2281,7 @@ export class DockerRuntime implements RuntimeAdapter {
               dockerfileName,
               tag,
               spec.logger,
+              signal,
             );
           } else {
             // Own the pack (error handler + abort) so a build-context read
@@ -2193,6 +2291,7 @@ export class DockerRuntime implements RuntimeAdapter {
             const { body, abortSignal, takeError } = packBuildContext(
               tree!.contextDir,
               contextEntries ?? [],
+              signal,
             );
             try {
               const stream = await this.docker.buildImage(body, {
@@ -2214,6 +2313,19 @@ export class DockerRuntime implements RuntimeAdapter {
                 ? new Error(`Failed to read Docker build context: ${safeErrorMessage(contextErr)}`, { cause: contextErr })
                 : err;
             }
+          }
+
+          // Same last gate as build(): an image that finished under a cancel must
+          // not come back "deploying", or the compose pipeline deploys it anyway.
+          if (isCancelled(spec.config.sessionId)) {
+            const result: BuildResult = {
+              sessionId: spec.config.sessionId,
+              status: "cancelled",
+              durationMs: Date.now() - startedAt,
+            };
+            spec.onResult?.(result);
+            results.push({ serviceName: spec.serviceName, result });
+            continue;
           }
 
           await this.verifyImageBuilt(tag);
@@ -2250,6 +2362,19 @@ export class DockerRuntime implements RuntimeAdapter {
           spec.onResult?.(result);
           results.push({ serviceName: spec.serviceName, result });
         } catch (err) {
+          // A cancelled build surfaces as an aborted stream or BuildCancelledError;
+          // either way it is not a build failure.
+          if (isCancelled(spec.config.sessionId) || err instanceof BuildCancelledError) {
+            spec.logger.log("Docker build cancelled\n", "error");
+            const result: BuildResult = {
+              sessionId: spec.config.sessionId,
+              status: "cancelled",
+              durationMs: Date.now() - startedAt,
+            };
+            spec.onResult?.(result);
+            results.push({ serviceName: spec.serviceName, result });
+            continue;
+          }
           const msg = safeErrorMessage(err);
           spec.logger.log(`Docker build failed: ${msg}\n`, "error");
           const result: BuildResult = {
@@ -2264,6 +2389,9 @@ export class DockerRuntime implements RuntimeAdapter {
       }
       return results;
     } finally {
+      for (const [sessionId, abort] of abortControllers) {
+        releaseDockerBuild(sessionId, abort);
+      }
       if (isSsh) {
         this.connectionOptions?.executor
           ?.exec(`rm -rf ${sq(remoteContextDir)}`)
@@ -2274,34 +2402,39 @@ export class DockerRuntime implements RuntimeAdapter {
   }
 
   async cancelBuild(sessionId: string): Promise<void> {
-    const abort = activeDockerBuilds.get(sessionId);
-    if (abort) {
-      abort.abort();
-    } else {
-      pendingDockerBuildCancellations.add(sessionId);
+    // A compose deploy registers one build per service under `<sessionId>-<serviceId>`,
+    // so abort every active build this id covers, not just an exact match.
+    for (const [activeId, abort] of activeDockerBuilds) {
+      if (cancelCovers(sessionId, activeId)) abort.abort();
     }
+    // Recorded unconditionally: "something was active" does NOT mean every build
+    // this cancel covers has registered — the later services of a compose deploy
+    // may still be queued behind the one that's running.
+    recordPendingCancellation(sessionId);
 
     // Closing an SSH channel normally sends SIGHUP to its remote shell, but a
     // host-side `docker build` may outlive that channel while the daemon keeps
-    // working. Kill the command whose cwd is this session's private context,
-    // mirroring BareRuntime's remote-build cancellation. This is a no-op for
-    // local/TCP runtimes and when the command has already exited.
+    // working. Kill whatever is running in this session's private context dirs,
+    // sharing BareRuntime's sweep. A no-op for local/TCP runtimes and when the
+    // command has already exited.
     const executor =
       this.transport.kind === "ssh" ? this.connectionOptions?.executor : undefined;
     if (executor) {
-      const dir = sq(`/tmp/openship-build-${sessionId}`);
-      const scan = (signal: string) =>
-        `for p in /proc/[0-9]*; do c=$(readlink "$p/cwd" 2>/dev/null); ` +
-        `case "$c" in ${dir}|${dir}/*) kill -${signal} "\${p##*/}" 2>/dev/null || true;; esac; done`;
-      await executor.exec(`${scan("TERM")}; sleep 2; ${scan("KILL")}`).catch(() => {});
+      await killProcessesUnderDir(executor, `/tmp/openship-build-${sessionId}`, {
+        includeSuffixed: true,
+      });
     }
 
-    // Attempt to find and kill the build container by label
+    // Attempt to find and kill the build container by label. Filtered on the label
+    // KEY, not `key=value`: a compose service's container carries the derived
+    // `<sessionId>-<serviceId>`, which an exact-value filter would never match.
     const containers = await this.docker.listContainers({
       all: true,
-      filters: { label: [`openship.build=${sessionId}`] },
+      filters: { label: ["openship.build"] },
     });
     for (const c of containers) {
+      const buildId = c.Labels?.["openship.build"];
+      if (!buildId || !cancelCovers(sessionId, buildId)) continue;
       try {
         await this.docker.getContainer(c.Id).remove({ force: true });
       } catch { /* already removed */ }
