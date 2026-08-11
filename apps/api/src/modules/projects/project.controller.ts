@@ -1795,10 +1795,8 @@ async function reRegisterDomainRoute(
     // Find the service deployment to get the container target. Prefer a row with
     // a container to inspect — a stored ip alone is just the last-known value.
     //
-    // Which service is "primary" comes from the same picker the access URL uses:
-    // `service_deployment` rows come back in insertion (dependency) order, so
-    // taking the first one with a container pointed the webhook vhost at whatever
-    // an exposed app depends on — its database (#498).
+    // Via the same picker the access URL uses: these rows come back in insertion
+    // (dependency) order, so the first one with a container was the database (#498).
     const svcDeps = await repos.service.listByDeployment(project.activeDeploymentId);
     const [projectServices, domainRows] = await Promise.all([
       repos.service.listByProject(project.id).catch(() => []),

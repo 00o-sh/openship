@@ -240,10 +240,6 @@ export async function getBuildSessionStatus(deploymentId: string) {
     // the server-backed keep/reject decision so the "Action Required" banner +
     // modal reappear after a refresh, until the user keeps or rejects.
     deploymentStatus: dep.status,
-    // A settled deploy that shipped nothing. Distinct from `ready` for a client
-    // that wants to say so, but still a healthy terminal state — the SSE status
-    // above stays "ready", so the build page renders as finished either way.
-    noChanges: snapshot?.noChanges === true,
     decisionPending: snapshot?.composeDeployment?.decision === "pending",
     partial: snapshot?.composeDeployment
       ? {

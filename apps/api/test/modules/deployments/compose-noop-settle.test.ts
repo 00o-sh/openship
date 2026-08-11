@@ -163,7 +163,6 @@ describe("executeComposePipeline — an all-carried redeploy must not take over"
     expect(h.activePointer).toEqual([]);
     const settle = h.statusWrites.find((w) => w.status === "no_changes");
     expect(settle, "a no-op must record a no_changes row").toBeTruthy();
-    expect((settle!.extra?.meta as { noChanges?: boolean } | undefined)?.noChanges).toBe(true);
     expect(h.containerIdWrites).toEqual([]);
     expect(h.notifications).toEqual(["deployment.no_changes"]);
     expect(h.audits).toEqual(["deployment.no_changes"]);

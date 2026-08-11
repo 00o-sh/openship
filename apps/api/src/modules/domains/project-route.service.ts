@@ -453,12 +453,11 @@ export async function reapplyProjectLiveRoutes(
 
     const containerId = deployment.containerId;
     if (!isRealContainerRef(containerId)) {
-      // Compose/multi-service deployments track containers per-service, so the
-      // parent row carries the `"compose"` sentinel or one service's container —
-      // never a single-app upstream to point a project-level route at (per-service
-      // routes are handled in updateService). Testing only for null let a compose
-      // project's project-level domain fall through to the port published by
-      // whichever service the row named, which in dependency order was its database.
+      // The `"compose"` sentinel means the release has no single upstream to point a
+      // project-level route at (per-service routes are handled in updateService). A
+      // REAL primary container is routed below — it is the container the project's
+      // canonical URL resolves to, which is what `primaryContainerId` now guarantees.
+      // Testing only for null sent the sentinel down that path as a container id.
       // Still tear down any dropped hostnames on the correct host.
       console.warn(
         `[project-route] ${project.slug}: deployment ${deployment.id} has no containerId (target=${effectiveTarget}) — skipping single-app route registration`,

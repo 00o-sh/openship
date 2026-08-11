@@ -322,8 +322,6 @@ export const EVENT_HEADLINES: Record<string, { title: string; description: strin
     title: "Server reachable",
     description: "A server's Docker daemon is answering again, with how long it was gone.",
   },
-  // Same reasoning: it subscribes as a success, but "Deploy succeeded" over a body
-  // saying nothing shipped is the exact mismatch this override exists for.
   "deployment.no_changes": {
     title: "No changes to deploy",
     description: "A redeploy found every service already up to date; the live release didn't move.",

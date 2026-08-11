@@ -110,10 +110,6 @@ export interface DeploymentMeta {
    * agree on one path.
    */
   staticServeOutputDir?: string;
-  /** This deploy carried every service forward and shipped nothing, so it never
-   *  became the active release (see `onNoChanges`). Mirrors the row's
-   *  `no_changes` status for clients reading meta rather than status. */
-  noChanges?: boolean;
   /** Compose roll-up. Loosely typed on purpose — the pipeline writes a wider
    *  object than any one reader needs. */
   composeDeployment?: { warningMessage?: string } & Record<string, unknown>;

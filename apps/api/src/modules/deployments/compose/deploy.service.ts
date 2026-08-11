@@ -985,9 +985,10 @@ export async function deployComposeServices(
     const prev = previousByServiceId.get(svc.id);
     if (!prev?.containerId) return false; // nothing running to carry
     // Against the image this deploy INTENDS, not the service row's: a pinned ref
-    // (rollback, `--image-version`) arrives via `builtImages` and is first read
-    // past the carry `continue`, so comparing `svc.image` carried a service whose
-    // intended image differed from the running one.
+    // (a rollback replay, a migration cutover's `handoverImages`) arrives via
+    // `builtImages` and is first read PAST the carry `continue`, so comparing
+    // `svc.image` carried a service whose intended image differed from the running
+    // one — comparing the row against itself.
     const intended = opts?.builtImages?.get(svc.id) ?? svc.image;
     if (prev.imageRef && prev.imageRef !== intended) return false;
     return true;
@@ -1244,22 +1245,16 @@ export async function deployComposeServices(
         // that is the row the next deploy reads (`previousByServiceId`), and an
         // all-carried pass never becomes active — so writing it only under `dep.id`
         // discards the fix and the stale binding comes back next time.
+        //
+        // A NARROW write, not an upsert: `upsertServiceDeployment` sets every
+        // column, so omitting `imageDigest` would null the anchor the update
+        // scanner needs to see a moved mutable tag — on the LIVE release's row.
         if (
-          project.activeDeploymentId &&
           project.activeDeploymentId !== dep.id &&
           (carriedIp !== (carried.ip ?? null) || carriedHostPort !== (carried.hostPort ?? null))
         ) {
           await repos.service
-            .upsertServiceDeployment({
-              deploymentId: project.activeDeploymentId,
-              serviceId: svc.id,
-              serviceName: svc.name,
-              containerId: carried.containerId,
-              status: "success",
-              imageRef: carried.imageRef ?? null,
-              hostPort: carriedHostPort,
-              ip: carriedIp,
-            })
+            .updateServiceDeployment(carried.id, { ip: carriedIp, hostPort: carriedHostPort })
             .catch(() => {});
         }
         // Decoupled single-service add on a mesh runtime (cloud): this peer is
@@ -2321,7 +2316,7 @@ export async function deployComposeServices(
             [],
             service.id,
           );
-          mutated = true; // persisted env — this pass is not a no-op
+          mutated = true;
           logger.log(`Prepared ${step.capture} → ${step.persistAs.key}\n`, "info");
         }
       } catch (err) {
@@ -2340,26 +2335,28 @@ export async function deployComposeServices(
       sessionManager.broadcastInstallPhase(dep.id, { id: "app-setup", status: "done" });
     }
   }
-  // Services this pass actually stood up, derived from the results rather than
-  // counted next to `successful` — a future success branch that forgets to
-  // increment would otherwise re-open #498 silently.
   const deployed = results.filter((r) => r.status !== "failed" && !r.carried).length;
 
   // The container a project-level question resolves to, picked the same way the
-  // access URL is. The fallbacks cover a primary with no container of its own (a
-  // static-served app, a failed one): any other exposed service, then the
-  // topo-first row — for a worker-only stack there is no better answer, and a
-  // wrong container still beats the sentinel's guaranteed 404.
+  // access URL is — and over `enabled`, NOT `ordered`: `pickPrimaryServiceId`'s
+  // last resort is the first element, and `ordered` is topo-sorted, so for a
+  // port-only project (nothing `exposed`, no verified domain) that first element
+  // is the dependency — the database — which is the very thing #498 is about. The
+  // read paths pass `listByProject` order, so passing `enabled` also keeps write
+  // and read agreeing on one answer. Narrowed to the services that actually came
+  // up with a container, so a static-served or failed primary defers to a real one.
   const primaryContainerId = await (async () => {
     const withContainer = results.filter((r) => r.containerId);
     if (withContainer.length === 0) return undefined;
     const domainRows = needsDomainMap
       ? [...domainByHostname.values()]
       : await repos.domain.listByProject(project.id).catch(() => []);
-    const primaryId = pickPrimaryServiceId(ordered, domainRows);
+    const candidates = enabled.filter((svc) =>
+      withContainer.some((r) => r.serviceId === svc.id),
+    );
+    const primaryId = pickPrimaryServiceId(candidates, domainRows);
     return (
       withContainer.find((r) => r.serviceId === primaryId)?.containerId ??
-      withContainer.find((r) => ordered.find((s) => s.id === r.serviceId)?.exposed)?.containerId ??
       withContainer[0].containerId
     );
   })();
@@ -2535,7 +2532,7 @@ export async function deployComposeServices(
       if (!previous.containerId || enabledServiceIds.has(previous.serviceId)) continue;
       try {
         await runtime.destroy(previous.containerId);
-        mutated = true; // reaped a container — this pass is not a no-op
+        mutated = true;
         logger.log(`Stopped disabled service container (${previous.containerId.slice(0, 12)}).\n`);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unknown error";
@@ -2573,7 +2570,7 @@ export async function deployComposeServices(
     ) {
       try {
         await runtime.destroy(prevContainerId);
-        mutated = true; // reaped a container — this pass is not a no-op
+        mutated = true;
         logger.log(`Stopped previous single-app container (${prevContainerId.slice(0, 12)}).\n`);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Unknown error";

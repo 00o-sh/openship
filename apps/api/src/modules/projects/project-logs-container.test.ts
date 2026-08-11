@@ -18,6 +18,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
   containerId: "cid-db" as string | null,
+  activeDeploymentId: "dep_1" as string,
   services: [] as Array<{ id: string; name: string; enabled: boolean; exposed: boolean }>,
   serviceRows: [] as Array<{ id: string; serviceId: string; containerId: string | null }>,
   live: [] as Array<{ id: string; names: string[]; state: string; labels: Record<string, string> }>,
@@ -34,7 +35,7 @@ vi.mock("@repo/db", () => ({
         id: "proj_1",
         slug: "stack",
         organizationId: "org_1",
-        activeDeploymentId: "dep_1",
+        activeDeploymentId: h.activeDeploymentId,
       }),
     },
     deployment: {
@@ -105,6 +106,7 @@ const container = (serviceName: string, id: string) => ({
 
 beforeEach(() => {
   h.containerId = "cid-db";
+  h.activeDeploymentId = "dep_1";
   h.services = [];
   h.serviceRows = [];
   h.live = [];
@@ -142,16 +144,31 @@ describe("project logs target the primary service, not the recorded database", (
     expect(h.healed).toEqual([{ rowId: "row_app", containerId: "cid-new" }]);
   });
 
-  it("uses the recorded id for a single-app deployment and never reads service rows", async () => {
+  it("uses the recorded id for a single-app deployment and stops after one query", async () => {
     h.containerId = "cid-single";
 
     await getRuntimeLogs("proj_1", "org_1");
 
     expect(h.logTargets).toEqual(["cid-single"]);
-    // One project-services read to establish there are none, and nothing further:
-    // opening logs must not fan out per call.
-    expect(h.listByProjectCalls).toBe(1);
-    expect(h.listByDeploymentCalls).toBe(0);
+    // The deployment's own rows answer "was this a service deploy", and there are
+    // none — so nothing further is read. Opening logs must not fan out per call.
+    expect(h.listByDeploymentCalls).toBe(1);
+    expect(h.listByProjectCalls).toBe(0);
+  });
+
+  it("answers a HISTORICAL deployment from its own row and never rewrites it", async () => {
+    // The live matcher keys on the project+service label, so it reports whatever
+    // runs NOW. For an older release that is the wrong container, and healing from
+    // it would rewrite history from a GET — these endpoints take any deployment id.
+    h.activeDeploymentId = "dep_7";
+    h.services = [{ id: "svc_app", name: "app", enabled: true, exposed: true }];
+    h.serviceRows = [{ id: "row_app", serviceId: "svc_app", containerId: "cid-v3" }];
+    h.live = [container("app", "cid-v7")];
+
+    await getRuntimeLogs("proj_1", "org_1");
+
+    expect(h.logTargets).toEqual(["cid-v3"]);
+    expect(h.healed).toEqual([]);
   });
 
   it("refuses the compose sentinel rather than dialling a container named 'compose'", async () => {

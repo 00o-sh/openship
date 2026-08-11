@@ -37,8 +37,6 @@
 
 import { COMPOSE_SENTINEL } from "../../../lib/container-ref";
 
-export { COMPOSE_SENTINEL };
-
 export const ROLLBACK_ERROR_CODES = {
   NOT_READY: "ROLLBACK_NOT_READY",
   ALREADY_ACTIVE: "ROLLBACK_ALREADY_ACTIVE",

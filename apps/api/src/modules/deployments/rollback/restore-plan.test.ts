@@ -1,6 +1,6 @@
+import { COMPOSE_SENTINEL } from "../../../lib/container-ref";
 import { describe, it, expect } from "vitest";
 import {
-  COMPOSE_SENTINEL,
   ROLLBACK_ERROR_CODES,
   planNeedsRepository,
   planRestore,
