@@ -866,6 +866,28 @@ export class DockerBackupExecutor implements BackupExecutor {
 
     docker.modem.demuxStream(stream as unknown as NodeJS.ReadableStream, stdout, stderrSink);
 
+    // demuxStream only forwards 'data' — it never ends the destinations when the
+    // source attach stream ends. Without this, a consumer piping stdout (pg_dump,
+    // mysqldump, mongodump, custom commands → the destination writer) waits on an
+    // EOF that never comes: the dump is fully written, the exec has exited, and
+    // the run still sits in `uploading` forever (#516). demuxContainerStream
+    // below carries the same fix for the volume/tar path.
+    //
+    // Safe to end here, and ONLY here: this path learns the exit code from the
+    // attach stream's own 'end' (see awaitExit below), so by the time it fires
+    // every byte has already been demuxed. Do not move this to a daemon-side exit
+    // signal — an exec can exit with bytes still in flight, and ending early
+    // truncates the artifact (the trap demuxContainerStream documents).
+    let sinksEnded = false;
+    const endSinks = () => {
+      if (sinksEnded) return;
+      sinksEnded = true;
+      stdout.end();
+      stderrSink.end();
+    };
+    stream.on("end", endSinks);
+    stream.on("close", endSinks);
+
     const watchdog = createIdleWatchdog(
       idleMs,
       `${label} produced no data for ${Math.round(idleMs / 1000)}s and was abandoned.`,
