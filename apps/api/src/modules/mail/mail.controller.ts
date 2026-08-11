@@ -389,6 +389,10 @@ export async function listMailServers(c: Context) {
     .map((row) => {
       const s = serverById.get(row.serverId);
       if (!s) return null; // FK CASCADE should prevent this, but guard anyway
+      // Where an incomplete install paused, if anywhere. The human label is
+      // derived from the step id here (server side) so the list needn't fetch
+      // per-server status or duplicate the step table on the client.
+      const resumeStep = row.resumeStep ?? null;
       return {
         id: s.id,
         name: s.name || s.sshHost,
@@ -398,6 +402,10 @@ export async function listMailServers(c: Context) {
         domain: row.domain,
         completed: row.installedAt !== null,
         active: active?.serverId === s.id,
+        resumeStep,
+        resumeStepLabel: resumeStep
+          ? MAIL_SETUP_STEPS[resumeStep - 1]?.label ?? null
+          : null,
       };
     })
     .filter((r): r is NonNullable<typeof r> => r !== null);
@@ -820,6 +828,15 @@ export async function startSetup(c: Context) {
       state = { ...state, finishedAt: extra.finishedAt ?? null, ...extra };
       await persist();
       active = null;
+      // Mirror the paused step onto the registry row so the /emails server list
+      // can show WHERE an incomplete install stopped without an SSH probe (the
+      // whole point of that table). A tracking write: never let it fail the
+      // stream — same posture as markInstalled below.
+      await repos.mailServer
+        .setResumeStep(serverId, state.resumeStep ?? null)
+        .catch((err) =>
+          console.warn("[mail] setResumeStep failed:", safeErrorMessage(err)),
+        );
     };
 
     try {

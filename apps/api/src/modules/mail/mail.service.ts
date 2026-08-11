@@ -32,6 +32,7 @@ import {
 import {
   HOST_AMAVIS_CONF_CANDIDATES,
   HOST_AMAVIS_CONF_PROBE,
+  forgetMailEngine,
   mailConfigFile,
   mailEngineCommand,
   mailUnitActionCommand,
@@ -616,6 +617,14 @@ export async function stepDeployEngine(
   } catch (err) {
     return { stepId, success: false, message: `Mail engine deploy failed: ${errMsg(err)}` };
   }
+
+  // We just changed the box's mail topology under a POOLED executor. Drop any
+  // memoized probe so the health gate below — and the DKIM step next — re-detect
+  // the engine that now exists, instead of trusting a "none" a status poll cached
+  // before this container was up. `resolveMailEngine` no longer retains a "none",
+  // but a mutation must still invalidate at its own boundary (belt-and-suspenders
+  // against a stale positive from a prior engine, and the honest contract).
+  forgetMailEngine(exec);
 
   // Health-gate on the daemons the container actually reports (via supervisorctl),
   // so a container that starts but whose Postfix/Dovecot never come up is a failure

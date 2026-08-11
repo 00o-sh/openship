@@ -414,6 +414,10 @@ export const mailApi = {
         domain: string | null;
         completed: boolean;
         active: boolean;
+        // The step an incomplete install paused at (null once complete / never
+        // halted) + its human label, so the list can show "Stopped · step N".
+        resumeStep: number | null;
+        resumeStepLabel: string | null;
       }>;
     }>(endpoints.mail.servers),
 

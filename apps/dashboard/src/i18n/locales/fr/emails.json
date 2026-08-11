@@ -82,7 +82,10 @@
     "willStream": "Les journaux s'afficheront ici une fois la configuration démarrée.",
     "jumpToLatest": "Aller au plus récent",
     "setupFailed": "Échec de la configuration",
-    "retryFromStep": "Réessayer à partir de l'étape {resumeStep}"
+    "retryFromStep": "Réessayer à partir de l'étape {resumeStep}",
+    "resumePausedTitle": "Configuration en pause",
+    "stepLabel": "Étape {step}",
+    "continueFromStep": "Reprendre à l'étape {step}"
   },
   "serverList": {
     "title": "Serveurs de messagerie",
@@ -91,7 +94,8 @@
     "removeAria": "Retirer {name} de la liste de messagerie",
     "installing": "Installation en cours",
     "running": "En cours d'exécution",
-    "incomplete": "Incomplet"
+    "incomplete": "Incomplet",
+    "stoppedAt": "Arrêté · étape {step}"
   },
   "setup": {
     "title": "Configuration du serveur de messagerie",

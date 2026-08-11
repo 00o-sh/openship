@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { integer, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 import { servers } from "./servers";
 import { project } from "./project";
 
@@ -33,6 +33,18 @@ export const mailServers = pgTable("mail_servers", {
 
   /** Stamped when the install wizard hits the "completed" terminal state. */
   installedAt: timestamp("installed_at"),
+
+  /**
+   * The step the setup wizard is paused at, mirrored from the on-host state
+   * file's `resumeStep` whenever the install halts (a failed step, or a
+   * DNS/PTR hold). NULL once the wizard completes or before it ever halts.
+   *
+   * Lets the /emails server list show WHERE an incomplete install stopped
+   * ("Stopped · step 6: Retrieve DKIM Keys") without the per-server SSH probe
+   * this table exists to avoid — the human label is derived from the step id
+   * against MAIL_SETUP_STEPS, so only the id is stored here.
+   */
+  resumeStep: integer("resume_step"),
 
   /**
    * The webmail project serving this mail server, when one was installed from

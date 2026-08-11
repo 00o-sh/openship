@@ -82,7 +82,10 @@
     "willStream": "Kurulum başladığında günlükler buraya akacaktır.",
     "jumpToLatest": "En son satıra git",
     "setupFailed": "Kurulum başarısız oldu",
-    "retryFromStep": "{resumeStep}. adımdan tekrar dene"
+    "retryFromStep": "{resumeStep}. adımdan tekrar dene",
+    "resumePausedTitle": "Kurulum duraklatıldı",
+    "stepLabel": "Adım {step}",
+    "continueFromStep": "{step}. adımdan devam et"
   },
   "serverList": {
     "title": "E-posta sunucuları",
@@ -91,7 +94,8 @@
     "removeAria": "{name} sunucusunu e-posta listesinden kaldır",
     "installing": "Kuruluyor",
     "running": "Çalışıyor",
-    "incomplete": "Tamamlanmamış"
+    "incomplete": "Tamamlanmamış",
+    "stoppedAt": "Durduruldu · adım {step}"
   },
   "setup": {
     "title": "E-posta Sunucusu Kurulumu",

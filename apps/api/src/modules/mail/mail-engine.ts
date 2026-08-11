@@ -32,6 +32,13 @@
  * to tune and no cache to invalidate by hand. A command that fails with a
  * "wrong flavor" signature drops the memo and re-probes to report the accurate
  * reason, so a hand-migrated box self-corrects on its next call.
+ *
+ * Only a POSITIVE topology (an engine exists) is retained. A `flavor: "none"` is
+ * NOT memoized: that executor is pooled per server, so a `getStatus` poll probing
+ * a box mid-setup would otherwise pin "no engine" for the whole run — and the DKIM
+ * step one line after "Mail engine container running" would trust it and refuse.
+ * A "nothing here" is exactly the state `deploy_engine` ends, so it's re-probed
+ * every call, same as a transient failure.
  */
 
 import {
@@ -94,12 +101,24 @@ const probes = new WeakMap<CommandExecutor, Promise<MailEngineProbe>>();
 export async function resolveMailEngine(executor: CommandExecutor): Promise<MailEngineProbe> {
   const cached = probes.get(executor);
   if (cached) return cached;
-  // Cache the promise, not the result — and drop it if the probe itself throws,
-  // so a transient SSH failure isn't remembered as "no mail engine".
-  const pending = detectMailEngine(executor).catch((err: unknown) => {
-    probes.delete(executor);
-    throw err;
-  });
+  // Cache the in-flight promise so concurrent callers on one connection share a
+  // single probe — then drop the memo for the two answers that go stale under a
+  // pooled executor:
+  //   - a throw (transient SSH failure), so it isn't remembered as "no engine";
+  //   - a `flavor: "none"`, the state `deploy_engine` ends. A concurrent
+  //     `getStatus` poll on the SAME pooled executor probing a box before its
+  //     container is up would otherwise pin "none" for the whole 5-min run, and
+  //     the DKIM step would refuse with "no mail engine" one line after the
+  //     deploy step logged the engine running.
+  const pending = detectMailEngine(executor)
+    .then((probe) => {
+      if (probe.flavor === "none") probes.delete(executor);
+      return probe;
+    })
+    .catch((err: unknown) => {
+      probes.delete(executor);
+      throw err;
+    });
   probes.set(executor, pending);
   return pending;
 }

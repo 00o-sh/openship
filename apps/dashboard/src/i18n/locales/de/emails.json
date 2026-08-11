@@ -82,7 +82,10 @@
     "willStream": "Die Protokolle werden hier gestreamt, sobald die Einrichtung startet.",
     "jumpToLatest": "Zum Neuesten springen",
     "setupFailed": "Einrichtung fehlgeschlagen",
-    "retryFromStep": "Ab Schritt {resumeStep} erneut versuchen"
+    "retryFromStep": "Ab Schritt {resumeStep} erneut versuchen",
+    "resumePausedTitle": "Einrichtung pausiert",
+    "stepLabel": "Schritt {step}",
+    "continueFromStep": "Ab Schritt {step} fortsetzen"
   },
   "serverList": {
     "title": "Mailserver",
@@ -91,7 +94,8 @@
     "removeAria": "{name} aus der Mail-Liste entfernen",
     "installing": "Wird installiert",
     "running": "Läuft",
-    "incomplete": "Unvollständig"
+    "incomplete": "Unvollständig",
+    "stoppedAt": "Gestoppt · Schritt {step}"
   },
   "setup": {
     "title": "Mailserver-Einrichtung",

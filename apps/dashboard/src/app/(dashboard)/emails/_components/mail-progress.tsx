@@ -11,7 +11,6 @@
 import { useEffect, useRef, useState } from "react";
 import { XCircle, ArrowDown, Trash2 } from "lucide-react";
 import { useI18n, interpolate } from "@/components/i18n-provider";
-import { SetupErrorBanner } from "./setup-error-banner";
 
 interface LogEntry {
   stepId: number;
@@ -23,11 +22,9 @@ interface MailProgressProps {
   logs: LogEntry[];
   running: boolean;
   error: string | null;
-  resumeStep: number | null;
   /** Whether the Reset button can be shown (requires a selected server). */
   canReset: boolean;
   onCancel: () => void;
-  onResume: (fromStep: number) => void;
   onReset: () => void;
 }
 
@@ -43,10 +40,8 @@ export function MailProgress({
   logs,
   running,
   error,
-  resumeStep,
   canReset,
   onCancel,
-  onResume,
   onReset,
 }: MailProgressProps) {
   const { t } = useI18n();
@@ -134,7 +129,7 @@ export function MailProgress({
                   className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
                     confirmReset
                       ? "bg-danger-solid text-white hover:bg-danger-solid/90"
-                      : "border border-danger-border text-danger hover:bg-danger-bg"
+                      : "text-muted-foreground/60 hover:bg-danger-bg hover:text-danger"
                   }`}
                   title={t.emails.progress.resetTitle}
                 >
@@ -194,17 +189,9 @@ export function MailProgress({
           </button>
         )}
       </div>
-
-      {/* Error banner - retry CTA is mirrored here so it's hard to miss
-          even when the user's eye is on the logs. */}
-      {error && (
-        <SetupErrorBanner
-          title={t.emails.progress.setupFailed}
-          message={error}
-          resumeStep={resumeStep}
-          onResume={onResume}
-        />
-      )}
+      {/* The failure message + resume CTA now live in the ResumeHero above the
+          progress grid (mail-console), so a reopened incomplete install opens
+          to "Continue" rather than the log wall. This column is logs only. */}
     </div>
   );
 }

@@ -5,8 +5,10 @@
 #   1. seed-if-absent: copy baked config into empty bind mounts, never overwrite
 #      operator edits (config dirs are host bind mounts; the queue/maildir/DKIM
 #      data dirs start empty and are left alone).
-#   2. reconcile: rewrite the baked `build-placeholder` DB password in every
-#      daemon config to the real shared role password from the --env-file.
+#   2. reconcile: rewrite the baked placeholders in every daemon config to the
+#      real per-install values from the --env-file — the `build-placeholder` DB
+#      password (shared role) and the `build.invalid` domain (-> $FIRST_DOMAIN),
+#      the latter also writing /etc/mailname + an /etc/hosts FQDN entry.
 #   3. wait for the postgres SIDECAR (127.0.0.1:5432).
 #   4. bootstrap the mail databases (roles + schema + first domain) if the vmail
 #      schema isn't there yet — see db-bootstrap.sh; never re-init an existing DB.
@@ -66,6 +68,63 @@ if [ -n "${VMAIL_DB_BIND_PASSWD:-}" ]; then
   fi
   rm -f /opt/iredapd/__pycache__/*.pyc 2>/dev/null || true
   unset _OPENSHIP_MAIL_PW
+fi
+
+# 2b. reconcile the baked placeholder DOMAIN -> the real FIRST_DOMAIN.
+#     The image is built with FIRST_DOMAIN=build.invalid (docker/build-config), so
+#     every config iRedMail laid down at build carries `build.invalid` /
+#     `mail.build.invalid` — most importantly amavis's
+#     `dkim_key('build.invalid', 'dkim', '/var/lib/dkim/build.invalid.pem')`, whose
+#     key never exists on the fresh DKIM bind mount. Left as-is `amavisd` aborts
+#     loading its own config ("Can't open PEM file …/build.invalid.pem") and DKIM
+#     retrieval (setup step 6) fails. One token replace fixes the dkim_key directive
+#     AND postfix myhostname/mydomain at once (`mail.build.invalid` ->
+#     `mail.$FIRST_DOMAIN`, `build.invalid` -> `$FIRST_DOMAIN`); the DKIM step below
+#     then generates `/var/lib/dkim/$FIRST_DOMAIN.pem`, which the rewritten directive
+#     now points at. Idempotent: once the token is gone every later boot no-ops — and
+#     it still matches on an already-seeded broken mount, so `docker pull` + recreate
+#     self-heals a server that halted here.
+if [ -n "$FIRST_DOMAIN" ]; then
+  # Same fail-closed charset guard as db-bootstrap.sh: FIRST_DOMAIN is spliced into
+  # perl -e, /etc/mailname and /etc/hosts below, so a shell/regex metachar must never
+  # reach them. A bad value skips the reconcile (db-bootstrap FATALs on it shortly)
+  # rather than corrupting a config.
+  case "$FIRST_DOMAIN" in
+    *[!A-Za-z0-9.-]*|"")
+      log "WARN: FIRST_DOMAIN '$FIRST_DOMAIN' outside [A-Za-z0-9.-] — skipping domain reconcile" ;;
+    *)
+      export _OPENSHIP_MAIL_DOMAIN="$FIRST_DOMAIN"
+      # \Q…\E so the dot in build.invalid is literal, not a wildcard. Same file set +
+      # *.pyc handling as the password reconcile above.
+      if grep -rl --exclude='*.pyc' 'build\.invalid' \
+           /etc/postfix /etc/dovecot /etc/amavis /opt/iredapd /etc/fail2ban 2>/dev/null \
+           | xargs -r perl -pi -e 's/\Qbuild.invalid\E/$ENV{_OPENSHIP_MAIL_DOMAIN}/g'; then
+        log "reconciled build.invalid -> ${FIRST_DOMAIN} in daemon configs"
+      else
+        log "no build.invalid placeholder to reconcile"
+      fi
+      rm -f /opt/iredapd/__pycache__/*.pyc 2>/dev/null || true
+      unset _OPENSHIP_MAIL_DOMAIN
+
+      # /etc/mailname — Debian's "system mail name" (postfix myorigin source). Not on
+      # a bind mount and never written under the stubbed-init build, so it is missing
+      # at runtime: the `head: cannot open '/etc/mailname'` line in the step-6 error.
+      # Write the mail FQDN atomically (temp + rename) to match the reconciled
+      # myhostname; a write failure is a warning, never fatal.
+      printf 'mail.%s\n' "$FIRST_DOMAIN" > /etc/mailname.tmp \
+        && mv -f /etc/mailname.tmp /etc/mailname \
+        || log "WARN: could not write /etc/mailname"
+
+      # /etc/hosts — give the container FQDN a resolvable entry so `hostname --fqdn`
+      # (amavis/postfix call it at startup) stops failing with "Name or service not
+      # known". Docker manages /etc/hosts and resets it on recreate, so add-once-per-
+      # boot is correct; the -F guard keeps a within-boot re-run from duplicating.
+      if ! grep -qF "mail.${FIRST_DOMAIN}" /etc/hosts 2>/dev/null; then
+        printf '127.0.0.1 mail.%s mail\n' "$FIRST_DOMAIN" >> /etc/hosts \
+          || log "WARN: could not append FQDN to /etc/hosts"
+      fi
+      ;;
+  esac
 fi
 
 # 3. wait for the sidecar DB.

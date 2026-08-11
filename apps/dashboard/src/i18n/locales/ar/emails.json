@@ -82,7 +82,10 @@
     "willStream": "ستُبَثّ السجلات هنا بمجرد بدء الإعداد.",
     "jumpToLatest": "الانتقال إلى الأحدث",
     "setupFailed": "فشل الإعداد",
-    "retryFromStep": "إعادة المحاولة من الخطوة {resumeStep}"
+    "retryFromStep": "إعادة المحاولة من الخطوة {resumeStep}",
+    "resumePausedTitle": "تم إيقاف الإعداد مؤقتًا",
+    "stepLabel": "الخطوة {step}",
+    "continueFromStep": "المتابعة من الخطوة {step}"
   },
   "serverList": {
     "title": "خوادم البريد",
@@ -91,7 +94,8 @@
     "removeAria": "إزالة {name} من قائمة البريد",
     "installing": "قيد التثبيت",
     "running": "قيد التشغيل",
-    "incomplete": "غير مكتمل"
+    "incomplete": "غير مكتمل",
+    "stoppedAt": "متوقف · الخطوة {step}"
   },
   "setup": {
     "title": "إعداد خادم البريد",

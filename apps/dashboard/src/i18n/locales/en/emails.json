@@ -82,7 +82,10 @@
     "willStream": "Logs will stream here once setup starts.",
     "jumpToLatest": "Jump to latest",
     "setupFailed": "Setup failed",
-    "retryFromStep": "Retry from step {resumeStep}"
+    "retryFromStep": "Retry from step {resumeStep}",
+    "resumePausedTitle": "Setup paused",
+    "stepLabel": "Step {step}",
+    "continueFromStep": "Continue from step {step}"
   },
   "serverList": {
     "title": "Mail servers",
@@ -91,7 +94,8 @@
     "removeAria": "Remove {name} from the mail list",
     "installing": "Installing",
     "running": "Running",
-    "incomplete": "Incomplete"
+    "incomplete": "Incomplete",
+    "stoppedAt": "Stopped · step {step}"
   },
   "setup": {
     "title": "Mail Server Setup",

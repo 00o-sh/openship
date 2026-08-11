@@ -82,7 +82,10 @@
     "willStream": "Os registos serão transmitidos aqui assim que a configuração começar.",
     "jumpToLatest": "Ir para o mais recente",
     "setupFailed": "Falha na configuração",
-    "retryFromStep": "Tentar novamente a partir do passo {resumeStep}"
+    "retryFromStep": "Tentar novamente a partir do passo {resumeStep}",
+    "resumePausedTitle": "Configuração pausada",
+    "stepLabel": "Etapa {step}",
+    "continueFromStep": "Continuar da etapa {step}"
   },
   "serverList": {
     "title": "Servidores de email",
@@ -91,7 +94,8 @@
     "removeAria": "Remover {name} da lista de email",
     "installing": "A instalar",
     "running": "Em execução",
-    "incomplete": "Incompleto"
+    "incomplete": "Incompleto",
+    "stoppedAt": "Parado · etapa {step}"
   },
   "setup": {
     "title": "Configuração do Servidor de Email",

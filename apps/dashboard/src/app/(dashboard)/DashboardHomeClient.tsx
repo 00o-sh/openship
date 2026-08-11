@@ -347,7 +347,7 @@ export default function DashboardHomeClient({ initialData }: DashboardHomeClient
                         (no dark/monochrome glyph that vanishes or reads as a black blob
                         on the dark card). */}
                     <div className="mt-3.5 flex items-center justify-center">
-                      {["supabase", "convex", "neon", "n8n", "metabase", "directus"].map((id, i) => (
+                      {["supabase", "convex", "neon", "n8n", "metabase", "minio"].map((id, i) => (
                         <div
                           key={id}
                           className={`flex size-7 items-center justify-center rounded-full border border-border/60 bg-card ${

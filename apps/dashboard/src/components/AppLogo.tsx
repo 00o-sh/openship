@@ -29,7 +29,8 @@ export const APP_LOGO: Record<
   "uptime-kuma": { slug: "uptimekuma" },
   vaultwarden: { slug: "vaultwarden" },
   metabase: { slug: "metabase" },
-  directus: { slug: "directus" },
+  // Directus' rabbit is near-black (#263238) → invert it on the dark themes.
+  directus: { slug: "directus", darkInvert: true },
   nocodb: { slug: "nocodb" },
   // Grafana's mark stays colored; Gitea's tea-cup mark is fine as-is.
   grafana: { slug: "grafana" },

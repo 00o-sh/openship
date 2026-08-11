@@ -40,6 +40,7 @@ import { MailSetupForm, type SetupRelay } from "./mail-setup-form";
 import { MailProgress } from "./mail-progress";
 import { MailSidebar } from "./mail-sidebar";
 import { SetupErrorBanner } from "./setup-error-banner";
+import { ResumeHero } from "./resume-hero";
 import { DnsHoldBanner } from "./dns-hold-banner";
 import { PtrHoldBanner } from "./ptr-hold-banner";
 import { MailAdminPanel } from "./admin/admin-panel";
@@ -202,7 +203,10 @@ function MailConsoleInner() {
         const s = await mailApi.getStatus(serverId);
         setStatus(s);
         if (s.domain) setDomain(s.domain);
-        if (s.dnsRecords) setDnsRecords(s.dnsRecords as unknown as DnsRecords);
+        // Authoritative for the open server: a server without records must CLEAR
+        // any left over from the previously-viewed one, or the reference card
+        // bleeds the prior server's DNS across a switch (same class as handleAddNew).
+        setDnsRecords(s.dnsRecords ? (s.dnsRecords as unknown as DnsRecords) : null);
         if (s.active) setRunning(true);
         if (s.resumeStep) setResumeStep(s.resumeStep);
         if (s.errorMessage) setError(s.errorMessage);
@@ -334,6 +338,7 @@ function MailConsoleInner() {
     setAdminPassword("");
     setDnsPendingStep(null);
     setPtrPending(null);
+    setDnsRecords(null);
     setError(null);
     setAddingNew(true);
   }, [setServerInUrl]);
@@ -1050,15 +1055,24 @@ function MailConsoleInner() {
 
         {/* ── Setup in progress (or partially failed) ── */}
         {showProgress && (
-          <div className="grid grid-cols-1 lg:grid-cols-[1fr_420px] gap-6">
+          <div className="space-y-6">
+            {/* Resume-first: a paused install opens to a prominent "Continue"
+                action, not the log wall whose loudest control is Reset. */}
+            {!running && resumeStep && !isCompleted && (
+              <ResumeHero
+                stepId={resumeStep}
+                stepLabel={status?.steps?.find((s) => s.id === resumeStep)?.label}
+                error={error}
+                onResume={handleStart}
+              />
+            )}
+            <div className="grid grid-cols-1 lg:grid-cols-[1fr_420px] gap-6">
             <MailProgress
               logs={logs}
               running={running}
               error={error}
-              resumeStep={resumeStep}
               canReset={!!selectedServer?.id}
               onCancel={handleCancel}
-              onResume={handleStart}
               onReset={handleReset}
             />
             <MailSidebar
@@ -1076,6 +1090,7 @@ function MailConsoleInner() {
               onResolveConflict={handleResolveConflict}
               onResume={handleStart}
             />
+            </div>
           </div>
         )}
     </PageContainer>

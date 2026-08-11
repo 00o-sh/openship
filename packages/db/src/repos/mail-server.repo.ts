@@ -98,11 +98,28 @@ export function createMailServerRepo(db: Database) {
           set: {
             domain: normalized,
             installedAt: new Date(),
+            // A completed install has no step to resume from. The halt(null) on
+            // success already clears this; nulling it here too keeps the row
+            // honest even if markInstalled is reached by another path.
+            resumeStep: null,
             updatedAt: new Date(),
           },
         })
         .returning();
       return row;
+    },
+
+    /**
+     * Mirror the wizard's paused step onto the row (null once complete / not
+     * halted). Update-only, like `setWebmailProject`: a missing row means the
+     * install never started, so there's nothing to annotate — no-op, never an
+     * upsert (that would fabricate a row with no `domain`).
+     */
+    async setResumeStep(serverId: string, step: number | null): Promise<void> {
+      await db
+        .update(mailServers)
+        .set({ resumeStep: step, updatedAt: new Date() })
+        .where(eq(mailServers.serverId, serverId));
     },
 
     /** The mail server whose webmail is this project — the reverse of the link

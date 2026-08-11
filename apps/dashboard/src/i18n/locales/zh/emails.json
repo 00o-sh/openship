@@ -82,7 +82,10 @@
     "willStream": "安装开始后日志将在此处实时显示。",
     "jumpToLatest": "跳到最新",
     "setupFailed": "安装失败",
-    "retryFromStep": "从第 {resumeStep} 步重试"
+    "retryFromStep": "从第 {resumeStep} 步重试",
+    "resumePausedTitle": "安装已暂停",
+    "stepLabel": "步骤 {step}",
+    "continueFromStep": "从步骤 {step} 继续"
   },
   "serverList": {
     "title": "邮件服务器",
@@ -91,7 +94,8 @@
     "removeAria": "将 {name} 从邮件列表中移除",
     "installing": "正在安装",
     "running": "运行中",
-    "incomplete": "未完成"
+    "incomplete": "未完成",
+    "stoppedAt": "已停止 · 步骤 {step}"
   },
   "setup": {
     "title": "邮件服务器设置",

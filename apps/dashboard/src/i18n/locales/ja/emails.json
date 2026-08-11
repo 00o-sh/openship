@@ -82,7 +82,10 @@
     "willStream": "セットアップが開始されると、ここにログがストリーミングされます。",
     "jumpToLatest": "最新へ移動",
     "setupFailed": "セットアップに失敗しました",
-    "retryFromStep": "ステップ {resumeStep} から再試行"
+    "retryFromStep": "ステップ {resumeStep} から再試行",
+    "resumePausedTitle": "セットアップを一時停止しました",
+    "stepLabel": "ステップ {step}",
+    "continueFromStep": "ステップ {step} から続行"
   },
   "serverList": {
     "title": "メールサーバー",
@@ -91,7 +94,8 @@
     "removeAria": "{name} をメール一覧から削除",
     "installing": "インストール中",
     "running": "稼働中",
-    "incomplete": "未完了"
+    "incomplete": "未完了",
+    "stoppedAt": "停止 · ステップ {step}"
   },
   "setup": {
     "title": "メールサーバーのセットアップ",
