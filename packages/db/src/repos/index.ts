@@ -123,6 +123,12 @@ export {
   type NewMailServer,
 } from "./mail-server.repo";
 export {
+  createMailInboundRepo,
+  type MailInboundRule,
+  type NewMailInboundRule,
+  type MailInboundScope,
+} from "./mail-inbound.repo";
+export {
   createAnalyticsRepo,
   type ServerAnalyticsRow,
   type NewServerAnalytics,
@@ -262,6 +268,7 @@ import { createServerGithubAuthRepo } from "./server-github-auth.repo";
 import { createGithubDeployKeyRepo } from "./github-deploy-key.repo";
 import { createServerTunnelRepo } from "./server-tunnel.repo";
 import { createMailServerRepo } from "./mail-server.repo";
+import { createMailInboundRepo } from "./mail-inbound.repo";
 import { createAnalyticsRepo } from "./analytics.repo";
 import { createResourceUsageRepo } from "./resource-usage.repo";
 import { createTerminalSessionRepo } from "./terminal-session.repo";
@@ -343,6 +350,7 @@ export const repos = {
   githubDeployKey: createGithubDeployKeyRepo(db),
   serverTunnel: createServerTunnelRepo(db),
   mailServer: createMailServerRepo(db),
+  mailInbound: createMailInboundRepo(db),
   analytics: createAnalyticsRepo(db),
   resourceUsage: createResourceUsageRepo(db),
   terminalSession: createTerminalSessionRepo(db),

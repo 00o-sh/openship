@@ -404,6 +404,19 @@ const TABLES: ReadonlyArray<TableSpec> = [
     hasOrganizationId: true,
   },
 
+  // Inbound-mail notification rules — instance-scope ONLY, exactly like their
+  // `mail_servers` parent and `notification_channel`, even though the rule row carries an
+  // organizationId. An organization scope here would ship a `server_id` and a
+  // `channel_ids` array whose targets are instance-scope and therefore absent from the
+  // dump: on the receiver they would dangle, or — worse — resolve to a PRE-EXISTING row
+  // belonging to somebody else.
+  {
+    sqlName: "mail_inbound_rule",
+    table: schema.mailInboundRule,
+    scopes: [{ in: "instance", via: "all-rows" }],
+    hasOrganizationId: true,
+  },
+
   // Analytics + audit — instance-only.
   { sqlName: "server_analytics", table: schema.serverAnalytics, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
   { sqlName: "server_analytics_geo", table: schema.serverAnalyticsGeo, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },

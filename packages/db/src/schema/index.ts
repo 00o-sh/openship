@@ -35,7 +35,7 @@ export { userSettings, instanceSettings } from "./settings";
 export { servers } from "./servers";
 export { serverGithubAuth, githubDeployKey } from "./server-github";
 export { serverTunnels } from "./server-tunnel";
-export { mailServers } from "./mail";
+export { mailServers, mailInboundRule } from "./mail";
 export { serverAnalytics, serverAnalyticsGeo } from "./analytics";
 export {
   resourceUsage,
