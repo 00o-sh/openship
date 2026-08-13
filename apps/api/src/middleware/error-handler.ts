@@ -32,6 +32,12 @@ export function handleApiError(err: unknown, c: Context) {
 
   if (err instanceof AppError) {
     const { message, code, statusCode } = err;
+    // A 5xx is a SERVER fault and must leave a trace, even when it arrives as a typed
+    // AppError carrying its own message. `AppError`'s statusCode defaults to 500, so
+    // a bare `new AppError(msg)` used to answer 500 and log NOTHING — the "500 with no
+    // actionable information in the logs" of GH-562. 4xx stays quiet on purpose: those
+    // are client outcomes, and logging them turns ordinary validation into noise.
+    if (statusCode >= 500) console.error(`[API ERROR] ${requestTag(c)}`, err);
     return c.json(
       { error: message, code },
       // 502/503 included: an AppError can legitimately mean "an upstream we
@@ -50,6 +56,19 @@ export function handleApiError(err: unknown, c: Context) {
     return c.json({ error: "Invalid JSON body", code: "INVALID_JSON" }, 400);
   }
 
-  console.error("[UNHANDLED ERROR]", err);
+  // Log the route with it. `[UNHANDLED ERROR] Error: doveadm pw returned …` on its own
+  // doesn't say WHICH request produced it, which is most of the work of diagnosing a
+  // 500 from a log file. The response body stays deliberately generic — an unknown
+  // error's message can carry internals we don't hand to a client.
+  console.error(`[UNHANDLED ERROR] ${requestTag(c)}`, err);
   return c.json({ error: "Internal server error" }, 500);
+}
+
+/** `METHOD /path` for a log line. Query string omitted: it can carry tokens. */
+function requestTag(c: Context): string {
+  try {
+    return `${c.req.method} ${new URL(c.req.url).pathname}`;
+  } catch {
+    return c.req.method;
+  }
 }
