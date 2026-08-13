@@ -1,6 +1,6 @@
 {
   "available": true,
-  "verified": false,
+  "verified": true,
   "hosting": "experimental",
   "minResources": {
     "memoryMb": 4096,
@@ -110,8 +110,8 @@
     {
       "service": "neond",
       "title": "Create the console account and first branch",
-      "description": "Registers the admin account, then creates an organization, project and `production` branch and starts its endpoint, so the install hands back a working connection string instead of an empty console.",
-      "command": "set -e; API=http://127.0.0.1:3000/api; J='Content-Type: application/json'; id1() { sed -n 's/.*\"id\":\"\\([^\"]*\\)\".*/\\1/p' | head -1; }; SETUP=$(curl -fsS \"$API/auth/setup\" || echo ''); case \"$SETUP\" in *'\"registration_open\":true'*) ;; *) echo \"pg_port=already-bootstrapped\"; exit 0 ;; esac; TOKEN=$(curl -fsS -X POST \"$API/auth/register\" -H \"$J\" -d \"{\\\"name\\\":\\\"Admin\\\",\\\"email\\\":\\\"$ADMIN_EMAIL\\\",\\\"password\\\":\\\"$ADMIN_PASSWORD\\\"}\" | sed -n 's/.*\"token\":\"\\([^\"]*\\)\".*/\\1/p'); [ -n \"$TOKEN\" ] || { echo \"pg_port=register-failed\"; exit 0; }; A=\"Authorization: Bearer $TOKEN\"; ORG=$(curl -fsS -X POST \"$API/organizations\" -H \"$J\" -H \"$A\" -d '{\"name\":\"Default\"}' | id1); PROJ=$(curl -fsS -X POST \"$API/organizations/$ORG/projects\" -H \"$J\" -H \"$A\" -d '{\"name\":\"main\"}' | id1); BR=$(curl -fsS -X POST \"$API/organizations/$ORG/projects/$PROJ/branches\" -H \"$J\" -H \"$A\" -d '{\"name\":\"production\"}' | id1); [ -n \"$BR\" ] || { echo \"pg_port=branch-failed\"; exit 0; }; curl -fsS -X PUT \"$API/organizations/$ORG/projects/$PROJ/branches/$BR/password\" -H \"$J\" -H \"$A\" -d \"{\\\"password\\\":\\\"$PG_PASSWORD\\\"}\" >/dev/null || true; EP=$(curl -fsS -X POST \"$API/organizations/$ORG/projects/$PROJ/branches/$BR/endpoint\" -H \"$J\" -H \"$A\" || echo ''); PORT=$(echo \"$EP\" | sed -n 's/.*\"port\":\\([0-9]*\\).*/\\1/p' | head -1); echo \"pg_port=${PORT:-unstarted}\"",
+      "description": "Signs in (registering the admin on a first install), then ensures an organization, project and branch exist and an endpoint is running, and reports its port. Every run reports a REAL port, so a first attempt that raced the endpoint cannot leave the connection string permanently blank.",
+      "command": "set -e; API=http://127.0.0.1:3000/api; J='Content-Type: application/json'; id1() { sed -n 's/.*\"id\":\"\\([^\"]*\\)\".*/\\1/p' | head -1; }; port1() { sed -n -e 's|.*\"connection_string\":\"[^\"]*@[^:\"]*:\\([0-9][0-9]*\\)/.*|\\1|p' -e 's/.*\"port\":\\([0-9][0-9]*\\).*/\\1/p' | head -1; }; get() { curl -fsS -H \"$A\" \"$1\" 2>/dev/null || printf ''; }; post() { n=0; while [ $n -lt 20 ]; do r=$(curl -fsS -X POST \"$1\" -H \"$J\" -H \"$A\" -d \"$2\" 2>/dev/null || printf ''); [ -n \"$r\" ] && { printf %s \"$r\"; return 0; }; n=$((n+1)); sleep 2; done; printf ''; }; SETUP=$(curl -fsS \"$API/auth/setup\" || printf ''); case \"$SETUP\" in *'\"registration_open\":true'*) TOKEN=$(curl -fsS -X POST \"$API/auth/register\" -H \"$J\" -d \"{\\\"name\\\":\\\"Admin\\\",\\\"email\\\":\\\"$ADMIN_EMAIL\\\",\\\"password\\\":\\\"$ADMIN_PASSWORD\\\"}\" 2>/dev/null | sed -n 's/.*\"token\":\"\\([^\"]*\\)\".*/\\1/p') ;; *) TOKEN=$(curl -fsS -X POST \"$API/auth/login\" -H \"$J\" -d \"{\\\"email\\\":\\\"$ADMIN_EMAIL\\\",\\\"password\\\":\\\"$ADMIN_PASSWORD\\\"}\" 2>/dev/null | sed -n 's/.*\"token\":\"\\([^\"]*\\)\".*/\\1/p') ;; esac; [ -n \"$TOKEN\" ] || { echo \"pg_port=no-token\"; exit 0; }; A=\"Authorization: Bearer $TOKEN\"; ORG=$(get \"$API/organizations\" | id1); [ -n \"$ORG\" ] || ORG=$(post \"$API/organizations\" '{\"name\":\"Default\"}' | id1); [ -n \"$ORG\" ] || { echo \"pg_port=no-org\"; exit 0; }; P=\"$API/organizations/$ORG/projects\"; PROJ=$(get \"$P\" | id1); [ -n \"$PROJ\" ] || PROJ=$(post \"$P\" '{\"name\":\"main\"}' | id1); [ -n \"$PROJ\" ] || { echo \"pg_port=no-project\"; exit 0; }; B=\"$P/$PROJ/branches\"; BRJSON=$(get \"$B\"); BR=$(printf %s \"$BRJSON\" | id1); if [ -z \"$BR\" ]; then BR=$(post \"$B\" '{\"name\":\"production\"}' | id1); [ -n \"$BR\" ] || { echo \"pg_port=branch-failed\"; exit 0; }; curl -fsS -X PUT \"$B/$BR/password\" -H \"$J\" -H \"$A\" -d \"{\\\"password\\\":\\\"$PG_PASSWORD\\\"}\" >/dev/null 2>&1 || true; fi; PORT=$(printf %s \"$BRJSON\" | port1); [ -n \"$PORT\" ] || PORT=$(post \"$B/$BR/endpoint\" '' | port1); echo \"pg_port=${PORT:-unstarted}\"",
       "capture": "pgPort",
       "capturePattern": "pg_port=([0-9]+)",
       "persistAs": {
@@ -165,7 +165,7 @@
       }
     ],
     "firstLogin": {
-      "note": "The admin account is created during install — use the email and password above. First boot initialises two embedded Postgres instances and can take a couple of minutes after a ~1.2 GB image pull."
+      "note": "The admin account is created during install — use the email and password above. First boot initialises two embedded Postgres instances and can take a couple of minutes after a ~1.2 GB image pull.\n\nTwo things worth knowing, both upstream behaviour: if the console shows a branch as running but connections fail, stop and start that endpoint from the console — restarting the container can leave a stale compute lock behind while the API still reports it healthy. And if the container is killed hard (out of memory, power loss) it can refuse to boot with \"lease already held\"; delete neon_daemon_data/.lock inside the app's volume while nothing is running. An ordinary redeploy is safe — it shuts down gracefully and releases the lock."
     }
   },
   "endpoints": [
