@@ -919,10 +919,18 @@ export async function runWizard(): Promise<void> {
         migratedCertPems,
         migratedStaticRootOverrides,
       );
-      if (!imported.ok) {
+      // A PARTIAL import is not a total failure: `importMigratedSites` returns
+      // ok:false when even one site missed, so keying the warning off `ok` and
+      // printing `migratedSites.length` claimed every site was dark one line after
+      // the import itself said "Migrated 3/4". Report only the real shortfall, and
+      // leave the retry advice to the import — it's the only layer that knows
+      // whether the cause was transient (edge still starting) or a config it will
+      // reject identically on every re-run.
+      const missed = migratedSites.length - imported.registered.length;
+      if (missed > 0) {
         log.warn(
-          `Your ${migratedSites.length} existing site${migratedSites.length === 1 ? "" : "s"} ` +
-            "aren't served yet — re-run `openship up` to retry the import.",
+          `${missed} of your ${migratedSites.length} existing site${migratedSites.length === 1 ? "" : "s"} ` +
+            `${missed === 1 ? "isn't" : "aren't"} served yet — see the import output above.`,
         );
       }
     }
