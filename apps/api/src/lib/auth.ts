@@ -8,9 +8,9 @@ import { createAccessControl } from "better-auth/plugins/access";
 import { db, getDriver, repos, schema, and, eq, gt } from "@repo/db";
 import { env, runtimeTarget, runtimeTargetId, trustedOrigins } from "../config/env";
 import { resolveAuthBaseUrl, resolveDashboardPublicUrl, refreshSelfAppPublicUrl } from "./public-url";
-import { sendMail, smtpEnabled, requireEmailVerificationStrict } from "./mail";
+import { sendMail, smtpEnabled, canSendMail, requireEmailVerificationStrict } from "./mail";
 import {
-  resetPasswordEmail,
+  resetPasswordOtpEmail,
   verifyEmailTemplate,
   verifyOtpEmailTemplate,
   organizationInviteEmail,
@@ -144,13 +144,23 @@ export const auth = betterAuth({
     minPasswordLength: 8,
     maxPasswordLength: 128,
 
-    /* Password reset - only functional when SMTP is configured */
-    sendResetPassword: smtpEnabled
-      ? async ({ user, url }: { user: User; url: string; token: string }) => {
-          const email = resetPasswordEmail(user, url);
-          await sendMail({ to: user.email, ...email });
-        }
-      : undefined,
+    /* Password reset is CODE-based, so there is deliberately no
+       `sendResetPassword` here.
+
+       Leaving it defined would send a second, link-bearing email alongside the
+       code — Better Auth calls this callback from /request-password-reset, which
+       is a different endpoint from the OTP one, so both would fire for anyone
+       still hitting the old route. The reset code is sent by the emailOTP
+       plugin's `sendVerificationOTP` (type: "forget-password"), which refuses
+       up front when nothing can deliver — see the guard there. */
+
+    /* Kick every existing session when a password is reset.
+       The commonest reason somebody resets a password is that they believe
+       someone else has it. Leaving their sessions alive means the reset does
+       not actually evict the intruder — it only stops them signing in AGAIN.
+       Better Auth has the switch; it was simply never turned on (the retired
+       link flow had the same hole). */
+    revokeSessionsOnPasswordReset: true,
 
     /* Email verification.
        - SaaS (CLOUD_MODE): ALWAYS required. No account can sign in until it
@@ -391,10 +401,36 @@ export const auth = betterAuth({
       rateLimit: { window: 60, max: 5 },
       overrideDefaultEmailVerification: true,
       async sendVerificationOTP({ email, otp, type }) {
-        // Only the email-verification flow is used today (sign-in / reset /
-        // change-email OTP types are not enabled). Send a link-free code email.
+        // Two flows, both link-free by design. `sign-in` and `change-email` OTP
+        // types are not enabled, so they fall through and send nothing.
         if (type === "email-verification") {
           const tmpl = verifyOtpEmailTemplate(otp, { expiresMinutes: 10 });
+          await sendMail({ to: email, ...tmpl });
+          return;
+        }
+        // Password reset. This replaced the link flow (`sendResetPassword` in the
+        // emailAndPassword block is deliberately gone): a "click here to change your
+        // password" URL is the most phishing-shaped mail we send, gets scored and
+        // rewritten by gateways, and a rewritten link is indistinguishable from an
+        // attack to whoever reads it. Same reasoning that already made verification
+        // a code.
+        if (type === "forget-password") {
+          // Refuse loudly when nothing can deliver. `sendMail` returns SILENTLY with
+          // no transport configured (it warns to the server log and moves on), which
+          // on this flow means the operator is told to check their inbox for a code
+          // that was never sent, and waits — with the account still locked out. That
+          // is worse than an error. `smtpEnabled` cannot express this: it is a
+          // constant `true` ("callbacks wired; runtime decides delivery"), so
+          // `canSendMail()` is the only honest check.
+          if (!(await canSendMail())) {
+            throw new APIError("SERVICE_UNAVAILABLE", {
+              message:
+                "This instance has no email transport configured, so a reset code " +
+                "cannot be sent. Configure SMTP in Settings → Email, or reset the " +
+                "password from the server with `openship reset-admin`.",
+            });
+          }
+          const tmpl = resetPasswordOtpEmail(otp, { expiresMinutes: 10 });
           await sendMail({ to: email, ...tmpl });
         }
       },
