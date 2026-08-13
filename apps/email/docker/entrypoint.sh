@@ -9,14 +9,15 @@
 #      real per-install values from the --env-file — the `build-placeholder` DB
 #      password (shared role) and the `build.invalid` domain (-> $FIRST_DOMAIN),
 #      the latter also writing /etc/mailname + an /etc/hosts FQDN entry.
-#   3. wait for the postgres SIDECAR (127.0.0.1:5432).
-#   4. bootstrap the mail databases (roles + schema + first domain) if the vmail
-#      schema isn't there yet — see db-bootstrap.sh; never re-init an existing DB.
-#   5. pre-create the log files fail2ban tails (rsyslog fills them once daemons
+#   3. bootstrap the mail databases (roles + schema + first domain) if the vmail
+#      schema isn't there yet — see db-bootstrap.sh, which owns the wait for the
+#      sidecar and never re-inits an existing DB. FATAL on failure: an engine
+#      without its schema cannot serve, and pretending otherwise is GH-562.
+#   4. pre-create the log files fail2ban tails (rsyslog fills them once daemons
 #      log; a jail whose logpath is missing at start would crash-loop).
-#   6. reuse-or-generate the DKIM key on its bind mount (never regenerate — a new
+#   5. reuse-or-generate the DKIM key on its bind mount (never regenerate — a new
 #      selector breaks DMARC until DNS repropagates).
-#   7. hand off to supervisord (the CMD).
+#   6. hand off to supervisord (the CMD).
 #
 # Env (from ensure-container-mail.ts --env-file): FIRST_DOMAIN,
 # OPENSHIP_MAIL_DB_{HOST,PORT,NAME,USER}, plus iRedMail secrets
@@ -26,8 +27,9 @@ set -euo pipefail
 
 log() { echo "[openship-mail] $*"; }
 
-DB_HOST="${OPENSHIP_MAIL_DB_HOST:-127.0.0.1}"
-DB_PORT="${OPENSHIP_MAIL_DB_PORT:-5432}"
+# No DB_HOST/DB_PORT here on purpose: db-bootstrap.sh reads the same two env vars and
+# owns every conversation with the sidecar, so duplicating them invites the two files
+# to disagree about where the database is.
 FIRST_DOMAIN="${FIRST_DOMAIN:-}"
 SEED_DIR="/opt/openship-mail/seed"
 
@@ -127,17 +129,30 @@ if [ -n "$FIRST_DOMAIN" ]; then
   esac
 fi
 
-# 3. wait for the sidecar DB.
-log "waiting for the mail database at ${DB_HOST}:${DB_PORT}..."
-for _ in $(seq 1 60); do
-  if nc -z "$DB_HOST" "$DB_PORT" 2>/dev/null; then break; fi
-  sleep 2
-done
+# 3. bootstrap the mail databases (idempotent; skips if the vmail schema exists).
+#
+# The wait for the sidecar lives INSIDE db-bootstrap.sh, which polls `SELECT 1` until
+# the database actually answers. This used to be an `nc -z` loop here, and that was
+# half of GH-562: a TCP probe succeeds as soon as postgres binds its port, which is
+# before it will serve a query — so the bootstrap started against a database that was
+# still initializing. The loop also fell through after 60 tries without checking, so an
+# absent sidecar proceeded anyway. A weaker duplicate probe here would add nothing.
+#
+# A failure is FATAL rather than a log line. There is no case where this exits non-zero
+# and the engine can still work: either the database is unreachable (no daemon can
+# authenticate) or the schema did not load (dovecot, iredapd and amavis all crash on
+# their first query). Continuing produced the reported symptom — every daemon
+# crash-looping while the boot log claimed success. Dying here instead means the log
+# names the cause once, and `verifyMailEngine`'s port probe correctly reports the
+# engine as down instead of reporting a healthy install.
+if ! bash /opt/openship-mail/db-bootstrap.sh; then
+  log "FATAL: mail database bootstrap failed — see the [db-bootstrap] lines above."
+  log "  The engine will not start without its schema. After fixing the cause, recreate"
+  log "  the container, or re-run:  docker exec openship-mail bash /opt/openship-mail/db-bootstrap.sh"
+  exit 1
+fi
 
-# 4. bootstrap the mail databases (idempotent; skips if the vmail schema exists).
-bash /opt/openship-mail/db-bootstrap.sh || log "ERROR: db-bootstrap failed — inspect the log above"
-
-# 5. pre-create the log files the fail2ban jails tail, so a jail never starts
+# 4. pre-create the log files the fail2ban jails tail, so a jail never starts
 #    against a missing path (rsyslog populates them as the daemons log).
 mkdir -p /var/log/dovecot /var/log/iredapd /var/log/supervisor
 touch /var/log/mail.log \
@@ -146,7 +161,7 @@ touch /var/log/mail.log \
       /var/log/iredapd/iredapd.log
 chown -R iredapd:iredapd /var/log/iredapd 2>/dev/null || true
 
-# 6. DKIM: reuse the key on the mount, else generate one (per domain).
+# 5. DKIM: reuse the key on the mount, else generate one (per domain).
 if [ -n "$FIRST_DOMAIN" ] && [ ! -s "/var/lib/dkim/${FIRST_DOMAIN}.pem" ]; then
   log "generating DKIM key for ${FIRST_DOMAIN}"
   # Debian ships the daemon as `amavisd` (no `amavisd-new` executable); try it

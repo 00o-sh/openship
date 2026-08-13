@@ -95,9 +95,18 @@ RUN cp /opt/openship-mail/build-config /opt/iRedMail-engine/config \
 # an image that passes this test is guaranteed to have something to put on :25.
 # NB: Debian's amavisd-new package ships the daemon as /usr/sbin/amavisd (there is
 # no `amavisd-new` executable), which is why supervisord invokes /usr/sbin/amavisd.
+#
+# `doveadm` is not a supervisord program but is gated with them anyway, because three
+# separate paths are dead without it: db-bootstrap.sh hashes the postmaster password,
+# and the control plane hashes on every mailbox create and postmaster rotation. It
+# arrives only as a transitive dependency of the dovecot packages iRedMail installs
+# (packages.sh names dovecot-imapd/pop3d/lmtpd/managesieved/sieve/pgsql, never
+# dovecot-core), so nothing guaranteed it was here. Its absence used to surface as a
+# postmaster row with an EMPTY password and a 500 on mailbox create (GH-562) — a
+# runtime mystery for a property the build can simply assert.
 RUN set -eu; \
     missing=""; \
-    for b in /usr/sbin/postfix /usr/sbin/dovecot /usr/sbin/amavisd \
+    for b in /usr/sbin/postfix /usr/sbin/dovecot /usr/bin/doveadm /usr/sbin/amavisd \
              /usr/sbin/clamd /usr/bin/freshclam /usr/sbin/spamd \
              /usr/bin/fail2ban-server /opt/iredapd/iredapd.py; do \
       [ -e "$b" ] || missing="$missing $b"; \
@@ -107,7 +116,12 @@ RUN set -eu; \
       echo "The openship-mail image would ship with no mail stack (issue #493)." >&2; \
       exit 1; \
     fi; \
-    echo "openship-mail: all mail daemons present ->$(echo ' postfix dovecot amavisd clamd freshclam spamd fail2ban iredapd')"
+    doveadm pw -s SSHA512 -p build-smoke-test | grep -q '^{SSHA512}' || { \
+      echo "FATAL: doveadm is present but cannot produce an SSHA512 hash." >&2; \
+      echo "Mailbox creation and the postmaster seed both depend on it (GH-562)." >&2; \
+      exit 1; \
+    }; \
+    echo "openship-mail: all mail daemons present ->$(echo ' postfix dovecot doveadm amavisd clamd freshclam spamd fail2ban iredapd')"
 
 # Runtime prerequisites the installer does not leave in place under our stubbed-
 # init build (its late service/DB steps abort — see the `|| true` above):
