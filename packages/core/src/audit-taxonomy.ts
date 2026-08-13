@@ -412,6 +412,16 @@ export const AUDIT_EVENTS: Record<string, AuditEventDef> = {
     label: "Mail server admin action",
     tone: "warning",
   },
+  // Catalogued because the taxonomy scan is deliberately over-inclusive: it greps
+  // apps/api/src for `eventType:` literals, so a notification-only emit that never
+  // writes an audit_event row is caught the same as an audit write. Without this the
+  // suite fails; with it, an operator who DOES surface these sees a real label.
+  "mail.inbound_received": {
+    category: "servers",
+    action: "received inbound mail matching an inbound rule on",
+    label: "Inbound email received",
+    tone: "info",
+  },
 
   /* ---------------- Members & access ---------------- */
   "organization.created": {

@@ -72,6 +72,7 @@ describe("notification category registry", () => {
       "member.added",
       "member.removed",
       "invitation.sent",
+      "mail.inbound_received",
       "billing.alert",
       "quota.warning",
     ]);

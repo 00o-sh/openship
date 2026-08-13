@@ -32,6 +32,9 @@ export const CATEGORY_GROUPS = [
   { id: "jobs", label: "Jobs" },
   { id: "domains", label: "Domains & SSL" },
   { id: "members", label: "Members" },
+  // Self-hosted-only, and dropped from `listCategories` under CLOUD_MODE — the mirror
+  // image of `billing` below. Placed before it so the cloud-only group stays last.
+  { id: "mail", label: "Mail" },
   { id: "billing", label: "Billing" },
 ] as const satisfies readonly { id: string; label: string }[];
 
@@ -211,6 +214,24 @@ export const CATEGORIES: readonly NotificationCategory[] = [
     defaultEnabled: false,
   },
 
+  // Self-hosted-only: fed by the mail engine, so `listCategories` drops this group
+  // under CLOUD_MODE — the inverse of the billing block below. It stays in the
+  // registry regardless, because `findCategory` supplies the title and first body
+  // line of every alert already stored against it.
+  //
+  // defaultEnabled MUST stay false. The dispatcher's fallback fans a default-enabled
+  // category to every org member's verified email channel with no opt-in, and for a
+  // PER-MESSAGE event that is both a flood and a mail loop: the notification mail
+  // would land on the same engine, inside a watched domain, and capture itself.
+  {
+    id: "mail.inbound_received",
+    group: "mail",
+    label: "Inbound email received",
+    description:
+      "A message arrived at a mailbox or domain one of your inbound rules watches.",
+    defaultEnabled: false,
+  },
+
   // Cloud-only: both are fed by Stripe/Oblien, so `listCategories` drops the whole
   // group outside CLOUD_MODE rather than showing toggles that can never fire. They
   // stay in the registry regardless — `findCategory` still has to render a message
@@ -289,6 +310,11 @@ const EVENT_TYPE_TO_CATEGORY: Record<string, string> = {
   "member.removed": "member.removed",
   "invitation.sent": "invitation.sent",
   "invitation.created": "invitation.sent",
+
+  // Mail (self-hosted engine). Without this entry `notification.emit` returns with no
+  // log and no delivery row, so the rules UI would look like it works while nothing
+  // is ever sent.
+  "mail.inbound_received": "mail.inbound_received",
 
   // Billing
   "billing.payment_failed": "billing.alert",
