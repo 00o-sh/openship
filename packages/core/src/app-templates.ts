@@ -104,8 +104,19 @@ export interface TemplateServiceSpec {
   healthcheck?: ComposeHealthcheck;
   /** Restart policy (compose syntax). */
   restart?: "no" | "always" | "on-failure" | "unless-stopped";
-  /** Override the container command. */
+  /** Override the container command (shell string; becomes ["sh","-c",cmd]). */
   command?: string;
+  /**
+   * Exact container argv, with no `sh -c` wrap. Wins over `command`. Required for
+   * images whose entrypoint rewrites argv instead of `exec "$@"` (e.g. MinIO).
+   */
+  commandArgv?: readonly string[];
+  /**
+   * Seconds/duration Docker waits after SIGTERM before SIGKILL (maps to
+   * `service.advanced.stopGracePeriod`). Needed by apps whose clean shutdown
+   * does real work — Docker's 10s default kills them mid-checkpoint.
+   */
+  stopGracePeriod?: string;
 }
 
 export interface AppConfigField {

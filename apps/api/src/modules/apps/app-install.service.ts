@@ -608,6 +608,9 @@ export async function installApp(
       environment: plainEnv,
       volumes: svc.volumes ? [...svc.volumes] : [],
       command: svc.command,
+      // Structured argv bypasses the `sh -c` wrap resolveComposeCmd applies to a
+      // bare `command`, which some images' entrypoints cannot survive.
+      commandArgv: svc.commandArgv ? [...svc.commandArgv] : undefined,
       restart: svc.restart,
       advanced: {
         ...(svc.healthcheck ? { healthcheck: svc.healthcheck } : {}),
@@ -615,6 +618,7 @@ export async function installApp(
           ? { files: filesByService.get(svc.name) }
           : {}),
         ...(svc.build ? { build: resolveBuild(svc.build) } : {}),
+        ...(svc.stopGracePeriod ? { stopGracePeriod: svc.stopGracePeriod } : {}),
       },
       // Routing is exactly what the operator chose — never the template's
       // `exposed` flag turned into a hostname.

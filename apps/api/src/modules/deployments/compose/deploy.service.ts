@@ -94,7 +94,10 @@ import { compileProjectRoutingFields } from "../../../lib/project-routing-fields
 import { buildCompositeRegistration, buildDomainFanoutRegistrations } from "./composite-route";
 import { newerThanRestoredRelease, serviceKind } from "./project-services";
 import { buildUpstreamUrl, resolveRouteStrategy } from "../../../lib/upstream-url";
-import { withLoopbackPublish } from "../../../lib/loopback-publish";
+import {
+  withLoopbackPublishAll,
+  upstreamHostPortFor,
+} from "../../../lib/loopback-publish";
 
 export interface ComposeDeployResult {
   /** `reconciling` when at least one service's outcome is UNKNOWN because the
@@ -1721,50 +1724,77 @@ export async function deployComposeServices(
       );
     }
 
-    // loopback-port routing (compose parity, mirrors single-app): republish the
-    // PRIMARY routed container port on `127.0.0.1:<pinnedHostPort>` so the edge
-    // reaches it on loopback and it isn't network-exposed. We OWN the pinned
-    // port (reuse the carried one, else allocate avoiding this deploy's picks),
-    // so the route resolves to it deterministically — no reading it back from
-    // the daemon's ambiguous first-binding. Port-only bindings the user declared
-    // for direct access are preserved. Cloud handles exposure itself; bare/no-
-    // executor can't publish → skip (route falls back to container-IP/loopback).
+    // loopback-port routing (compose parity, mirrors single-app): republish EVERY
+    // routed container port on its OWN `127.0.0.1:<pinnedHostPort>` so the edge
+    // reaches each on loopback and none is network-exposed. We OWN the pinned
+    // ports (reuse the carried one for the primary, else allocate avoiding this
+    // deploy's picks), so each route resolves deterministically — no reading it
+    // back from the daemon's ambiguous first-binding. Port-only bindings the user
+    // declared for direct access are preserved. Cloud handles exposure itself;
+    // bare/no-executor can't publish → skip (route falls back to container-IP).
+    //
+    // ONE HOST PORT PER ROUTED PORT, not one per service: a service can carry
+    // several routes (minio's console + `s3` API, convex's API + `http`), and
+    // pinning only `proxyRoutes[0]` while `resolveTargetUrl` returned that single
+    // port for every route made each extra subdomain silently proxy to the FIRST
+    // route's port. minio's s3 host served the console; convex's http host served
+    // the 3210 API. Only the primary port is persisted (`service_deployment`
+    // holds one), which is why the extras are re-pinned and re-registered on
+    // every deploy rather than carried.
     const composeRouteStrategy = resolveRouteStrategy(project.routeStrategy);
-    const routedContainerPort = proxyRoutes[0]?.targetPort;
+    const routedContainerPorts = [
+      ...new Set(
+        proxyRoutes
+          .map((r) => r.targetPort)
+          .filter((p): p is number => typeof p === "number" && p > 0),
+      ),
+    ];
+    const primaryRoutedPort = routedContainerPorts[0];
+    /** routed container port → the loopback host port WE pinned for it. */
+    const pinnedHostPortByContainerPort = new Map<number, number>();
     let servicePinnedHostPort: number | undefined;
     if (
       composeRouteStrategy === "loopback-port" &&
       runtime.name !== "cloud" &&
-      routedContainerPort !== undefined &&
+      primaryRoutedPort !== undefined &&
       // A container with no endpoint of its own publishes nothing — allocating a
       // host port would burn it and pin a route to an upstream that never binds.
       !hasNoRoutableAddress &&
       opts?.executor
     ) {
-      const carried = previousByServiceId.get(svc.id)?.hostPort;
-      if (carried) {
-        servicePinnedHostPort = carried;
-      } else {
-        const allocation = await allocateHostPort(opts.executor, { avoid: usedHostPorts });
-        servicePinnedHostPort = allocation.port;
-        // "Couldn't read occupancy" is not "nothing is listening" — without this the
-        // bind failure that follows blames Docker for an unreachable host (#490).
-        if (!allocation.scanned) {
-          logger.log(
-            `Couldn't read live port occupancy on the target, so ${allocation.port} for ` +
-              `${svc.name} avoids only ports this deploy already took. If publishing it fails ` +
-              `as "already allocated", check that Openship can reach this host ` +
-              `(Servers → this box).\n`,
-            "warn",
-          );
+      for (const containerPort of routedContainerPorts) {
+        // Only the primary reuses the carried port: it is the one persisted, so
+        // it is the only one whose previous value is knowable.
+        const carried =
+          containerPort === primaryRoutedPort
+            ? previousByServiceId.get(svc.id)?.hostPort
+            : undefined;
+        let hostPort: number;
+        if (carried) {
+          hostPort = carried;
+        } else {
+          const allocation = await allocateHostPort(opts.executor, { avoid: usedHostPorts });
+          hostPort = allocation.port;
+          // "Couldn't read occupancy" is not "nothing is listening" — without this the
+          // bind failure that follows blames Docker for an unreachable host (#490).
+          if (!allocation.scanned) {
+            logger.log(
+              `Couldn't read live port occupancy on the target, so ${allocation.port} for ` +
+                `${svc.name} avoids only ports this deploy already took. If publishing it fails ` +
+                `as "already allocated", check that Openship can reach this host ` +
+                `(Servers → this box).\n`,
+              "warn",
+            );
+          }
         }
+        usedHostPorts.add(hostPort);
+        pinnedHostPortByContainerPort.set(containerPort, hostPort);
       }
-      usedHostPorts.add(servicePinnedHostPort);
-      serviceRuntimeConfig.ports = withLoopbackPublish(
+      serviceRuntimeConfig.ports = withLoopbackPublishAll(
         serviceRuntimeConfig.ports,
-        routedContainerPort,
-        servicePinnedHostPort,
+        pinnedHostPortByContainerPort,
       );
+      servicePinnedHostPort = pinnedHostPortByContainerPort.get(primaryRoutedPort);
     }
 
     let deployedContainerId: string | undefined;
@@ -1795,10 +1825,18 @@ export async function deployComposeServices(
             ? async (containerId, port) => {
                 const strategy = resolveRouteStrategy(project.routeStrategy);
                 const sameSvc = serviceResult?.containerId === containerId;
-                // Prefer the port WE pinned+published this deploy (deterministic);
-                // fall back to the port reported by the deploy result otherwise.
-                const hostPort =
-                  servicePinnedHostPort ?? (sameSvc ? serviceResult?.hostPort : undefined);
+                // Prefer the port WE pinned+published for THIS container port
+                // (deterministic); fall back to the port the deploy result
+                // reported. That fallback is a single scalar read off the daemon,
+                // so it is only meaningful for the primary route — applying it to
+                // a secondary port is the collapse this map exists to prevent.
+                const hostPort = upstreamHostPortFor({
+                  port,
+                  pinned: pinnedHostPortByContainerPort,
+                  primaryPort: primaryRoutedPort,
+                  resultHostPort: serviceResult?.hostPort,
+                  sameService: sameSvc,
+                });
                 // loopback-port → the service's published host port; else the
                 // container IP (cached from the deploy result when we can).
                 if (strategy === "loopback-port" && hostPort) {
