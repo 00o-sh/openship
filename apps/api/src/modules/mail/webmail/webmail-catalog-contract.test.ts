@@ -64,6 +64,25 @@ describe("webmail catalog contract", () => {
     }
   });
 
+  it("keeps both secrets un-inlined, so a missing one can be minted later", () => {
+    // `ensureGeneratedAppSecrets` refuses to mint a key the template substitutes into
+    // some other string, because those copies were written once and would contradict a
+    // new value. Inlining either of these would silently disable the backfill that
+    // stops webmail deploying without a SESSION_ENCRYPTION_KEY (#566) — and the image
+    // treats that as fatal.
+    const inlined = [
+      ...(template?.services ?? []).flatMap((s) => Object.values(s.environment ?? {})),
+      ...(template?.files ?? []).map((f) => f.content),
+      ...(template?.services ?? []).map((s) => s.build?.dockerfile ?? ""),
+    ].join("\n");
+    for (const key of ["SESSION_ENCRYPTION_KEY", "BRANDING_ADMIN_TOKEN"]) {
+      // Tolerant of inner whitespace, exactly like the substitution itself.
+      expect(inlined, `${key} must not be inlined`).not.toMatch(
+        new RegExp(`\\{\\{\\s*config:${key}\\s*\\}\\}`),
+      );
+    }
+  });
+
   it("exposes one routable HTTP endpoint", () => {
     // `startWebmailDeploy` reads endpoint[0] to size its route instead of pinning a
     // port number — an app with no endpoint would deploy unreachable.

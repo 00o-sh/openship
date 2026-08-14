@@ -282,6 +282,7 @@
     "notAvailable": "Nicht verfügbar",
     "domainTitle": "Domain",
     "domainHintProxy": "Ihr Mail-Server besitzt diesen Hostnamen bereits – wir leiten ihn über Ihren Mail-VPS an den Opshcloud-Workload weiter. Keine DNS-Änderungen nötig.",
+    "domainHintMailHost": "Der eigene Hostname deines Mailservers - er zeigt schon hierher und hat schon ein Zertifikat, es ist also nichts einzurichten. Nutze stattdessen webmail.<deine Domain>, wenn du beides getrennt halten willst.",
     "domainHintCloud": "Richten Sie einen CNAME auf die *.opsh.io-URL, die wir bereitstellen (Sie sehen sie nach dem Deploy).",
     "domainHintDefault": "Die URL, die Betreiber besuchen. DNS muss auf das Deploy-Ziel verweisen.",
     "summary": "Zusammenfassung",

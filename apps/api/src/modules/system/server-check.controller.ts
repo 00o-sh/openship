@@ -22,6 +22,7 @@ import {
   COMPONENT_UNINSTALLERS,
   ensureEdge,
   getRemovalSupport,
+  invalidateHostChannelAuth,
   isHostChannelUnavailableError,
   isSshAuthError,
   recoverInterruptedTakeover,
@@ -385,10 +386,6 @@ export async function checkServer(c: Context) {
     ) {
       return c.json({ error: "no_server", message }, 400);
     }
-    if (isSshAuthError(err)) {
-      return c.json({ error: "auth_failed", message }, 400);
-    }
-
     // A connect failure on THIS box is almost never "the server is down" — it's the
     // container→host SSH channel, and the row's display sshHost (127.0.0.1) names
     // neither the right machine nor the right port (#490). Hand the UI the address
@@ -397,7 +394,22 @@ export async function checkServer(c: Context) {
     // Only for failures that came from the transport: a component check that threw for
     // its own reasons is not evidence about the channel, and diagnosing it anyway costs
     // a TCP probe to tell the operator about a firewall that was never involved.
-    if (isHostChannelUnavailableError(err) || isTransportFailure(err)) {
+    //
+    // #527 added `isSshAuthError` here and moved the generic `auth_failed` answer BELOW
+    // this block. An auth rejection on the local row was being claimed by that branch
+    // before this one could run, and on that row the answer is always wrong: its stored
+    // credentials are display-only, nothing dials with them, so the operator got an
+    // edit-credentials form that could not change the outcome. Reordering is safe for
+    // remote servers because `host_channel_blocked` only ever comes back for a row that
+    // resolves to THIS box — a remote box with a genuinely rejected key still falls
+    // through to `auth_failed`.
+    if (isSshAuthError(err) || isHostChannelUnavailableError(err) || isTransportFailure(err)) {
+      // A rejection we are HOLDING beats a memoized "the key worked 20s ago". Without
+      // this, a health probe that cached success just before the key stopped working
+      // would answer `ok`, the diagnosis would not name the channel, and the failure
+      // would fall through to the generic credentials answer this branch exists to
+      // prevent — the #527 card, restored by a cache.
+      if (isSshAuthError(err)) invalidateHostChannelAuth();
       const d = await sshManager.diagnoseReachability(serverId).catch(() => null);
       if (d?.code === "host_channel_blocked") {
         return c.json(
@@ -416,6 +428,11 @@ export async function checkServer(c: Context) {
           502,
         );
       }
+    }
+    // Reached only when the diagnosis did NOT name the host channel — i.e. a real remote
+    // server whose key or password the far end refused, which is what this answer is for.
+    if (isSshAuthError(err)) {
+      return c.json({ error: "auth_failed", message }, 400);
     }
     return c.json({ error: "connection_failed", message }, 502);
   }

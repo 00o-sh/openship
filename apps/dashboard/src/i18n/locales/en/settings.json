@@ -353,6 +353,8 @@
     "badgeReadOnly": "read-only",
     "badgeScoped": "scoped",
     "metaLine": " · last used {lastUsed} · expires {expires}",
+    "callsOne": " · 1 call",
+    "callsMany": " · {count} calls",
     "revoke": "Revoke",
     "expiry": {
       "none": "No expiry",
@@ -404,11 +406,14 @@
     "orgPrefix": "{org} · ",
     "authorized": "Authorized {date}",
     "lastUsedSuffix": " · last used {date}",
+    "callsOne": " · 1 call",
+    "callsMany": " · {count} calls",
     "toast": {
       "disconnected": "MCP client disconnected",
       "disconnectFailed": "Failed to disconnect"
     },
     "editAccess": "Edit access",
+    "viewActivity": "Activity",
     "editScopeTitle": "{client} access",
     "editScopeSubtitle": "Changes apply on the agent's next request — it does not need to reconnect.",
     "editScopeOrg": "In {org}",
@@ -730,6 +735,8 @@
     },
     "filters": {
       "anyone": "Anyone",
+      "anyAgent": "Any agent",
+      "agentCalls": "{count} events",
       "period": "Period",
       "allTime": "All time",
       "today": "Today",
@@ -758,6 +765,7 @@
       "who": "Who",
       "when": "When",
       "cameFrom": "Came from",
+      "viaAgent": "Agent",
       "technical": "Technical details",
       "eventType": "Event type"
     }

@@ -175,7 +175,17 @@ export const auth = betterAuth({
     sendVerificationEmail: smtpEnabled
       ? async ({ user, url }: { user: User; url: string; token: string }) => {
           const email = verifyEmailTemplate(user, url);
-          await sendMail({ to: user.email, ...email });
+          const delivered = await sendMail({ to: user.email, ...email });
+          // `requireEmailVerification` blocks sign-in until the address is confirmed,
+          // so a silently-dropped verification mail is an account that can never be
+          // used. Fail the request instead of creating one.
+          if (!delivered) {
+            throw new APIError("SERVICE_UNAVAILABLE", {
+              message:
+                "Could not send the verification email — this instance has no working " +
+                "email transport. Configure SMTP in Settings → Email.",
+            });
+          }
         }
       : undefined,
   },
@@ -405,7 +415,17 @@ export const auth = betterAuth({
         // types are not enabled, so they fall through and send nothing.
         if (type === "email-verification") {
           const tmpl = verifyOtpEmailTemplate(otp, { expiresMinutes: 10 });
+<<<<<<< HEAD
           await sendMail({ to: email, ...tmpl });
+=======
+          if (!(await sendMail({ to: email, ...tmpl }))) {
+            throw new APIError("SERVICE_UNAVAILABLE", {
+              message:
+                "Could not send the verification code — this instance has no working " +
+                "email transport. Configure SMTP in Settings → Email.",
+            });
+          }
+>>>>>>> a52e2566 (patch v0.6.6)
           return;
         }
         // Password reset. This replaced the link flow (`sendResetPassword` in the
@@ -431,7 +451,18 @@ export const auth = betterAuth({
             });
           }
           const tmpl = resetPasswordOtpEmail(otp, { expiresMinutes: 10 });
-          await sendMail({ to: email, ...tmpl });
+          // Check the RESULT as well as the pre-flight above. `canSendMail()` reads a
+          // transport cache with a 60s TTL, so it can say yes for a config that has
+          // since been changed or broken — and being told to check your inbox while
+          // locked out is the worst place to be optimistic.
+          if (!(await sendMail({ to: email, ...tmpl }))) {
+            throw new APIError("SERVICE_UNAVAILABLE", {
+              message:
+                "Could not send the reset code — this instance has no working email " +
+                "transport. Configure SMTP in Settings → Email, or reset the password " +
+                "from the server with `openship reset-admin`.",
+            });
+          }
         }
       },
     }),
@@ -532,7 +563,7 @@ export const auth = betterAuth({
             const settings = await repos.instanceSettings.get();
             const source = settings?.invitationMailSource === "cloud" ? "cloud" : "platform";
 
-            await sendMail({
+            const delivered = await sendMail({
               to: data.email,
               preferSource: source,
               // organizationId is required by lib/mail.ts when
@@ -542,6 +573,18 @@ export const auth = betterAuth({
               organizationId: data.organization.id,
               ...email,
             });
+            // An invite that cannot be delivered must not report success: the invitee
+            // has a pending row and no way to learn about it, and the inviter believes
+            // it went out. `sendMail` only warns on an empty chain, so this is the only
+            // place that can tell. Throwing surfaces it on the invite request itself.
+            if (!delivered) {
+              throw new APIError("SERVICE_UNAVAILABLE", {
+                message:
+                  `Could not email the invitation to ${data.email} — this instance has ` +
+                  `no working email transport. Configure SMTP in Settings → Email and ` +
+                  `invite again.`,
+              });
+            }
           }
         : undefined,
 

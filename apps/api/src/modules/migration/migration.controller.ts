@@ -12,6 +12,7 @@ import { repos } from "@repo/db";
 import { safeErrorMessage } from "@repo/core";
 import { getRequestContext } from "../../lib/request-context";
 import { permission } from "../../lib/permission";
+import { parseRevealKeys, pickRevealed } from "../../lib/env-reveal";
 import { isServerInOrg, param } from "../../lib/controller-helpers";
 import { streamRunSSE } from "../../lib/run-sse";
 import { streamSSE } from "../../lib/sse";
@@ -181,18 +182,22 @@ export async function scanServerStream(c: Context) {
 }
 
 /**
- * POST /migration/reveal-env  { serverId, containerId }
+ * POST /migration/reveal-env  { serverId, containerId, keys: string[] }
  *
  * #336: on-demand reveal of ONE discovered container's real env for the wizard's
- * env viewer. The scan masks env (`maskDiscoveredStack`); this returns it UNMASKED
- * for a single container the user chose to reveal. Write-gated (`server:write`, the
- * route tag) — same read/write split as the service-env reveal — so the masked
- * scan stays a `:read` and only a `:write` holder can pull the real secrets.
+ * env viewer. The scan masks env (`maskDiscoveredStack`); this returns UNMASKED
+ * plaintext for the keys the body names — one eye-press, one secret, not the
+ * container's whole env. Write-gated (`server:write`, the route tag) — same
+ * read/write split as the service-env reveal — so the masked scan stays a `:read`
+ * and only a `:write` holder can pull the real secrets.
  */
 export async function revealServiceEnv(c: Context) {
-  const { serverId, containerId } = await c.req.json<{ serverId?: string; containerId?: string }>();
+  type RevealBody = { serverId?: string; containerId?: string; keys?: unknown };
+  const body = await c.req.json<RevealBody>().catch(() => ({}) as RevealBody);
+  const { serverId, containerId } = body;
   if (!serverId) return c.json({ error: "serverId is required" }, 400);
   if (!containerId) return c.json({ error: "containerId is required" }, 400);
+  const keys = parseRevealKeys(body.keys);
 
   const ctx = getRequestContext(c);
   await permission.assert(ctx, {
@@ -205,7 +210,9 @@ export async function revealServiceEnv(c: Context) {
   }
 
   try {
-    const environment = await revealContainerEnv(serverId, ctx.organizationId, containerId);
+    const full = await revealContainerEnv(serverId, ctx.organizationId, containerId);
+    const environment = pickRevealed(full, keys);
+    c.set("auditAfter", { containerId, revealedEnvKeys: Object.keys(environment) });
     return c.json({ success: true, environment });
   } catch (err) {
     return c.json({ error: `Reveal failed: ${safeErrorMessage(err)}` }, 502);

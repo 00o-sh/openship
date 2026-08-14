@@ -25,6 +25,7 @@ import {
 } from "./server-containers.service";
 import {
   getActiveContainerApplySession,
+  listContainerApplySessions,
   subscribeContainerApplySession,
 } from "../../lib/server-container-session";
 
@@ -128,6 +129,89 @@ export async function containerIssues(c: Context) {
   const cloudGuard = assertNotCloud(c); if (cloudGuard) return cloudGuard;
   const ctx = getRequestContext(c);
   return c.json(await loadOrgContainerIssues(ctx.organizationId));
+}
+
+/** How long a settled apply keeps reporting its outcome to the fleet view. */
+const SETTLED_WINDOW_MS = 90_000;
+
+/**
+ * GET /system/containers/applying — what the org has in flight right now, and what
+ * just settled.
+ *
+ * The progress read behind the fleet roll-up. Two sources, because neither alone is
+ * the whole truth:
+ *  - the cached rows say which (server, component) pairs were ACCEPTED, including
+ *    the ones a bulk run has queued but not started (they carry no session yet);
+ *  - the in-memory sessions say how far the ones actually running have got, and are
+ *    the only place an outcome exists — a drift row clears `behind` and its
+ *    in-progress flag in the same write, so a reader watching rows alone sees work
+ *    vanish and can never tell that it succeeded.
+ *
+ * `intent` comes from the row's own state (behind → update, otherwise a restart),
+ * which is what the operator pressed; sessions don't record it.
+ */
+export async function listApplyingContainers(c: Context) {
+  const cloudGuard = assertNotCloud(c); if (cloudGuard) return cloudGuard;
+  const ctx = getRequestContext(c);
+  const [servers, rows] = await Promise.all([
+    repos.server.listByOrganization(ctx.organizationId),
+    repos.serverContainerStatus.listByOrg(ctx.organizationId),
+  ]);
+  const names = new Map(servers.map((s) => [s.id, s.name ?? s.sshHost]));
+  const sessions = listContainerApplySessions({ settledWithinMs: SETTLED_WINDOW_MS }).filter((s) =>
+    names.has(s.serverId),
+  );
+  const running = new Map(
+    sessions.filter((s) => s.status === "running").map((s) => [`${s.serverId}:${s.component}`, s]),
+  );
+  const rowFor = new Map(rows.map((r) => [`${r.serverId}:${r.component}`, r]));
+
+  // Flagged rows first (stable, and the only source that knows the intent), then any
+  // running session whose row went missing — a swap mid-flight is still in flight
+  // even if its cached row was dropped.
+  const active = [
+    ...rows
+      .filter((r) => r.latestInProgress)
+      .map((r) => {
+        const key = `${r.serverId}:${r.component}`;
+        const session = running.get(key);
+        return {
+          serverId: r.serverId,
+          serverName: names.get(r.serverId) ?? r.serverId,
+          component: r.component,
+          state: session ? ("running" as const) : ("queued" as const),
+          intent: r.behind ? ("update" as const) : ("repair" as const),
+          ...(session
+            ? { sessionId: session.id, steps: session.steps, startedAt: new Date(session.startedAt).toISOString() }
+            : {}),
+        };
+      }),
+    ...[...running.entries()]
+      .filter(([key]) => !rowFor.get(key)?.latestInProgress)
+      .map(([, session]) => ({
+        serverId: session.serverId,
+        serverName: names.get(session.serverId) ?? session.serverId,
+        component: session.component,
+        state: "running" as const,
+        intent: null,
+        sessionId: session.id,
+        steps: session.steps,
+        startedAt: new Date(session.startedAt).toISOString(),
+      })),
+  ];
+
+  const recent = sessions
+    .filter((s) => s.status !== "running")
+    .map((s) => ({
+      serverId: s.serverId,
+      serverName: names.get(s.serverId) ?? s.serverId,
+      component: s.component,
+      ok: s.status === "completed",
+      ...(s.error ? { error: s.error } : {}),
+      finishedAt: new Date(s.finishedAt ?? Date.now()).toISOString(),
+    }));
+
+  return c.json({ active, recent });
 }
 
 /**

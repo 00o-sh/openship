@@ -16,7 +16,7 @@
  * update must never leave the box without a mail engine.
  */
 
-import { buildMailImageRef, safeErrorMessage } from "@repo/core";
+import { buildMailImageRef, safeErrorMessage, mailHostname } from "@repo/core";
 import type { CommandExecutor, LogEntry } from "../../types";
 import type { SystemLog, SystemLogCallback } from "../types";
 import { sq } from "../local-shell";
@@ -30,6 +30,7 @@ import {
   swapManagedImage,
 } from "../managed-image";
 import { waitForPortListening } from "../port-listen";
+import { rootOrDegrade } from "../privilege";
 import {
   MAIL_CONTAINER,
   MAIL_DB_CONTAINER,
@@ -208,6 +209,69 @@ async function writeEnvFile(
 const ENGINE_ENV_FILE = `${MAIL_HOST_STATE_DIR}/engine.env`;
 const DB_ENV_FILE = `${MAIL_HOST_STATE_DIR}/db.env`;
 
+/** One key back out of an env-file we wrote. Same trivial `K=V` shape as `writeEnvFile`. */
+async function readEnvFileValue(
+  executor: CommandExecutor,
+  path: string,
+  key: string,
+): Promise<string | null> {
+  const body = await executor.readFile(path).catch(() => "");
+  for (const line of body.split("\n")) {
+    const eq = line.indexOf("=");
+    if (eq > 0 && line.slice(0, eq).trim() === key) return line.slice(eq + 1);
+  }
+  return null;
+}
+
+/**
+ * The superuser password an ALREADY-INITIALISED cluster is holding, or null if this is a
+ * first install.
+ *
+ * GH-564: `POSTGRES_PASSWORD` only takes effect during `initdb`. On a redeploy over a
+ * RETAINED pgdata the sidecar starts a cluster that already has its own superuser
+ * password, so handing it a freshly minted one means every connection fails auth —
+ * db-bootstrap then cannot load the schema and `vmail` never appears. The engine's
+ * early-return is keyed on the ENGINE container existing, so an engine that was removed
+ * (or never came up) while pgdata survived lands straight in the create path.
+ *
+ * So: if the data directory holds a cluster, the credential of record is the one on disk,
+ * not the one we just generated. PG_VERSION is the marker initdb writes — the same probe
+ * the compose path uses.
+ */
+async function retainedDbPassword(
+  executor: CommandExecutor,
+  onLog: SystemLogCallback,
+): Promise<string | null> {
+  const initialised = await executor
+    .exec(`test -s ${sq(`${MAIL_DB_HOST_DATA_DIR}/pgdata/PG_VERSION`)} && echo yes || true`)
+    .then((out) => out.trim() === "yes")
+    .catch(() => false);
+  if (!initialised) return null;
+
+  const retained = await readEnvFileValue(executor, DB_ENV_FILE, "POSTGRES_PASSWORD");
+  if (retained) {
+    onLog(
+      log(
+        `Reusing the existing mail database credential — ${MAIL_DB_HOST_DATA_DIR} already ` +
+          `holds an initialised cluster, and its superuser password cannot be changed by ` +
+          `an env var.`,
+      ),
+    );
+    return retained;
+  }
+
+  // The cluster exists but we no longer hold its password. Minting one would produce a
+  // sidecar that cannot authenticate, a failed bootstrap, and a confusing error far from
+  // the cause — so stop here and name the two things that actually recover it.
+  throw new Error(
+    `The mail database directory ${MAIL_DB_HOST_DATA_DIR} holds an initialised Postgres ` +
+      `cluster, but its credential is missing from ${DB_ENV_FILE}. A new password cannot ` +
+      `be applied to an existing cluster. Either restore ${DB_ENV_FILE} with the original ` +
+      `POSTGRES_PASSWORD, or — if the mail data is expendable — remove ` +
+      `${MAIL_DB_HOST_DATA_DIR} to reinitialise the database from scratch.`,
+  );
+}
+
 /** `docker run` argv for the Postgres sidecar (loopback-published, bind-mounted data). */
 function buildDbRunCommand(container: string): string {
   return [
@@ -316,7 +380,7 @@ function makeMailStart(
   opts: ContainerMailOptions,
 ): (image: string) => Promise<boolean> {
   const { onLog } = opts;
-  const hostname = `mail.${opts.domain}`;
+  const hostname = mailHostname(opts.domain);
   return async (image: string) => {
     if (!(await startEngine(executor, container, image, hostname, onLog))) return false;
     return (await verifyMailEngine(executor, opts)).ok;
@@ -394,13 +458,39 @@ export async function ensureContainerMail(
     if (pull.code !== 0) throw new Error(pullFailureMessage(image, output.join("\n")));
   }
 
-  // 2. Host state dirs (engine mounts + DB data dir), created over the same
-  //    executor that runs the containers — a missing host dir silently becomes an
-  //    empty bind and loses data.
+  // 2. Host state dirs (engine mounts + DB data dir). Through the privilege gate, and
+  //    reported rather than swallowed: these are root-owned paths under
+  //    /var/lib/openship/mail, so on a box we log into as a non-root sudo user the
+  //    unelevated `mkdir` fails. The comment here already named the consequence — "a
+  //    missing host dir silently becomes an empty bind and loses data" — and then
+  //    `.catch(() => {})` made it silent, so the one outcome worth an operator's
+  //    attention was the one nothing could observe. Degrades rather than throws, so an
+  //    unmeasurable host keeps today's behaviour.
+  const hostState = await rootOrDegrade(executor, {
+    purpose: "Creating the mail engine's host state directories",
+    consequence: "A missing directory becomes an empty bind mount, which loses mail data.",
+    report: (message) => onLog(log(message, "warn")),
+  });
   for (const mount of MAIL_CONTAINER_MOUNTS) {
-    await executor.exec(`mkdir -p ${sq(mount.host)}`).catch(() => {});
+    await hostState.exec(`mkdir -p ${sq(mount.host)}`).catch((err: unknown) => {
+      onLog(
+        log(
+          `Could not create the mail state directory ${mount.host}: ${safeErrorMessage(err)}. ` +
+            `Docker will create it empty, which loses mail data.`,
+          "warn",
+        ),
+      );
+    });
   }
-  await executor.exec(`mkdir -p ${sq(MAIL_DB_HOST_DATA_DIR)}`).catch(() => {});
+  await hostState.exec(`mkdir -p ${sq(MAIL_DB_HOST_DATA_DIR)}`).catch((err: unknown) => {
+    onLog(
+      log(
+        `Could not create the mail database directory ${MAIL_DB_HOST_DATA_DIR}: ` +
+          `${safeErrorMessage(err)}. Postgres will start on an empty bind mount.`,
+        "warn",
+      ),
+    );
+  });
 
   // 3. Secret env-files (root-only), consumed via --env-file so creds never hit a
   //    shell string. The engine's first-boot entrypoint reads these to init the
@@ -409,19 +499,28 @@ export async function ensureContainerMail(
   // PGSQL_ROOT_PASSWD) with an empty `vmail` database; the engine's first-boot
   // entrypoint then creates the vmail/vmailadmin/amavisd/iredapd/fail2ban roles
   // (from the per-role passwords passed in the engine env) and loads the schema.
-  await writeEnvFile(executor, DB_ENV_FILE, {
+  // A cluster already on disk owns its own superuser password (GH-564); a freshly
+  // generated one would only be applied by initdb, which will not run again.
+  const retainedRoot = await retainedDbPassword(hostState, onLog);
+  const dbRootPassword =
+    retainedRoot ?? opts.secrets.PGSQL_ROOT_PASSWD ?? opts.secrets.VMAIL_DB_ADMIN_PASSWD ?? "";
+
+  await writeEnvFile(hostState, DB_ENV_FILE, {
     POSTGRES_USER: "postgres",
     POSTGRES_DB: MAIL_DB_NAME,
-    POSTGRES_PASSWORD:
-      opts.secrets.PGSQL_ROOT_PASSWD ?? opts.secrets.VMAIL_DB_ADMIN_PASSWD ?? "",
+    POSTGRES_PASSWORD: dbRootPassword,
   });
-  await writeEnvFile(executor, ENGINE_ENV_FILE, {
+  await writeEnvFile(hostState, ENGINE_ENV_FILE, {
     FIRST_DOMAIN: opts.domain,
     OPENSHIP_MAIL_DB_HOST: MAIL_DB_HOST_BIND,
     OPENSHIP_MAIL_DB_PORT: String(MAIL_DB_PORT),
     OPENSHIP_MAIL_DB_NAME: MAIL_DB_NAME,
     OPENSHIP_MAIL_DB_USER: MAIL_DB_USER,
     ...opts.secrets,
+    // Spread LAST so the retained value wins: the engine's first-boot bootstrap connects
+    // as the superuser, and it has to use the password the cluster actually has, not the
+    // one this deploy generated.
+    ...(retainedRoot ? { PGSQL_ROOT_PASSWD: retainedRoot } : {}),
   });
 
   try {
@@ -433,7 +532,7 @@ export async function ensureContainerMail(
 
     // 5. Engine.
     onLog(log("Starting the mail engine container..."));
-    if (!(await startEngine(executor, container, image, `mail.${opts.domain}`, onLog))) {
+    if (!(await startEngine(executor, container, image, mailHostname(opts.domain), onLog))) {
       throw new Error("the mail engine container failed to start");
     }
 

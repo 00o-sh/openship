@@ -183,6 +183,8 @@ export interface SeedEventInput {
   resourceType?: string | null;
   resourceId?: string | null;
   source?: string | null;
+  /** `oauth:<clientId>` / `pat:<tokenId>` — which agent, for MCP rows. */
+  sourceClientId?: string | null;
   createdAt?: Date;
 }
 
@@ -203,6 +205,7 @@ export async function seedEvent(input: SeedEventInput): Promise<string> {
     resourceType: input.resourceType ?? null,
     resourceId: input.resourceId ?? null,
     source: input.source ?? null,
+    sourceClientId: input.sourceClientId ?? null,
     createdAt: input.createdAt ?? new Date(),
   });
   return id;

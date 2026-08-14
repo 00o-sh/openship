@@ -62,6 +62,8 @@ export function getMailSectionHeading(tab: string, t: Dictionary): MailSectionHe
       return { title: a.mailboxes.heading, description: a.mailboxes.description };
     case "aliases":
       return { title: a.aliases.heading, description: a.aliases.description };
+    case "inbound":
+      return { title: a.inbound.heading, description: a.inbound.description };
     case "dns":
       return { title: a.dns.heading, description: a.dns.description };
     case "health":

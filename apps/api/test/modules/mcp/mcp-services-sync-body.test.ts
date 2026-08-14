@@ -25,6 +25,7 @@ const cliPayload = {
       environment: { NODE_ENV: "production", EMPTY: "" },
       volumes: ["./static:/srv/static:ro"],
       command: "node server.js",
+      commandArgv: ["node", "server.js"],
       restart: "on-failure:3",
     },
     { name: "db", image: "postgres:16", volumes: ["pgdata:/var/lib/postgresql/data"] },
@@ -73,6 +74,35 @@ describe("POST /projects/:id/services/sync body schema", () => {
 
   it("accepts the payload the dashboard posts", () => {
     expect(Value.Check(SyncServicesBody, dashboardPayload)).toBe(true);
+  });
+
+  it("advertises `commandArgv`, the only faithful way to send a list command (#332)", () => {
+    // Without it the string was the sole option, and the string form of a list
+    // command is a lossy join: `["sh","-c","a && b"]` → "sh -c a && b" → 5 words.
+    // An MCP agent reads this schema to know what it may send.
+    const entry = (
+      (SyncServicesBody as unknown as {
+        properties: { services: { items: { properties: Record<string, unknown> } } };
+      }).properties.services.items.properties
+    );
+    expect(entry.commandArgv).toBeDefined();
+
+    expect(
+      Value.Check(SyncServicesBody, {
+        services: [{ name: "web", commandArgv: ["sh", "-c", "a && b"] }],
+      }),
+    ).toBe(true);
+    // `[]` is meaningful — it clears the image CMD.
+    expect(Value.Check(SyncServicesBody, { services: [{ name: "web", commandArgv: [] }] })).toBe(
+      true,
+    );
+    // argv entries are strings, like every other compose scalar here.
+    expect(Value.Check(SyncServicesBody, { services: [{ name: "web", commandArgv: [8080] }] })).toBe(
+      false,
+    );
+    expect(
+      Value.Check(SyncServicesBody, { services: [{ name: "web", commandArgv: "node server.js" }] }),
+    ).toBe(false);
   });
 
   it("accepts compose restart policies outside the four-value enum", () => {

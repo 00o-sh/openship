@@ -743,6 +743,13 @@
       "when": 1788042107325,
       "tag": "0105_mail_inbound_rules",
       "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1788128507325,
+      "tag": "0106_mcp_call_tracking",
+      "breakpoints": true
     }
   ]
 }

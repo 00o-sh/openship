@@ -199,6 +199,33 @@ describe("ensureContainerMail swap", () => {
  *
  * So the writer must fail closed on anything that isn't a single clean record.
  */
+/**
+ * GH-564: on a redeploy over a RETAINED pgdata, the credential of record is the one the
+ * cluster was initialised with, not the one this deploy generated - `POSTGRES_PASSWORD`
+ * only takes effect during initdb. Handing the sidecar a fresh password fails auth,
+ * db-bootstrap cannot load the schema, and `vmail` never appears.
+ *
+ * `initialised` controls the PG_VERSION probe; `retainedEnv` is the db.env already on the
+ * host (null = the file is gone, the unrecoverable case).
+ */
+function retainedDbExecutor(opts: { initialised: boolean; retainedEnv: string | null }) {
+  const streamExec = vi.fn(async (_cmd: string) => ({ code: 0, output: "" }));
+  const exec = vi.fn(async (cmd: string) => {
+    if (cmd.includes(STATE_PROBE)) return "";
+    if (cmd.includes("docker version")) return "27.0.0\n";
+    if (cmd.includes("docker image inspect")) return "sha256:abc\n";
+    if (cmd.includes("/proc/net/tcp")) return PROC_LISTENING;
+    if (cmd.includes("PG_VERSION")) return opts.initialised ? "yes\n" : "";
+    return "";
+  });
+  const writeFile = vi.fn(async (_path: string, _content: string) => {});
+  const readFile = vi.fn(async (path: string) => {
+    if (path.endsWith("db.env") && opts.retainedEnv !== null) return opts.retainedEnv;
+    throw new Error("ENOENT");
+  });
+  return { executor: { exec, streamExec, writeFile, readFile } as never, writeFile, readFile };
+}
+
 function envWriteExecutor() {
   const streamExec = vi.fn(async (_cmd: string) => ({ code: 0, output: "" }));
   const exec = vi.fn(async (cmd: string) => {
@@ -282,5 +309,75 @@ describe("engine env-file cannot be injected with extra records", () => {
     // One record per key: the password line must not have spawned another.
     const lines = (engineEnv as string).trim().split("\n");
     expect(lines.every((l) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(l))).toBe(true);
+  });
+});
+
+describe("mail database credential over a retained pgdata (GH-564)", () => {
+  const RETAINED = "POSTGRES_USER=postgres\nPOSTGRES_DB=vmail\nPOSTGRES_PASSWORD=old-cluster-pw\n";
+
+  it("reuses the password the existing cluster was initialised with", async () => {
+    setDefaultMailImage("ghcr.io/x/openship-mail:pinned");
+    const { executor, writeFile } = retainedDbExecutor({
+      initialised: true,
+      retainedEnv: RETAINED,
+    });
+
+    await ensureContainerMail(executor, {
+      domain: "example.com",
+      // What a redeploy freshly generates - it must NOT win.
+      secrets: { PGSQL_ROOT_PASSWD: "newly-generated-pw" },
+      onLog: () => {},
+    }).catch(() => {}); // the stub cannot finish verify; the env writes already happened
+
+    const written = new Map(writeFile.mock.calls.map(([p, c]) => [String(p), String(c)]));
+    const dbEnv = [...written.entries()].find(([p]) => p.endsWith("db.env"))?.[1] ?? "";
+    const engineEnv = [...written.entries()].find(([p]) => p.endsWith("engine.env"))?.[1] ?? "";
+
+    expect(dbEnv).toContain("POSTGRES_PASSWORD=old-cluster-pw");
+    expect(dbEnv).not.toContain("newly-generated-pw");
+    // The engine's first-boot bootstrap connects as the superuser, so it needs the SAME
+    // credential - otherwise the schema load fails auth even though the sidecar is fine.
+    expect(engineEnv).toContain("PGSQL_ROOT_PASSWD=old-cluster-pw");
+    expect(engineEnv).not.toContain("newly-generated-pw");
+  });
+
+  it("uses the generated password on a genuine first install", async () => {
+    setDefaultMailImage("ghcr.io/x/openship-mail:pinned");
+    const { executor, writeFile, readFile } = retainedDbExecutor({
+      initialised: false,
+      retainedEnv: null,
+    });
+
+    await ensureContainerMail(executor, {
+      domain: "example.com",
+      secrets: { PGSQL_ROOT_PASSWD: "newly-generated-pw" },
+      onLog: () => {},
+    }).catch(() => {});
+
+    const dbEnv =
+      writeFile.mock.calls.map(([p, c]) => [String(p), String(c)] as const).find(([p]) => p.endsWith("db.env"))?.[1] ??
+      "";
+    expect(dbEnv).toContain("POSTGRES_PASSWORD=newly-generated-pw");
+    // No cluster on disk, so no reason to read the old file at all.
+    expect(readFile).not.toHaveBeenCalled();
+  });
+
+  it("refuses to mint a password an existing cluster cannot have", async () => {
+    setDefaultMailImage("ghcr.io/x/openship-mail:pinned");
+    const { executor, writeFile } = retainedDbExecutor({ initialised: true, retainedEnv: null });
+
+    // Silently generating here produces a sidecar that cannot authenticate and an error
+    // far from its cause, so this must abort and name the recoveries.
+    await expect(
+      ensureContainerMail(executor, {
+        domain: "example.com",
+        secrets: { PGSQL_ROOT_PASSWD: "newly-generated-pw" },
+        onLog: () => {},
+      }),
+    ).rejects.toThrow(/initialised Postgres cluster/i);
+
+    // And it must not have written a credential the cluster does not hold.
+    const wroteDbEnv = writeFile.mock.calls.some(([p]) => String(p).endsWith("db.env"));
+    expect(wroteDbEnv).toBe(false);
   });
 });

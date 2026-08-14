@@ -50,7 +50,7 @@ import { getMailServerStats } from "./stats.service";
 import { scanDns } from "./dns-scan.service";
 import { sendTestEmail, TestEmailError } from "./test-email.service";
 import { AppError, isRelayProviderId, safeErrorMessage } from "@repo/core";
-import { handleApiError } from "../../../middleware/error-handler";
+import { handleApiError, requestTag } from "../../../middleware/error-handler";
 import {
   getComponentLogs,
   restartAllComponents,
@@ -862,5 +862,11 @@ function errorJson(c: Context, err: unknown) {
   // The SSH+psql layer throws plain Error for any non-shape error
   // (connection failure, SQL syntax, validation). 500 is the right default;
   // typed errors above are caught and mapped to 4xx individually.
+  //
+  // Logged HERE because we answer the response ourselves: `app.onError` only sees
+  // errors that were never caught, so every mail-admin 500 left the API log with
+  // nothing but hono's `--> … 500` (the second half of GH-562). The AppError branch
+  // above logs through `handleApiError`, so no path logs twice.
+  console.error(`[MAIL ADMIN ERROR] ${requestTag(c)}`, err);
   return c.json({ error: message }, 500);
 }

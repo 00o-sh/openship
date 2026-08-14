@@ -174,10 +174,19 @@ export async function planUp(opts: UpPlanOpts): Promise<UpPlan> {
       ...(stack.hostChannel
         ? [
             stack.hostChannel.keyPath,
-            `${stack.hostChannel.authKeysPath}${stack.hostChannel.viaSudo ? "  (via sudo)" : ""}  (authorizes that key for ${stack.hostChannel.user}'s host ops; --no-host-control skips it)`,
+            `${stack.hostChannel.authKeysPath}  (authorizes that key for ${stack.hostChannel.user}'s host ops; --no-host-control skips it)`,
+            // Say which route to root this channel will take, rather than repeating a root
+            // warning at a box that reaches root perfectly well via sudo. `sudo` is a
+            // supported shape now, not a degradation, and the preview is where an operator
+            // decides whether that is what they wanted.
+            ...(stack.hostChannel.elevation === "sudo"
+              ? [
+                  `logs in as ${stack.hostChannel.user} and elevates with sudo for root host ops (no root login is created)`,
+                ]
+              : []),
             ...(stack.hostChannel.rootUnavailable
               ? [
-                  "⚠ host control needs root — this user isn't root and passwordless sudo isn't available, so mail/edge host ops will fail (re-run as root to fix)",
+                  "⚠ host control needs root — this user isn't root and passwordless sudo isn't available, so mail/edge host ops will fail (re-run as root, or enable passwordless sudo, to fix)",
                 ]
               : []),
           ]

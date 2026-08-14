@@ -13,6 +13,10 @@
  * generated at boot and never sent anywhere: only a request originating INSIDE
  * this process can know it. A forged header fails the check and the source is
  * derived from the credential instead.
+ *
+ * The dispatcher signs a second claim the same way — which CLIENT of that surface
+ * (`oauth:<clientId>` / `pat:<tokenId>`) — because with two assistants connected
+ * under one user, "mcp" alone can't tell you which one to revoke.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -28,6 +32,21 @@ export function isAuditSource(value: unknown): value is AuditSource {
 }
 
 const CALL_SOURCE_HEADER = "x-openship-call-source";
+const CALL_CLIENT_HEADER = "x-openship-call-client";
+
+/**
+ * Shape of an attributable client id: the canonical principal id the auth layer
+ * mints (`oauth:<clientId>` / `pat:<tokenId>`). Bounded and character-checked
+ * because the value is persisted on audit_event and rendered in the audit UI —
+ * the nonce proves it came from us, not that we assembled it from something sane.
+ */
+const CLIENT_ID_PATTERN = /^(?:oauth|pat):[A-Za-z0-9_.\-]{1,128}$/;
+
+/** True for a well-formed source-client id. Also the query-param validator for
+ *  the audit filter, so what can be stored and what can be filtered on agree. */
+export function isAuditClientId(value: unknown): value is string {
+  return typeof value === "string" && CLIENT_ID_PATTERN.test(value);
+}
 
 /**
  * Process-local secret. Regenerated on every boot: an in-flight forged header
@@ -40,21 +59,54 @@ export function internalSourceHeader(source: AuditSource): Record<string, string
   return { [CALL_SOURCE_HEADER]: `${source}.${PROCESS_NONCE}` };
 }
 
+/**
+ * The same claim, one level finer: WHICH client of that source.
+ *
+ * Signed with the same nonce and for the same reason. "An AI assistant deleted
+ * this" is a different fact from "Cursor deleted this", and the second is the one
+ * that decides which connection an operator revokes — so it must be no more
+ * forgeable than the first.
+ */
+export function internalClientHeader(principalId: string): Record<string, string> {
+  return { [CALL_CLIENT_HEADER]: `${principalId}.${PROCESS_NONCE}` };
+}
+
 /** Constant-time, because the nonce is the whole gate: leak it and `mcp` is claimable. */
 function nonceMatches(candidate: string): boolean {
   if (candidate.length !== PROCESS_NONCE.length) return false;
   return timingSafeEqual(Buffer.from(candidate), Buffer.from(PROCESS_NONCE));
 }
 
-/** The claimed source, but only if the claim came from this process. */
-function trustedClaim(c: Context): AuditSource | null {
-  const raw = c.req.header(CALL_SOURCE_HEADER);
+/**
+ * The payload of a nonce-signed header, or null if the signature isn't ours.
+ * The nonce is hex, so the LAST dot is always the separator no matter what the
+ * payload contains.
+ */
+function signedPayload(raw: string | undefined): string | null {
   if (!raw) return null;
   const sep = raw.lastIndexOf(".");
   if (sep <= 0) return null;
-  const claimed = raw.slice(0, sep);
   if (!nonceMatches(raw.slice(sep + 1))) return null;
-  return isAuditSource(claimed) ? claimed : null;
+  return raw.slice(0, sep);
+}
+
+/** The claimed source, but only if the claim came from this process. */
+function trustedClaim(c: Context): AuditSource | null {
+  const claimed = signedPayload(c.req.header(CALL_SOURCE_HEADER));
+  return claimed && isAuditSource(claimed) ? claimed : null;
+}
+
+/**
+ * Which client of the surface made this request — `oauth:<clientId>` /
+ * `pat:<tokenId>` — or null when nobody trustworthy said.
+ *
+ * Deliberately NOT derived from the credential as a fallback: the surfaces that
+ * have one client per request (a browser, the CLI) gain nothing from the column,
+ * and guessing here would put a value in it that no dispatcher stands behind.
+ */
+export function resolveCallClientId(c: Context): string | null {
+  const claimed = signedPayload(c.req.header(CALL_CLIENT_HEADER));
+  return claimed && CLIENT_ID_PATTERN.test(claimed) ? claimed : null;
 }
 
 /**

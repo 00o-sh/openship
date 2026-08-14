@@ -19,7 +19,7 @@
 
 import type { Context } from "hono";
 import { repos } from "@repo/db";
-import { resolveCallSource, type AuditSource } from "./call-source";
+import { resolveCallClientId, resolveCallSource, type AuditSource } from "./call-source";
 
 export interface AuditContext {
   organizationId: string;
@@ -28,6 +28,9 @@ export interface AuditContext {
   userAgent?: string | null;
   /** Where the action came in from. Filled by `auditContextFrom`. */
   source?: AuditSource | null;
+  /** Which client of that surface — `oauth:<clientId>` / `pat:<tokenId>`. Only
+   *  MCP dispatch sets it; see call-source.ts. */
+  sourceClientId?: string | null;
 }
 
 export interface AuditEventInput {
@@ -39,6 +42,9 @@ export interface AuditEventInput {
   /** Overrides the context's source. For emitters with no request to read
    *  (crons, Better Auth hooks, webhook deliveries). */
   source?: AuditSource | null;
+  /** Overrides the context's client id. For the MCP endpoint itself, which knows
+   *  the calling client before any sub-request has carried the signed header. */
+  sourceClientId?: string | null;
 }
 
 export const audit = {
@@ -56,6 +62,7 @@ export const audit = {
         ipAddress: ctx.ipAddress ?? null,
         userAgent: ctx.userAgent ?? null,
         source: event.source ?? ctx.source ?? null,
+        sourceClientId: event.sourceClientId ?? ctx.sourceClientId ?? null,
       });
     } catch (err) {
       console.error("[audit] failed to record event", event.eventType, err);
@@ -79,5 +86,6 @@ export function auditContextFrom(
     ipAddress: c.var.clientIp,
     userAgent: c.req.header("user-agent") ?? null,
     source: resolveCallSource(c),
+    sourceClientId: resolveCallClientId(c),
   };
 }

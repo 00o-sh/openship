@@ -254,6 +254,26 @@ button {
 .animate-slide-in-right {
   animation: slideInRight 0.25s ease-out;
 }
+/* A highlight travelling across a progress bar's FILLED part (app install aside).
+   The bar's width carries the real progress; this only says "still moving", so a
+   phase that takes minutes doesn't read as a hung bar — and nothing here fakes
+   advancement. Motion-sensitive users get the plain bar. */
+@keyframes progressSweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+.animate-progress-sweep {
+  animation: progressSweep 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate-progress-sweep {
+    animation: none;
+  }
+}
 /* ── Card surfaces: lifted fills, never bordered boxes ─────────────────────
  * All three themes agree, so this is unscoped. A card separates from the page by
  * its own fill: white on light's grey page, a white overlay on dark's black and

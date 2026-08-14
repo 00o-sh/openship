@@ -30,6 +30,7 @@ import { resolveRecords } from "../../lib/dns-resolver";
 import { resolveProjectServerHost, resolveLocalServerHost, resolveInstancePublicIp, isLoopbackHost } from "../../lib/server-target";
 import { reconcileProjectRoutes } from "../../lib/route-apply.service";
 import { generateToken } from "../../lib/domain-token";
+import { routableWithoutOwnership } from "../../lib/domain-claims";
 import { untrackedSiteFor } from "../../lib/edge-orphans.service";
 import type { UntrackedEdgeSite } from "@repo/core";
 import { publicEndpointHostname, resolveServicePublicEndpoints } from "../../lib/public-endpoints";
@@ -409,6 +410,15 @@ export async function ensurePendingServiceDomain(opts: {
   // must neither create (collision) nor touch theirs (cross-tenant write) —
   // surface it as a conflict (matches addDomain) instead of silently skipping.
   const foreign = await repos.domain.findByHostname(hostname);
+
+  // Same general question the deploy path asks — see lib/domain-claims. A hostname
+  // another subsystem owns can still be routable by this project, and the claim decides
+  // that, not this function. Asked even when there is NO row, for the reason documented
+  // there.
+  if (await routableWithoutOwnership(hostname, opts.projectId, foreign)) {
+    return { created: false, domainId: null };
+  }
+
   if (foreign) {
     throw new ConflictError(
       `The domain "${hostname}" is already connected to another project.`,

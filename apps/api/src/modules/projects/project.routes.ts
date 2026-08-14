@@ -117,9 +117,10 @@ r.post(
   },
   folder.scanSession,
 );
-r.get(
+r.post(
   // #336: real (unmasked) compose env for the folder-scan wizard's reveal
-  // toggle. Write-gated (project:write); no mcp — reveal is a dashboard action.
+  // toggle — one service, only the keys the body names. Write-gated
+  // (project:write); no mcp — reveal is a dashboard action.
   "/folder/scan/:sessionId/env-reveal",
   { tag: "project:write", collection: true },
   folder.revealSessionEnv,

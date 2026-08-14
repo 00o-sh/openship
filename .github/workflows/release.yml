@@ -15,6 +15,13 @@ permissions:
   contents: write
 
 jobs:
+  # Typecheck + tests. `publish` and `publish-npm` depend on this, so a red test
+  # stops the release instead of publishing alongside it. Runs on the manual
+  # dispatch too — that path publishes npm, which is immutable.
+  gate:
+    name: Release gate
+    uses: ./.github/workflows/release-gate.yml
+
   build-openship:
     name: Build openship release artifact
     if: github.event_name == 'push'
@@ -546,9 +553,15 @@ jobs:
     # mismatch. `always()` keeps the manual npm-only path working: on a
     # workflow_dispatch the `publish` job is skipped (push-only), and we publish
     # anyway; on a tag push we require `publish` to have succeeded.
-    needs: [publish]
+    #
+    # `gate` is required on BOTH paths, and is the one condition with no escape
+    # hatch: the tag path inherits it through `publish`, and the dispatch path —
+    # which skips `publish` entirely — would otherwise put an untested,
+    # unreplaceable version on npm.
+    needs: [gate, publish]
     if: >-
       always() &&
+      needs.gate.result == 'success' &&
       (github.event_name == 'workflow_dispatch' || needs.publish.result == 'success')
     # OIDC trusted publishing: npm verifies this workflow's identity instead of
     # a long-lived token. id-token:write lets the runner mint the OIDC token.
@@ -652,7 +665,7 @@ jobs:
   publish:
     name: Publish GitHub release
     if: github.event_name == 'push'
-    needs: [build-openship, build-email, build-dashboard, build-cli-payload, build-desktop, build-desktop-macos]
+    needs: [gate, build-openship, build-email, build-dashboard, build-cli-payload, build-desktop, build-desktop-macos]
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout

@@ -264,7 +264,21 @@ export const SyncServicesBody = Type.Object({
         dependsOn: Type.Optional(Type.Array(Type.String())),
         environment: Type.Optional(Type.Record(Type.String(), Type.String())),
         volumes: Type.Optional(Type.Array(Type.String())),
-        command: Type.Optional(Type.String()),
+        command: Type.Optional(
+          Type.String({
+            description:
+              "Shell-string form. Stored for display and shell-word-split into argv; prefer `commandArgv` for a list command, whose string form here is a LOSSY join.",
+          }),
+        ),
+        // #332: without this the only way to express a command was the string above,
+        // so a list command round-tripped through this endpoint lost its quoting
+        // (`["sh","-c","a && b"]` → five words). The CLI has always sent it.
+        commandArgv: Type.Optional(
+          Type.Array(Type.String(), {
+            description:
+              "Exact container argv (docker-compose Cmd semantics: overrides the image CMD, keeps its ENTRYPOINT, no implicit `sh -c`). Wins over `command`. `[]` clears the image CMD.",
+          }),
+        ),
         restart: Type.Optional(
           Type.String({
             description: 'Compose restart policy, e.g. "unless-stopped" or "on-failure:3".',

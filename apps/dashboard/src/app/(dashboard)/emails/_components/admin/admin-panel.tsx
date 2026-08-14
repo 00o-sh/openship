@@ -26,6 +26,7 @@ import {
   Globe,
   UserRound,
   Forward,
+  Inbox,
   FileText,
   HeartPulse,
   Send,
@@ -42,6 +43,7 @@ import { OverviewTab } from "./overview-tab";
 import { DomainsTab } from "./domains-tab";
 import { MailboxesTab } from "./mailboxes-tab";
 import { AliasesTab } from "./aliases-tab";
+import { InboundTab } from "./inbound-tab";
 import { DnsTab } from "./dns-tab";
 import { HealthTab } from "./health-tab";
 import { TestTab } from "./test-tab";
@@ -67,6 +69,7 @@ type TabKey =
   | "domains"
   | "mailboxes"
   | "aliases"
+  | "inbound"
   | "dns"
   | "health"
   | "test"
@@ -91,6 +94,7 @@ const TABS: TabDef[] = [
   { key: "domains", icon: Globe },
   { key: "mailboxes", icon: UserRound },
   { key: "aliases", icon: Forward },
+  { key: "inbound", icon: Inbox },
   { key: "sending", icon: Waypoints },
   { key: "dns", icon: FileText },
   { key: "health", icon: HeartPulse },
@@ -202,6 +206,9 @@ export function MailAdminPanel({ status, serverId, onRefresh, onForgotten }: Mai
             selectedDomain={selectedDomain}
             onSelectDomain={(d) => setQuery({ domain: d })}
           />
+        )}
+        {tab === "inbound" && (
+          <InboundTab serverId={serverId} primaryDomain={primaryDomain} />
         )}
         {tab === "dns" && (
           <DnsTab

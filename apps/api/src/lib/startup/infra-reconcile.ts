@@ -19,6 +19,12 @@
  * auto-apply, when `autoUpdateInfra` is on — never holds up boot. Both the
  * advisory (toggle off) and the auto-update (toggle on) fall out of that one
  * call. Self-hosted + desktop only (CLOUD_MODE never runs startup hooks).
+ *
+ * One thing here runs on EVERY boot, not once per version: clearing stale
+ * in-progress flags. An apply lives in this process — its session, logs and step
+ * model are in memory — so a flag that survived a restart describes a run that no
+ * longer exists, and every surface that renders it would show a permanent
+ * "Updating…" for a swap nobody is performing.
  */
 
 import { safeErrorMessage } from "@repo/core";
@@ -32,6 +38,14 @@ export function registerInfraReconcile(): void {
     id: "infra:reconcile",
     modes: ["desktop", "selfhosted"],
     run: async () => {
+      // Every boot, before the version gate: no apply can be running yet, so any
+      // in-progress flag is a leftover from the process that died holding it.
+      await repos.serverContainerStatus
+        .clearAllInProgress()
+        .catch((err) =>
+          console.warn(`[infra-reconcile] in-progress reset failed: ${safeErrorMessage(err)}`),
+        );
+
       const current = readApiVersion();
       const settings = await repos.instanceSettings.get().catch(() => undefined);
       if (settings?.lastSeenVersion === current) return;

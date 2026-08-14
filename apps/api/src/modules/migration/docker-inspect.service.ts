@@ -341,6 +341,7 @@ export async function discoverServerStack(
  * declaration, then run the SAME `toDiscoveredService` merge — so the record is
  * byte-for-byte the keys the wizard shows masked (`maskDiscoveredStack`), only
  * with the real values. One round-trip, not a full re-scan. Read-only on the box.
+ * Returns the full map; the controller narrows it to the requested keys.
  *
  * Write-gated at the route (`server:write`): the masked scan is a `:read`,
  * revealing the real secret is a `:write`, the same split as the service-env

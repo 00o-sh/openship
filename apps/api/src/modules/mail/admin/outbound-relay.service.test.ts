@@ -1,4 +1,19 @@
 import { describe, expect, test, vi, beforeEach } from "vitest";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+/** Repo root, found by marker so moving this file cannot silently no-op a check. */
+function repoRoot(): string {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 12; i++) {
+    if (existsSync(join(dir, "apps", "email", "engine"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  throw new Error("repo root not found - fix the marker walk in this test");
+}
 
 // Stub the state I/O (readState/mutateState) so the test isolates the service's
 // command construction + DNS patching from the on-VPS JSON plumbing. The
@@ -476,6 +491,47 @@ describe("relay TLS is scoped to the hop, not the server", () => {
       expect(writes.some((w) => w.path === TLS_MAP[flavor].write)).toBe(false);
     });
   }
+
+  /**
+   * GH-392: a global `smtp_tls_security_level=encrypt` also governs the
+   * Postfix→Amavis content-filter hop, because `smtp-amavis` is an smtp CLIENT
+   * service. Amavisd's :10024 offers no STARTTLS, so saving a relay with the
+   * DEFAULT scope took INBOUND mail down entirely — every message deferring with
+   * "TLS is required, but was not offered". The exemption has to be applied in
+   * both scopes: "selected" leaves the global at `may` today, but an operator may
+   * have hardened it by hand, and a box built before the master.cf fix carries
+   * its own copy on the /etc/postfix bind mount.
+   */
+  for (const scope of ["all", "selected"] as const) {
+    test(`[${scope}] exempts the amavis content filter from the global TLS level`, async () => {
+      const { exec, execCalls } = makeExec();
+      await configureOutboundRelay(exec, {
+        ...base,
+        scope,
+        ...(scope === "selected" ? { domains: ["example.com"] } : {}),
+      });
+      expect(execCalls.join("\n")).toContain(
+        "postconf -P 'smtp-amavis/unix/smtp_tls_security_level=none'",
+      );
+    });
+  }
+
+  test("the amavis exemption is pinned at the transport for new installs", async () => {
+    // The runtime repair above only reaches boxes where a relay is saved. New
+    // installs must be correct from the first boot, so the override lives in the
+    // transport definition too - and this asserts it sits inside the
+    // `smtp-amavis` entry, not merely somewhere in the file (the two pre-existing
+    // `=none` lines belong to the reinject smtpd services).
+    const masterCf = readFileSync(
+      join(repoRoot(), "apps/email/engine/samples/postfix/master.cf"),
+      "utf-8",
+    );
+    const entry = masterCf.slice(
+      masterCf.indexOf("smtp-amavis unix"),
+      masterCf.indexOf("# smtp port used by Amavisd"),
+    );
+    expect(entry).toContain("-o smtp_tls_security_level=none");
+  });
 
   test("merges into an operator's existing policy map instead of clobbering it", async () => {
     const { exec, execCalls } = makeExec();

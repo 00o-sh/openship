@@ -88,4 +88,37 @@ describe("GET /categories billing gate", () => {
     const { categories, groups } = await fetchCategories(true);
     expect(new Set(categories.map((c) => c.group))).toEqual(new Set(groups.map((g) => g.id)));
   });
+
+  // Mail is the mirror image of billing: the engine is self-hosted-only and the whole
+  // mail module is absent from the cloud runtime, so the gate has to run the other way.
+  // Nothing else pins the DIRECTION, and a later "simplification" that filtered
+  // CATEGORIES itself — or dropped one of the two branches — would ship green.
+  it("keeps the mail group on self-hosted", async () => {
+    const { categories, groups } = await fetchCategories(false);
+    expect(groups.map((g) => g.id)).toContain("mail");
+    expect(categories.map((c) => c.id)).toContain("mail.inbound_received");
+  });
+
+  it("drops the mail group from both arrays on cloud", async () => {
+    const { categories, groups } = await fetchCategories(true);
+
+    expect(groups.map((g) => g.id)).not.toContain("mail");
+    expect(categories.map((c) => c.id)).not.toContain("mail.inbound_received");
+    const groupIds = new Set(groups.map((g) => g.id));
+    for (const cat of categories) expect(groupIds).toContain(cat.group);
+  });
+
+  it("still renders an inbound-mail alert on a cloud box", async () => {
+    // Same registry-stays-complete guarantee as billing, in the other direction: a row
+    // stored before a migration to cloud must keep its label, not degrade to the raw id.
+    await fetchCategories(true);
+    expect(findCategory("mail.inbound_received")?.label).toBe("Inbound email received");
+  });
+
+  // Per-message events must never default on: the dispatcher's fallback fans a
+  // default-enabled category to every member's verified email channel, and a
+  // notification mail landing back on the watched engine captures itself.
+  it("never defaults inbound mail to enabled", async () => {
+    expect(findCategory("mail.inbound_received")?.defaultEnabled).toBe(false);
+  });
 });

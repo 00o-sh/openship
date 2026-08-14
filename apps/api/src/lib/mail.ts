@@ -399,12 +399,33 @@ async function getTransportChain(
   if (preferSource !== "platform" && envTransport) {
     chain.push({ transport: envTransport, from: envFrom, source: "env" });
   }
+  // Last resort for the "platform" preference: env is normally dropped so a branded
+  // invite can't quietly go out from a generic sender — but that only holds while a
+  // branded sender EXISTS. On a box whose only mail config is env SMTP the chain above
+  // is empty, and dropping env there doesn't downgrade the sender, it loses the mail
+  // entirely (sendMail's empty-chain path is a silent no-op). An invite delivered from
+  // the generic sender beats an invite that never arrives.
+  if (chain.length === 0 && envTransport) {
+    chain.push({ transport: envTransport, from: envFrom, source: "env" });
+  }
   return chain;
 }
 
-/** Send an email. No-ops with a warning when no transport is available; fails
- *  over across the transport chain when a send throws. */
-export async function sendMail(opts: SendMailOptions): Promise<void> {
+/**
+ * Send an email. Fails over across the transport chain when a send throws.
+ *
+ * RETURNS whether anything actually accepted the message. This used to be `void`,
+ * and the empty-chain path still only warns rather than throwing — which is right
+ * for the fire-and-forget callers, but it meant a caller could not TELL. That is how
+ * an email notification channel ended up marked `verified` and every delivery marked
+ * `sent` on a box with no transport at all: the send "succeeded" because it silently
+ * did nothing.
+ *
+ * So: callers that must react check the boolean (see the email notification worker),
+ * and callers that genuinely don't care keep ignoring it exactly as before. A hard
+ * throw here would have changed behaviour for all eight call sites at once.
+ */
+export async function sendMail(opts: SendMailOptions): Promise<boolean> {
   const preferSource = opts.preferSource ?? "auto";
 
   // Cloud relay branch — only meaningful on a local self-hosted instance.
@@ -416,7 +437,7 @@ export async function sendMail(opts: SendMailOptions): Promise<void> {
         "[mail] preferSource=cloud requires organizationId - skipping email to",
         opts.to,
       );
-      return;
+      return false;
     }
     // cloud-client is dual-side (local outbound → SaaS) with no local-
     // only side effects on import, so static import is fine. Cargo-cult
@@ -434,8 +455,9 @@ export async function sendMail(opts: SendMailOptions): Promise<void> {
       console.warn(
         `[mail] cloud invitation relay failed for org=${opts.organizationId}: ${result.error}`,
       );
+      return false;
     }
-    return;
+    return true;
   }
 
   const chain = await getTransportChain(preferSource);
@@ -444,7 +466,7 @@ export async function sendMail(opts: SendMailOptions): Promise<void> {
       `[mail] no transport configured (preferSource=${preferSource}) - skipping email to`,
       opts.to,
     );
-    return;
+    return false;
   }
 
   // Try each transport in priority order; fail over to the next on a send
@@ -461,7 +483,7 @@ export async function sendMail(opts: SendMailOptions): Promise<void> {
         html: opts.html,
         ...(opts.text ? { text: opts.text } : {}),
       });
-      return;
+      return true;
     } catch (err) {
       lastErr = err;
       const more = i < chain.length - 1;

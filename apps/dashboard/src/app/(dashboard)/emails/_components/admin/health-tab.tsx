@@ -6,9 +6,10 @@
  * Two sections operators check in different troubleshooting flows but
  * want to see together:
  *
- *   1. Daemons   - live systemd status of Postfix, Dovecot, Amavis,
- *                  ClamAV, etc. Polled every 10 s. Check this when
- *                  "mail isn't sending" - usually a daemon is down.
+ *   1. Daemons   - live state of Postfix, Dovecot, Amavis, ClamAV, etc, read from
+ *                  whichever supervisor the box runs (supervisord in the engine
+ *                  container, or systemd on a legacy host). Polled every 10 s.
+ *                  Check this when "mail isn't sending" - usually a daemon is down.
  *   2. Outbound  - where this server hands mail off, and what the queue
  *                  says about it. Rides the same poll as the daemons.
  *                  Check this when the daemons are green and mail still
@@ -294,7 +295,8 @@ function DaemonRow({
   const { t, dir } = useI18n();
   const h = t.emailsAdmin.health;
   const presentation = daemonStatusPresentation(component.status);
-  const statusLabel = daemonStatusLabel(component.status, h);
+  const statusLabel = daemonStatusLabel(component.status, h, component.subState);
+  const subStateHint = daemonSubStateHint(component, h);
   const { showToast } = useToast();
   const [acting, setActing] = useState<ComponentAction | null>(null);
   const [logsOpen, setLogsOpen] = useState(false);
@@ -303,11 +305,31 @@ function DaemonRow({
     if (acting) return;
     setActing(action);
     try {
-      await mailAdminApi.components.action(serverId, component.key, action);
-      const doneTpl =
-        action === "start" ? h.toast.started : action === "stop" ? h.toast.stopped : h.toast.restarted;
-      showToast(interpolate(doneTpl, { label: component.label }), "success");
+      const res = await mailAdminApi.components.action(serverId, component.key, action);
+      // Refresh BEFORE toasting so the pill and the toast can't contradict each other.
       await onActed();
+      const wanted = action === "stop" ? "inactive" : "active";
+      if (!res.settled || res.settled.status === wanted) {
+        const doneTpl =
+          action === "start" ? h.toast.started : action === "stop" ? h.toast.stopped : h.toast.restarted;
+        showToast(interpolate(doneTpl, { label: component.label }), "success");
+      } else {
+        // The supervisor took the job and the daemon still isn't there. "ClamAV
+        // restarted" for a daemon already back in BACKOFF is the lie this removes.
+        // `res.output` is the supervisor's own words (e.g. "ERROR (not running)"),
+        // server-generated, so it is appended verbatim and untranslated. A settled
+        // state that is still transitional arrives as undefined, so a healthy slow
+        // restart keeps the optimistic wording above.
+        const sentence = interpolate(h.toast.notConfirmed, {
+          label: component.label,
+          state: daemonStatusLabel(res.settled.status, h, res.settled.subState),
+        });
+        showToast(
+          res.output ? `${sentence} ${res.output}` : sentence,
+          "info",
+          interpolate(h.toast.notConfirmedTitle, { label: component.label }),
+        );
+      }
     } catch (err) {
       const failMsg =
         action === "start" ? h.toast.startFailed : action === "stop" ? h.toast.stopFailed : h.toast.restartFailed;
@@ -387,6 +409,14 @@ function DaemonRow({
             <span className="font-mono text-[11px] text-muted-foreground/80 truncate">
               {component.unit}
             </span>
+            {/* Informational rows carry the same chip: from the operator's side both
+                mean "mail still works without this". The difference is only whether the
+                banner grades it (GH-240). */}
+            {component.severity !== "required" && (
+              <span className="text-[10px] uppercase tracking-wide font-medium text-muted-foreground/70 border border-border/60 rounded px-1 py-px">
+                {h.optional}
+              </span>
+            )}
           </div>
           <p className="text-xs text-muted-foreground mt-0.5 truncate">
             {component.description}
@@ -402,6 +432,9 @@ function DaemonRow({
             <p className="text-[11px] text-warning mt-0.5 break-words">
               {component.detail}
             </p>
+          )}
+          {subStateHint && (
+            <p className="text-[11px] text-danger mt-0.5 break-words">{subStateHint}</p>
           )}
         </div>
         <StatusPill tone={presentation.tone} icon={presentation.PillIcon}>
@@ -436,7 +469,6 @@ function DaemonRow({
         <LogsDrawer
           serverId={serverId}
           componentKey={component.key}
-          unit={component.unit}
           label={component.label}
           onClose={() => setLogsOpen(false)}
         />
@@ -917,7 +949,11 @@ function dnsStatusPresentation(status: DnsCheckStatus): DnsStatusPresentation {
 
 // ─── Status label maps (localized) ───────────────────────────────────────────
 
-function daemonStatusLabel(status: MailComponentStatus, h: HealthDict): string {
+function daemonStatusLabel(
+  status: MailComponentStatus,
+  h: HealthDict,
+  subState?: string,
+): string {
   switch (status) {
     case "active":
       return h.daemonStatus.running;
@@ -927,13 +963,29 @@ function daemonStatusLabel(status: MailComponentStatus, h: HealthDict): string {
       return h.daemonStatus.stopping;
     case "inactive":
       return h.daemonStatus.stopped;
+    // supervisord collapses FATAL (given up) and BACKOFF (still retrying) into one
+    // `failed`; only the sub-state separates them, and only one of them needs the
+    // operator to press Restart.
     case "failed":
-      return h.daemonStatus.failed;
+      return subState === "fatal" ? h.daemonStatus.crashed : h.daemonStatus.failed;
     case "missing":
       return h.daemonStatus.missing;
     default:
       return h.daemonStatus.unknown;
   }
+}
+
+/**
+ * The one thing `failed` doesn't say: whether anything is still trying.
+ *
+ * Matches the LOWER-CASED supervisord word (mail-engine.ts lower-cases the container
+ * arm); systemd has no FATAL/BACKOFF, so the host flavor never hits either branch.
+ */
+function daemonSubStateHint(component: MailComponentHealth, h: HealthDict): string | null {
+  if (component.status !== "failed") return null;
+  if (component.subState === "fatal") return h.daemonHint.fatal;
+  if (component.subState === "backoff") return h.daemonHint.backoff;
+  return null;
 }
 
 function dnsStatusLabel(status: DnsCheckStatus, h: HealthDict): string {

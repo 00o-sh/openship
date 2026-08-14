@@ -44,7 +44,7 @@ const resolveTxt = publicResolver.resolveTxt.bind(publicResolver);
 const reverse = publicResolver.reverse.bind(publicResolver);
 import { sshManager } from "../../../lib/ssh-manager";
 import { readState } from "../mail-state";
-import { relayedDomainsFor, safeErrorMessage } from "@repo/core";
+import { relayedDomainsFor, safeErrorMessage, mailHostname } from "@repo/core";
 
 export type DnsCheckStatus = "pass" | "warn" | "fail" | "unknown";
 
@@ -175,14 +175,63 @@ export async function scanDns(serverId: string, domain?: string): Promise<DnsSca
   };
 }
 
+/**
+ * Addresses that mean "a local interceptor answered", not "this is where the name
+ * points" (GH-240 FP2).
+ *
+ * Pinning the resolver to 1.1.1.1/8.8.8.8 is not enough on a machine behind a
+ * fake-IP proxy: Clash, sing-box and friends run a TUN that captures UDP:53 to ANY
+ * destination and synthesise an address per hostname, so the query never leaves the box
+ * and the answer is an internal handle. Compared against the real public IP that reads as
+ * "resolves, but to 198.18.x.x" — the operator is told their DNS is wrong when their DNS
+ * is fine and only the machine running the scan cannot see it.
+ *
+ *   198.18.0.0/15  RFC 2544 benchmarking range - the documented default fake-ip-range
+ *                  for Clash and sing-box, and never legitimately a public mail host.
+ *   240.0.0.0/4    RFC 1112 reserved (class E); used by some fake-IP configs.
+ *   fc00::/7       IPv6 ULA, which covers sing-box's fd00::/18 v6 default.
+ *
+ * A real A record can never legitimately be any of these, so treating them as
+ * "unverifiable" costs nothing and stops the scan lying about the zone.
+ */
+export function looksSyntheticAddress(ip: string): boolean {
+  if (ip.includes(":")) {
+    const head = parseInt(ip.split(":")[0] || "0", 16);
+    return head >= 0xfc00 && head <= 0xfdff;
+  }
+  const [a = 0, b = 0] = ip.split(".").map(Number);
+  if (a === 198 && (b === 18 || b === 19)) return true;
+  if (a >= 240) return true;
+  return false;
+}
+
 // ─── Per-record checks ───────────────────────────────────────────────────────
 
 async function checkA(domain: string, exp?: ExpectedRecord): Promise<DnsCheck | null> {
   if (!exp?.value) return null;
-  const name = exp.name || `mail.${domain}`;
+  const name = exp.name || mailHostname(domain);
   try {
     const ips = await resolve4(name);
     const match = ips.includes(exp.value);
+    // A synthetic answer says nothing about the published zone, so report "we could not
+    // look" rather than "your record is wrong".
+    if (!match && ips.length > 0 && ips.every(looksSyntheticAddress)) {
+      return {
+        key: "a",
+        label: "A record",
+        description: `Points the mail server hostname (${name}) at the VPS public IP.`,
+        queriedName: name,
+        recordType: "A",
+        status: "unknown",
+        expected: exp.value,
+        actual: ips.join(", "),
+        message:
+          `DNS could not be verified from here: ${name} resolved to ${ips.join(", ")}, ` +
+          `which is a synthetic address from a local DNS interceptor (a fake-IP VPN or ` +
+          `proxy such as Clash or sing-box), not a published record. Re-run the scan with ` +
+          `that proxy off, or check the record from another network.`,
+      };
+    }
     return {
       key: "a",
       label: "A record",
@@ -205,7 +254,7 @@ async function checkA(domain: string, exp?: ExpectedRecord): Promise<DnsCheck | 
 
 async function checkAaaa(domain: string, exp?: ExpectedRecord): Promise<DnsCheck | null> {
   if (!exp?.value) return null;
-  const name = exp.name || `mail.${domain}`;
+  const name = exp.name || mailHostname(domain);
   try {
     const ips = await resolve6(name);
     const match = ips.some((ip) => normaliseIpv6(ip) === normaliseIpv6(exp.value!));
@@ -512,7 +561,7 @@ async function checkPtr(
   relayedAll = false,
 ): Promise<DnsCheck | null> {
   if (!aRecord?.value) return null;
-  const expectedHost = trimDot(`mail.${domain}`);
+  const expectedHost = trimDot(mailHostname(domain));
   const base = {
     key: "ptr",
     label: "PTR (reverse DNS)",

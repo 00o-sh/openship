@@ -777,10 +777,11 @@ export function ServiceDetailPanel({
               isEditingMode={true}
               setIsEditingMode={() => { /* always editing in the Env tab */ }}
               showSettingsActions={false}
-              // #336: env values arrive masked; reveal the real ones on demand
-              // (the endpoint is write-gated, so read-only members can't).
-              onRevealAll={async () =>
-                (await servicesApi.revealEnv(projectId, service.id)).environment
+              // #336: env values arrive masked; reveal only the keys the operator
+              // actually opens (the endpoint is write-gated, so read-only members
+              // can't reveal at all).
+              onReveal={async (keys) =>
+                (await servicesApi.revealEnv(projectId, service.id, keys)).environment
               }
               borderless
             />

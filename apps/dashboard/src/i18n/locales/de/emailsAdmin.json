@@ -4,6 +4,7 @@
       "overview": "Übersicht",
       "domains": "Domains",
       "mailboxes": "Postfächer",
+      "inbound": "Eingang",
       "dns": "DNS",
       "health": "Zustand",
       "test": "Test",
@@ -11,6 +12,56 @@
       "advanced": "Erweitert"
     },
     "ariaLabel": "Mail-Admin-Bereiche"
+  },
+  "inbound": {
+    "heading": "Eingangsregeln",
+    "description": "Lassen Sie sich in einem Benachrichtigungskanal informieren, wenn Mail an eine Adresse auf diesem Server eintrifft.",
+    "newRule": "Neue Regel",
+    "newTitle": "Neue Eingangsregel",
+    "editTitle": "Eingangsregel bearbeiten",
+    "edit": "Bearbeiten",
+    "emptyTitle": "Noch keine Eingangsregeln",
+    "emptyBody": "Fügen Sie eine Regel hinzu, um in Slack, Telegram, Discord oder per Webhook benachrichtigt zu werden, wenn Mail an ein Postfach oder eine Domain auf diesem Server eintrifft.",
+    "noChannels": "Sie haben noch keine verifizierten Benachrichtigungskanäle. Fügen Sie unter Einstellungen → Benachrichtigungen einen hinzu, verifizieren Sie ihn und kommen Sie dann zurück, um eine Regel zu erstellen.",
+    "fieldName": "Name",
+    "namePlaceholder": "Support-Postfach → #support",
+    "fieldScope": "Überwachen",
+    "scopeMailbox": "Ein Postfach",
+    "scopeDomain": "Eine ganze Domain",
+    "scopeAll": "Jede Domain auf diesem Server",
+    "scopeAllSummary": "Jede Domain",
+    "fieldAddress": "Adresse",
+    "fieldDomain": "Domain",
+    "mailboxCaveat": "Der Abgleich erfolgt über die Kopfzeilen To und Cc – Mail, die dieses Postfach per Bcc oder über einen Alias erreicht hat, passt daher nicht. Überwachen Sie die ganze Domain, wenn Sie jede Nachricht benötigen.",
+    "fieldFrom": "Absender enthält",
+    "fieldSubject": "Betreff enthält",
+    "patternPlaceholder": "optional",
+    "patternHint": "Groß-/Kleinschreibung wird ignoriert. Verwenden Sie * als Platzhalter – alles andere wird wörtlich abgeglichen.",
+    "fieldChannels": "Diese Kanäle benachrichtigen",
+    "fieldEnabled": "Regel ist aktiv",
+    "channelCount": "{count} Kanal/Kanäle",
+    "colRule": "Regel",
+    "colWatch": "Überwacht",
+    "colChannels": "Kanäle",
+    "colStatus": "Status",
+    "active": "Aktiv",
+    "disabled": "Aus",
+    "paused": "Pausiert",
+    "deleteTitle": "Eingangsregel löschen",
+    "deleteConfirm": "Regel löschen",
+    "deleting": "Wird gelöscht…",
+    "deleteHint": "Bereits gesendete Benachrichtigungen bleiben unberührt. Bereits erfasste, aber noch nicht verarbeitete Mail wird verworfen.",
+    "save": "Regel speichern",
+    "saving": "Wird gespeichert…",
+    "cancel": "Abbrechen",
+    "test": "Jetzt testen",
+    "testing": "Wird getestet…",
+    "testResult": "{read} erfasste Nachricht(en) gelesen: {matched} passten zu einer Regel, {dropped} wurden herausgefiltert. Es wurde nichts gesendet oder gelöscht.",
+    "testFailed": "Der Test konnte nicht ausgeführt werden.",
+    "loadFailed": "Eingangsregeln konnten nicht geladen werden.",
+    "saveFailed": "Die Regel konnte nicht gespeichert werden.",
+    "deleteFailed": "Die Regel konnte nicht gelöscht werden.",
+    "confirmDelete": "Die Regel „{name}“ löschen? Die Erfassung für ihre Adresse wird beendet, sofern keine andere Regel sie noch benötigt."
   },
   "overview": {
     "mailServer": "Mailserver",
@@ -267,6 +318,11 @@
     "logs": "Protokolle",
     "openLogs": "Protokolle öffnen",
     "up": "Aktiv seit {time}",
+    "optional": "Optional",
+    "daemonHint": {
+      "fatal": "supervisord hat aufgegeben - es versucht es nicht von selbst erneut. Starte es über das Menü neu.",
+      "backoff": "Stürzt wiederholt ab; supervisord versucht es weiter. Die Protokolle nennen den Grund."
+    },
     "menu": {
       "restart": "Neu starten",
       "restarting": "Wird neu gestartet…",
@@ -284,7 +340,9 @@
       "restartFailed": "Neustart fehlgeschlagen",
       "startFailedTitle": "Start von {label} fehlgeschlagen",
       "stopFailedTitle": "Stopp von {label} fehlgeschlagen",
-      "restartFailedTitle": "Neustart von {label} fehlgeschlagen"
+      "restartFailedTitle": "Neustart von {label} fehlgeschlagen",
+      "notConfirmedTitle": "{label} ist nicht gestartet",
+      "notConfirmed": "Der Supervisor hat die Anfrage angenommen, aber {label} ist {state}. Öffne die Protokolle, um den Grund zu sehen."
     },
     "daemonStatus": {
       "running": "Läuft",
@@ -292,6 +350,7 @@
       "stopping": "Wird gestoppt",
       "stopped": "Gestoppt",
       "failed": "Fehlgeschlagen",
+      "crashed": "Abgestürzt",
       "missing": "Fehlt",
       "unknown": "Unbekannt"
     },
@@ -319,6 +378,10 @@
       "partDnsOne": "{count} DNS-Eintrag fehlt",
       "partDnsOther": "{count} DNS-Einträge fehlen",
       "partDelivery": "ausgehende Mail wird nicht zugestellt",
+      "degradedLabel": "Funktioniert, mit eingeschränktem Schutz",
+      "partScanning": "{names} läuft nicht - neue Mail wird OHNE Virenprüfung zugestellt",
+      "partSignatures": "{names} läuft nicht - Virensignaturen werden nicht mehr aktualisiert, Mail wird also gegen einen veraltenden Signaturstand geprüft",
+      "partAdvisory": "{names} läuft nicht",
       "almostSubQueueOne": "{count} Nachricht wartet auf den Versand – siehe Ausgehender Versand unten.",
       "almostSubQueueOther": "{count} Nachrichten warten auf den Versand – siehe Ausgehender Versand unten."
     },
@@ -554,6 +617,6 @@
     "close": "Schließen",
     "logsLoadFailed": "Protokolle konnten nicht geladen werden",
     "loadingLogs": "Protokolle werden geladen…",
-    "noJournal": "Keine Journal-Einträge für diese Unit."
+    "noLogLines": "Noch keine Protokollzeilen für diese Komponente."
   }
 }

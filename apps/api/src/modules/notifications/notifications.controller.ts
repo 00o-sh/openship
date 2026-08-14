@@ -42,21 +42,24 @@ const VALID_CHANNEL_KINDS = new Set([
 /**
  * GET /categories — the static registry, plus the groups the Settings UI tabs by.
  *
- * Billing is dropped outside CLOUD_MODE: those two categories are fed by
- * Stripe/Oblien, so on a self-hosted box they are toggles that can never fire.
- * The filter lives HERE and not in `CATEGORIES` on purpose — `findCategory`
- * supplies the title and body of every delivered alert
- * (notification-workers.ts) and the dispatcher's `defaultEnabled` fallback, so
- * the registry has to stay complete or an org that already holds a billing row
- * would start rendering the raw category id.
+ * Each group is dropped in the mode that can never produce it: `billing` is fed by
+ * Stripe/Oblien so it is cloud-only, and `mail` is fed by the self-hosted mail engine
+ * (the whole mail module is absent in cloud) so it is the mirror image. Either way a
+ * toggle that can never fire is worse than no toggle.
+ *
+ * The filter lives HERE and not in `CATEGORIES` on purpose — `findCategory` supplies the
+ * title and body of every delivered alert (notification-workers.ts) and the dispatcher's
+ * `defaultEnabled` fallback, so the registry has to stay complete or an org that already
+ * holds a row for a hidden category would start rendering the raw category id.
+ *
+ * Both lists are filtered symmetrically: a category whose group is gone would render
+ * under no tab at all.
  */
 export async function listCategories(c: Context) {
-  if (env.CLOUD_MODE) {
-    return c.json({ categories: CATEGORIES, groups: CATEGORY_GROUPS });
-  }
+  const hidden = new Set(env.CLOUD_MODE ? ["mail"] : ["billing"]);
   return c.json({
-    categories: CATEGORIES.filter((cat) => cat.group !== "billing"),
-    groups: CATEGORY_GROUPS.filter((g) => g.id !== "billing"),
+    categories: CATEGORIES.filter((cat) => !hidden.has(cat.group)),
+    groups: CATEGORY_GROUPS.filter((g) => !hidden.has(g.id)),
   });
 }
 

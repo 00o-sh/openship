@@ -20,7 +20,12 @@ const { createProjectMock, createServiceMock, setEnvMock, requireCloudMock, draf
 
 vi.mock("@repo/db", () => ({
   repos: {
-    project: { findDraftByAppTemplate: draftMock },
+    project: {
+      findDraftByAppTemplate: draftMock,
+      // installApp now ends in `ensureGeneratedAppSecrets`; nothing here asserts on it.
+      getEnvMap: async () => ({}),
+      mergeEnvVars: async () => {},
+    },
     service: {
       listByProject: async () => [
         { id: "svc-backend", name: "backend" },

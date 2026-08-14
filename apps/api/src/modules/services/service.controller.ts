@@ -13,6 +13,7 @@ import { AppError } from "@repo/core";
 import { streamSSE } from "../../lib/sse";
 import { param } from "../../lib/controller-helpers";
 import { getRequestContext } from "../../lib/request-context";
+import { parseRevealKeys, pickRevealed } from "../../lib/env-reveal";
 import { audit, auditContextFrom } from "../../lib/audit";
 import { sshManager } from "../../lib/ssh-manager";
 import * as serviceService from "./service.service";
@@ -57,13 +58,27 @@ export async function getById(c: Context) {
 
 // ─── Reveal real env (#336) — write-gated, backs the "show values" toggle ─────
 
+/**
+ * POST /projects/:id/services/:serviceId/env-reveal  { keys: string[] }
+ *
+ * Per-key: returns plaintext for the named keys ONLY, so pressing one row's eye
+ * discloses one secret. `keys` is required (see parseRevealKeys) — no request can
+ * ask for the whole map. The auto-emitted `project:service:write` audit row
+ * carries the disclosed key names via `auditAfter`.
+ */
 export async function revealEnv(c: Context) {
   const ctx = getRequestContext(c);
   const projectId = param(c, "id");
   const serviceId = param(c, "serviceId");
+  // Outside the try: a 400 from key validation must not be reported as a
+  // reveal failure. Body may be absent on a malformed client call.
+  const body = await c.req.json<{ keys?: unknown }>().catch(() => ({}) as { keys?: unknown });
+  const keys = parseRevealKeys(body.keys);
 
   try {
-    const environment = await serviceService.revealServiceEnv(ctx, projectId, serviceId);
+    const stored = await serviceService.revealServiceEnv(ctx, projectId, serviceId);
+    const environment = pickRevealed(stored, keys);
+    c.set("auditAfter", { revealedEnvKeys: Object.keys(environment) });
     return c.json({ success: true, environment });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to reveal service env";
@@ -231,6 +246,8 @@ export async function syncFromCompose(c: Context) {
       environment?: Record<string, string>;
       volumes?: string[];
       command?: string;
+      /** #332: exact argv — no `sh -c`. Wins over the lossy `command` string. */
+      commandArgv?: string[];
       restart?: string;
       exposed?: boolean;
       exposedPort?: string;

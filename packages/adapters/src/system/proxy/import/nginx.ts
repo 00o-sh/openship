@@ -45,6 +45,27 @@ async function dumpResolvedConfig(
   return null;
 }
 
+/**
+ * nginx's compiled `--prefix` — the base a prefix-relative `root` resolves against.
+ *
+ * `-T` inlines every `include` but does NOT rewrite directive VALUES, so a stock
+ * `root html;` survives the dump verbatim and only nginx's own prefix says where it
+ * points. `-V` prints the configure line to STDERR, hence the redirect.
+ *
+ * Null when no binary answers, or when the build passed no `--prefix`: nginx's
+ * compiled-in default (`/usr/local/nginx`) is a guess, and a wrong guess here
+ * publishes the wrong directory to the internet. Callers skip the site with that as
+ * the stated reason instead.
+ */
+async function nginxPrefix(executor: CommandExecutor, bins: string[]): Promise<string | null> {
+  for (const bin of bins) {
+    const out = await tryExec(executor, `${bin} -V 2>&1`);
+    const prefix = out?.match(/--prefix=(\S+)/)?.[1];
+    if (prefix) return prefix;
+  }
+  return null;
+}
+
 async function loadNginxConfig(executor: CommandExecutor): Promise<string> {
   const dumped = await dumpResolvedConfig(executor, ["nginx", "openresty"]);
   if (dumped) return dumped;
@@ -275,15 +296,59 @@ function parseProxyDirectives(body: string): {
   };
 }
 
+/**
+ * Loopback `server_name`s, which are never migratable hostnames: they only match a
+ * request that ARRIVED with `Host: localhost` — an on-box curl — so a vhost claiming
+ * one cannot be served for anybody through a public edge.
+ *
+ * Filtering them alongside `_` and regex names is what keeps nginx's SHIPPED default
+ * vhost (`server_name localhost; root html;`) out of the migrate set: it is a
+ * placeholder welcome page, not a site, and carrying it over failed at APPLY time on
+ * its prefix-relative root — reported to the operator as "1 site not served" for a
+ * site that never existed. A block that has a loopback name AND a real one keeps the
+ * real one; a block left with nothing falls into the no-usable-name skip below.
+ */
+const LOOPBACK_SERVER_NAMES = new Set([
+  "localhost",
+  "localhost.localdomain",
+  "ip6-localhost",
+  "ip6-loopback",
+]);
+
+/**
+ * Absolutize a `root`. nginx treats a value not starting with `/` as relative to its
+ * compiled prefix, so a bare `html` is legal config meaning `<prefix>/html`.
+ *
+ * Resolving HERE, where the prefix is known, is what keeps the raw token from
+ * reaching the vhost writer — which rejects it with "must be an absolute path", an
+ * accurate sentence about a config that is perfectly valid nginx, at the one moment
+ * (post-cutover) when the operator can least afford a misleading error.
+ */
+function resolveStaticRoot(
+  root: string,
+  prefix?: string,
+): { root: string } | { reason: string } {
+  if (root.startsWith("/")) return { root };
+  if (!prefix) {
+    return {
+      reason:
+        `static root "${root}" is relative to nginx's compiled prefix, ` +
+        `which this host didn't report`,
+    };
+  }
+  return { root: `${prefix.replace(/\/+$/, "")}/${root}` };
+}
+
 function parseServer(
   body: string,
   source: string,
   upstreams: Map<string, string>,
+  prefix?: string,
 ): { site?: ImportedSite; warnings: string[] } {
   const warnings: string[] = [];
   const names = firstDirective(body, "server_name")
     ?.split(/\s+/)
-    .filter((n) => n && n !== "_" && !n.startsWith("~"))
+    .filter((n) => n && n !== "_" && !n.startsWith("~") && !LOOPBACK_SERVER_NAMES.has(n.toLowerCase()))
     ?? [];
 
   // ssl if any `listen ... ssl` or `listen 443` (443 as a whole token — not 8443)
@@ -294,9 +359,10 @@ function parseServer(
   const certPath = firstDirective(body, "ssl_certificate");
   const keyPath = firstDirective(body, "ssl_certificate_key");
 
-  // No usable server_name = the default catch-all (`server_name _;` / omitted).
-  // It can't become a vhost (there's no hostname to register) and every nginx has
-  // one, so it's an expected skip, not a config item the operator lost.
+  // No usable server_name = the default catch-all (`server_name _;` / omitted), or a
+  // loopback-only block like nginx's shipped default vhost. It can't become a vhost
+  // (there's no routable hostname to register) and every nginx has one, so it's an
+  // expected skip, not a config item the operator lost.
   if (names.length === 0) return { warnings: [] };
 
   // All routes for this vhost. Locations are the real source; fall back to a
@@ -332,7 +398,12 @@ function parseServer(
     // only on :80 serving an empty webroot.
     return { warnings: [] };
   } else if (root && !isAcmeWebrootOnly(body)) {
-    target = { kind: "static", root: root.replace(/;$/, "") };
+    const resolved = resolveStaticRoot(root.replace(/;$/, ""), prefix);
+    if ("reason" in resolved) {
+      warnings.push(`nginx: ${names[0]} — ${resolved.reason} (skipped)`);
+      return { warnings };
+    }
+    target = { kind: "static", root: resolved.root };
   } else if (root) {
     // A root that exists ONLY to answer /.well-known/acme-challenge — certbot
     // scaffolding, not a site. Our edge answers ACME itself (nginx.conf proxies
@@ -353,8 +424,11 @@ function parseServer(
 }
 
 /** Parse a raw nginx config string into normalized sites. Shared by `scanNginx`
- *  (foreign `/etc/nginx`) and `scanOpenshipEdge` (our OpenResty sites tree). */
-function parseNginxConfig(raw: string): ProxyScanResult {
+ *  (foreign `/etc/nginx`) and `scanOpenshipEdge` (our OpenResty sites tree).
+ *
+ *  `prefix` absolutizes a prefix-relative `root`; our own edge always writes
+ *  absolute roots, so the "ours" callers pass none. */
+function parseNginxConfig(raw: string, prefix?: string): ProxyScanResult {
   const warnings: string[] = [];
   const sites: ImportedSite[] = [];
 
@@ -372,7 +446,7 @@ function parseNginxConfig(raw: string): ProxyScanResult {
   }
 
   for (const body of blocks) {
-    const { site, warnings: blockWarnings } = parseServer(body, "nginx", upstreams);
+    const { site, warnings: blockWarnings } = parseServer(body, "nginx", upstreams, prefix);
     warnings.push(...blockWarnings);
     if (site) sites.push(site);
   }
@@ -396,7 +470,13 @@ function parseNginxConfig(raw: string): ProxyScanResult {
  * answering only on port 80 with an empty webroot.
  */
 export async function scanNginx(executor: CommandExecutor): Promise<ProxyScanResult> {
-  return parseNginxConfig(await loadNginxConfig(executor));
+  const raw = await loadNginxConfig(executor);
+  // Only pay for the extra `-V` when a root that needs the prefix is actually
+  // present. A commented-out `root html;` false-positives the probe, which costs one
+  // cheap exec and nothing else — the prefix is unused if no site needs it.
+  const relativeRoot = /(?:^|[;{\s])root\s+[^/;\s]/.test(raw);
+  const prefix = relativeRoot ? await nginxPrefix(executor, ["nginx", "openresty"]) : null;
+  return parseNginxConfig(raw, prefix ?? undefined);
 }
 
 /**

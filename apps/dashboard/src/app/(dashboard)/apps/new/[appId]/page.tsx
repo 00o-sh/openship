@@ -59,6 +59,7 @@ import { resolvePublicEndpointHostname } from "@/lib/public-endpoint-payload";
 import {
   CleanDeployProgressCard,
   firstPublicHost,
+  type DeploySummaryRow,
 } from "@/components/deploy/CleanDeployProgress";
 import { useBuildStream } from "@/hooks/useSSEConnection";
 import type { ServiceStatusEvent } from "@/lib/sseMessageProcessors";
@@ -456,6 +457,10 @@ export default function AppInstallPage() {
   const [deploymentId, setDeploymentId] = useState<string | null>(resumeDeploymentId);
   const [projectId, setProjectId] = useState<string | null>(adoptedProjectId);
   const [progress, setProgress] = useState(0);
+  // Epoch ms this install started, for the progress panel's elapsed clock. Set
+  // when we enter `installing`, and on a mid-install refresh from the build's own
+  // `buildStartedAt` so the resumed view doesn't restart the clock at zero.
+  const [startedAt, setStartedAt] = useState<number | null>(null);
   const [phaseLabel, setPhaseLabel] = useState("");
   const [liveUrl, setLiveUrl] = useState<string | null>(null);
   const [logs, setLogs] = useState("");
@@ -670,6 +675,9 @@ export default function AppInstallPage() {
         const s = res?.data ?? res ?? {};
         const status: string = s.deploymentStatus ?? s.status ?? "";
         if (typeof s.progress === "number") setProgress(s.progress);
+        // Resuming: keep the clock on the real start when the build reports one.
+        const startedIso = Date.parse(String(s.buildStartedAt ?? ""));
+        setStartedAt((prev) => prev ?? (Number.isFinite(startedIso) ? startedIso : Date.now()));
         if (
           ["ready", "failed", "cancelled", "partial_failure", "action_required", "rejected", "no_changes"].includes(
             status,
@@ -908,6 +916,7 @@ export default function AppInstallPage() {
                 deployTarget: "server",
                 serverId: server.id,
                 serverHost: server.sshHost,
+                serverName: server.name ?? undefined,
               })
             }
           />
@@ -1004,6 +1013,7 @@ export default function AppInstallPage() {
         }
       }
       setPhaseLabel(w.phaseQueued);
+      setStartedAt(Date.now());
       setPhase("installing");
     } catch (err) {
       // Strip the server's "Pre-deploy checks failed:" prefix for a cleaner
@@ -1078,6 +1088,7 @@ export default function AppInstallPage() {
       setErrorMsg("");
       setDeploymentId(null);
       setCancelled(false);
+      setStartedAt(null);
       try {
         const url = new URL(window.location.href);
         url.searchParams.delete("deployment");
@@ -1087,6 +1098,96 @@ export default function AppInstallPage() {
       }
       setPhase("form");
     };
+
+    // What this install was configured WITH — the aside's read-out, and the thing
+    // an operator can't get from the stepper or the logs. Every row is read from
+    // the pickers' own state, so it shows the configuration that was sent, never
+    // one re-derived from the template. A value this view can't know (the
+    // destination after a mid-install refresh — only the routing pickers
+    // rehydrate) is left out rather than guessed.
+    const summary: DeploySummaryRow[] = [];
+    const destinationValue =
+      destination?.deployTarget === "cloud"
+        ? t.deploy.targetStep.options.cloud
+        : (destination?.serverName || destination?.serverHost || "");
+    if (destinationValue) {
+      summary.push({
+        id: "destination",
+        label: w.summaryDestination,
+        value: destinationValue,
+        mono: destination?.deployTarget === "server" && !destination.serverName,
+      });
+    }
+    for (const e of appEndpoints) {
+      const st = expo[endpointKey(e)];
+      if (!st) continue;
+      const id = `ep-${endpointKey(e)}`;
+      const hostPort = hostPortForEndpoint(template.services, e);
+      if (st.kind === "http" && st.mode === "domain") {
+        // The hostname the install will actually write — same resolver the
+        // routing payload uses, seeded with the same default label.
+        const host = resolvePublicEndpointHostname(
+          {
+            domainType: st.ep.domainType,
+            domain: st.ep.domain.trim() ? normalizeServiceLabel(st.ep.domain) : defaultFreeLabel(e),
+            customDomain: normalizeCustomHostname(st.ep.customDomain),
+          },
+          baseDomain,
+        );
+        if (host) summary.push({ id, label: e.label, value: host, mono: true });
+      } else if (st.kind === "tcp" && st.mode === "internal") {
+        summary.push({ id, label: e.label, value: w.tcpInternalLabel });
+      } else {
+        // Port-only web, or a published database port: the reachable HOST port.
+        summary.push({
+          id,
+          label: e.label,
+          value: destination?.serverHost ? `${destination.serverHost}:${hostPort}` : `:${hostPort}`,
+          mono: true,
+        });
+      }
+    }
+    const serviceCount = template.services?.length ?? 0;
+    if (serviceCount > 0) {
+      summary.push({ id: "services", label: w.summaryServices, value: String(serviceCount) });
+    }
+    for (const req of requires) {
+      const sourceName = candidates.find((p) => p.id === connChoices[req.id])?.name;
+      if (sourceName) {
+        summary.push({
+          id: `req-${req.id}`,
+          label: resolveLocalized(req.label, locale),
+          value: sourceName,
+        });
+      }
+    }
+    // The business fields the operator filled in. Secrets are never shown, and a
+    // boolean is skipped rather than rendered as a bare "true"; capped so a
+    // settings-heavy app doesn't push the actions off a short viewport.
+    const fieldValueOf = (service: string, key: string) => values[fk(service, key)];
+    for (const f of installFields) {
+      if (summary.length >= 10) break;
+      if (f.secret || f.type === "boolean" || !isFieldVisible(f, fieldValueOf)) continue;
+      const raw = values[fk(f.service, f.key)];
+      if (typeof raw !== "string" || raw.trim() === "") continue;
+      summary.push({
+        id: `set-${f.service}-${f.key}`,
+        label: f.label,
+        value: f.options?.find((o) => o.value === raw)?.label ?? raw.trim(),
+      });
+    }
+    if (declaresResources) {
+      const needs = [
+        template.minResources?.memoryMb
+          ? interpolate(w.needsMemory, { value: formatMemoryMb(template.minResources.memoryMb) })
+          : null,
+        template.minResources?.cpuCores ? formatCpuCores(template.minResources.cpuCores) : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      if (needs) summary.push({ id: "resources", label: w.needsTitle, value: needs });
+    }
+
     return (
       <CleanDeployProgressCard
         appId={appId}
@@ -1103,6 +1204,8 @@ export default function AppInstallPage() {
         services={services}
         appSetupSteps={appSetupSteps}
         firstLogin={firstLogin}
+        summary={summary}
+        startedAt={startedAt}
         connect={
           projectId
             ? {

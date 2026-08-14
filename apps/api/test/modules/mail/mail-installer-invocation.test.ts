@@ -24,10 +24,14 @@ vi.mock("@repo/adapters", async (importOriginal) => ({
 // Health-gate reports everything up so the step reaches its success return.
 vi.mock("../../../src/modules/mail/mail-health.service", () => ({
   checkMailHealth: vi.fn(async () => [
-    { key: "postfix", label: "Postfix", description: "", unit: "postfix", status: "active" },
-    { key: "dovecot", label: "Dovecot", description: "", unit: "dovecot", status: "active" },
-    { key: "postgresql", label: "PostgreSQL", description: "", unit: "postgresql", status: "active" },
+    { key: "postfix", label: "Postfix", description: "", unit: "postfix", severity: "required", status: "active" },
+    { key: "dovecot", label: "Dovecot", description: "", unit: "dovecot", severity: "required", status: "active" },
+    { key: "postgresql", label: "PostgreSQL", description: "", unit: "postgresql", severity: "required", status: "active" },
   ]),
+  // The gate reads the CATALOG, not `c.severity` off the row, so this mock must export
+  // it — a missing export throws loudly instead of silently gating on nothing.
+  requiresMailComponent: (key: string) =>
+    ["postfix", "dovecot", "postgresql"].includes(key),
   MAIL_COMPONENTS: [],
 }));
 

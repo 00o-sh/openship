@@ -317,6 +317,44 @@ export const SYSTEM_JOB_DEFS: SystemJobDef[] = [
     },
   },
   {
+    key: "mail:inbound-watch",
+    label: "Inbound mail rules",
+    // Reads each armed collector folder, matches captured mail against the operator's
+    // inbound rules, emits notifications, and DELETES what it handled — the deletion is
+    // both the cursor and the prune that keeps a second full copy of every watched
+    // message from accumulating under /var/vmail (a bind mount with no quota of its own).
+    //
+    // Every minute: this is the feature's latency, and a rule that says "tell me when
+    // support@ gets mail" is not useful at a six-hour cadence. A server with no rules
+    // costs one indexed query and no SSH at all. Self-hosted + desktop only — the mail
+    // module does not exist in the cloud runtime.
+    defaultCron: "* * * * *",
+    available: () => platform().target !== "cloud",
+    run: async () => {
+      const { runInboundWatch } = await import("../mail/inbound/watch");
+      return runInboundWatch();
+    },
+  },
+  {
+    key: "mail:inbound-reconcile",
+    label: "Inbound mail capture drift",
+    // Brings each engine's armed BCC rows back in line with the rules that exist.
+    // Separate from the one-minute read sweep above because it costs SSH per mail
+    // server and repairs nothing latency-sensitive: a `scope: "all"` rule picking up
+    // a domain added after it was written, an arm/disarm that failed mid-write, or a
+    // collector mailbox an operator deleted by hand.
+    //
+    // Deliberately NOT the defence against an unpruned collector filling /var/vmail —
+    // the write path disarms what it orphans (GH-559). This is the backstop, so a
+    // slow off-peak cadence is right. Off the :00/:30 marks.
+    defaultCron: "17 */2 * * *",
+    available: () => platform().target !== "cloud",
+    run: async () => {
+      const { runInboundReconcile } = await import("../mail/inbound/watch");
+      return runInboundReconcile();
+    },
+  },
+  {
     key: "services:health-watch",
     label: "Container health watch",
     // Every minute. This is the ONLY thing that notices a container died after

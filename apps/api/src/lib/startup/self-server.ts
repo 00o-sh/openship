@@ -38,6 +38,7 @@
  * the target list and the deploy wizard to surface — an annotation, never a gate.
  */
 import { env } from "../../config/env";
+import { hostChannelAccount } from "@repo/core";
 import type { HostChannelCode } from "@repo/adapters";
 import { repos, type Server } from "@repo/db";
 import { boxOwningOrgId } from "../box-org";
@@ -131,12 +132,13 @@ async function register(opts?: EnsureLocalServerOptions): Promise<Server | null>
   const organizationId = await localServerOwnerOrg();
   if (!organizationId) return null;
 
-  // The account the host channel actually logs in as. The CLI writes
-  // OPENSHIP_HOST_SSH_USER when it provisions the container→host channel; the default
-  // matches `hostChannelUser()`, so a bare install with no channel agrees too. A row
-  // claiming `root` while the channel dials someone else is issue #489 — and since
-  // these fields are display-only (below), nothing else would ever correct it.
-  const desiredSshUser = process.env.OPENSHIP_HOST_SSH_USER?.trim() || "root";
+  // The account the host channel actually logs in as. Through the SHARED resolver, not a
+  // local copy of the expression: the row is display-only, so nothing downstream would
+  // ever correct it, and a row claiming one account while the channel dials another is
+  // #489 and then #527 — where the operator was shown `admin@…`, went to fix it, and the
+  // dial went on using `root` regardless. Same function the dial uses (hostChannelUser in
+  // adapters), so the two cannot drift.
+  const desiredSshUser = hostChannelAccount(process.env);
 
   const existing = await repos.server.findLocal(organizationId);
   if (existing) {

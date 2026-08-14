@@ -100,6 +100,61 @@ export function getActiveContainerApplySession(
   return null;
 }
 
+/**
+ * A session without its transport — what a progress READER needs (steps, status,
+ * outcome) and nothing it must not hold (the subscriber set, the log ring, the
+ * done promise).
+ */
+export interface ContainerApplySnapshot {
+  id: string;
+  serverId: string;
+  component: ContainerComponent;
+  status: ContainerSessionStatus;
+  steps: ContainerStep[];
+  startedAt: number;
+  finishedAt?: number;
+  result?: ContainerApplyResult;
+  error?: string;
+}
+
+function snapshot(s: ContainerApplySession): ContainerApplySnapshot {
+  return {
+    id: s.id,
+    serverId: s.serverId,
+    component: s.component,
+    status: s.status,
+    steps: s.steps.map((step) => ({ ...step })),
+    startedAt: s.startedAt,
+    ...(s.finishedAt ? { finishedAt: s.finishedAt } : {}),
+    ...(s.result ? { result: { ...s.result } } : {}),
+    ...(s.error ? { error: s.error } : {}),
+  };
+}
+
+/**
+ * Every apply this process is running, plus the ones that JUST settled — the read
+ * behind a fleet-wide progress surface.
+ *
+ * One pass over the store instead of a scan per (server, component), because a
+ * fleet view asks about every box at once. `settledWithinMs` includes finished
+ * sessions for that long after the fact: the outcome is the only place a "done"
+ * beat can come from — the drift row clears its `behind` and its in-progress flag
+ * in the same write, so a reader watching the row alone can only ever see the work
+ * disappear, never that it succeeded.
+ */
+export function listContainerApplySessions(opts?: {
+  settledWithinMs?: number;
+}): ContainerApplySnapshot[] {
+  const window = opts?.settledWithinMs ?? 0;
+  const cutoff = Date.now() - window;
+  const out: ContainerApplySnapshot[] = [];
+  for (const s of sessions.values()) {
+    if (s.status === "running") out.push(snapshot(s));
+    else if (window > 0 && (s.finishedAt ?? 0) >= cutoff) out.push(snapshot(s));
+  }
+  return out.sort((a, b) => a.startedAt - b.startedAt);
+}
+
 export function createContainerApplySession(
   serverId: string,
   component: ContainerComponent,

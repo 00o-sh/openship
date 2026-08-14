@@ -88,6 +88,11 @@
     "breadcrumbApps": "Uygulamalar",
     "appEyebrow": "Uygulama",
     "stopFailed": "Yükleme durdurulamadı",
+    "progressStep": "Adım {current} / {total}",
+    "progressServicesReady": "{total} servisten {done} tanesi hazır",
+    "summaryTitle": "Yapılandırma",
+    "summaryDestination": "Hedef",
+    "summaryServices": "Servisler",
     "mail": {
       "title": "E-posta kur",
       "subtitle": "Kendi alan adınızda webmail dağıtın veya mevcut bir posta kutusunu bağlayın.",
