@@ -69,8 +69,10 @@ forward-compatibility placeholder).
 
 Real-daemon E2Es under `apps/api/test/e2e/`. They run only in the opt-in suite
 (`bun run --cwd apps/api test:e2e`) — `bun run test` excludes the directory — and
-CI runs them in the `e2e-docker` job with `RUN_DOCKER_E2E=1`, which turns "no
-daemon" into a FAILURE instead of a skip. Locally the socket is resolved the way
+the release gate (`release-gate.yml`) runs them in the `e2e-docker` job with
+`RUN_DOCKER_E2E=1`, which turns "no daemon" into a FAILURE instead of a skip — and,
+since `Release` and `Docker images` both list that gate in `needs:`, into a blocked
+publish. Locally the socket is resolved the way
 the product resolves it (explicit → `DOCKER_HOST` → active `docker context` →
 `/var/run/docker.sock`), so Colima / Rancher / Podman need no env at all; a skip
 prints the reason. See `apps/api/test/helpers/docker-e2e.ts`.

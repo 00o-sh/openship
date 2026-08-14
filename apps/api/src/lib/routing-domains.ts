@@ -8,6 +8,7 @@ import { acmeIssueLockKey, LOCAL_ACME_SCOPE, resolveSslPatch, sslIssueLockKey } 
 import { resolveRouteRedirect } from "./domain-redirect";
 import { createProvisionLock } from "./provision-lock";
 import { generateToken } from "./domain-token";
+import { routableWithoutOwnership } from "./domain-claims";
 
 export interface PlannedRouteDomain {
   hostname: string;
@@ -629,6 +630,19 @@ export async function ensureRouteDomainRecord(opts: {
   // cert). Refuse loudly here, before any patch or create, so neither the update
   // nor the create path can claim a hostname this project doesn't own.
   const owner = await repos.domain.findByHostname(route.hostname);
+
+  // A hostname owned by another SUBSYSTEM that still grants this project routing rights
+  // — see lib/domain-claims for who those are and why they own no project row.
+  // Deliberately the GENERAL question: this function is otherwise subsystem-blind, and
+  // the per-subsystem reasoning belongs with the claim rather than inline in the deploy
+  // path. A true return still registers the vhost; it only declines to record a row.
+  //
+  // Asked BEFORE the ownership branch and whether or not a row exists: a claim can apply
+  // to a hostname with no row at all, and inside the `owner &&` branch this would fall
+  // through to `findOrCreate` and MINT a project-owned row for the very host the claim
+  // exists to protect.
+  if (await routableWithoutOwnership(route.hostname, projectId, owner)) return null;
+
   if (owner && owner.projectId !== projectId) {
     throw new ConflictError(
       `Hostname ${route.hostname} is routed by another project and cannot be claimed here.`,

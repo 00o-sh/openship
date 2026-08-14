@@ -196,9 +196,8 @@ export function DraftProjectView({ onDeleteProject }: DraftProjectViewProps) {
               <div className="flex items-start justify-between gap-3">
                 <h2 className="text-[15px] font-semibold text-foreground">{heading}</h2>
                 <span
-                  className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${meta.badge}`}
+                  className={`inline-flex shrink-0 items-center rounded-full px-2.5 py-1 text-[11px] font-semibold ${meta.badge}`}
                 >
-                  <span className={`size-1.5 rounded-full ${meta.dot}`} />
                   {projectStatusLabel(status, t)}
                 </span>
               </div>

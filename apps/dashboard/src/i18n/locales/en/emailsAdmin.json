@@ -5,6 +5,7 @@
       "domains": "Domains",
       "mailboxes": "Mailboxes",
       "aliases": "Aliases",
+      "inbound": "Inbound",
       "dns": "DNS",
       "health": "Health",
       "test": "Test",
@@ -13,6 +14,56 @@
       "advanced": "Advanced"
     },
     "ariaLabel": "Mail admin sections"
+  },
+  "inbound": {
+    "heading": "Inbound rules",
+    "description": "Get told in a notification channel when mail arrives at an address on this server.",
+    "newRule": "New rule",
+    "newTitle": "New inbound rule",
+    "editTitle": "Edit inbound rule",
+    "edit": "Edit",
+    "emptyTitle": "No inbound rules yet",
+    "emptyBody": "Add a rule to be notified in Slack, Telegram, Discord or a webhook when mail arrives at a mailbox or domain on this server.",
+    "noChannels": "You have no verified notification channels yet. Add and verify one in Settings → Notifications, then come back to create a rule.",
+    "fieldName": "Name",
+    "namePlaceholder": "Support inbox → #support",
+    "fieldScope": "Watch",
+    "scopeMailbox": "One mailbox",
+    "scopeDomain": "A whole domain",
+    "scopeAll": "Every domain on this server",
+    "scopeAllSummary": "Every domain",
+    "fieldAddress": "Address",
+    "fieldDomain": "Domain",
+    "mailboxCaveat": "Matched from the To and Cc headers, so mail that reached this mailbox by Bcc or through an alias will not match. Watch the whole domain if you need every message.",
+    "fieldFrom": "From contains",
+    "fieldSubject": "Subject contains",
+    "patternPlaceholder": "optional",
+    "patternHint": "Case-insensitive. Use * as a wildcard — everything else is matched literally.",
+    "fieldChannels": "Notify these channels",
+    "fieldEnabled": "Rule is active",
+    "channelCount": "{count} channel(s)",
+    "colRule": "Rule",
+    "colWatch": "Watching",
+    "colChannels": "Channels",
+    "colStatus": "Status",
+    "active": "Active",
+    "disabled": "Off",
+    "paused": "Paused",
+    "deleteTitle": "Delete inbound rule",
+    "deleteConfirm": "Delete rule",
+    "deleting": "Deleting…",
+    "deleteHint": "Existing notifications are unaffected. Mail already captured but not yet processed is discarded.",
+    "save": "Save rule",
+    "saving": "Saving…",
+    "cancel": "Cancel",
+    "test": "Test now",
+    "testing": "Testing…",
+    "testResult": "Read {read} captured message(s): {matched} matched a rule, {dropped} filtered out. Nothing was sent or deleted.",
+    "testFailed": "Could not run the test.",
+    "loadFailed": "Could not load inbound rules.",
+    "saveFailed": "Could not save the rule.",
+    "deleteFailed": "Could not delete the rule.",
+    "confirmDelete": "Delete the rule “{name}”? Capture stops for its address unless another rule still needs it."
   },
   "sending": {
     "title": "Outbound sending",
@@ -385,6 +436,11 @@
     "logs": "Logs",
     "openLogs": "Open logs",
     "up": "Up {time}",
+    "optional": "Optional",
+    "daemonHint": {
+      "fatal": "supervisord has given up - it will not retry on its own. Restart it from the menu.",
+      "backoff": "Crashing repeatedly; supervisord is still retrying. Check the logs for why."
+    },
     "menu": {
       "restart": "Restart",
       "restarting": "Restarting…",
@@ -402,7 +458,9 @@
       "restartFailed": "restart failed",
       "startFailedTitle": "{label} start failed",
       "stopFailedTitle": "{label} stop failed",
-      "restartFailedTitle": "{label} restart failed"
+      "restartFailedTitle": "{label} restart failed",
+      "notConfirmedTitle": "{label} has not come up",
+      "notConfirmed": "The supervisor accepted the request, but {label} is {state}. Open the logs to see why."
     },
     "daemonStatus": {
       "running": "Running",
@@ -410,6 +468,7 @@
       "stopping": "Stopping",
       "stopped": "Stopped",
       "failed": "Failed",
+      "crashed": "Crashed",
       "missing": "Missing",
       "unknown": "Unknown"
     },
@@ -437,6 +496,10 @@
       "partDnsOne": "{count} DNS record missing",
       "partDnsOther": "{count} DNS records missing",
       "partDelivery": "outbound mail is not being delivered",
+      "degradedLabel": "Working, with reduced protection",
+      "partScanning": "{names} not running - new mail is being delivered WITHOUT virus scanning",
+      "partSignatures": "{names} not running - virus signatures are no longer being updated, so mail is scanned against an ageing signature set",
+      "partAdvisory": "{names} not running",
       "almostSubQueueOne": "{count} message is waiting to go out - see Outbound delivery below.",
       "almostSubQueueOther": "{count} messages are waiting to go out - see Outbound delivery below."
     },
@@ -672,6 +735,6 @@
     "close": "Close",
     "logsLoadFailed": "Failed to load logs",
     "loadingLogs": "Loading logs…",
-    "noJournal": "No journal entries for this unit."
+    "noLogLines": "No log lines for this component yet."
   }
 }

@@ -45,6 +45,7 @@ const mocks = vi.hoisted(() => ({
       scoped: boolean;
       createdAt: Date;
       lastUsedAt: Date | null;
+      useCount: number;
     },
     /** Grants attached to that binding. */
     grants: [] as Grant[],
@@ -58,6 +59,7 @@ const mocks = vi.hoisted(() => ({
     organizationId: args.organizationId,
   })),
   auditCreate: vi.fn(async () => {}),
+  disconnectMcpClient: vi.fn(async () => {}),
 }));
 
 vi.mock("@repo/db", () => ({
@@ -85,7 +87,10 @@ vi.mock("@repo/db", () => ({
       upsertOAuthBindingWithGrants: mocks.upsertOAuthBindingWithGrants,
     },
     organization: { findManyById: vi.fn(async () => [{ id: ORG, name: "Acme" }]) },
-    oauth: { listApplicationsByClientIds: vi.fn(async () => [{ clientId: "cli1", name: "Claude Code" }]) },
+    oauth: {
+      listApplicationsByClientIds: vi.fn(async () => [{ clientId: "cli1", name: "Claude Code" }]),
+      disconnectMcpClient: mocks.disconnectMcpClient,
+    },
     auditEvent: { create: mocks.auditCreate },
     project: { findById: vi.fn(async (id: string) => ({ id, organizationId: ORG })), findEnvVarById: vi.fn(async () => null) },
     server: { get: vi.fn(async (id: string) => ({ id, organizationId: ORG })) },
@@ -100,7 +105,11 @@ vi.mock("@repo/db", () => ({
 }));
 vi.mock("../../../src/config/env", () => ({ env: { CLOUD_MODE: false } }));
 
-import { authorizeMcpClient, getMcpClient } from "../../../src/modules/tokens/token.controller";
+import {
+  authorizeMcpClient,
+  disconnectMcpClient,
+  getMcpClient,
+} from "../../../src/modules/tokens/token.controller";
 
 interface Reply {
   body: { data?: Record<string, unknown>; error?: string; code?: string };
@@ -162,6 +171,12 @@ async function read(clientId: string): Promise<Reply> {
   return reply();
 }
 
+async function disconnect(clientId: string): Promise<Reply> {
+  const { c, reply } = request({}, { clientId });
+  await disconnectMcpClient(c);
+  return reply();
+}
+
 function connect(over: Partial<NonNullable<typeof mocks.state.binding>> = {}) {
   mocks.state.binding = {
     id: "binding1",
@@ -172,6 +187,7 @@ function connect(over: Partial<NonNullable<typeof mocks.state.binding>> = {}) {
     scoped: true,
     createdAt: new Date("2026-01-01T00:00:00Z"),
     lastUsedAt: null,
+    useCount: 0,
     ...over,
   };
 }
@@ -186,6 +202,7 @@ beforeEach(() => {
   mocks.state.userGrants = [];
   mocks.upsertOAuthBindingWithGrants.mockClear();
   mocks.auditCreate.mockClear();
+  mocks.disconnectMcpClient.mockClear();
 });
 
 describe("GET one client", () => {
@@ -392,5 +409,76 @@ describe("the audit row carries counts, never the grant tuples", () => {
     await authorize({ clientId: "cli1", grants: [PROJECT_GRANT] });
     const call = mocks.auditCreate.mock.calls.at(-1)?.[0] as unknown as Record<string, unknown>;
     expect(call.before ?? null).toBeNull();
+  });
+});
+
+/**
+ * Authorizing and re-scoping an agent were recorded; REVOKING it was not. That
+ * left the one MCP lifecycle event with no trace, and a log that reads as though a
+ * client which is long gone still holds the scope it was last seen with.
+ */
+describe("disconnecting is recorded too", () => {
+  it("records mcp.disconnected with the scope the client HELD", async () => {
+    connect({ scoped: true, readOnly: true, useCount: 42 });
+    mocks.state.grants = [PROJECT_GRANT, { ...PROJECT_GRANT, resourceId: "P2" }];
+
+    const r = await disconnect("cli1");
+    expect(r.status).toBe(200);
+    expect(mocks.disconnectMcpClient).toHaveBeenCalledWith("u1", "cli1");
+
+    const call = mocks.auditCreate.mock.calls.at(-1)?.[0] as unknown as Record<string, unknown>;
+    expect(call).toMatchObject({
+      eventType: "mcp.disconnected",
+      resourceType: "mcp_client",
+      resourceId: "binding1",
+      organizationId: ORG,
+    });
+    // Read BEFORE the teardown — afterwards the binding and its grants are gone,
+    // and the row could only have said "something named cli1 was disconnected".
+    expect(call.before).toMatchObject({
+      clientId: "cli1",
+      scoped: true,
+      readOnly: true,
+      grantCount: 2,
+      useCount: 42,
+    });
+    expect(call.after ?? null).toBeNull();
+  });
+
+  it("keeps the grant tuples out of the row, like every other mcp.* event", async () => {
+    connect();
+    mocks.state.grants = [PROJECT_GRANT];
+    await disconnect("cli1");
+    const call = mocks.auditCreate.mock.calls.at(-1)?.[0] as unknown as Record<string, unknown>;
+    expect(JSON.stringify(call)).not.toContain("P1");
+  });
+
+  it("still records when the binding is already gone", async () => {
+    // A double-click, or a client disconnected in another tab: the teardown is
+    // idempotent, and the attempt is still part of the history.
+    mocks.state.binding = null;
+    const r = await disconnect("cli1");
+    expect(r.status).toBe(200);
+    const call = mocks.auditCreate.mock.calls.at(-1)?.[0] as unknown as Record<string, unknown>;
+    expect(call).toMatchObject({ eventType: "mcp.disconnected", resourceId: "cli1" });
+    expect(call.before).toEqual({ clientId: "cli1" });
+  });
+
+  it("400s on a blank clientId, and tears down nothing", async () => {
+    // A present-but-empty param: an absent one throws in `param()` and is mapped
+    // by the error handler, so this guard is what catches "/mcp-clients/%20".
+    const r = await disconnect("   ");
+    expect(r.status).toBe(400);
+    expect(r.body.code).toBe("CLIENT_ID_REQUIRED");
+    expect(mocks.disconnectMcpClient).not.toHaveBeenCalled();
+    expect(mocks.auditCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe("the client list carries its usage", () => {
+  it("reports the call count and the key for this client's audit rows", async () => {
+    connect({ useCount: 1204 });
+    const r = await read("cli1");
+    expect(r.body.data).toMatchObject({ useCount: 1204, auditClientId: "oauth:cli1" });
   });
 });

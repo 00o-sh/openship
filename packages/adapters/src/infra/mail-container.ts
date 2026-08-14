@@ -39,8 +39,15 @@ export interface MailMount {
   /**
    * The entrypoint must seed this mount from the image's baked defaults when it's
    * empty on first boot, then never overwrite operator edits. True for config dirs
-   * we bind-mount whole (so the baked config isn't hidden by an empty host dir);
-   * false for pure data dirs (maildir, queue, keys, DB).
+   * we bind-mount whole (so the baked config isn't hidden by an empty host dir) AND
+   * for ClamAV's signature database — data, but clamd exits without it; false for
+   * pure data dirs (maildir, queue, keys, DB).
+   *
+   * DECLARATIVE: nothing here reads this flag. The copy lives in the image's
+   * entrypoint (`seed <baked-subdir> <container-path>`), so this is only a claim
+   * about it — pinned by apps/api/test/lib/mail-image-seed-mounts.test.ts. A mount
+   * that needed seeding with nothing seeding it is how the engine shipped a clamd
+   * whose signature database was hidden by its own mount (issue #565).
    */
   seed?: boolean;
 }
@@ -66,8 +73,10 @@ export const MAIL_CONTAINER_MOUNTS: ReadonlyArray<MailMount> = [
   { host: `${MAIL_HOST_STATE_DIR}/config/dovecot`, container: "/etc/dovecot", seed: true },
   { host: `${MAIL_HOST_STATE_DIR}/config/amavis`, container: "/etc/amavis/conf.d", seed: true },
   // ClamAV signatures — bind-mounted so a pull doesn't force a multi-hundred-MB
-  // freshclam re-download and delay readiness.
-  { host: `${MAIL_HOST_STATE_DIR}/clamav`, container: "/var/lib/clamav" },
+  // freshclam re-download and delay readiness. `seed: true` because that same mount
+  // HIDES the database baked into the image: with nothing copying it across, clamd
+  // finds an empty database directory and exits (issue #565).
+  { host: `${MAIL_HOST_STATE_DIR}/clamav`, container: "/var/lib/clamav", seed: true },
   { host: "/etc/letsencrypt", container: "/etc/letsencrypt", readonly: true },
 ];
 

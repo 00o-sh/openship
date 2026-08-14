@@ -3125,15 +3125,18 @@ function ServiceConfigCard({
   const envRecord = envOverride ?? service.env;
   const envRows = useMemo(() => envToRows(envRecord), [envRecord]);
   // On-demand reveal: the scan masks env, so the eye / "Show values" fetches the
-  // real values for THIS container from the source server. Only wired when there's
-  // a running container to read (repo-only `isNew` cards have no server-side env).
+  // real values for the opened keys of THIS container from the source server. Only
+  // wired when there's a running container to read (repo-only `isNew` cards have no
+  // server-side env).
   const containerId = service.containerId;
-  const onRevealAll = useMemo(() => {
+  const onReveal = useMemo(() => {
     if (!sourceServerId || !containerId) return undefined;
     const serverId = sourceServerId;
     const cid = containerId;
-    return () =>
-      dockerMigrationApi.revealEnv({ serverId, containerId: cid }).then((r) => r.environment);
+    return (keys: string[]) =>
+      dockerMigrationApi
+        .revealEnv({ serverId, containerId: cid, keys })
+        .then((r) => r.environment);
   }, [sourceServerId, containerId]);
   // Image-supplied vars not yet pinned as config — importing them adds them to the
   // override, which empties this list and bumps the env count.
@@ -3418,7 +3421,7 @@ function ServiceConfigCard({
             borderless
             envVars={envRows}
             onEnvVarsChange={(rows) => onSetEnv(rowsToEnv(rows))}
-            onRevealAll={onRevealAll}
+            onReveal={onReveal}
           />
         </div>
       </Modal>

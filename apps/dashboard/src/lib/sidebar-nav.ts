@@ -25,6 +25,7 @@ import {
   FileText,
   FolderKanban,
   Forward,
+  Inbox,
   Globe,
   HeartPulse,
   LayoutDashboard,
@@ -95,6 +96,12 @@ export function getNavSections(isSaaS: boolean, selfHosted: boolean): NavSection
     { key: "backups", href: "/backups", icon: DatabaseBackup },
     { key: "settings", href: "/settings", icon: Settings },
   ];
+  // LAST row of the LAST section, deliberately. `isSaaS` is true on a self-hosted box
+  // the moment it links a cloud account (`!selfHosted || cloudConnected` in
+  // sidebar.tsx), and Billing sitting mid-rail there read as "this install is
+  // metered" — above Servers, which is what an operator on their own machine
+  // actually came for. Cloud credits are real, so the entry stays; it just stops
+  // outranking the infrastructure.
   if (isSaaS) {
     settingsItems.push({ key: "billing", href: "/billing", icon: CreditCard });
   }
@@ -110,10 +117,13 @@ export function getNavSections(isSaaS: boolean, selfHosted: boolean): NavSection
   //   { key: "domains",    href: "/domains",    icon: Globe },
   // );
 
+  // Infrastructure ahead of settings: self-hosted, Servers is the second thing you
+  // reach for after Projects, and it used to sit below Backups/Settings/Billing.
+  // On the SaaS the group is empty and filters out, so the rail there is unchanged.
   return [
     { section: "main", items: MAIN_ITEMS },
-    { section: "settings", items: settingsItems },
     { section: "infrastructure", items: infraItems },
+    { section: "settings", items: settingsItems },
   ].filter((s) => s.items.length > 0);
 }
 
@@ -146,6 +156,10 @@ const MAIL_TABS_PRIMARY: MailTab[] = [
   { key: "domains", icon: Globe },
   { key: "mailboxes", icon: UserRound },
   { key: "aliases", icon: Forward },
+  // Inbound rules sit with the address space rather than with Delivery: Delivery is
+  // about SENDING, and a rule is about what happens to mail arriving at one of the
+  // addresses above it.
+  { key: "inbound", icon: Inbox },
 ];
 
 /**

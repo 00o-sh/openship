@@ -4,6 +4,7 @@
       "overview": "Visão geral",
       "domains": "Domínios",
       "mailboxes": "Caixas de correio",
+      "inbound": "Entrada",
       "dns": "DNS",
       "health": "Saúde",
       "test": "Teste",
@@ -11,6 +12,56 @@
       "advanced": "Avançado"
     },
     "ariaLabel": "Seções de administração de e-mail"
+  },
+  "inbound": {
+    "heading": "Regras de entrada",
+    "description": "Receba um aviso em um canal de notificação quando um e-mail chegar a um endereço deste servidor.",
+    "newRule": "Nova regra",
+    "newTitle": "Nova regra de entrada",
+    "editTitle": "Editar regra de entrada",
+    "edit": "Editar",
+    "emptyTitle": "Nenhuma regra de entrada ainda",
+    "emptyBody": "Adicione uma regra para ser notificado no Slack, Telegram, Discord ou em um webhook quando um e-mail chegar a uma caixa de correio ou a um domínio deste servidor.",
+    "noChannels": "Você ainda não tem canais de notificação verificados. Adicione e verifique um em Configurações → Notificações e depois volte aqui para criar uma regra.",
+    "fieldName": "Nome",
+    "namePlaceholder": "Caixa de suporte → #support",
+    "fieldScope": "Monitorar",
+    "scopeMailbox": "Uma caixa de correio",
+    "scopeDomain": "Um domínio inteiro",
+    "scopeAll": "Todos os domínios deste servidor",
+    "scopeAllSummary": "Todos os domínios",
+    "fieldAddress": "Endereço",
+    "fieldDomain": "Domínio",
+    "mailboxCaveat": "A correspondência usa os cabeçalhos To e Cc, então um e-mail que chegou a esta caixa de correio por Bcc ou através de um alias não vai corresponder. Monitore o domínio inteiro se você precisar de todas as mensagens.",
+    "fieldFrom": "Remetente contém",
+    "fieldSubject": "Assunto contém",
+    "patternPlaceholder": "opcional",
+    "patternHint": "Não diferencia maiúsculas de minúsculas. Use * como curinga — todo o resto é comparado literalmente.",
+    "fieldChannels": "Notificar estes canais",
+    "fieldEnabled": "Regra ativa",
+    "channelCount": "{count} canal(is)",
+    "colRule": "Regra",
+    "colWatch": "Monitorando",
+    "colChannels": "Canais",
+    "colStatus": "Status",
+    "active": "Ativa",
+    "disabled": "Desativada",
+    "paused": "Pausada",
+    "deleteTitle": "Excluir regra de entrada",
+    "deleteConfirm": "Excluir regra",
+    "deleting": "Excluindo…",
+    "deleteHint": "As notificações já enviadas não são afetadas. O e-mail que já foi capturado, mas ainda não processado, é descartado.",
+    "save": "Salvar regra",
+    "saving": "Salvando…",
+    "cancel": "Cancelar",
+    "test": "Testar agora",
+    "testing": "Testando…",
+    "testResult": "{read} mensagem(ns) capturada(s) lida(s): {matched} corresponderam a uma regra, {dropped} foram filtradas. Nada foi enviado nem excluído.",
+    "testFailed": "Não foi possível executar o teste.",
+    "loadFailed": "Não foi possível carregar as regras de entrada.",
+    "saveFailed": "Não foi possível salvar a regra.",
+    "deleteFailed": "Não foi possível excluir a regra.",
+    "confirmDelete": "Excluir a regra “{name}”? A captura do endereço dela é interrompida, a menos que outra regra ainda precise dela."
   },
   "overview": {
     "mailServer": "Servidor de e-mail",
@@ -267,6 +318,11 @@
     "logs": "Logs",
     "openLogs": "Abrir logs",
     "up": "Ativo {time}",
+    "optional": "Opcional",
+    "daemonHint": {
+      "fatal": "O supervisord desistiu - ele não vai tentar de novo por conta própria. Reinicie pelo menu.",
+      "backoff": "Está caindo repetidamente; o supervisord continua tentando. Veja os logs para entender o motivo."
+    },
     "menu": {
       "restart": "Reiniciar",
       "restarting": "Reiniciando…",
@@ -284,7 +340,9 @@
       "restartFailed": "falha ao reiniciar",
       "startFailedTitle": "Falha ao iniciar {label}",
       "stopFailedTitle": "Falha ao parar {label}",
-      "restartFailedTitle": "Falha ao reiniciar {label}"
+      "restartFailedTitle": "Falha ao reiniciar {label}",
+      "notConfirmedTitle": "{label} não iniciou",
+      "notConfirmed": "O supervisor aceitou a solicitação, mas {label} está {state}. Abra os logs para ver o motivo."
     },
     "daemonStatus": {
       "running": "Em execução",
@@ -292,6 +350,7 @@
       "stopping": "Parando",
       "stopped": "Parado",
       "failed": "Com falha",
+      "crashed": "Travado",
       "missing": "Ausente",
       "unknown": "Desconhecido"
     },
@@ -319,6 +378,10 @@
       "partDnsOne": "{count} registro DNS ausente",
       "partDnsOther": "{count} registros DNS ausentes",
       "partDelivery": "o e-mail de saída não está sendo entregue",
+      "degradedLabel": "Funcionando, com proteção reduzida",
+      "partScanning": "{names} não está em execução - as novas mensagens estão sendo entregues SEM verificação de vírus",
+      "partSignatures": "{names} não está em execução - as assinaturas de vírus não são mais atualizadas, então o e-mail é verificado com um conjunto de assinaturas envelhecendo",
+      "partAdvisory": "{names} não está em execução",
       "almostSubQueueOne": "{count} mensagem aguardando para sair - veja Envio de saída abaixo.",
       "almostSubQueueOther": "{count} mensagens aguardando para sair - veja Envio de saída abaixo."
     },
@@ -554,6 +617,6 @@
     "close": "Fechar",
     "logsLoadFailed": "Falha ao carregar os logs",
     "loadingLogs": "Carregando logs…",
-    "noJournal": "Nenhuma entrada de journal para esta unidade."
+    "noLogLines": "Ainda não há linhas de log para este componente."
   }
 }

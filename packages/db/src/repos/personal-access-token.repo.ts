@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, isNotNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, isNotNull, sql } from "drizzle-orm";
 import {
   generateId,
   serializeSourceAccessScope,
@@ -100,6 +100,23 @@ export function createPersonalAccessTokenRepo(db: Database) {
         ),
         orderBy: [desc(personalAccessToken.createdAt)],
       });
+    },
+
+    /**
+     * Display names for a set of token ids. Used to label audit rows attributed
+     * to `pat:<tokenId>` — a static-token MCP connection has no OAuth application
+     * to read a name from, so the token's own name is the only label there is.
+     *
+     * Deliberately NOT user-scoped: the caller is reading rows in an org it holds
+     * audit:read on, and a token used against that org is part of its history even
+     * if it belongs to another member. Only the name is projected.
+     */
+    async listNamesByIds(ids: string[]): Promise<Array<{ id: string; name: string }>> {
+      if (ids.length === 0) return [];
+      return db
+        .select({ id: personalAccessToken.id, name: personalAccessToken.name })
+        .from(personalAccessToken)
+        .where(inArray(personalAccessToken.id, ids));
     },
 
     /**
@@ -224,11 +241,18 @@ export function createPersonalAccessTokenRepo(db: Database) {
       return rows.length > 0;
     },
 
-    /** Best-effort last-used stamp (called on each authenticated request). */
+    /**
+     * Best-effort usage stamp (called on each authenticated request).
+     *
+     * The counter rides along in the same UPDATE — it is the same row and the same
+     * write, so "how many calls has this agent made" costs nothing on top of "when
+     * did it last call". Incremented in SQL, not read-modify-write, so concurrent
+     * requests from one agent don't lose counts.
+     */
     async touchLastUsed(id: string): Promise<void> {
       await db
         .update(personalAccessToken)
-        .set({ lastUsedAt: new Date() })
+        .set({ lastUsedAt: new Date(), useCount: sql`${personalAccessToken.useCount} + 1` })
         .where(eq(personalAccessToken.id, id));
     },
   };

@@ -26,6 +26,7 @@ import {
 import { startService, ensureInternalToken } from "../commands/up";
 import {
   summarizeHostChannelCause,
+  HOST_CHANNEL_AUTH_REJECTED_SHORT,
   HOST_CHANNEL_PROVISION_COMMAND,
   type HostChannelCause,
 } from "@repo/core";
@@ -279,6 +280,11 @@ export function hostControlRow(
       case "key_unreadable":
       case "unreachable":
         return row("fail", `${api.state.replace(/_/g, " ")} — see the api container's boot log`);
+      // Its own case, NOT grouped above: this is the one fault here an operator can act
+      // on without the withheld address, and #527 is what happens when the only thing
+      // we tell them is to go read a log.
+      case "auth_rejected":
+        return row("fail", HOST_CHANNEL_AUTH_REJECTED_SHORT);
       // `disabled` (a hardening choice) and `not_applicable` (a bare install) are the
       // same non-event the local path returns null for. Whitelisted rather than derived
       // from `ok === false`, which `disabled` also is.

@@ -14,6 +14,7 @@ import type { Context } from "hono";
 import { AppError, isRelayProviderId, RELAY_PROVIDER_IDS } from "@repo/core";
 import { env } from "../../../config";
 import { getRequestContext } from "../../../lib/request-context";
+import { requestTag } from "../../../middleware/error-handler";
 import { listWebmailTargets } from "./webmail.service";
 import {
   startWebmailDeploy,
@@ -37,6 +38,9 @@ function deployError(c: Context, err: unknown) {
     return c.json({ error: err.message, code: err.code }, err.statusCode as 400);
   }
   const message = err instanceof Error ? err.message : "Failed to start deploy";
+  // Answered here, so `app.onError` never logs it — same blind spot as the other two
+  // self-answered mail 500s.
+  console.error(`[WEBMAIL ERROR] ${requestTag(c)}`, err);
   return c.json({ error: message }, 500);
 }
 

@@ -401,6 +401,7 @@ export {
   hostControlDisabled,
   setHostControlOverride,
   hostChannelHealth,
+  invalidateHostChannelAuth,
   containerBridgeCidr,
   type HostChannelHealth,
   type HostChannelCode,

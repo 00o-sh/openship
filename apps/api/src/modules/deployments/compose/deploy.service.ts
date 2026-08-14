@@ -24,6 +24,7 @@ import {
   composeNamespaceRef,
   ownsNetworkEndpoint,
   UNLIMITED_RESOURCES,
+  safeErrorMessage,
   type ComposeAdvanced,
   type ProxySettings,
 } from "@repo/core";
@@ -33,7 +34,7 @@ import {
   BuildLogger,
   DockerRuntime,
   allocateHostPort,
-  elevatedExecutor,
+  rootOrDegrade,
   resolveEnvironment,
   runDeployPipeline,
   type CommandExecutor,
@@ -793,6 +794,33 @@ export async function deployComposeServices(
     localHost?: boolean;
   },
 ): Promise<ComposeDeployResult> {
+  // Generated app secrets, BEFORE any env is read below. A catalog app whose install died
+  // part-way keeps a service row with the generated values missing, and the installer only
+  // writes them for services it created — so webmail reached the container with no
+  // SESSION_ENCRYPTION_KEY and crash-looped (#566). The install path repairs that, but
+  // Redeploy / Start / a webhook push all arrive HERE without passing through it, and that
+  // Redeploy button is the natural next click after seeing a bouncing container.
+  //
+  // Idempotent (a stored value is reused, never rotated) and best-effort: a repair we
+  // could not make must not fail a deploy that would otherwise run.
+  if (project.appTemplateId) {
+    try {
+      const template = await getTemplateForOrg(project.organizationId, project.appTemplateId);
+      if (template) {
+        // Dynamic: a static import would pull the app-install service — and through it the
+        // whole services/auth layer — into every module that imports this one. Same reason
+        // mail.service.ts imports deployment-runtime lazily.
+        const { ensureGeneratedAppSecrets } = await import("../../apps/app-install.service");
+        await ensureGeneratedAppSecrets(project.id, template);
+      }
+    } catch (err) {
+      logger.log(
+        `Could not check this app's generated secrets: ${safeErrorMessage(err)}\n`,
+        "warn",
+      );
+    }
+  }
+
   const services = await repos.service.listByProject(project.id);
   const enabled = services.filter((s) => s.enabled);
 
@@ -1148,19 +1176,21 @@ export async function deployComposeServices(
   // how the edge writes its own root-owned config. Resolved lazily and cached, so
   // privilege detection is skipped entirely for deploys that ship no config files
   // and never re-run per service.
+  // Through the shared gate rather than an inline copy of it. This was the only
+  // `elevatedExecutor` call site in apps/*, and it re-derived the decision that
+  // `rootOrDegrade` exists to own: same sudo arm, but it also REPORTS when the login can
+  // neither be root nor sudo, instead of silently handing back the plain executor and
+  // letting the write fail later as "No such file". Still lazy and still cached, so a
+  // deploy that ships no config files never probes privileges.
   let hostConfigWriter: Promise<CommandExecutor> | null = null;
   const resolveHostConfigWriter = (executor: CommandExecutor): Promise<CommandExecutor> => {
-    hostConfigWriter ??= (async () => {
-      try {
-        const env = await resolveEnvironment(executor);
-        if (!env.isRoot && env.canSudo) return elevatedExecutor(executor);
-      } catch {
-        // Privilege probe failed — fall back to the plain executor. A root or
-        // already-writable target still succeeds; a locked-down one fails loudly
-        // at write time, exactly as it did before this guard.
-      }
-      return executor;
-    })();
+    hostConfigWriter ??= rootOrDegrade(executor, {
+      purpose: "Writing generated app config files to the host",
+      consequence:
+        "A config file the app needs may be missing, so the service can start misconfigured " +
+        "or fail outright.",
+      report: (message) => logger.log(`${message}\n`, "warn"),
+    });
     return hostConfigWriter;
   };
 
@@ -1332,12 +1362,12 @@ export async function deployComposeServices(
         status: "failed",
         error: message,
       });
-      await repos.service.createServiceDeployment({
+      await repos.service.markServiceDeploymentFailed({
         deploymentId: dep.id,
         serviceId: svc.id,
         serviceName: svc.name,
-        status: "failure",
         imageRef: opts?.builtImages?.get(svc.id) ?? svc.image ?? null,
+        errorMessage: message,
       });
       results.push({
         serviceId: svc.id,
@@ -1396,12 +1426,12 @@ export async function deployComposeServices(
         status: "failed",
         error: buildFailure,
       });
-      await repos.service.createServiceDeployment({
+      await repos.service.markServiceDeploymentFailed({
         deploymentId: dep.id,
         serviceId: svc.id,
         serviceName: svc.name,
-        status: "failure",
         imageRef: svc.image ?? null,
+        errorMessage: buildFailure,
       });
       results.push({
         serviceId: svc.id,
@@ -1431,11 +1461,11 @@ export async function deployComposeServices(
         status: "failed",
         error: message,
       });
-      await repos.service.createServiceDeployment({
+      await repos.service.markServiceDeploymentFailed({
         deploymentId: dep.id,
         serviceId: svc.id,
         serviceName: svc.name,
-        status: "failure",
+        errorMessage: message,
       });
       results.push({
         serviceId: svc.id,
@@ -1578,12 +1608,12 @@ export async function deployComposeServices(
         status: "failed",
         error: message,
       });
-      await repos.service.createServiceDeployment({
+      await repos.service.markServiceDeploymentFailed({
         deploymentId: dep.id,
         serviceId: svc.id,
         serviceName: svc.name,
-        status: "failure",
         imageRef: image ?? null,
+        errorMessage: message,
       });
       results.push({ serviceId: svc.id, serviceName: svc.name, status: "failed", error: message });
       unavailableServiceNames.add(svc.name);
@@ -2114,12 +2144,12 @@ export async function deployComposeServices(
           error: message,
         });
 
-        await repos.service.createServiceDeployment({
+        await repos.service.markServiceDeploymentFailed({
           deploymentId: dep.id,
           serviceId: svc.id,
           serviceName: svc.name,
-          status: "failure",
           imageRef: image,
+          errorMessage: message,
         });
 
         results.push({

@@ -107,12 +107,15 @@ describe("audit categories", () => {
     // These travel in URLs (?category=deployments) and are sent to the API as a
     // filter, so a rename breaks saved links and every bookmarked view. Labels
     // above them are free to change — that's the point of the split.
+    // Adding an id is fine (and is why this list grows); RENAMING one is the
+    // breaking change this pins down.
     expect(CATEGORY_IDS).toEqual([
       "deployments",
       "apps",
       "domains",
       "servers",
       "members",
+      "agent",
       "security",
       "billing",
       "system",

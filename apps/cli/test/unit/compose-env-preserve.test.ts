@@ -46,6 +46,16 @@ const h = vi.hoisted(() => ({
     stdout: "LISTEN 0      128                0.0.0.0:22         0.0.0.0:*",
     stderr: "",
   }),
+  /**
+   * The verification dial (`ssh … true`) that proves sshd ACCEPTS the key we just
+   * authorized (#527). Default: it does — so the refusal warning only fires for the
+   * tests that ask for it, the same convention `listeners` follows.
+   *
+   * Declared explicitly rather than left to the mock's status-0 fallthrough: a check
+   * whose default answer is an accident is a check that stops being exercised the moment
+   * the fallthrough changes.
+   */
+  channelAuth: () => ({ status: 0, stdout: "", stderr: "" }),
 }));
 
 vi.mock("node:child_process", () => ({
@@ -68,6 +78,8 @@ vi.mock("node:child_process", () => ({
     // Host-channel provisioning: the keypair, then the sshd prerequisite (#509).
     if (cmd === "ssh-keygen") return h.keygen();
     if (cmd === "ss" || cmd === "netstat") return h.listeners();
+    // ...then the dial that asks sshd whether the key actually works (#527).
+    if (cmd === "ssh") return h.channelAuth();
     // #486 preflight: registry manifest probe. Driven per-ref by h.manifestInspect.
     if (cmd === "docker" && args[0] === "manifest" && args[1] === "inspect") {
       return h.manifestInspect(String(args[2]));
@@ -1535,6 +1547,52 @@ describe("composeUp — the host channel is provisioned out loud (#509)", () => 
 
     expect(writtenEnv().OPENSHIP_HOST_SSH_HOST).toBe("host.docker.internal");
     expect(warned.join("\n")).not.toContain("listening for SSH");
+  });
+
+  /**
+   * #527: a LISTENER is not an accepted key.
+   *
+   * The reporter's box passed every check above — key generated, `authorized_keys`
+   * written, sshd listening on 22 — and the install said host control was on. The channel
+   * was refused on every dial, which they discovered weeks later through an unrelated
+   * feature, worded as their own stored credentials being wrong. The only thing that can
+   * settle it is asking sshd, and nothing did.
+   */
+  it("reports a key sshd refuses, and still writes the channel", async () => {
+    seedHostKey();
+    h.channelAuth = () => ({
+      status: 255,
+      stdout: "",
+      stderr: "root@127.0.0.1: Permission denied (publickey).",
+    });
+
+    const res = await composeUp({});
+
+    // Still not fatal, and the key stays authorized: it is right the moment the host
+    // permits that account, exactly as the no-sshd case stays right once sshd starts.
+    expect(res.ok).toBe(true);
+    expect(writtenEnv().OPENSHIP_HOST_SSH_HOST).toBe("host.docker.internal");
+    const msg = warned.join("\n");
+    expect(msg).toContain("REFUSED the channel's key");
+    // The account, because "the key was refused" is unactionable without knowing which
+    // authorized_keys to go and look at.
+    expect(msg).toContain("root");
+    // Both causes, and the command that distinguishes them — the half the reporter was
+    // never told, and could not have guessed from inside a container.
+    expect(msg).toContain("permitrootlogin");
+    expect(msg).toContain("Ordinary deploys to this box still work");
+  });
+
+  it("stays quiet when the verification dial can't run at all", async () => {
+    // No `ssh` client: the question was never asked, and answering "refused" would fail
+    // an install that is fine — the mirror of the ss-not-installed case above.
+    seedHostKey();
+    h.channelAuth = () => ({ status: null, stdout: "", stderr: "", error: Object.assign(new Error("spawn ssh ENOENT"), { code: "ENOENT" }) });
+
+    await composeUp({});
+
+    expect(writtenEnv().OPENSHIP_HOST_SSH_HOST).toBe("host.docker.internal");
+    expect(warned.join("\n")).not.toContain("REFUSED");
   });
 });
 

@@ -151,6 +151,49 @@ RUN mkdir -p /opt/openship-mail/seed \
     && cp -a /etc/amavis/conf.d /opt/openship-mail/seed/amavis-confd 2>/dev/null || true \
     && chmod +x /opt/openship-mail/entrypoint.sh
 
+# ClamAV signatures, fetched into the SEED dir (issue #565).
+#
+# /var/lib/clamav is a host bind mount at runtime, so a database written there during
+# the build is hidden the moment the container starts: clamd finds an empty database
+# directory and exits 1. That is not a degraded scanner — amavis's only scanner is
+# clamd and @av_scanners_backup is empty, so every inbound message fails its virus
+# check and defers. Seeding from here means a fresh install scans with no network and
+# no multi-hundred-MB wait during setup.
+#
+# Fetched here rather than moved out of /var/lib/clamav after the installer: layers are
+# additive, so a `mv` in a later layer keeps the originals in the installer's layer and
+# ships them twice. build-config turns the installer's own freshclam off, which is why
+# the image's /var/lib/clamav is now intentionally EMPTY — unmounted debugging
+# (`docker run --entrypoint sh`) gets a clamd with no database.
+#
+# The retry is not defensive coding: database.clamav.net rate-limits CI egress, and the
+# gate below is a hard build failure, so one 429 would block an entire release. Each
+# attempt resumes into the same datadir. freshclam folds mirror and "could not notify
+# clamd" warnings into its exit status, so the FILE CHECK is the real gate.
+RUN set -eu; \
+    getent passwd clamav >/dev/null || { \
+      echo "FATAL: no clamav user — clamav-base did not install (issue #565)." >&2; \
+      exit 1; \
+    }; \
+    install -d -o clamav -g clamav /var/log/clamav /opt/openship-mail/seed/clamav; \
+    for attempt in 1 2 3; do \
+      if freshclam --datadir=/opt/openship-mail/seed/clamav; then break; fi; \
+      echo "openship-mail: freshclam attempt ${attempt} failed, retrying in 30s" >&2; \
+      sleep 30; \
+    done; \
+    seeded=""; \
+    for db in main.cvd main.cld daily.cvd daily.cld; do \
+      [ -s "/opt/openship-mail/seed/clamav/$db" ] || continue; \
+      seeded="$seeded $db"; \
+    done; \
+    if [ -z "$seeded" ]; then \
+      echo "FATAL: no ClamAV signature database in /opt/openship-mail/seed/clamav." >&2; \
+      echo "freshclam fetched neither main nor daily, so the image would ship a clamd" >&2; \
+      echo "that cannot start and an amavis that defers all inbound mail (issue #565)." >&2; \
+      exit 1; \
+    fi; \
+    echo "openship-mail: ClamAV signature seed ->$seeded"
+
 # Mail protocol ports (bound on the host via --network host at runtime):
 #   25 SMTP  465 SMTPS  587 submission  143 IMAP  993 IMAPS  110/995 POP3  4190 sieve
 EXPOSE 25 465 587 143 993 110 995 4190

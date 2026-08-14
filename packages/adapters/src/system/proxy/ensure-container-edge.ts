@@ -462,8 +462,19 @@ export async function ensureContainerEdge(
   // missing bind source itself, as an EMPTY root-owned dir, so the container comes up
   // serving nothing and every later vhost write fails somewhere else entirely. Say it
   // once, here, where the cause is still in hand.
+  // Through the gate, for the reason `edgeHostExecutor` goes through it: these are
+  // root-owned paths under /var/lib/openship, so on a box we log into as a non-root sudo
+  // user the unelevated `mkdir` fails — and the failure was swallowed into a warning
+  // nobody acts on, leaving the empty-bind-mount outcome the comment above describes.
+  // `installContainerEdge` already gates the same work; this reconcile entrypoint never
+  // did. Degrades rather than throws, so an unmeasurable host keeps today's behaviour.
+  const hostState = await rootOrDegrade(executor, {
+    purpose: "Creating the edge's state directories",
+    consequence: "Docker will create them empty, so vhosts and certificates may not persist.",
+    report: (message) => onLog(log(message, "warn")),
+  });
   for (const mount of EDGE_CONTAINER_MOUNTS) {
-    await executor.exec(`mkdir -p ${sq(mount.host)}`).catch((err: unknown) => {
+    await hostState.exec(`mkdir -p ${sq(mount.host)}`).catch((err: unknown) => {
       onLog(
         log(
           `Could not create the edge state directory ${mount.host}: ${safeErrorMessage(err)}. ` +

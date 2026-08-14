@@ -282,6 +282,7 @@
     "notAvailable": "利用不可",
     "domainTitle": "ドメイン",
     "domainHintProxy": "メールサーバーはすでにこのホスト名を所有しています - メールVPS経由でOpshcloudワークロードにプロキシします。DNSの変更は不要です。",
+    "domainHintMailHost": "メールサーバー自身のホスト名です。すでにここを指しており証明書もあるため、設定は不要です。分けて運用したい場合は webmail.<お使いのドメイン> を使ってください。",
     "domainHintCloud": "プロビジョニングする *.opsh.io のURLにCNAMEを向けてください(デプロイ後に表示されます)。",
     "domainHintDefault": "オペレーターがアクセスするURLです。DNSはデプロイ先を指している必要があります。",
     "summary": "概要",

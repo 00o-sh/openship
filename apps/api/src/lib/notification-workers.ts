@@ -191,12 +191,27 @@ async function sendEmail(
   }
 
   const { title, body } = renderMessage(delivery);
-  await sendMail({
+  const delivered = await sendMail({
     to: config.address,
     subject: `[Openship] ${title}`,
     text: body,
     html: `<pre style="font-family:system-ui,sans-serif;font-size:14px">${escapeHtml(body)}</pre>`,
   });
+  // THROW when nothing could carry it. `sendMail` only warns on an empty transport
+  // chain, so ignoring its result meant this worker returned normally and the delivery
+  // was marked SENT having delivered nothing. Worse, `POST /channels/:id/test` flips a
+  // channel to `verified` whenever the send doesn't throw — so an instance with no SMTP
+  // produced a channel that looked verified and working and had never delivered once.
+  //
+  // Throwing is exactly right here: this worker's contract is "throw = retry", so the
+  // alert is retried and the reason lands in the delivery row's lastError, and the test
+  // endpoint's catch now refuses to verify the channel.
+  if (!delivered) {
+    throw new Error(
+      "No email transport is configured on this instance, so the message could not be " +
+        "sent. Configure SMTP in Settings → Email.",
+    );
+  }
 }
 
 async function sendWebhook(

@@ -33,9 +33,10 @@ import { buildMailBackupPayload } from "./admin/backup-plan";
 // goes through the same cron validation + schedule registration as a project's.
 import { syncPolicySchedule, validateCronExpression } from "../backups/triggers/cron";
 import { streamSSE } from "../../lib/sse";
+import { requestTag } from "../../middleware/error-handler";
 import { invalidatePlatformTransport } from "../../lib/mail";
 import { env } from "../../config";
-import { safeErrorMessage, DEFAULT_RETAIN_COUNT } from "@repo/core";
+import { safeErrorMessage, DEFAULT_RETAIN_COUNT, mailHostname } from "@repo/core";
 import { sshManager } from "../../lib/ssh-manager";
 import { repos } from "@repo/db";
 import { getRequestContext, type RequestContext } from "../../lib/request-context";
@@ -63,7 +64,7 @@ import {
 } from "./mail.service";
 import { checkMailDelivery } from "./mail-delivery.service";
 import { checkMailHealth, mailIsServing, MAIL_COMPONENTS } from "./mail-health.service";
-import { resolveMailEngine } from "./mail-engine";
+import { resolveMailEngine, resolveMailFlavor } from "./mail-engine";
 import { updatePostmasterPassword } from "./mail-credentials.service";
 import { reserveMailSetup } from "./mail-setup-lease";
 import { preflightMailSetup } from "./mail-setup-preflight";
@@ -153,9 +154,9 @@ function statusFromState(
   const credentials = state.domain
     ? {
         username: `postmaster@${state.domain}`,
-        smtpHost: `mail.${state.domain}`,
+        smtpHost: mailHostname(state.domain),
         smtpPort: 587,
-        imapHost: `mail.${state.domain}`,
+        imapHost: mailHostname(state.domain),
         imapPort: 993,
       }
     : undefined;
@@ -210,7 +211,7 @@ function buildPtrPayload(
   return {
     ipv4,
     ipv6,
-    target: `mail.${state.domain}`,
+    target: mailHostname(state.domain),
     resumeStep,
   };
 }
@@ -569,7 +570,7 @@ async function augmentStateWithHostRecords(
   const { ipv4, ipv6 } = await resolveHostIPs(server.sshHost);
   if (!ipv4) return state;
 
-  const mailDomain = `mail.${state.domain}`;
+  const mailDomain = mailHostname(state.domain);
   const augmented: Record<string, unknown> = {
     a: { type: "A", name: mailDomain, value: ipv4, required: true },
     ...(ipv6 && {
@@ -1105,10 +1106,10 @@ export async function startSetup(c: Context) {
         data: JSON.stringify({
           success: true,
           domain,
-          mailDomain: `mail.${domain}`,
+          mailDomain: mailHostname(domain),
           finishedAt: Date.parse(finishedAt),
-          webmailUrl: `https://mail.${domain}/mail`,
-          adminUrl: `https://mail.${domain}/iredadmin`,
+          webmailUrl: `https://${mailHostname(domain)}/mail`,
+          adminUrl: `https://${mailHostname(domain)}/iredadmin`,
         }),
       });
     } catch (err) {
@@ -1413,7 +1414,13 @@ export async function saveMailBackupPolicy(c: Context) {
 
   const messageData = body.messageData === true;
   const keys = body.keys !== false; // default: include keys/secrets
-  const payload = buildMailBackupPayload(mailRow.domain, { messageData, keys });
+  // The produce/restore shell is baked HERE and executed later by the generic
+  // custom_command producer, which has no mail knowledge — so the topology has to be
+  // resolved at build time. A containerized engine keeps Postgres in a sidecar and the
+  // `vmail` user only inside the engine, and the old plan issued `sudo -u postgres` and
+  // `chown vmail` on the host, where neither exists (GH-563).
+  const flavor = await resolveMailFlavor(serverId);
+  const payload = buildMailBackupPayload(mailRow.domain, { messageData, keys }, flavor);
 
   const cronExpression =
     typeof body.cronExpression === "string" && body.cronExpression.trim()
@@ -1616,6 +1623,9 @@ export async function getHealth(c: Context) {
     return c.json({ serverId, components, definitions: MAIL_COMPONENTS, delivery });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Health check failed";
+    // Same reason as the mail-admin funnel: this 500 is answered here, so `app.onError`
+    // never logs it and every Health-tab failure was invisible in the API log.
+    console.error(`[MAIL HEALTH ERROR] ${requestTag(c)}`, err);
     return c.json({ error: message }, 500);
   }
 }

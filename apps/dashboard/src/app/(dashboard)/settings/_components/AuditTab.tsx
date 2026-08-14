@@ -77,6 +77,7 @@ const CATEGORY_ICONS: Record<AuditCategoryId, React.ComponentType<{ className?: 
   domains: Globe,
   servers: Server,
   members: Users,
+  agent: Bot,
   security: Shield,
   billing: CreditCard,
   system: Wrench,
@@ -162,7 +163,9 @@ function resourceDisplay(e: AuditEventRow): string {
   if (e.resourceName) return e.resourceName;
   const payload = (e.after ?? e.before) as Record<string, unknown> | null | undefined;
   if (payload && typeof payload === "object") {
-    for (const field of ["email", "hostname", "name", "slug"]) {
+    // `tool` is what a tool-call row is about — "ran the MCP tool get_projects"
+    // beats "ran the MCP tool a connected AI agent".
+    for (const field of ["email", "hostname", "name", "slug", "tool"]) {
       const value = payload[field];
       if (typeof value === "string" && value.trim()) return value;
     }
@@ -301,6 +304,15 @@ function AuditDetailsBody({
           label={t.settings.audit.details.cameFrom}
           value={sourceLabel(event.source)}
         />
+        {/* The agent, when there was one. Named separately from "came from"
+            because "an AI assistant" and "Cursor" answer different questions —
+            the second is the one that decides which connection to revoke. */}
+        {event.sourceClientId && (
+          <DetailRow
+            label={t.settings.audit.details.viaAgent}
+            value={event.sourceClientName || event.sourceClientId}
+          />
+        )}
         <DetailRow label={t.settings.audit.details.when} value={absoluteTime(event.createdAt)} />
         <DetailRow label={t.settings.audit.ip} value={event.ipAddress || "—"} copyable={!!event.ipAddress} mono />
         {(event.resourceType || event.resourceId) && (
@@ -462,7 +474,17 @@ export function AuditTab() {
     return hit ? hit.id : "all";
   }, [categoryParam]);
 
-  const [source, setSource] = useState<SourceKey>("all");
+  // Source and client live in the URL alongside category, not in component state:
+  // "what has this agent been doing" is a link other screens hand out (the MCP
+  // settings row does) and a question people paste to each other, neither of which
+  // works if the answer is only reachable by clicking two pills in order.
+  const sourceParam = searchParams.get("source");
+  const source: SourceKey = useMemo(
+    () => (sourceParam && SOURCE_ICONS[sourceParam as AuditSource] ? (sourceParam as AuditSource) : "all"),
+    [sourceParam],
+  );
+  const client = searchParams.get("client") ?? "";
+
   const [actorUserId, setActorUserId] = useState("");
   const [period, setPeriod] = useState<PeriodKey>("all");
   const [search, setSearch] = useState("");
@@ -486,11 +508,12 @@ export function AuditTab() {
     () => ({
       category: category === "all" ? undefined : category,
       source: source === "all" ? undefined : source,
+      sourceClientId: client || undefined,
       actorUserId: actorUserId || undefined,
       from: periodStart(period),
       q: debouncedSearch || undefined,
     }),
-    [category, source, actorUserId, period, debouncedSearch],
+    [category, source, client, actorUserId, period, debouncedSearch],
   );
 
   useEffect(() => {
@@ -579,22 +602,50 @@ export function AuditTab() {
     [query, showToast, t],
   );
 
+  /**
+   * The audit URL with some filters changed and the rest kept. Merging rather
+   * than rebuilding is what stops a category tab from silently dropping the
+   * source/client filter the reader already chose.
+   */
+  const hrefWith = useCallback(
+    (patch: Record<string, string | undefined>) => {
+      const next = new URLSearchParams(searchParams.toString());
+      next.set("tab", "audit");
+      for (const [key, value] of Object.entries(patch)) {
+        if (value) next.set(key, value);
+        else next.delete(key);
+      }
+      return `/settings?${next.toString()}`;
+    },
+    [searchParams],
+  );
+
   // Every filter change invalidates the offset — page 3 of the old result set
   // has nothing to do with the new one, so each setter resets it rather than an
   // effect on `query` (which would fetch the stale page first, then page 1).
   const setCategory = useCallback(
     (next: CategoryKey) => {
-      const url = next === "all" ? "/settings?tab=audit" : `/settings?tab=audit&category=${next}`;
-      router.replace(url, { scroll: false });
+      router.replace(hrefWith({ category: next === "all" ? undefined : next }), { scroll: false });
       setPage(1);
     },
-    [router],
+    [router, hrefWith],
   );
 
-  const pickSource = useCallback((next: SourceKey) => {
-    setSource(next);
-    setPage(1);
-  }, []);
+  const pickSource = useCallback(
+    (next: SourceKey) => {
+      router.replace(hrefWith({ source: next === "all" ? undefined : next }), { scroll: false });
+      setPage(1);
+    },
+    [router, hrefWith],
+  );
+
+  const pickClient = useCallback(
+    (next: string) => {
+      router.replace(hrefWith({ client: next || undefined }), { scroll: false });
+      setPage(1);
+    },
+    [router, hrefWith],
+  );
 
   const pickActor = useCallback((next: string) => {
     setActorUserId(next);
@@ -618,17 +669,17 @@ export function AuditTab() {
         key: "all" as CategoryKey,
         label: t.settings.audit.tabs.all,
         count: facets?.total,
-        href: "/settings?tab=audit",
+        href: hrefWith({ category: undefined }),
       },
       ...AUDIT_CATEGORIES.map((cat) => ({
         key: cat.id as CategoryKey,
         label: cat.label,
         icon: CATEGORY_ICONS[cat.id],
         count: counts.get(cat.id),
-        href: `/settings?tab=audit&category=${cat.id}`,
+        href: hrefWith({ category: cat.id }),
       })),
     ];
-  }, [facets, t]);
+  }, [facets, t, hrefWith]);
 
   const sourceOptions: PillOption<SourceKey>[] = useMemo(() => {
     const seen = new Set(
@@ -648,6 +699,27 @@ export function AuditTab() {
         })),
     ];
   }, [facets, source, t]);
+
+  /**
+   * The connected agents that appear in the feed. A dropdown rather than pills:
+   * the list is unbounded (any registered client), unlike the six fixed sources.
+   * Only rendered when there is more than one agent to choose between.
+   */
+  const clientOptions = useMemo(() => {
+    const rows = facets?.clients ?? [];
+    // Keep the current selection listed even at zero, same as the source pills —
+    // otherwise a link into a quiet window leaves the filter unclearable.
+    const listed = rows.some((row) => row.id === client);
+    return [
+      { value: "", label: t.settings.audit.filters.anyAgent },
+      ...rows.map((row) => ({
+        value: row.id,
+        label: row.name || row.id,
+        description: interpolate(t.settings.audit.filters.agentCalls, { count: String(row.count) }),
+      })),
+      ...(client && !listed ? [{ value: client, label: client }] : []),
+    ];
+  }, [facets, client, t]);
 
   const actorOptions = useMemo(
     () => [
@@ -727,15 +799,24 @@ export function AuditTab() {
   }, [events, t]);
 
   const filtersActive =
-    category !== "all" || source !== "all" || !!actorUserId || period !== "all" || !!debouncedSearch;
+    category !== "all" ||
+    source !== "all" ||
+    !!client ||
+    !!actorUserId ||
+    period !== "all" ||
+    !!debouncedSearch;
 
   const clearFilters = useCallback(() => {
-    setSource("all");
     setActorUserId("");
     setPeriod("all");
     setSearch("");
-    setCategory("all");
-  }, [setCategory]);
+    // One navigation for all three URL-held filters — clearing them separately
+    // would race, each push overwriting the previous one's params.
+    router.replace(hrefWith({ category: undefined, source: undefined, client: undefined }), {
+      scroll: false,
+    });
+    setPage(1);
+  }, [router, hrefWith]);
 
   return (
     <div className="space-y-6">
@@ -789,6 +870,18 @@ export function AuditTab() {
             placeholder={t.settings.audit.filters.period}
             className="w-40"
           />
+          {/* Hidden when there is nothing to choose between — but ALWAYS shown
+              while a client filter is active, or arriving from the MCP tab's
+              Activity link (one connected agent) would leave no way to clear it. */}
+          {(clientOptions.length > 2 || !!client) && (
+            <CustomSelect
+              value={client}
+              options={clientOptions}
+              onChange={pickClient}
+              placeholder={t.settings.audit.filters.anyAgent}
+              className="w-52"
+            />
+          )}
         </div>
         {sourceOptions.length > 1 && (
           <PillSwitcher options={sourceOptions} value={source} onChange={pickSource} size="sm" />
@@ -851,9 +944,15 @@ export function AuditTab() {
                         <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
                           <span>{clockTime(e.createdAt)}</span>
                           {e.source === "mcp" && (
-                            <span className="inline-flex items-center gap-1 rounded-md bg-info-bg px-1.5 py-0.5 text-[10px] font-medium text-info">
-                              <Bot className="size-2.5" />
-                              {t.settings.audit.sources.mcp}
+                            // The client's own name when we have it: at a glance
+                            // "Claude Desktop" tells the reader which of their
+                            // connected agents this was, which the generic
+                            // "AI assistant" chip never could.
+                            <span className="inline-flex max-w-[14rem] items-center gap-1 rounded-md bg-info-bg px-1.5 py-0.5 text-[10px] font-medium text-info">
+                              <Bot className="size-2.5 shrink-0" />
+                              <span className="truncate">
+                                {e.sourceClientName || t.settings.audit.sources.mcp}
+                              </span>
                             </span>
                           )}
                           {e.source && e.source !== "mcp" && e.source !== "dashboard" && (

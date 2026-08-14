@@ -53,6 +53,11 @@ export const AUDIT_CATEGORIES = [
     description: "Who is in this organization and what they are allowed to do.",
   },
   {
+    id: "agent",
+    label: "AI agents",
+    description: "What connected assistants did over MCP — every tool call, and the scope they hold.",
+  },
+  {
     id: "security",
     label: "Security",
     description: "Admin credentials, auth mode, data export, and audit recording itself.",
@@ -545,19 +550,34 @@ export const AUDIT_EVENTS: Record<string, AuditEventDef> = {
     description: "An existing grant was overwritten with a different scope.",
   },
   "mcp.authorized": {
-    category: "members",
+    category: "agent",
     action: "authorized the MCP client",
     label: "MCP client authorized",
     tone: "info",
     description: "An AI agent was connected and given a scope to act within.",
   },
   "mcp.scope_changed": {
-    category: "members",
+    category: "agent",
     action: "changed the access of the MCP client",
     label: "MCP access changed",
     tone: "warning",
     description:
       "A connected agent's scope was edited. It takes effect on the agent's next request — no reconnect.",
+  },
+  "mcp.disconnected": {
+    category: "agent",
+    action: "disconnected the MCP client",
+    label: "MCP client disconnected",
+    tone: "warning",
+    description:
+      "A connected agent's tokens, consent and scope were torn down. It stops working immediately and must re-consent to return.",
+  },
+  "mcp.tool_called": {
+    category: "agent",
+    action: "ran the MCP tool",
+    label: "Agent tool call",
+    description:
+      "A tool call that left no other trace: a read, or an attempt that was refused or errored. A tool call that successfully changed something is recorded as the change itself, so it is not duplicated here.",
   },
   "grant.materialized": {
     category: "members",
@@ -922,6 +942,7 @@ export const AUDIT_RESOURCE_LABELS: Record<string, string> = {
   backup_run: "a backup",
   backup_restore: "a restore",
   incoming_webhook: "a webhook",
+  mcp_client: "a connected AI agent",
   billing: "billing",
   cloud: "Openship Cloud",
   settings: "settings",

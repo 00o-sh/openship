@@ -63,7 +63,8 @@ export const endpoints = {
     ensure: "projects/ensure",
     folderSession: "projects/folder/session",
     folderScan: (sessionId: string) => `projects/folder/scan/${sessionId}`,
-    // #336: real (unmasked) per-service env for the folder-scan wizard reveal.
+    // #336: POST { service, keys } — real (unmasked) values for one folder-scan
+    // service's named keys.
     folderEnvReveal: (sessionId: string) => `projects/folder/scan/${sessionId}/env-reveal`,
     folderUpload: (sessionId: string) => `projects/folder/upload/${sessionId}`,
   },
@@ -116,7 +117,7 @@ export const endpoints = {
       `projects/${projectId}/services/${serviceId}/env`,
     envSet: (projectId: string | number, serviceId: string) =>
       `projects/${projectId}/services/${serviceId}/env`,
-    // #336: real (unmasked) compose env for the "show values" reveal.
+    // #336: POST { keys } — real (unmasked) values for the named keys only.
     envReveal: (projectId: string | number, serviceId: string) =>
       `projects/${projectId}/services/${serviceId}/env-reveal`,
   },
@@ -318,6 +319,8 @@ export const endpoints = {
     allContainersScan: () => `system/containers/scan`,
     // Fleet bulk apply — server-derived targets, body only picks the intents
     allContainersApply: () => `system/containers/apply-all`,
+    // Live fleet progress: queued/running applies + the ones that just settled
+    allContainersApplying: () => `system/containers/applying`,
     // Per-server GitHub auth (self-hosted)
     serverGithub: (id: string) => `system/servers/${id}/github`,
     serverGithubConnect: (id: string) => `system/servers/${id}/github/connect`,
@@ -391,6 +394,12 @@ export const endpoints = {
         `mail/admin/${encodeURIComponent(serverId)}/aliases`,
       alias: (serverId: string, id: number) =>
         `mail/admin/${encodeURIComponent(serverId)}/aliases/${id}`,
+      inboundRules: (serverId: string) =>
+        `mail/admin/${encodeURIComponent(serverId)}/inbound-rules`,
+      inboundRule: (serverId: string, ruleId: string) =>
+        `mail/admin/${encodeURIComponent(serverId)}/inbound-rules/${encodeURIComponent(ruleId)}`,
+      inboundRulesTest: (serverId: string) =>
+        `mail/admin/${encodeURIComponent(serverId)}/inbound-rules/test`,
       stats: (serverId: string) =>
         `mail/admin/${encodeURIComponent(serverId)}/stats`,
       dnsScan: (serverId: string) =>

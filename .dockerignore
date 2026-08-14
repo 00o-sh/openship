@@ -7,6 +7,7 @@
 **/node_modules
 **/.next
 **/dist
+**/build
 **/release-dist
 apps/desktop/out
 apps/desktop/.vite
@@ -16,10 +17,34 @@ apps/desktop/.vite
 .gitignore
 .github
 
-# Secrets / local env — MUST NOT enter the build context or image
-.env
-.env.*
-!.env.example
+# Claude worktrees — full duplicate checkouts of this repo (multi-GB), each
+# carrying its own tracked env files. Nothing builds from them.
+.claude/worktrees
+
+# Secrets / local env — MUST NOT enter the build context or image.
+#
+# The `**/` prefixes are load-bearing: a pattern without one is matched only
+# against the CONTEXT-ROOT-relative path, so the previous `.env` / `.env.*`
+# covered a root-level `.env` and nothing deeper. Every per-app env file was
+# therefore in the context of every image. Two consequences, both real:
+#
+#   • `docker build -f apps/api/Dockerfile .` from a working checkout shipped
+#     the operator's own apps/api/.env — DB URL, auth secret, provider keys —
+#     into openship-api, because Dockerfile:10 is `COPY apps/ ./apps/` and the
+#     runtime stage copies apps/api forward. Same exposure via
+#     apps/dashboard/Dockerfile. CI escaped it only because a clean checkout
+#     has no untracked .env.
+#   • apps/email/client/.env.development reached the webmail builder, where
+#     `node` is bun and bun auto-loads it whenever NODE_ENV is unset — which is
+#     how GH-567 froze `http://localhost:3000` into the published client
+#     bundle. (Also fixed at the source in apps/email/scripts/build-release.ts;
+#     this is the second lock on the same door.)
+#
+# No Dockerfile copies a `.env*` out of the context — every env COPY is a
+# `--from=builder` — so excluding them cannot break a build.
+**/.env
+**/.env.*
+!**/.env.example
 
 # Caches + logs
 **/.turbo

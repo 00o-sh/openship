@@ -354,9 +354,10 @@ export const dockerMigrationApi = {
       })();
     }),
 
-  /** On-demand reveal of ONE discovered container's real env (scan masks it).
-   *  Write-gated (server:write) — same bar as the service-env reveal (#336). */
-  revealEnv: (input: { serverId: string; containerId: string }) =>
+  /** On-demand reveal of the named env keys of ONE discovered container (the scan
+   *  masks them). Write-gated (server:write) — same bar as the service-env reveal
+   *  (#336); the API rejects an empty `keys`. */
+  revealEnv: (input: { serverId: string; containerId: string; keys: string[] }) =>
     api.post<{ success: boolean; environment: Record<string, string> }>(
       endpoints.dockerMigration.revealEnv,
       input,

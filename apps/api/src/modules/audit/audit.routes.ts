@@ -8,7 +8,8 @@
  *
  * Filters on the list: `category` (expanded to its event types through the
  * shared taxonomy — a category is not a column), `eventType`, `actorUserId`,
- * `source`, `resourceType`, `resourceId`, `from`/`to`, and `q`.
+ * `source`, `sourceClientId` (one MCP client, not just "an assistant"),
+ * `resourceType`, `resourceId`, `from`/`to`, and `q`.
  *
  * `q` is deliberately more than an `event_type LIKE`: rows store ids, so
  * searching "api-gateway" resolves the term against project/server/domain names
@@ -35,7 +36,7 @@ import { secureRouter } from "../../lib/secure-router";
 import { getRequestContext } from "../../lib/request-context";
 import { checkPermissionOnResource } from "../../lib/permission";
 import { audit, auditContextFrom } from "../../lib/audit";
-import { isAuditSource } from "../../lib/call-source";
+import { isAuditClientId, isAuditSource } from "../../lib/call-source";
 
 const r = secureRouter(new Hono(), { module: "audit", basePath: "/api/audit" });
 
@@ -68,6 +69,7 @@ async function filtersFromQuery(c: Context, organizationId: string) {
   const category = c.req.query("category");
   const eventType = c.req.query("eventType");
   const source = c.req.query("source");
+  const sourceClientId = c.req.query("sourceClientId");
   const q = c.req.query("q")?.trim();
 
   return {
@@ -82,6 +84,10 @@ async function filtersFromQuery(c: Context, organizationId: string) {
     resourceType: c.req.query("resourceType") || undefined,
     resourceId: c.req.query("resourceId") || undefined,
     source: source && isAuditSource(source) ? source : undefined,
+    // Shape-checked with the same predicate the writer uses, so a filter can only
+    // name something the column could hold. A malformed value degrades to
+    // unfiltered, matching how an unknown category behaves above.
+    sourceClientId: isAuditClientId(sourceClientId) ? sourceClientId : undefined,
     from: parseDate(c.req.query("from")),
     to: parseDate(c.req.query("to")),
     q: q || undefined,
@@ -145,6 +151,35 @@ async function attachResourceNames(rows: AuditRow[]): Promise<Map<string, string
   return names;
 }
 
+/**
+ * Names for `source_client_id` values — `oauth:<clientId>` → the registered MCP
+ * app's name, `pat:<tokenId>` → the token's name.
+ *
+ * Two batched lookups at most, in parallel, same as the resource resolver above.
+ * An unresolvable id (client deleted, token revoked and pruned) stays nameless
+ * and the UI falls back to the raw id: a row attributed to something that no
+ * longer exists is still evidence, and dropping it would be worse.
+ */
+async function resolveClientNames(ids: string[]): Promise<Map<string, string>> {
+  const names = new Map<string, string>();
+  if (ids.length === 0) return names;
+
+  const oauthIds: string[] = [];
+  const patIds: string[] = [];
+  for (const id of ids) {
+    if (id.startsWith("oauth:")) oauthIds.push(id.slice("oauth:".length));
+    else if (id.startsWith("pat:")) patIds.push(id.slice("pat:".length));
+  }
+
+  const [apps, tokens] = await Promise.all([
+    oauthIds.length ? repos.oauth.listApplicationsByClientIds(oauthIds).catch(() => []) : [],
+    patIds.length ? repos.personalAccessToken.listNamesByIds(patIds).catch(() => []) : [],
+  ]);
+  for (const a of apps) names.set(`oauth:${a.clientId}`, a.name);
+  for (const t of tokens) names.set(`pat:${t.id}`, t.name);
+  return names;
+}
+
 r.get("/", { tag: "audit:read" }, async (c: Context) => {
   const ctx = getRequestContext(c);
   const cursor = c.req.query("cursor");
@@ -168,9 +203,13 @@ r.get("/", { tag: "audit:read" }, async (c: Context) => {
   const actorIds = Array.from(
     new Set(result.rows.map((r) => r.actorUserId).filter((id): id is string => !!id)),
   );
-  const [actors, resourceNames] = await Promise.all([
+  const clientIds = Array.from(
+    new Set(result.rows.map((r) => r.sourceClientId).filter((id): id is string => !!id)),
+  );
+  const [actors, resourceNames, clientNames] = await Promise.all([
     repos.user.findManyByIds(actorIds),
     attachResourceNames(result.rows),
+    resolveClientNames(clientIds),
   ]);
   const actorById = new Map(actors.map((u) => [u.id, { id: u.id, email: u.email, name: u.name }]));
 
@@ -181,6 +220,9 @@ r.get("/", { tag: "audit:read" }, async (c: Context) => {
       row.resourceType && row.resourceId
         ? resourceNames.get(`${row.resourceType}:${row.resourceId}`) ?? null
         : null,
+    // "Claude Desktop", not "oauth:4f2a…" — the actor a reader cares about when
+    // the human in the row only authorized the agent months ago.
+    sourceClientName: row.sourceClientId ? clientNames.get(row.sourceClientId) ?? null : null,
   }));
 
   if ("pageInfo" in result) {
@@ -205,11 +247,14 @@ r.get("/facets", { tag: "audit:read" }, async (c: Context) => {
   const ctx = getRequestContext(c);
   const orgId = ctx.organizationId;
   const filters = await filtersFromQuery(c, orgId);
-  const { eventTypes, source, ...shared } = filters;
+  const { eventTypes, source, sourceClientId, ...shared } = filters;
 
-  const [byEventType, bySource, actorIds, settings, canManage] = await Promise.all([
-    repos.auditEvent.countByEventType(orgId, { ...shared, source }),
-    repos.auditEvent.countBySource(orgId, { ...shared, eventTypes }),
+  const [byEventType, bySource, byClient, actorIds, settings, canManage] = await Promise.all([
+    repos.auditEvent.countByEventType(orgId, { ...shared, source, sourceClientId }),
+    repos.auditEvent.countBySource(orgId, { ...shared, eventTypes, sourceClientId }),
+    // Counted without its own filter, like every other facet — picking one agent
+    // must not zero out the others and trap the filter on that choice.
+    repos.auditEvent.countBySourceClient(orgId, { ...shared, eventTypes, source }),
     repos.auditEvent.distinctActors(orgId, { from: filters.from, to: filters.to }),
     repos.auditSettings.get(orgId),
     checkPermissionOnResource(ctx, { resourceType: "audit", resourceId: "*", action: "write" }),
@@ -225,7 +270,10 @@ r.get("/facets", { tag: "audit:read" }, async (c: Context) => {
     if (category) categoryCounts.set(category, (categoryCounts.get(category) ?? 0) + count);
   }
 
-  const actors = await repos.user.findManyByIds(actorIds);
+  const [actors, clientNames] = await Promise.all([
+    repos.user.findManyByIds(actorIds),
+    resolveClientNames(byClient.map((row) => row.sourceClientId)),
+  ]);
 
   return c.json({
     total,
@@ -236,6 +284,11 @@ r.get("/facets", { tag: "audit:read" }, async (c: Context) => {
       count: categoryCounts.get(cat.id) ?? 0,
     })),
     sources: bySource.map((row) => ({ source: row.source, count: row.count })),
+    clients: byClient.map((row) => ({
+      id: row.sourceClientId,
+      name: clientNames.get(row.sourceClientId) ?? null,
+      count: row.count,
+    })),
     actors: actors.map((u) => ({ id: u.id, name: u.name, email: u.email, image: u.image })),
     settings,
     canManage,

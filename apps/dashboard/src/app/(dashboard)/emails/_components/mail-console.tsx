@@ -28,7 +28,7 @@ import {
   type MailSSEEvent,
   type PortConflict,
 } from "@/lib/api";
-import { relayProvider } from "@repo/core";
+import { relayProvider, mailHostname } from "@repo/core";
 import { mailProvider } from "@/lib/mail-providers";
 import type { ServerOption } from "@/components/shared/ServerSelector";
 import { PageContainer } from "@/components/ui/PageContainer";
@@ -281,7 +281,7 @@ function MailConsoleInner() {
             setPtrPending({
               ipv4,
               ipv6,
-              target: `mail.${s.domain}`,
+              target: mailHostname(s.domain),
               resumeStep: s.resumeStep ?? 12,
             });
           }
@@ -759,7 +759,7 @@ function MailConsoleInner() {
         setPtrPending({
           ipv4,
           ipv6,
-          target: `mail.${domain}`,
+          target: mailHostname(domain),
           resumeStep: next,
         });
       } else {

@@ -3,7 +3,7 @@
  */
 
 import { normalizeRoutingFields, repos, composeSpecDiff, type Project, type Service, type ServicePublicEndpoint } from "@repo/db";
-import { aliasConflictsWithSiblings, getProjectType, mergeAdvanced, normalizeServiceLabel, normalizeAliasStrict, safeErrorMessage, withTimeout, type ComposeAdvanced, type ServiceContainerState, type StackId } from "@repo/core";
+import { aliasConflictsWithSiblings, getProjectType, mergeAdvanced, normalizeServiceLabel, normalizeAliasStrict, resolveCommandArgv, safeErrorMessage, withTimeout, type ComposeAdvanced, type ServiceContainerState, type StackId } from "@repo/core";
 import {
   BuildLogger,
   DockerRuntime,
@@ -231,6 +231,9 @@ export async function getService(
  * write-gated reveal that backs the "show values" toggle — the route tag is
  * `project:service:write`, so a read-only caller can never reach the plaintext
  * (the whole point: read = masked). `getService` above always masks.
+ *
+ * Returns the FULL stored map; the controller narrows it to the keys the request
+ * named (`pickRevealed`) so only those cross the wire.
  */
 export async function revealServiceEnv(
   ctx: RequestContext,
@@ -496,7 +499,13 @@ export async function createService(
     environment: data.environment ?? {},
     volumes: data.volumes ?? [],
     command: trimOrNull(data.command),
-    commandArgv: data.commandArgv ?? null, // #332
+    // #332: derive argv from the text command when the client didn't send one, or
+    // the row falls back to the `sh -c` wrap that breaks entrypoint+CMD images.
+    commandArgv:
+      resolveCommandArgv({
+        incomingArgv: data.commandArgv,
+        incomingCommand: data.command,
+      }) ?? null,
     restart: data.restart ?? "unless-stopped",
     advanced,
     ...routing,
@@ -590,6 +599,18 @@ export async function updateService(
       patch[key] = trimOrNull(patch[key]);
     }
   }
+  // #332: `commandArgv` wins over `command` at deploy time, so a command edit that
+  // leaves a stale argv behind silently keeps running the OLD command — the form's
+  // command field did nothing on any row imported from a compose file. Re-derive on
+  // a real edit; an echoed-back identical string keeps the stored argv (it may be a
+  // list command whose display join can't be re-split).
+  const nextCommandArgv = resolveCommandArgv({
+    incomingArgv: patch.commandArgv,
+    incomingCommand: "command" in patch ? patch.command : undefined,
+    storedCommand: svc.command,
+    storedArgv: svc.commandArgv as string[] | null,
+  });
+  if (nextCommandArgv !== undefined) patch.commandArgv = nextCommandArgv;
   // Monorepo sub-app build settings: same trim-or-null treatment so empty
   // strings become null in DB (matches the rest of the service columns).
   for (const key of [
@@ -1040,6 +1061,11 @@ export async function syncComposeServices(
   // holding a bad one (persisted before #342) must not be refused wholesale.
   assertValidCustomDomains(parsed, { known: customHostnamesOf(stored) });
 
+  // #332: argv needs no restoring here. This endpoint accepts `command` as a string
+  // whose stored form is a lossy join, but `syncFromCompose` (composeWritePatch →
+  // resolveCommandArgv) is the ONE place that decides whether an unchanged string
+  // keeps the stored argv or a changed one re-derives — so every writer into that
+  // path, including the deploy request's own service list, gets the same rule.
   const reconciled = parsed.map((svc) =>
     svc.environment
       ? { ...svc, environment: unmaskEnv(svc.environment, storedEnvByName.get(svc.name) ?? null) }

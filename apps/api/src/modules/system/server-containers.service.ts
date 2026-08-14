@@ -259,7 +259,9 @@ function upsertView(server: Server, view: ServerContainerView, lastError?: strin
     runningVersion: view.runningVersion,
     pinnedVersion: view.pinnedVersion,
     behind: view.behind,
-    latestInProgress: false,
+    // Deliberately NOT written: a probe knows what the box runs, not whether an
+    // apply is mid-flight. `upsert` preserves the flag when it's omitted, so a scan
+    // landing during a swap can no longer erase the state every surface renders.
     detail,
   });
 }
@@ -663,7 +665,23 @@ export async function applyAllContainers(
     });
   }
 
-  // Detached on purpose — the response is the classification, not the outcome.
+  // Flag EVERY accepted target — queued ones included — and await it before the
+  // response. `applyServerContainer` sets the same flag itself, but only when a
+  // worker slot picks the target up: with BULK_APPLY_CONCURRENCY at 3, targets 4..N
+  // were indistinguishable from "never started" for as long as the first swaps took,
+  // so a fleet view had nothing to render and a second click re-queued containers
+  // that were already accepted (the session dedup only catches a target a worker
+  // has actually reached). One flag per target, written up front, is the record that
+  // the work was taken on.
+  await Promise.all(
+    targets.map((t) =>
+      repos.serverContainerStatus.setInProgress(t.server.id, t.component, true).catch(() => {}),
+    ),
+  );
+
+  // Detached on purpose — the response is the classification, not the outcome. Each
+  // apply clears its own flag in `applyServerContainer`'s finally; a target whose
+  // worker never runs (process death mid-run) is cleared at the next boot.
   void mapWithLimit(targets, BULK_APPLY_CONCURRENCY, async (t) => {
     await runContainerApply(t.server, t.component, t.intent).done.catch(() => {});
   }).catch(() => {});

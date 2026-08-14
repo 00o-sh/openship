@@ -32,6 +32,8 @@ function serialize(t: PublicPersonalAccessToken) {
     scoped: t.scoped,
     expiresAt: t.expiresAt,
     lastUsedAt: t.lastUsedAt,
+    /** Requests made with this token. Approximate — the write is fire-and-forget. */
+    useCount: t.useCount,
     revokedAt: t.revokedAt,
     createdAt: t.createdAt,
   };
@@ -514,7 +516,7 @@ export async function authorizeMcpClient(c: Context) {
  * reproduced here.
  */
 function serializeBinding(
-  b: { oauthClientId: string | null; name: string; organizationId: string | null; readOnly: boolean; scoped: boolean; createdAt: Date; lastUsedAt: Date | null },
+  b: { id: string; oauthClientId: string | null; name: string; organizationId: string | null; readOnly: boolean; scoped: boolean; createdAt: Date; lastUsedAt: Date | null; useCount: number },
   name: string,
   organizationName: string | null,
   grants: Array<{ resourceType: string; resourceId: string; permissions: Permission[]; scope?: SourceAccessScope }>,
@@ -530,6 +532,10 @@ function serializeBinding(
     grantCount: grants.length,
     authorizedAt: b.createdAt,
     lastUsedAt: b.lastUsedAt,
+    /** Requests this client has made. Approximate — the write is fire-and-forget. */
+    useCount: b.useCount,
+    /** Audit key for "everything this client did" (audit_event.source_client_id). */
+    auditClientId: b.oauthClientId ? `oauth:${b.oauthClientId}` : `pat:${b.id}`,
     ...(opts.includeGrants
       ? {
           grants: grants.map((g) => ({
@@ -633,10 +639,38 @@ export async function disconnectMcpClient(c: Context) {
   const clientId = param(c, "clientId").trim();
   if (!clientId) return c.json({ error: "clientId required", code: "CLIENT_ID_REQUIRED" }, 400);
 
+  // Read the binding BEFORE the teardown: it is the only place the scope the
+  // client held is still recorded, and an audit row that can only say "something
+  // named X was disconnected" answers none of the questions asked after the fact.
+  const binding = await repos.personalAccessToken.findOAuthBinding(ctx.userId, clientId);
+  const grantCount = binding ? (await repos.patGrant.listByToken(binding.id)).length : 0;
+
   // Atomic: tokens + consent + binding + grants are torn down in one
   // transaction (see oauth repo). Self-scoped to ctx.userId, so a client
   // shared across users keeps working for everyone else.
   await repos.oauth.disconnectMcpClient(ctx.userId, clientId);
+
+  // Authorizing and re-scoping an agent were both recorded; REVOKING it was not,
+  // which left the one MCP lifecycle event with no trace — and the log reading as
+  // though a client that is long gone still holds its scope.
+  const organizationId = binding?.organizationId ?? ctx.organizationId;
+  if (organizationId) {
+    audit.recordAsync(auditContextFrom(c, organizationId, ctx.userId), {
+      eventType: "mcp.disconnected",
+      resourceType: "mcp_client",
+      resourceId: binding?.id ?? clientId,
+      before: binding
+        ? {
+            clientId,
+            scoped: binding.scoped,
+            readOnly: binding.readOnly,
+            grantCount,
+            useCount: binding.useCount,
+          }
+        : { clientId },
+      after: null,
+    });
+  }
 
   return c.json({ data: { ok: true } });
 }

@@ -19,7 +19,11 @@
 import type { Context } from "hono";
 import { db, getDriver, sql, count, eq, schema } from "@repo/db";
 import { hostChannelHealth, type HostChannelHealth } from "@repo/adapters";
-import { HOST_CHANNEL_NOT_PROVISIONED, safeErrorMessage } from "@repo/core";
+import {
+  HOST_CHANNEL_AUTH_REJECTED,
+  HOST_CHANNEL_NOT_PROVISIONED,
+  safeErrorMessage,
+} from "@repo/core";
 
 import { env } from "../../config";
 
@@ -60,13 +64,17 @@ function reportHostChannel(h: HostChannelHealth): HostChannelReport {
     ok: h.ok,
     state: h.code,
     ...(h.cause ? { cause: h.cause } : {}),
-    // `key_unreadable`'s own hint names the key PATH, which never goes on the wire —
-    // and the remedy is the same one anyway: reprovision, then verify.
+    // `key_unreadable`'s own hint names the key PATH and `auth_rejected`'s names the
+    // channel TARGET; neither goes on the wire, for the reason the address and the
+    // firewall rule don't — this payload is for monitoring, not for an operator standing
+    // at a terminal. Both fall back to the shared prose, which is the same remedy anyway.
     ...(h.code === "key_unreadable"
       ? { remedy: HOST_CHANNEL_NOT_PROVISIONED }
-      : h.hint
-        ? { remedy: h.hint }
-        : {}),
+      : h.code === "auth_rejected"
+        ? { remedy: `${HOST_CHANNEL_AUTH_REJECTED} ${HOST_CHANNEL_NOT_PROVISIONED}` }
+        : h.hint
+          ? { remedy: h.hint }
+          : {}),
   };
 }
 

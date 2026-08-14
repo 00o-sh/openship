@@ -83,10 +83,13 @@ r.get(
   cloudProjectProxy,
   ctrl.getById,
 );
-r.get(
-  // #336: real (unmasked) compose env. Write-gated on purpose — read-only
-  // callers only ever see the masked map from GET /:serviceId. No mcp block:
-  // revealing secrets stays a dashboard action, off the automation surface.
+r.post(
+  // #336: real (unmasked) compose env for the keys named in the body — never the
+  // whole map. Write-gated on purpose: read-only callers only ever see the masked
+  // map from GET /:serviceId. POST, not GET, because the requested key names are
+  // a body (out of proxy access logs and browser history) and are unbounded by
+  // URL length. No mcp block: revealing secrets stays a dashboard action, off the
+  // automation surface.
   "/:serviceId/env-reveal",
   { tag: "project:service:write" },
   cloudProjectProxy,

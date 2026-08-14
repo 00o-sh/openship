@@ -90,6 +90,60 @@ export class MailEngineUnavailableError extends AppError {
   }
 }
 
+/**
+ * The engine image's idempotent schema bootstrap, at the path the Dockerfile bakes it
+ * to, plus the restart it needs to be useful: supervisord's default `startretries=3`
+ * has already put Postfix/Dovecot/Amavis in FATAL after their first failed starts
+ * against the empty database, and FATAL is terminal.
+ *
+ * DISPLAY-ONLY — this string is never handed to an executor, which is why the
+ * `${MAIL_CONTAINER}` interpolation here is not shell-quoted like every real docker
+ * string in this file. It mirrors the second half of what entrypoint.sh prints when the
+ * bootstrap fails, so the panel and the container log name the same fix.
+ */
+const MAIL_DB_BOOTSTRAP_COMMAND =
+  `docker exec ${MAIL_CONTAINER} bash /opt/openship-mail/db-bootstrap.sh` +
+  ` && docker restart ${MAIL_CONTAINER}`;
+
+/**
+ * The engine is up and psql answered — with "there is no schema here".
+ *
+ * `db-bootstrap.sh` is what seeds `vmail`, and it used to be able to leave without
+ * having done so. A box in that state serves SSH, runs the container, and answers every
+ * admin read with `relation "domain" does not exist` — which reached the panel as a bare
+ * 500 (GH-562). 409 for the same reason as the engine gate above: the request is valid
+ * and the box is reachable, the operation just cannot run until one documented command
+ * has been. The remediation is IN the message because that is the only place the
+ * operator looks.
+ *
+ * The copy hedges on purpose. `running` comes from `docker inspect .State.Running`,
+ * which is true from the instant the container starts — including the whole time the
+ * entrypoint is inside db-bootstrap.sh waiting up to 180s for the sidecar. A dashboard
+ * poll that lands in that window must not be told confidently to run a repair.
+ *
+ * A separate class from {@link MailEngineUnavailableError} on purpose: the engine IS
+ * installed and running here, so the dashboard's `isMailEngineUnavailable` path — which
+ * hides the message in favour of a banner that will not render — must not claim it.
+ * Since the entrypoint now exits non-zero when the bootstrap fails, a current-image box
+ * lands on `not_running` instead; this is the safety net for an older image, or a
+ * `vmail` wiped under a live engine.
+ */
+export class MailDbNotInitializedError extends AppError {
+  constructor(
+    readonly flavor: MailEngineFlavor,
+    readonly detail: string,
+  ) {
+    super(
+      flavor === "container"
+        ? `The mail database on this server has no schema yet (${detail}). If mail setup is still running, wait for it to finish; otherwise the engine's bootstrap did not complete — run: ${MAIL_DB_BOOTSTRAP_COMMAND}`
+        : `The mail database on this server has no schema yet (${detail}). Re-run mail setup on this server.`,
+      409,
+      "MAIL_DB_NOT_INITIALIZED",
+    );
+    this.name = "MailDbNotInitializedError";
+  }
+}
+
 // ─── Resolution ──────────────────────────────────────────────────────────────
 
 const probes = new WeakMap<CommandExecutor, Promise<MailEngineProbe>>();
@@ -204,6 +258,50 @@ export async function runMailCommand(
 }
 
 /**
+ * Run SQL against `vmail` on whichever engine this box has — the one funnel every
+ * mail-admin read and write goes through (see `admin/psql-runner`).
+ *
+ * It exists to give a psql failure a TYPE. The flavor is captured as the command is
+ * built, so the "no schema" answer can carry the flavor-correct remediation without a
+ * second topology probe and without psql-runner learning what a container is. `flavor`
+ * stays "none" only when the gate in `runMailCommand` refused before building — the one
+ * case where no SQL ran, and one the classifier never sees because that gate throws a
+ * typed error.
+ */
+export async function runMailSql(target: MailTarget, sql: string): Promise<string> {
+  let flavor: MailEngineFlavor = "none";
+  try {
+    const { output } = await runMailCommand(target, (resolved) => {
+      flavor = resolved;
+      return mailPsqlCommand(resolved, sql);
+    });
+    return output;
+  } catch (err) {
+    if (err instanceof AppError) throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    if (looksLikeMissingSchema(message)) {
+      // Logged here because the throw below is a 409, and the error handler only logs
+      // 5xx — without this line the condition being fixed leaves no trace at all,
+      // which is the complaint that opened the issue.
+      console.warn(`[mail] vmail schema missing on ${flavor} engine: ${firstOutputLine(message)}`);
+      throw new MailDbNotInitializedError(flavor, firstOutputLine(message));
+    }
+    throw err;
+  }
+}
+
+/**
+ * A psql answer that means the schema was never seeded — a missing `vmail` database
+ * (the sidecar initialized, the bootstrap never ran) or a missing table in it (it ran
+ * partially). Deliberately NOT `column … does not exist`: that means OUR SQL disagrees
+ * with a schema that IS there, which is our bug to read verbatim, not an operator's to
+ * bootstrap away.
+ */
+function looksLikeMissingSchema(text: string): boolean {
+  return /database "[^"]+" does not exist|relation "[^"]+" does not exist/i.test(text);
+}
+
+/**
  * Does this output mean "you talked to the wrong topology / the engine is gone"?
  *
  * Per-flavor on purpose: docker's "No such container" is conclusive for the
@@ -293,6 +391,65 @@ export function mailPsqlCommand(flavor: MailEngineFlavor, sql: string): string {
  */
 export function mailEngineCommand(flavor: MailEngineFlavor, cmd: string): string {
   return flavor === "container" ? `docker exec ${MAIL_CONTAINER} ${cmd}` : cmd;
+}
+
+/**
+ * The three renderers the BACKUP shell needs (GH-563).
+ *
+ * `mailPsqlCommand` above cannot serve them: it bakes in `-c <sql>`, while a backup
+ * streams a dump to stdout and replays a FILE. And a backup script is generated once and
+ * executed later by the generic custom_command producer over a bare SSH executor, so it
+ * cannot call back into this module — the topology has to be baked into the string.
+ *
+ * The container case is not simply "prefix with docker exec". Two things differ:
+ *
+ *   - `-i`. The dump file lives in the producer's `$tmp` ON THE HOST, which the sidecar
+ *     cannot see, so the replay has to arrive over stdin (`-f -`) and `docker exec`
+ *     needs `-i` to forward it. A `-f "$tmp/…"` inside the container would just be a
+ *     missing path.
+ *   - WHICH container. Postgres is the sidecar; vmail ownership is the engine. Getting
+ *     that pair backwards is how `chown -R vmail:vmail` ran somewhere with no vmail user.
+ */
+/**
+ * Just the topology, for callers that GENERATE a command instead of running one — the
+ * backup plan is built now and executed later, elsewhere, by the generic producer.
+ * `requireRunning` is deliberately not implied: a backup policy can legitimately be
+ * saved while the engine is stopped.
+ */
+export async function resolveMailFlavor(target: MailTarget): Promise<MailEngineFlavor> {
+  return withMailEngine(target, async (probe) => {
+    if (probe.flavor === "none") {
+      throw new MailEngineUnavailableError("not_installed", probe.flavor);
+    }
+    return probe.flavor;
+  });
+}
+
+export function mailPgDumpToStdout(flavor: MailEngineFlavor, args: string): string {
+  return flavor === "container"
+    ? `docker exec ${MAIL_DB_CONTAINER} pg_dump -U postgres -d ${MAIL_DB_NAME} ${args}`
+    : `sudo -u postgres pg_dump -d ${MAIL_DB_NAME} ${args}`;
+}
+
+/** psql reading SQL from STDIN, so the caller redirects a host-side file into it. */
+export function mailPsqlFromStdin(flavor: MailEngineFlavor): string {
+  const flags = `-d ${MAIL_DB_NAME} -v ON_ERROR_STOP=1 -f -`;
+  return flavor === "container"
+    ? `docker exec -i ${MAIL_DB_CONTAINER} psql -U postgres ${flags}`
+    : `sudo -u postgres psql ${flags}`;
+}
+
+/**
+ * Pick the restored mail data up. The engine reads its accounts from Postgres and its
+ * config from the bind-mounted /etc paths, so a restore is inert until the daemons
+ * re-read both — `supervisorctl` in the container, `systemctl` on a legacy host. The
+ * supervisord program names are deliberately the same strings as the health probe's
+ * units (see mail-health.service.ts), so there is one vocabulary, not two.
+ */
+export function mailDaemonReloadCommand(flavor: MailEngineFlavor): string {
+  return flavor === "container"
+    ? `docker exec ${MAIL_CONTAINER} supervisorctl restart postfix dovecot amavis`
+    : "systemctl reload postfix dovecot 2>/dev/null; systemctl restart amavis 2>/dev/null";
 }
 
 /**
@@ -390,7 +547,12 @@ export type MailUnitStatus =
 
 export interface MailUnitState {
   status: MailUnitStatus;
-  /** Free-form sub-state when running (systemd's, or supervisord's state word). */
+  /**
+   * The supervisor's own state word — systemd's SubState, or supervisord's,
+   * lower-cased. Load-bearing beyond display: `status: "failed"` covers both
+   * supervisord FATAL (it has given up) and BACKOFF (it is still retrying), and
+   * this is the only thing that tells them apart.
+   */
   subState?: string;
   /** ISO timestamp the unit entered its current state — systemd only. */
   activeSince?: string;
@@ -485,10 +647,10 @@ export function mailUnitActionCommand(
 ): string {
   if (flavor === "container") {
     return key === "postgresql"
-      ? `docker ${action} ${MAIL_DB_CONTAINER}`
-      : `docker exec ${MAIL_CONTAINER} supervisorctl ${action} ${unit}`;
+      ? `docker ${action} ${sq(MAIL_DB_CONTAINER)}`
+      : `docker exec ${sq(MAIL_CONTAINER)} supervisorctl ${action} ${sq(unit)}`;
   }
-  return `systemctl --no-block ${action} ${unit}`;
+  return `systemctl --no-block ${action} ${sq(unit)}`;
 }
 
 /**
@@ -508,23 +670,39 @@ export function mailQueueProbeCommand(flavor: MailEngineFlavor, lines = 400): st
 }
 
 /**
- * Tail one daemon's logs. supervisord writes each program to
- * `/var/log/supervisor/<program>.log` (see apps/email's supervisord.conf); the
- * sidecar logs to its container; a legacy box has journald. `timeout 10` caps the
- * exec so a hung log can't sit on the SSH channel.
+ * Tail one daemon's logs — the command to run, and the same read in the form we
+ * show the operator.
+ *
+ * supervisord writes each program to `/var/log/supervisor/<program>.log` (see
+ * apps/email's supervisord.conf); the sidecar logs to its container; a legacy box
+ * has journald. `timeout 10` caps the exec so a hung log can't sit on the SSH
+ * channel.
+ *
+ * `source` exists because the drawer printed a hardcoded `journalctl -u …` header,
+ * naming a log the container engine does not have. Both halves come out of this one
+ * switch, so the header cannot drift from the read; `source` drops the `timeout`,
+ * the redirection and the shell quoting, and nothing else. The log path keeps
+ * `${unit}` unquoted deliberately — it is closed over by `MAIL_COMPONENTS`, not
+ * caller input.
  */
-export function mailUnitLogsCommand(
+export function mailUnitLogsRead(
   flavor: MailEngineFlavor,
   key: string,
   unit: string,
   lines: number,
-): string {
+): { command: string; source: string } {
   if (flavor === "container") {
-    return key === "postgresql"
-      ? `timeout 10 docker logs --tail ${lines} ${MAIL_DB_CONTAINER} 2>&1 || true`
-      : `timeout 10 docker exec ${MAIL_CONTAINER} tail -n ${lines} /var/log/supervisor/${unit}.log 2>/dev/null || true`;
+    if (key === "postgresql") {
+      const source = `docker logs --tail ${lines} ${MAIL_DB_CONTAINER}`;
+      return { command: `timeout 10 ${source} 2>&1 || true`, source };
+    }
+    const source = `docker exec ${MAIL_CONTAINER} tail -n ${lines} /var/log/supervisor/${unit}.log`;
+    return { command: `timeout 10 ${source} 2>/dev/null || true`, source };
   }
-  return `timeout 10 journalctl -u ${sq(unit)} -n ${lines} --no-pager 2>&1 || true`;
+  return {
+    command: `timeout 10 journalctl -u ${sq(unit)} -n ${lines} --no-pager 2>&1 || true`,
+    source: `journalctl -u ${unit} -n ${lines}`,
+  };
 }
 
 function firstOutputLine(text: string): string {
@@ -543,6 +721,9 @@ function mapSupervisorState(s: string): MailUnitStatus {
     case "STOPPED":
     case "EXITED":
       return "inactive";
+    // Both are `failed` for every consumer that grades this — the deploy gate, the
+    // serving check, the Health banner. What differs is whether anything is still
+    // trying, and that rides on `subState`: FATAL means supervisord has given up.
     case "FATAL":
     case "BACKOFF":
       return "failed";

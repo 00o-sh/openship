@@ -158,6 +158,10 @@ export type {
   BulkRestartResult,
   MailBackupPolicy,
   SaveMailBackupPolicyInput,
+  InboundRule,
+  InboundRulePayload,
+  InboundScope,
+  InboundTestResult,
 } from "./mail-admin";
 export type {
   MailSetupStep,
@@ -174,6 +178,7 @@ export type {
   PortUsage,
   MailComponentHealth,
   MailComponentStatus,
+  MailComponentSeverity,
   MailComponentDef,
   MailHealthResponse,
   MailDeliveryHealth,

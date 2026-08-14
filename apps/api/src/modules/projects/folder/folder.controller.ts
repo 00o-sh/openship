@@ -1,6 +1,7 @@
 import type { Context } from "hono";
 import { safeErrorMessage } from "@repo/core";
 import { getRequestContext } from "../../../lib/request-context";
+import { parseRevealKeys, pickRevealed } from "../../../lib/env-reveal";
 import { requestApiPublicUrl } from "../../../lib/public-url";
 import { projectInfoToScanResponse } from "../../deployments/prepare.service";
 import { createFolderSession, acceptRelayUpload, scanFolderSession } from "./folder.service";
@@ -87,22 +88,33 @@ export async function scanSession(c: Context) {
 }
 
 /**
- * GET /projects/folder/scan/:sessionId/env-reveal
+ * POST /projects/folder/scan/:sessionId/env-reveal  { service, keys: string[] }
  * #336: the scan response masks compose env, so the wizard's "show values"
  * toggle fetches the REAL values here. Backed by `session.services`, which the
  * scan captured PRE-mask. Write-gated at the route (project:write) so a
- * read-only caller can't reveal. Returns real env keyed by service name.
+ * read-only caller can't reveal.
+ *
+ * Scoped to ONE service and the keys it names: this used to answer with every
+ * key of every service in the session, so revealing a single row of one service
+ * shipped the whole stack's secrets to the browser.
  */
 export async function revealSessionEnv(c: Context) {
   const { organizationId } = getRequestContext(c);
   const sessionId = c.req.param("sessionId");
+  type RevealBody = { service?: unknown; keys?: unknown };
+  const body = await c.req.json<RevealBody>().catch(() => ({}) as RevealBody);
+  const serviceName = typeof body.service === "string" ? body.service : "";
+  if (!serviceName) return c.json({ error: "service is required" }, 400);
+  const keys = parseRevealKeys(body.keys);
+
   const session = sessionId ? getFolderSession(sessionId) : undefined;
   if (!session || session.orgId !== organizationId) {
     return c.json({ error: "Upload session not found" }, 404);
   }
-  const environments: Record<string, Record<string, string>> = {};
-  for (const s of session.services ?? []) {
-    if (s.name) environments[s.name] = s.environment ?? {};
-  }
-  return c.json({ success: true, environments });
+  const match = (session.services ?? []).find((s) => s.name === serviceName);
+  if (!match) return c.json({ error: "Service not found in this upload session" }, 404);
+
+  const environment = pickRevealed(match.environment, keys);
+  c.set("auditAfter", { service: serviceName, revealedEnvKeys: Object.keys(environment) });
+  return c.json({ success: true, environment });
 }

@@ -242,6 +242,24 @@ export async function createServer(c: Context) {
 }
 
 /** PATCH /servers/:id - update a server */
+/**
+ * Everything on a server row that describes HOW to dial it — i.e. everything an isLocal
+ * row does not use. Listed once so a new credential field can't quietly become writable
+ * on the one row where writing it means nothing.
+ */
+const LOCAL_ROW_READONLY_FIELDS = [
+  "sshHost",
+  "sshPort",
+  "sshUser",
+  "sshAuthMethod",
+  "sshPassword",
+  "sshKeyPath",
+  "sshPrivateKey",
+  "sshKeyPassphrase",
+  "sshJumpHost",
+  "sshArgs",
+] as const;
+
 export async function updateServer(c: Context) {
   const cloudGuard = assertNotCloud(c); if (cloudGuard) return cloudGuard;
 
@@ -254,6 +272,33 @@ export async function updateServer(c: Context) {
   if (!existing) return c.json({ error: "Server not found" }, 404);
 
   const body = await c.req.json();
+
+  // #527: an isLocal row's ssh* fields are DISPLAY-ONLY. Every operation on this box goes
+  // through the container→host channel, whose credentials come from OPENSHIP_HOST_SSH_*
+  // and never from this row (see lib/startup/self-server.ts). Accepting them stored a
+  // credential nothing reads, displayed it back as though it were in use, and let
+  // `ensureLocalServer`'s reconcile silently revert ssh_user on the next `GET /servers`.
+  //
+  // That combination is most of what #527 cost its reporter: told their credentials were
+  // rejected, they came here, entered a username and key, watched it change nothing, and
+  // tried three more key paths. Refusing with the reason is the only answer that ends
+  // that loop. `name` stays editable — renaming this row is meaningful and harmless.
+  if (existing.isLocal) {
+    const attempted = LOCAL_ROW_READONLY_FIELDS.filter((f) => body[f] !== undefined);
+    if (attempted.length > 0) {
+      return c.json(
+        {
+          error:
+            "This row is the machine Openship runs on, so its SSH details are display-only " +
+            "— the connection to this host uses the channel key provisioned by " +
+            "`openship up`, not credentials stored here. Re-run `openship up` to change it.",
+          fields: attempted,
+        },
+        400,
+      );
+    }
+  }
+
   const patch: Record<string, unknown> = {};
 
   if (body.name !== undefined) patch.name = body.name?.trim() || null;

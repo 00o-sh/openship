@@ -81,7 +81,9 @@ vi.mock("../../../src/modules/mail/mail-state", () => ({
   readState: async () => state,
 }));
 
-import { scanDns } from "../../../src/modules/mail/admin/dns-scan.service";
+import { scanDns,
+  looksSyntheticAddress,
+} from "../../../src/modules/mail/admin/dns-scan.service";
 
 beforeEach(() => {
   state = BASE_STATE;
@@ -590,5 +592,35 @@ describe("resolver selection", () => {
     await import("../../../src/modules/mail/admin/dns-scan.service");
 
     expect(dns.setServers).toHaveBeenCalledWith(expect.arrayContaining(["1.1.1.1"]));
+  });
+});
+
+/**
+ * GH-240 FP2: pinning the resolver to 1.1.1.1/8.8.8.8 does not escape a fake-IP TUN.
+ * Clash/sing-box capture UDP:53 to ANY destination and synthesise a per-hostname address,
+ * so the query never leaves the machine. Comparing that handle to the real public IP told
+ * operators their DNS was wrong when only the scanning host could not see it.
+ */
+describe("synthetic address detection (GH-240)", () => {
+  test("recognises the fake-IP ranges proxies actually use", () => {
+    // Clash / sing-box default: 198.18.0.0/15 (RFC 2544).
+    expect(looksSyntheticAddress("198.18.0.7")).toBe(true);
+    expect(looksSyntheticAddress("198.19.255.254")).toBe(true);
+    // RFC 1112 class-E reserved.
+    expect(looksSyntheticAddress("240.0.0.1")).toBe(true);
+    // IPv6 ULA, covering sing-box's fd00::/18.
+    expect(looksSyntheticAddress("fd00::1")).toBe(true);
+    expect(looksSyntheticAddress("fc00::1")).toBe(true);
+  });
+
+  test("does not mistake a real public address for a synthetic one", () => {
+    // The neighbours of 198.18/15 must not be swept in.
+    expect(looksSyntheticAddress("198.17.0.1")).toBe(false);
+    expect(looksSyntheticAddress("198.20.0.1")).toBe(false);
+    // Ordinary public IPs, RFC1918, loopback and a real v6 address are all "not synthetic":
+    // 127.0.1.1 is a DIFFERENT false positive, already handled by pinning the resolver.
+    for (const ip of ["1.2.3.4", "203.0.113.10", "192.168.1.1", "10.0.0.1", "127.0.1.1", "2606:4700::1111"]) {
+      expect(looksSyntheticAddress(ip), ip).toBe(false);
+    }
   });
 });

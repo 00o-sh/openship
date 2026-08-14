@@ -4,6 +4,7 @@
       "overview": "概要",
       "domains": "ドメイン",
       "mailboxes": "メールボックス",
+      "inbound": "受信ルール",
       "dns": "DNS",
       "health": "ヘルス",
       "test": "テスト",
@@ -11,6 +12,56 @@
       "advanced": "詳細設定"
     },
     "ariaLabel": "メール管理セクション"
+  },
+  "inbound": {
+    "heading": "受信ルール",
+    "description": "このサーバー上のアドレスにメールが届いたときに、通知チャンネルでお知らせします。",
+    "newRule": "新しいルール",
+    "newTitle": "新しい受信ルール",
+    "editTitle": "受信ルールを編集",
+    "edit": "編集",
+    "emptyTitle": "受信ルールがまだありません",
+    "emptyBody": "このサーバー上のメールボックスまたはドメインにメールが届いたときに Slack、Telegram、Discord、webhook で通知を受け取るには、ルールを追加してください。",
+    "noChannels": "検証済みの通知チャンネルがまだありません。設定 → 通知 で追加して検証したうえで、ここに戻ってルールを作成してください。",
+    "fieldName": "名前",
+    "namePlaceholder": "サポート受信トレイ → #support",
+    "fieldScope": "監視対象",
+    "scopeMailbox": "1 つのメールボックス",
+    "scopeDomain": "ドメイン全体",
+    "scopeAll": "このサーバー上のすべてのドメイン",
+    "scopeAllSummary": "すべてのドメイン",
+    "fieldAddress": "アドレス",
+    "fieldDomain": "ドメイン",
+    "mailboxCaveat": "To および Cc ヘッダーで照合するため、Bcc やエイリアス経由でこのメールボックスに届いたメールは一致しません。すべてのメッセージが必要な場合はドメイン全体を監視してください。",
+    "fieldFrom": "From に含まれる文字列",
+    "fieldSubject": "件名に含まれる文字列",
+    "patternPlaceholder": "任意",
+    "patternHint": "大文字と小文字は区別しません。ワイルドカードとして * を使用できます — それ以外はすべてそのまま照合されます。",
+    "fieldChannels": "通知するチャンネル",
+    "fieldEnabled": "ルールを有効にする",
+    "channelCount": "{count} 件のチャンネル",
+    "colRule": "ルール",
+    "colWatch": "監視対象",
+    "colChannels": "チャンネル",
+    "colStatus": "ステータス",
+    "active": "オン",
+    "disabled": "オフ",
+    "paused": "一時停止中",
+    "deleteTitle": "受信ルールを削除",
+    "deleteConfirm": "ルールを削除",
+    "deleting": "削除中…",
+    "deleteHint": "既存の通知には影響しません。取り込み済みでまだ処理されていないメールは破棄されます。",
+    "save": "ルールを保存",
+    "saving": "保存中…",
+    "cancel": "キャンセル",
+    "test": "今すぐテスト",
+    "testing": "テスト中…",
+    "testResult": "取り込んだメッセージ {read} 件を読み取りました: {matched} 件がルールに一致し、{dropped} 件は除外されました。送信も削除も行っていません。",
+    "testFailed": "テストを実行できませんでした。",
+    "loadFailed": "受信ルールを読み込めませんでした。",
+    "saveFailed": "ルールを保存できませんでした。",
+    "deleteFailed": "ルールを削除できませんでした。",
+    "confirmDelete": "ルール「{name}」を削除しますか? ほかのルールがまだ必要としている場合を除き、そのアドレスの取り込みは停止します。"
   },
   "overview": {
     "mailServer": "メールサーバー",
@@ -267,6 +318,11 @@
     "logs": "ログ",
     "openLogs": "ログを開く",
     "up": "稼働 {time}",
+    "optional": "任意",
+    "daemonHint": {
+      "fatal": "supervisord は再試行を諦めました。自動では再起動しません。メニューから再起動してください。",
+      "backoff": "繰り返しクラッシュしています。supervisord はまだ再試行中です。理由はログを確認してください。"
+    },
     "menu": {
       "restart": "再起動",
       "restarting": "再起動中…",
@@ -284,7 +340,9 @@
       "restartFailed": "再起動に失敗しました",
       "startFailedTitle": "{label} の起動に失敗しました",
       "stopFailedTitle": "{label} の停止に失敗しました",
-      "restartFailedTitle": "{label} の再起動に失敗しました"
+      "restartFailedTitle": "{label} の再起動に失敗しました",
+      "notConfirmedTitle": "{label} は起動していません",
+      "notConfirmed": "スーパーバイザーは要求を受け付けましたが、{label} は {state} です。理由はログで確認してください。"
     },
     "daemonStatus": {
       "running": "稼働中",
@@ -292,6 +350,7 @@
       "stopping": "停止中",
       "stopped": "停止済み",
       "failed": "失敗",
+      "crashed": "クラッシュ",
       "missing": "存在しません",
       "unknown": "不明"
     },
@@ -319,6 +378,10 @@
       "partDnsOne": "{count} 件の DNS レコードが不足",
       "partDnsOther": "{count} 件の DNS レコードが不足",
       "partDelivery": "送信メールが配送されていません",
+      "degradedLabel": "動作中（保護レベルは低下）",
+      "partScanning": "{names} が動作していません - 新着メールはウイルススキャンなしで配信されています",
+      "partSignatures": "{names} が動作していません - ウイルス定義が更新されなくなるため、古くなっていく定義でスキャンされます",
+      "partAdvisory": "{names} が動作していません",
       "almostSubQueueOne": "{count} 件のメールが送信待ちです - 下の「送信の状態」を確認してください。",
       "almostSubQueueOther": "{count} 件のメールが送信待ちです - 下の「送信の状態」を確認してください。"
     },
@@ -554,6 +617,6 @@
     "close": "閉じる",
     "logsLoadFailed": "ログの読み込みに失敗しました",
     "loadingLogs": "ログを読み込み中…",
-    "noJournal": "このユニットのジャーナルエントリはありません。"
+    "noLogLines": "このコンポーネントのログ行はまだありません。"
   }
 }

@@ -28,6 +28,7 @@ const TITLES: Partial<Record<HostChannelHealth["code"], string>> = {
   unreachable: "HOST CONTROL UNREACHABLE",
   not_configured: "HOST CONTROL NOT CONFIGURED",
   key_unreadable: "HOST CONTROL KEY UNREADABLE",
+  auth_rejected: "HOST CONTROL KEY REFUSED",
 };
 
 /** One blocked item, wrapped with a hanging indent so a long one still reads as a

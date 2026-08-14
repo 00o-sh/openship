@@ -24,8 +24,8 @@
  *   coded in the service files.
  *
  * Transport:
- *   HOW psql is reached is not decided here. `runMailCommand` resolves the box's
- *   mail topology and `mailPsqlCommand` renders the right invocation (the engine's
+ *   HOW psql is reached is not decided here. `runMailSql` resolves the box's mail
+ *   topology, renders the right invocation and types its failures (the engine's
  *   pg sidecar, or `sudo -u postgres` on a legacy pre-container install) — see
  *   `../mail-engine.ts`. This file was hardcoded to the sidecar, which is why
  *   every admin read on a legacy box 500'd with "No such container". Same SQL
@@ -34,7 +34,7 @@
 
 import type { CommandExecutor } from "@repo/adapters";
 import { safeErrorMessage } from "@repo/core";
-import { mailPsqlCommand, runMailCommand, type MailTarget } from "../mail-engine";
+import { runMailSql, type MailTarget } from "../mail-engine";
 
 /**
  * Quote a value as a PostgreSQL string literal. Escapes embedded single
@@ -166,12 +166,10 @@ export async function transaction(
  * (when the caller reuses one across several calls).
  *
  * A stopped engine / gone container surfaces as a typed
- * `MailEngineUnavailableError` (→ 409 + a code the dashboard branches on), not as
- * a raw shell error the panel prints as "API 500".
+ * `MailEngineUnavailableError`, and a `vmail` that was never seeded as
+ * `MailDbNotInitializedError` carrying the exact bootstrap command (→ 409 + a code the
+ * dashboard branches on), not as a raw shell error the panel prints as "API 500".
  */
 async function runSql(serverIdOrExec: MailTarget, sql: string): Promise<string> {
-  const { output } = await runMailCommand(serverIdOrExec, (flavor) =>
-    mailPsqlCommand(flavor, sql),
-  );
-  return output;
+  return runMailSql(serverIdOrExec, sql);
 }

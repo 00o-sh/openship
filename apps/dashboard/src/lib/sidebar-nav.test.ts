@@ -17,7 +17,7 @@ import {
  *
  * One: the mail section is a function of mail state, in lockstep with
  * `resolveMailView()` (`emails/_lib/view-gate.ts`). Drift either way is a rail of
- * links that all land somewhere else — ten tabs on a box with no mail server, or
+ * links that all land somewhere else — every tab on a box with no mail server, or
  * a lone "Set up mail" on a working one.
  *
  * Two: every label key the rail emits actually exists in the English dictionary.
@@ -25,7 +25,7 @@ import {
  * doesn't fail a build or a type check — it silently renders the raw key, and
  * `?? key` means even the fallback looks intentional.
  *
- * Three: all ten tabs are still reachable after the grouping. They're spread over
+ * Three: every tab is still reachable after the grouping. They're spread over
  * three headings now, and a tab dropped from one group without being added to
  * another would just quietly vanish from the rail.
  */
@@ -46,11 +46,12 @@ const mailAt = (input: Partial<MailNavInput> = {}): NavSection[] =>
     ...input,
   });
 
-const TEN_TABS = [
+const ALL_TABS = [
   "overview",
   "domains",
   "mailboxes",
   "aliases",
+  "inbound",
   "dns",
   "health",
   "test",
@@ -60,9 +61,9 @@ const TEN_TABS = [
 ];
 
 describe("getNavSections (the platform rail)", () => {
-  it("is unchanged by mail mode: main + settings + infrastructure", () => {
+  it("is unchanged by mail mode: main + infrastructure + settings", () => {
     const s = getNavSections(false, true);
-    expect(sectionsOf(s)).toEqual(["main", "settings", "infrastructure"]);
+    expect(sectionsOf(s)).toEqual(["main", "infrastructure", "settings"]);
     expect(keysOf(find(s, "main"))).toEqual([
       "home",
       "projects",
@@ -70,8 +71,8 @@ describe("getNavSections (the platform rail)", () => {
       "deployments",
       "issues",
     ]);
-    expect(keysOf(find(s, "settings"))).toEqual(["backups", "settings"]);
     expect(keysOf(find(s, "infrastructure"))).toEqual(["servers", "emails", "jobs"]);
+    expect(keysOf(find(s, "settings"))).toEqual(["backups", "settings"]);
   });
 
   it("adds Billing on the SaaS and drops the infrastructure section there", () => {
@@ -79,6 +80,18 @@ describe("getNavSections (the platform rail)", () => {
     expect(keysOf(find(s, "settings"))).toEqual(["backups", "settings", "billing"]);
     // Empty sections are filtered out, not rendered as a bare heading.
     expect(find(s, "infrastructure")).toBeUndefined();
+  });
+
+  it("keeps Billing at the very bottom, below Servers, on a cloud-linked self-hosted box", () => {
+    // isSaaS goes true the moment a self-hosted install links a cloud account, which
+    // is the case that put Billing above Servers. Nothing in the rail may follow it,
+    // and the host rows must all precede it.
+    const s = getNavSections(true, true);
+    const keys = s.flatMap((x) => keysOf(x));
+    expect(keys.at(-1)).toBe("billing");
+    for (const host of ["servers", "emails", "jobs"]) {
+      expect(keys.indexOf(host), host).toBeLessThan(keys.indexOf("billing"));
+    }
   });
 
   it("keeps /emails in the platform rail", () => {
@@ -117,13 +130,14 @@ describe("getMailNavSections (the Openship Mail rail)", () => {
     expect(mail?.items[0]?.href).toBe("/emails?serverId=srv1");
   });
 
-  it("splits the ten tabs across three headings once the server is completed", () => {
+  it("splits every tab across three headings once the server is completed", () => {
     const s = mailAt();
     expect(keysOf(find(s, "mail"))).toEqual([
       "overview",
       "domains",
       "mailboxes",
       "aliases",
+      "inbound",
       "webmail",
     ]);
     // Sending leads — it's the decision the other three check. Same order as the
@@ -133,10 +147,10 @@ describe("getMailNavSections (the Openship Mail rail)", () => {
     expect(keysOf(find(s, "infrastructure"))).toEqual(["servers", "jobs", "backup", "advanced"]);
   });
 
-  it("still reaches all ten tabs, and every one is a ?tab= link", () => {
+  it("still reaches every tab, and every one is a ?tab= link", () => {
     const s = mailAt();
     const tabItems = s.flatMap((x) => x.items).filter((i) => i.labelSource === "mailTab");
-    expect(tabItems.map((i) => i.key).sort()).toEqual([...TEN_TABS].sort());
+    expect(tabItems.map((i) => i.key).sort()).toEqual([...ALL_TABS].sort());
     for (const item of tabItems) {
       expect(item.tab).toBe(item.key);
       expect(item.href).toBe(`/emails?serverId=srv1&tab=${item.key}`);
@@ -178,7 +192,9 @@ describe("getMailNavSections (the Openship Mail rail)", () => {
     // The point of the grouping: ten flat mail entries buried Servers at row 11.
     const keys = mailAt().flatMap((x) => keysOf(x));
     expect(keys.indexOf("servers")).toBeLessThan(keys.indexOf("backup"));
-    expect(keys.indexOf("servers")).toBe(9);
+    // Index-pinned on purpose, and it moves whenever a mail tab is added ahead of the
+    // infrastructure group — Inbound (after Aliases) is what took it from 9 to 10.
+    expect(keys.indexOf("servers")).toBe(10);
   });
 
   describe("Webmail — the one mail entry that is a project, not a tab", () => {
@@ -298,7 +314,7 @@ describe("isNavItemActive", () => {
 
   it("keeps the webmail route and the mail tabs from lighting each other", () => {
     // Two entries share the /emails prefix but nothing else: Webmail is a path
-    // item at /emails/webmail, the ten tabs are query items at /emails.
+    // item at /emails/webmail, the tabs are query items at /emails.
     const webmail = pathItem("/emails/webmail?serverId=srv1");
     expect(isNavItemActive(webmail, "/emails/webmail", null)).toBe(true);
     expect(isNavItemActive(webmail, "/emails", null)).toBe(false);

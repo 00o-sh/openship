@@ -4,6 +4,7 @@
       "overview": "Aperçu",
       "domains": "Domaines",
       "mailboxes": "Boîtes aux lettres",
+      "inbound": "Entrant",
       "dns": "DNS",
       "health": "État",
       "test": "Test",
@@ -11,6 +12,56 @@
       "advanced": "Avancé"
     },
     "ariaLabel": "Sections d'administration de la messagerie"
+  },
+  "inbound": {
+    "heading": "Règles de courrier entrant",
+    "description": "Soyez averti dans un canal de notification lorsqu'un courrier arrive à une adresse de ce serveur.",
+    "newRule": "Nouvelle règle",
+    "newTitle": "Nouvelle règle de courrier entrant",
+    "editTitle": "Modifier la règle de courrier entrant",
+    "edit": "Modifier",
+    "emptyTitle": "Aucune règle de courrier entrant pour l'instant",
+    "emptyBody": "Ajoutez une règle pour être averti dans Slack, Telegram, Discord ou par un webhook lorsqu'un courrier arrive dans une boîte aux lettres ou sur un domaine de ce serveur.",
+    "noChannels": "Vous n'avez encore aucun canal de notification vérifié. Ajoutez-en un et vérifiez-le dans Paramètres → Notifications, puis revenez ici pour créer une règle.",
+    "fieldName": "Nom",
+    "namePlaceholder": "Boîte du support → #support",
+    "fieldScope": "Surveiller",
+    "scopeMailbox": "Une boîte aux lettres",
+    "scopeDomain": "Un domaine entier",
+    "scopeAll": "Tous les domaines de ce serveur",
+    "scopeAllSummary": "Tous les domaines",
+    "fieldAddress": "Adresse",
+    "fieldDomain": "Domaine",
+    "mailboxCaveat": "La correspondance se fait sur les en-têtes To et Cc : un courrier arrivé dans cette boîte aux lettres par Bcc ou via un alias ne correspondra donc pas. Surveillez le domaine entier s'il vous faut tous les messages.",
+    "fieldFrom": "L'expéditeur contient",
+    "fieldSubject": "L'objet contient",
+    "patternPlaceholder": "facultatif",
+    "patternHint": "Insensible à la casse. Utilisez * comme joker — tout le reste est comparé littéralement.",
+    "fieldChannels": "Notifier ces canaux",
+    "fieldEnabled": "Règle active",
+    "channelCount": "{count} canal(aux)",
+    "colRule": "Règle",
+    "colWatch": "Surveillance",
+    "colChannels": "Canaux",
+    "colStatus": "Statut",
+    "active": "Active",
+    "disabled": "Désactivée",
+    "paused": "En pause",
+    "deleteTitle": "Supprimer la règle de courrier entrant",
+    "deleteConfirm": "Supprimer la règle",
+    "deleting": "Suppression…",
+    "deleteHint": "Les notifications déjà envoyées ne sont pas affectées. Le courrier déjà capturé mais pas encore traité est supprimé.",
+    "save": "Enregistrer la règle",
+    "saving": "Enregistrement…",
+    "cancel": "Annuler",
+    "test": "Tester maintenant",
+    "testing": "Test en cours…",
+    "testResult": "{read} message(s) capturé(s) lu(s) : {matched} ont correspondu à une règle, {dropped} ont été filtrés. Rien n'a été envoyé ni supprimé.",
+    "testFailed": "Impossible d'exécuter le test.",
+    "loadFailed": "Impossible de charger les règles de courrier entrant.",
+    "saveFailed": "Impossible d'enregistrer la règle.",
+    "deleteFailed": "Impossible de supprimer la règle.",
+    "confirmDelete": "Supprimer la règle « {name} » ? La capture s'arrête pour son adresse, sauf si une autre règle en a encore besoin."
   },
   "overview": {
     "mailServer": "Serveur de messagerie",
@@ -267,6 +318,11 @@
     "logs": "Journaux",
     "openLogs": "Ouvrir les journaux",
     "up": "Actif {time}",
+    "optional": "Facultatif",
+    "daemonHint": {
+      "fatal": "supervisord a abandonné - il ne réessaiera pas de lui-même. Redémarrez-le depuis le menu.",
+      "backoff": "Plante à répétition ; supervisord réessaie encore. Consultez les journaux pour savoir pourquoi."
+    },
     "menu": {
       "restart": "Redémarrer",
       "restarting": "Redémarrage…",
@@ -284,7 +340,9 @@
       "restartFailed": "échec du redémarrage",
       "startFailedTitle": "échec du démarrage de {label}",
       "stopFailedTitle": "échec de l'arrêt de {label}",
-      "restartFailedTitle": "échec du redémarrage de {label}"
+      "restartFailedTitle": "échec du redémarrage de {label}",
+      "notConfirmedTitle": "{label} n'a pas démarré",
+      "notConfirmed": "Le superviseur a accepté la demande, mais {label} est {state}. Ouvrez les journaux pour savoir pourquoi."
     },
     "daemonStatus": {
       "running": "En cours d'exécution",
@@ -292,6 +350,7 @@
       "stopping": "Arrêt",
       "stopped": "Arrêté",
       "failed": "En échec",
+      "crashed": "Planté",
       "missing": "Absent",
       "unknown": "Inconnu"
     },
@@ -319,6 +378,10 @@
       "partDnsOne": "{count} enregistrement DNS manquant",
       "partDnsOther": "{count} enregistrements DNS manquants",
       "partDelivery": "le courrier sortant n'est pas distribué",
+      "degradedLabel": "Fonctionne, avec une protection réduite",
+      "partScanning": "{names} n'est pas en cours d'exécution - les nouveaux messages sont livrés SANS analyse antivirus",
+      "partSignatures": "{names} n'est pas en cours d'exécution - les signatures antivirus ne sont plus mises à jour, le courrier est donc analysé avec un jeu de signatures qui vieillit",
+      "partAdvisory": "{names} n'est pas en cours d'exécution",
       "almostSubQueueOne": "{count} message attend d'être envoyé - voir Envoi sortant ci-dessous.",
       "almostSubQueueOther": "{count} messages attendent d'être envoyés - voir Envoi sortant ci-dessous."
     },
@@ -554,6 +617,6 @@
     "close": "Fermer",
     "logsLoadFailed": "Échec du chargement des journaux",
     "loadingLogs": "Chargement des journaux…",
-    "noJournal": "Aucune entrée de journal pour cette unité."
+    "noLogLines": "Aucune ligne de journal pour ce composant pour le moment."
   }
 }

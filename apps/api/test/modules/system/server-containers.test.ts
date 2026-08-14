@@ -39,6 +39,9 @@ vi.mock("@repo/db", () => ({
 
 vi.mock("@repo/adapters", () => ({
   dockerAvailable: vi.fn().mockResolvedValue(true),
+  // Only the bulk apply reaches this, and only to pre-check 80/443 before promising
+  // an edge REPAIR. Clean by default so classification isn't the thing under test.
+  probeEdge: vi.fn().mockResolvedValue({ canProceedClean: true }),
   detectEdgeContainer: vi
     .fn()
     .mockResolvedValue({ name: null, running: false, image: null, exists: false }),
@@ -76,6 +79,7 @@ vi.mock("../../../src/lib/ssh-manager", () => ({
 
 import {
   imageTag,
+  applyAllContainers,
   classifyContainerIssues,
   detectServerContainers,
   applyServerContainer,
@@ -331,6 +335,75 @@ describe("detectServerContainers", () => {
     expect(views).toEqual([]);
     expect(mocked.status.upsert).not.toHaveBeenCalled();
     expect(mocked.status.remove).not.toHaveBeenCalledWith("srv_1", "edge");
+  });
+
+  it("never writes the in-progress flag — a scan must not clear a running apply", async () => {
+    mocked.edge.mockResolvedValue(edgeContainer("ghcr.io/oblien/openship-edge:0.4.0") as never);
+
+    await detectServerContainers(server);
+
+    // The repo preserves the flag only when the payload omits it. A probe knows what
+    // the box runs, not whether a swap is mid-flight; writing its default is what let
+    // the 6-hourly scan (and the dashboard's own mount auto-scan) erase the state.
+    const payload = mocked.status.upsert.mock.calls
+      .map(([p]) => p as { component: string })
+      .find((p) => p.component === "edge");
+    expect(payload).toBeDefined();
+    expect(Object.keys(payload!)).not.toContain("latestInProgress");
+  });
+});
+
+describe("applyAllContainers", () => {
+  const box = (id: string) => ({ id, name: id.toUpperCase(), sshHost: `10.0.0.${id.slice(-1)}` });
+  const behindEdge = (serverId: string) => ({
+    serverId,
+    component: "edge" as const,
+    behind: true,
+    latestInProgress: false,
+    detail: null,
+  });
+
+  it("flags every accepted target before returning — queued ones included", async () => {
+    // Five targets against a concurrency of 3: two of them cannot have been started
+    // by the time the response is built, and used to be indistinguishable from
+    // "never asked for" on every surface that reads the cache.
+    const servers = ["srv_1", "srv_2", "srv_3", "srv_4", "srv_5"];
+    mocked.server.listByOrganization.mockResolvedValue(servers.map(box) as never);
+    mocked.status.listByOrg.mockResolvedValue(servers.map(behindEdge) as never);
+
+    const result = await applyAllContainers("org_1", ["update"]);
+
+    expect(result.started).toHaveLength(5);
+    expect(result.skipped).toEqual([]);
+    for (const id of servers) {
+      expect(mocked.status.setInProgress).toHaveBeenCalledWith(id, "edge", true);
+    }
+  });
+
+  it("refuses a target whose apply is already in flight", async () => {
+    mocked.server.listByOrganization.mockResolvedValue([box("srv_1")] as never);
+    mocked.status.listByOrg.mockResolvedValue([
+      { ...behindEdge("srv_1"), latestInProgress: true },
+    ] as never);
+
+    const result = await applyAllContainers("org_1", ["update"]);
+
+    expect(result.started).toEqual([]);
+    expect(result.skipped).toMatchObject([{ serverId: "srv_1", reason: "already_running" }]);
+    expect(mocked.reconcileEdge).not.toHaveBeenCalled();
+  });
+
+  it("acts only on the intents it was given", async () => {
+    mocked.server.listByOrganization.mockResolvedValue([box("srv_1"), box("srv_2")] as never);
+    mocked.status.listByOrg.mockResolvedValue([
+      behindEdge("srv_1"),
+      { serverId: "srv_2", component: "edge" as const, behind: false, latestInProgress: false, detail: { down: true } },
+    ] as never);
+
+    const result = await applyAllContainers("org_1", ["repair"]);
+
+    expect(result.started).toMatchObject([{ serverId: "srv_2", intent: "repair" }]);
+    expect(mocked.status.setInProgress).not.toHaveBeenCalledWith("srv_1", "edge", true);
   });
 });
 

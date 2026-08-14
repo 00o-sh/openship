@@ -33,6 +33,7 @@ import {
 import { getRuntimeCatalog, getTemplateForOrg, listOrgCustomApps } from "./catalog-source";
 import { repos } from "@repo/db";
 import { env } from "../../config";
+import { decrypt, encrypt } from "../../lib/encryption";
 import type { RequestContext } from "../../lib/request-context";
 import { isLocalHostRow } from "../../lib/box-org";
 import { parseServicePort } from "../../lib/deployable-service";
@@ -524,7 +525,7 @@ export async function installApp(
   // lets a service env embed a generated secret it can't otherwise interpolate
   // (e.g. a full `postgres://user:PASSWORD@db/…` connection URL).
   const inlineConfig = (s: string): string =>
-    s.replace(/\{\{\s*config:([A-Za-z0-9_]+)\s*\}\}/g, (_m, k) => resolved.get(k) ?? "");
+    s.replace(CONFIG_TOKEN_RE, (_m, k) => resolved.get(k) ?? "");
 
   // Resolve template files per service.
   const filesByService = new Map<string, { path: string; content: string }[]>();
@@ -566,7 +567,9 @@ export async function installApp(
   const rowByName = new Map(existingRows.map((s) => [s.name, s]));
   // Only services this call CREATED get config/secret env written. Re-writing a
   // generated secret onto an adopted row would rotate it (Convex's
-  // INSTANCE_SECRET invalidates the admin key), so an existing row keeps its own.
+  // INSTANCE_SECRET invalidates the admin key), so an existing row keeps its own —
+  // and `ensureGeneratedAppSecrets` below is what fills the gap that leaves when the
+  // first attempt never got as far as writing them.
   const createdServices = new Set<string>();
 
   // Seed the compose service rows — or, on an adopted draft, re-apply the chosen
@@ -655,5 +658,223 @@ export async function installApp(
     }
   }
 
+  // AFTER the writes above, never before: `setServiceEnvVars` REPLACES a service's
+  // whole production scope, so anything backfilled first would be wiped. This is what
+  // makes the installer's guarantee unconditional rather than "if the first attempt ran
+  // to completion".
+  await ensureGeneratedAppSecrets(project.id, template);
+
   return { kind: "template", projectId: project.id, slug: project.slug };
+}
+
+// ─── Generated secrets: reuse-or-mint ────────────────────────────────────────
+
+/** Scope the installer writes generated config values to. */
+const GENERATED_ENV_SCOPE = "production";
+
+/** The substitution form `inlineConfig` uses. Shared so the two cannot drift. */
+const CONFIG_TOKEN_RE = /\{\{\s*config:([A-Za-z0-9_]+)\s*\}\}/g;
+
+/**
+ * Config keys the template SUBSTITUTES into some other string — a sibling service's
+ * `DATABASE_URL`, a mounted `redis.conf`, a build arg.
+ *
+ * Those copies are written once, at install, from the value resolved then. Minting a
+ * fresh value for such a key later would leave the env row saying A while every inlined
+ * copy still says B: an app that cannot reach its own database, with nothing logged.
+ * So for these keys a missing row is reported, never invented.
+ */
+function inlinedConfigKeys(template: AppTemplate): ReadonlySet<string> {
+  const keys = new Set<string>();
+  const scan = (text: string | undefined | null) => {
+    if (!text) return;
+    for (const [, key] of text.matchAll(CONFIG_TOKEN_RE)) keys.add(key);
+  };
+  // The four places `inlineConfig` is applied, and only those.
+  for (const svc of template.services ?? []) {
+    for (const value of Object.values(svc.environment ?? {})) scan(value);
+    scan(svc.build?.dockerfile);
+    for (const file of svc.build?.files ?? []) scan(file.content);
+  }
+  for (const file of template.files ?? []) scan(file.content);
+  return keys;
+}
+
+/**
+ * Make every `generate:` config field the template declares EXIST on the project,
+ * minting only what is genuinely missing.
+ *
+ * `installApp` writes those values for the services one call creates, which made the
+ * guarantee conditional on a single uninterrupted pass: an adopted draft keeps whatever
+ * the first attempt wrote, and a later attempt skips the write for rows it did not
+ * create. Webmail then deploys a container with no `SESSION_ENCRYPTION_KEY`, which its
+ * image treats as fatal — a crash loop the deploy reported as success (issue #566).
+ *
+ * Idempotent and non-destructive, in that order:
+ *   - PRESENCE is decided from the RAW stored keys, never from decrypted values.
+ *     `decryptEnvMap` drops whatever it cannot decrypt, so after a BETTER_AUTH_SECRET
+ *     rotation every secret would read as absent — and `mergeEnvVars` deletes before it
+ *     inserts, which would overwrite the only copy of a database password and turn a
+ *     recoverable misconfiguration into an unopenable volume.
+ *   - a key the template inlines elsewhere is never minted (see above).
+ *   - a `generateGroup` is resolved ACROSS services and only ever gets one value. Two
+ *     fields in a group are a password that must MATCH (ghost's `ghostdb` spans
+ *     ghost-db and ghost), so a per-service map would repair one half of the pair with a
+ *     value the other half does not know. Where one member is already stored we reuse
+ *     ITS value; where that copy cannot be decrypted the whole group is left alone.
+ *
+ * Returns the keys it wrote, for the caller's log.
+ */
+export async function ensureGeneratedAppSecrets(
+  projectId: string,
+  template: AppTemplate,
+): Promise<string[]> {
+  const generated = (template.configFields ?? []).filter((f) => f.generate);
+  if (generated.length === 0) return [];
+
+  const inlined = inlinedConfigKeys(template);
+  const rows = await repos.service.listByProject(projectId);
+  const rowByName = new Map(rows.map((r) => [r.name, r]));
+  const secretKeysByService = new Map(
+    (template.services ?? []).map((s) => [s.name, new Set(s.secretEnv ?? [])] as const),
+  );
+
+  // Every service's stored scope, read before anything is decided: a group spans
+  // services, so what to do about one field can depend on another service's rows.
+  const byService = groupByService(generated);
+  const storedByService = new Map<string, Record<string, string>>();
+  for (const serviceName of byService.keys()) {
+    const row = rowByName.get(serviceName);
+    if (row) {
+      storedByService.set(
+        serviceName,
+        await repos.project.getEnvMap(projectId, GENERATED_ENV_SCOPE, row.id),
+      );
+    }
+  }
+  // PROJECT scope counts as present. An operator may hold a generated value at project
+  // level (`service_id IS NULL`), and the deploy layers service env ABOVE project env —
+  // so minting a service-scoped value here would SHADOW theirs and silently rotate the
+  // secret out from under a running app. Never mint over a value that is already in use,
+  // wherever it is kept.
+  const storedAtProject = await repos.project.getEnvMap(projectId, GENERATED_ENV_SCOPE, null);
+
+  const { groupValue, blockedGroups } = resolveGeneratedGroups(
+    generated,
+    storedByService,
+    storedAtProject,
+  );
+
+  const written: string[] = [];
+  for (const [serviceName, fields] of byService) {
+    const row = rowByName.get(serviceName);
+    const stored = storedByService.get(serviceName);
+    if (!row || !stored) continue;
+    const upserts: { key: string; value: string; isSecret: boolean }[] = [];
+
+    for (const field of fields) {
+      if (Object.hasOwn(stored, field.key) || Object.hasOwn(storedAtProject, field.key)) continue;
+      const group = field.generateGroup ?? field.jwtSecretGroup;
+      if (group && blockedGroups.has(group)) {
+        console.warn(
+          `[apps] ${template.id}: ${serviceName}.${field.key} is missing, but its group "${group}" already has a value elsewhere that cannot be read — leaving it alone rather than writing a value the rest of the group would not match.`,
+        );
+        continue;
+      }
+      if (inlined.has(field.key)) {
+        console.warn(
+          `[apps] ${template.id}: ${serviceName}.${field.key} is missing and is inlined elsewhere in the template — not minting a value that its existing copies would contradict.`,
+        );
+        continue;
+      }
+      const value = mintGenerated(field, groupValue);
+      if (!value) continue;
+      upserts.push({
+        key: field.key,
+        value: encrypt(value),
+        isSecret: !!field.secret || !!secretKeysByService.get(serviceName)?.has(field.key),
+      });
+      written.push(field.key);
+    }
+
+    if (upserts.length > 0) {
+      await repos.project.mergeEnvVars(projectId, GENERATED_ENV_SCOPE, upserts, [], row.id);
+    }
+  }
+
+  if (written.length > 0) {
+    console.warn(
+      `[apps] ${template.id}: backfilled generated config on ${projectId}: ${written.join(", ")}`,
+    );
+  }
+  return written;
+}
+
+/**
+ * Seed each `generateGroup` from whatever is already stored, before anything is minted.
+ *
+ * A group is one shared value across services. Three outcomes per group:
+ *   - a stored member we can decrypt → its plaintext becomes the group's value, so the
+ *     missing members are REPAIRED to match it instead of rotating the pair;
+ *   - a stored member we cannot decrypt → the group is blocked, because any value we
+ *     minted would silently disagree with the copy that is already in use;
+ *   - nothing stored → left unset, and the first field that needs it mints one.
+ */
+function resolveGeneratedGroups(
+  fields: AppConfigField[],
+  storedByService: Map<string, Record<string, string>>,
+  storedAtProject: Record<string, string>,
+): { groupValue: Map<string, string>; blockedGroups: Set<string> } {
+  const groupValue = new Map<string, string>();
+  const blockedGroups = new Set<string>();
+  for (const field of fields) {
+    const group = field.generateGroup;
+    if (!group) continue;
+    const raw = storedByService.get(field.service)?.[field.key] ?? storedAtProject[field.key];
+    if (!raw || groupValue.has(group)) continue;
+    try {
+      groupValue.set(group, decrypt(raw));
+    } catch {
+      blockedGroups.add(group);
+    }
+  }
+  // A group whose value we recovered is not blocked, whichever member we read it from.
+  for (const group of groupValue.keys()) blockedGroups.delete(group);
+  return { groupValue, blockedGroups };
+}
+
+function groupByService(fields: AppConfigField[]): Map<string, AppConfigField[]> {
+  const out = new Map<string, AppConfigField[]>();
+  for (const field of fields) {
+    const list = out.get(field.service) ?? [];
+    list.push(field);
+    out.set(field.service, list);
+  }
+  return out;
+}
+
+/**
+ * One generated value, using the same rules as the installer's `valueFor`.
+ *
+ * `groupValue` is shared across services and may already carry a value recovered from a
+ * stored member, which is what makes a repaired half of a pair match the other half. A
+ * `generate:"jwt"` field can only be signed with a secret this map knows: with no
+ * recovered and no minted secret it yields "" and is left for the operator's reinstall
+ * rather than signed with a key nothing else has.
+ */
+function mintGenerated(field: AppConfigField, groupValue: Map<string, string>): string {
+  if (field.generate === "secret") {
+    if (!field.generateGroup) return generateSecret();
+    const existing = groupValue.get(field.generateGroup);
+    if (existing) return existing;
+    const secret = generateSecret();
+    groupValue.set(field.generateGroup, secret);
+    return secret;
+  }
+  if (field.generate === "jwt") {
+    const secret = field.jwtSecretGroup ? groupValue.get(field.jwtSecretGroup) : undefined;
+    if (!secret || !field.jwtRole) return "";
+    return signHs256Jwt(secret, field.jwtRole);
+  }
+  return "";
 }

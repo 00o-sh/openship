@@ -26,13 +26,20 @@
  * so the operator cannot repoint it and we front it for them.
  */
 
-import { AppError, getAppEndpoints, safeErrorMessage, type AppTemplate } from "@repo/core";
+import {
+  AppError,
+  getAppEndpoints,
+  safeErrorMessage,
+  type AppTemplate,
+  type ComposeAdvanced,
+  type OpenshipReadiness, mailHostname } from "@repo/core";
 import { repos, type Domain, type Project } from "@repo/db";
 import { assertResourceInOrg } from "../../../lib/controller-helpers";
-import { pickCanonicalDomainRow } from "../../../lib/public-endpoints";
+import { pickCanonicalDomainRow, resolveServicePublicEndpoints } from "../../../lib/public-endpoints";
 import type { RequestContext } from "../../../lib/request-context";
 import { sshManager } from "../../../lib/ssh-manager";
 import {
+  ensureGeneratedAppSecrets,
   installApp,
   planInstallRouting,
   serviceRoutingPatch,
@@ -205,10 +212,25 @@ interface WebmailInstallPlan {
   settings: AppSettingChange[];
   deployTarget: "server" | "cloud";
   serverId?: string;
-  /** An already-deployed project to redeploy instead of installing fresh. */
+  /**
+   * An already-LINKED project to redeploy instead of installing fresh. Not
+   * necessarily a deployed one: `beforeDeploy` stamps the mail server's FK before the
+   * build is queued, so a retry after a failed first deploy arrives here too — which
+   * is why the generated-secret backfill cannot live in the else branch.
+   */
   reuse?: Project;
   /** Runs after the project exists and BEFORE the deploy is queued. */
   beforeDeploy?: (projectId: string) => Promise<void>;
+  /**
+   * Apply `routes` only AFTER `beforeDeploy` has run.
+   *
+   * For the mail server's own hostname the order is the authorization: the claim is
+   * allowed on the strength of `mail_servers.webmail_project_id` pointing at this
+   * project, and `beforeDeploy` is what stamps that link (#566). Routing first would be
+   * refused as a foreign hostname — the mail row belongs to the mail install's
+   * certificate renewal, not to any project.
+   */
+  routeAfterLink?: boolean;
 }
 
 async function runWebmailInstall(
@@ -220,16 +242,18 @@ async function runWebmailInstall(
 
   if (plan.reuse) {
     projectId = plan.reuse.id;
-    await reapplyRouting(ctx, template, plan.reuse, plan.routes);
+    if (!plan.routeAfterLink) await reapplyRouting(ctx, template, plan.reuse, plan.routes);
   } else {
     // The generic installer owns everything about the app itself: project row,
-    // service rows, declared volumes, and the generated SESSION_ENCRYPTION_KEY /
-    // BRANDING_ADMIN_TOKEN. A same-named draft from a failed attempt is adopted
-    // here rather than duplicated, which is why the name is derived, not typed.
+    // service rows, declared volumes, and the FIRST write of the generated
+    // SESSION_ENCRYPTION_KEY / BRANDING_ADMIN_TOKEN — first, not only: adoption skips
+    // that write for rows it did not create, so the guarantee comes from
+    // `ensureGeneratedAppSecrets` below. A same-named draft from a failed attempt is
+    // adopted here rather than duplicated, which is why the name is derived, not typed.
     const installed = await installApp(ctx, {
       templateId: WEBMAIL_TEMPLATE_ID,
       name: plan.name,
-      routes: plan.routes,
+      routes: plan.routeAfterLink ? [] : plan.routes,
     });
     if (installed.kind !== "template") {
       throw new AppError("The webmail app isn't installable on this instance.", 409);
@@ -244,9 +268,30 @@ async function runWebmailInstall(
     await updateAppProjectSettings(ctx, projectId, plan.settings);
   }
 
+  // Both branches, one call. The image treats SESSION_ENCRYPTION_KEY as fatal, so a
+  // project that reached the container without one crash-loops forever (issue #566) —
+  // and the reuse branch, which every retry takes, installs nothing. Idempotent: a
+  // stored key is reused, never rotated. Deliberately after the settings write, which
+  // is what proves this project really is the webmail app before we write its env.
+  await ensureGeneratedAppSecrets(projectId, template);
+
+  // A crash loop must not report success. The restart-loop watch already exists
+  // (#335) but is OFF by default and webmail never asked for it, so a container that
+  // exited on a missing SESSION_ENCRYPTION_KEY and restarted ten times still finished
+  // the deploy as "deployed and running" (#566).
+  await enableRestartLoopWatch(ctx, projectId, template);
+
   // Before the deploy, never after: the deploy's success hook resolves the mail
   // server FROM the project, and a build can finish before a later write lands.
   await plan.beforeDeploy?.(projectId);
+
+  // The mail host's route, now that the link authorizing it exists. Same plan builder
+  // and same per-service write as a first install — the only difference is that it could
+  // not have been accepted a few lines earlier.
+  if (plan.routeAfterLink) {
+    const project = await repos.project.findById(projectId);
+    if (project) await reapplyRouting(ctx, template, project, plan.routes);
+  }
 
   const dep = await requestBuildAccess(ctx, {
     projectId,
@@ -256,6 +301,46 @@ async function runWebmailInstall(
   });
 
   return { projectId, deploymentId: dep.deployment_id };
+}
+
+/**
+ * Webmail's readiness gate: watch for a restart loop, and let it veto the deploy.
+ *
+ * No TCP probe. That asks a different question, and an enabled one adds up to 45s to
+ * the critical path; what distinguishes "it started" from "it kept starting" is the
+ * restart count. `onFailure: "fail"` because the deploy status vocabulary has no
+ * "started but unhealthy" — for a container that is bouncing, `failed` is the only
+ * honest verdict, and a warn would leave the deploy green.
+ */
+const WEBMAIL_READINESS: OpenshipReadiness = { stabilization: true, onFailure: "fail" };
+
+/**
+ * Opt the webmail service into the restart-loop watch, once.
+ *
+ * Best-effort by design: a readiness row we could not write must not abort a deploy
+ * that would otherwise queue. Losing the watch costs honesty on a failure; throwing
+ * here costs the deploy. An `advanced.readiness` that already exists is left alone —
+ * that is an operator's explicit choice about their own project.
+ *
+ * Scoped to the endpoint service rather than every row: the gate is per-service, and a
+ * future multi-service webmail should not have a sidecar's restarts veto the deploy.
+ */
+async function enableRestartLoopWatch(
+  ctx: RequestContext,
+  projectId: string,
+  template: AppTemplate,
+): Promise<void> {
+  try {
+    const name = webmailEndpoint(template).service;
+    const row = (await repos.service.listByProject(projectId)).find((r) => r.name === name);
+    if (!row) return;
+    if ((row.advanced as ComposeAdvanced | null)?.readiness) return;
+    await updateService(ctx, projectId, row.id, { advanced: { readiness: WEBMAIL_READINESS } });
+  } catch (err) {
+    console.warn(
+      `[webmail] could not enable the restart-loop watch on ${projectId}: ${safeErrorMessage(err)}`,
+    );
+  }
 }
 
 /**
@@ -321,7 +406,7 @@ export async function startWebmailDeploy(
     );
   }
 
-  const mailHost = `mail.${installDomain}`;
+  const mailHost = mailHostname(installDomain);
   const isOwnMailSubdomain = input.hostname === mailHost;
 
   // `mail.<install>`'s A record is pinned to the mail box — it carries IMAP,
@@ -396,6 +481,9 @@ export async function startWebmailDeploy(
     serverId: input.target.kind === "self" ? input.target.serverId : undefined,
     // The legacy row is gone by now, so this is a fresh install, not a redeploy.
     reuse: legacy ? undefined : (linked ?? undefined),
+    // `mail.<install>` is routable only by the mail server's LINKED webmail, and the
+    // link is stamped in `beforeDeploy` — so this one route has to wait for it (#566).
+    routeAfterLink: isOwnMailSubdomain && !useProxyVariant,
     beforeDeploy: (projectId) =>
       repos.mailServer.setWebmailProject(input.mailServerId, projectId),
   });
@@ -530,7 +618,14 @@ export async function resolveWebmailSummary(
   // No route of its own + running on the cloud = the mail VPS fronts it (see
   // the proxy variant above). Derived, so nothing has to be stored.
   const proxied = rows !== null && !routed && !!project.cloudWorkspaceId;
-  const hostname = routed?.hostname ?? (proxied ? `mail.${mailServer.domain}` : "");
+  // A webmail on the mail server's OWN hostname has no domain row by design — that row
+  // belongs to the mail install's certificate renewal and must stay project-less (#566,
+  // see lib/mail-host-claim). Its address therefore has to come from the SERVICE's routing
+  // instead, or a webmail that is deployed and serving reads as "not installed" and the
+  // card offers to deploy it again.
+  const hostname =
+    routed?.hostname ??
+    (proxied ? mailHostname(mailServer.domain) : rows === null ? "" : await routedServiceHostname(project));
 
   return {
     installed: await isLiveDeploymentReady(project.activeDeploymentId),
@@ -544,6 +639,26 @@ export async function resolveWebmailSummary(
     projectId: project.id,
     legacy: isLegacyWebmailProject(project),
   };
+}
+
+/**
+ * The hostname this project's services actually route, read from the service rows.
+ *
+ * Only consulted when the project has no domain row at all. Restricted to `custom`
+ * endpoints: a free `*.opsh.io` route always has a row, so a rowless free endpoint would
+ * mean a routing state we could not have written, and guessing one is how a stale address
+ * ends up on the card.
+ */
+async function routedServiceHostname(project: Pick<Project, "id" | "slug" | "name">): Promise<string> {
+  const rows = await repos.service.listByProject(project.id).catch(() => []);
+  for (const row of rows) {
+    const endpoints = resolveServicePublicEndpoints(row, {
+      projectSlug: project.slug ?? project.name,
+    });
+    const custom = endpoints.find((e) => e.domainType === "custom" && e.customDomain);
+    if (custom?.customDomain) return custom.customDomain;
+  }
+  return "";
 }
 
 async function isLiveDeploymentReady(deploymentId: string | null): Promise<boolean> {
@@ -582,7 +697,7 @@ export async function onWebmailDeployed(
 
     const platform = await resolveMailVpsPlatform(mailServer.serverId, project.organizationId);
     await platform.routing.registerRoute({
-      domain: `mail.${mailServer.domain}`,
+      domain: mailHostname(mailServer.domain),
       tls: true,
       // We issue this host's cert right below, so the edge must keep a :443
       // listener up meanwhile — a routed host with no TLS listener refuses
@@ -592,7 +707,7 @@ export async function onWebmailDeployed(
     });
     // The mail box already holds certs for IMAP/SMTP; this adds the HTTPS
     // one for the webmail UI, through the same Let's Encrypt feature.
-    await platform.ssl.provisionCert(`mail.${mailServer.domain}`);
+    await platform.ssl.provisionCert(mailHostname(mailServer.domain));
   } catch (err) {
     console.warn(
       `[webmail] could not front mail.<domain> for project ${project.id}: ${safeErrorMessage(err)}`,
@@ -629,7 +744,7 @@ export async function cleanupWebmailInstall(project: Project): Promise<string | 
   const rows: Domain[] = await listProjectRouteRows(project.id).catch(() => []);
   if (rows.length > 0 || !project.cloudWorkspaceId) return null;
 
-  const hostname = `mail.${mailServer.domain}`;
+  const hostname = mailHostname(mailServer.domain);
   const platform = await resolveMailVpsPlatform(mailServer.serverId, project.organizationId);
   await platform.routing.removeRoute(hostname);
   return `removed ${hostname} proxy`;

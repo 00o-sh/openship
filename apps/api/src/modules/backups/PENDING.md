@@ -142,8 +142,8 @@ executor, which is precisely why #434 survived a green run: neither fake could h
 and neither had a container to miss. So the guarantees above are pinned by one
 real-daemon test, `../../test/e2e/backup-volume-roundtrip.e2e.test.ts` — capture a
 volume, empty the volume, restore, assert the tree and the bytes. It runs in the
-opt-in suite (`bun run --cwd apps/api test:e2e`, `RUN_DOCKER_E2E=1` in CI's
-`e2e-docker` job) and it is the only test that drives `backupOrchestrator.execute`
+opt-in suite (`bun run --cwd apps/api test:e2e`, `RUN_DOCKER_E2E=1` in the release
+gate's `e2e-docker` job) and it is the only test that drives `backupOrchestrator.execute`
 and `restoreOrchestrator.beginPrepare`/`apply` through real archives, a real
 `alpine:3` helper and a real destination on disk. It asserts the sha256 recorded at
 capture is the one prepare recomputes from the destination's bytes
@@ -172,11 +172,13 @@ itself the regression test for the removed cast.
 
 **CI triggers, split by cost.** `e2e-docker` is a two-scope matrix (`E2E_SCOPE` in
 `apps/api/vitest.e2e.config.ts`): `fast` — every daemon-level and full-cycle case,
-~5 min — runs on every PR and push; `heavy` — `rollback-build-restore` alone, ~225s
-cold because it pulls a Node base image and runs a real build, with
-`fileParallelism: false` holding the suite up meanwhile — runs on `workflow_dispatch`,
-the nightly `schedule`, and `v*` tags, so a release is proven restorable before it
-ships. `ci.yml` also gained a `concurrency` group (PR pushes cancel their
+~5 min; `heavy` — `rollback-build-restore` alone, ~225s cold because it pulls a Node
+base image and runs a real build, with `fileParallelism: false` holding the suite up
+meanwhile. Both scopes live in `release-gate.yml` and run on `workflow_dispatch` and on
+every publish, because `Release` and `Docker images` list that gate in `needs:` — so a
+release really is proven restorable before it ships. (It was not, for as long as the job
+sat in `ci.yml`: a separate workflow on the same tag push is not ordered against the
+publish, so the suite finished whenever it finished, alongside the release.) `ci.yml` also gained a `concurrency` group (PR pushes cancel their
 predecessor; main and tags run to completion) and a Docker Hub login guarded on a
 secret that does not exist yet — hosted runners share outbound IPs, so anonymous
 pulls hit `toomanyrequests` as a function of strangers' traffic and it reads as a

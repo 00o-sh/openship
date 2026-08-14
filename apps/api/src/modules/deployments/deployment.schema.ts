@@ -67,6 +67,12 @@ const BuildServiceInput = Type.Object({
   environment: Type.Record(Type.String(), Type.String()),
   volumes: Type.Array(Type.String()),
   command: Type.Optional(Type.String()),
+  // #332: the string above is a lossy join for a list command, so it was not
+  // possible to express `["sh","-c","a && b"]` on this route at all — and these
+  // entries are persisted (requestBuildAccess → syncFromCompose), so a client
+  // replaying its service list re-split the stored argv. The repo now keeps an
+  // unchanged string from disturbing argv; this lets a client be explicit.
+  commandArgv: Type.Optional(Type.Array(Type.String())),
   restart: Type.Optional(Type.String()),
   exposed: Type.Optional(Type.Boolean()),
   exposedPort: Type.Optional(Type.String()),

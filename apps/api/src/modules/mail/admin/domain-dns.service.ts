@@ -25,6 +25,7 @@ import { readState, mutateState } from "../mail-state";
 import type { DnsRecordSet, AdditionalDomainDns } from "../mail-state";
 import { buildSpfValue } from "../mail.service";
 import { withSpfInclude } from "./outbound-relay.service";
+import { mailHostname } from "@repo/core";
 
 // ─── Record set construction ─────────────────────────────────────────────────
 
@@ -53,7 +54,7 @@ export function buildDomainDnsRecords(
   ipv6?: string | null,
   opts?: { spfInclude?: string },
 ): DnsRecordSet {
-  const mailHost = `mail.${installDomain}`;
+  const mailHost = mailHostname(installDomain);
   // `spfInclude` is the outbound relay's provider token when one is active for
   // this domain — a no-op when absent, so direct-send domains are unaffected.
   const spfValue = withSpfInclude(buildSpfValue(ipv4, ipv6), opts?.spfInclude);

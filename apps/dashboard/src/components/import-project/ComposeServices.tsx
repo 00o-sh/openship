@@ -708,12 +708,14 @@ const ServiceCard: React.FC<{
   const missingCount = missingEnvCount(service);
   const envCount = Object.keys(service.environment).length;
   const [envModalOpen, setEnvModalOpen] = useState(false);
-  // #336: in the folder-upload flow the scan masks env — reveal THIS service's
-  // real values from the upload session (write-gated on the API). Only wired
-  // when an upload session exists; git/edit flows have no session-scoped source.
+  // #336: in the folder-upload flow the scan masks env — reveal the opened keys of
+  // THIS service from the upload session (write-gated on the API, and scoped to one
+  // service so a sibling's secrets never come along). Only wired when an upload
+  // session exists; git/edit flows have no session-scoped source.
   const uploadSessionId = config.uploadSessionId;
-  const onRevealAll = uploadSessionId
-    ? async () => (await folderApi.reveal(uploadSessionId)).environments[service.name] ?? {}
+  const onReveal = uploadSessionId
+    ? async (keys: string[]) =>
+        (await folderApi.reveal(uploadSessionId, service.name, keys)).environment
     : undefined;
   const [envRows, setEnvRows] = useState<EnvVarRow[]>(() =>
     envToArray(service.environment, {}, service.environmentMeta),
@@ -907,7 +909,7 @@ const ServiceCard: React.FC<{
             envVars={envRows}
             envMeta={service.environmentMeta}
             onEnvVarsChange={handleEnvChange}
-            onRevealAll={onRevealAll}
+            onReveal={onReveal}
           />
         </div>
       </Modal>

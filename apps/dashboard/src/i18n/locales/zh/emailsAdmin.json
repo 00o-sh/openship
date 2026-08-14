@@ -4,6 +4,7 @@
       "overview": "概览",
       "domains": "域名",
       "mailboxes": "邮箱",
+      "inbound": "入站",
       "dns": "DNS",
       "health": "健康状态",
       "test": "测试",
@@ -11,6 +12,56 @@
       "advanced": "高级"
     },
     "ariaLabel": "邮件管理分区"
+  },
+  "inbound": {
+    "heading": "入站规则",
+    "description": "当邮件送达此服务器上的某个地址时，在通知渠道中收到提醒。",
+    "newRule": "新建规则",
+    "newTitle": "新建入站规则",
+    "editTitle": "编辑入站规则",
+    "edit": "编辑",
+    "emptyTitle": "暂无入站规则",
+    "emptyBody": "添加一条规则，当邮件送达此服务器上的某个邮箱或域名时，即可在 Slack、Telegram、Discord 或 webhook 中收到通知。",
+    "noChannels": "你还没有已验证的通知渠道。请先在 设置 → 通知 中添加并验证一个，然后回来创建规则。",
+    "fieldName": "名称",
+    "namePlaceholder": "支持收件箱 → #support",
+    "fieldScope": "监听范围",
+    "scopeMailbox": "单个邮箱",
+    "scopeDomain": "整个域名",
+    "scopeAll": "此服务器上的所有域名",
+    "scopeAllSummary": "所有域名",
+    "fieldAddress": "地址",
+    "fieldDomain": "域名",
+    "mailboxCaveat": "按 To 和 Cc 邮件头进行匹配，因此通过 Bcc 或别名送达此邮箱的邮件不会被匹配。如果需要覆盖每一封邮件，请监听整个域名。",
+    "fieldFrom": "From 包含",
+    "fieldSubject": "主题包含",
+    "patternPlaceholder": "可选",
+    "patternHint": "不区分大小写。使用 * 作为通配符——其余内容均按字面匹配。",
+    "fieldChannels": "通知这些渠道",
+    "fieldEnabled": "规则已启用",
+    "channelCount": "{count} 个渠道",
+    "colRule": "规则",
+    "colWatch": "监听对象",
+    "colChannels": "渠道",
+    "colStatus": "状态",
+    "active": "已开启",
+    "disabled": "已关闭",
+    "paused": "已暂停",
+    "deleteTitle": "删除入站规则",
+    "deleteConfirm": "删除规则",
+    "deleting": "删除中…",
+    "deleteHint": "现有通知不受影响。已捕获但尚未处理的邮件将被丢弃。",
+    "save": "保存规则",
+    "saving": "保存中…",
+    "cancel": "取消",
+    "test": "立即测试",
+    "testing": "测试中…",
+    "testResult": "已读取 {read} 封捕获的邮件：{matched} 封匹配到规则，{dropped} 封被过滤掉。未发送或删除任何邮件。",
+    "testFailed": "无法运行测试。",
+    "loadFailed": "无法加载入站规则。",
+    "saveFailed": "无法保存规则。",
+    "deleteFailed": "无法删除规则。",
+    "confirmDelete": "删除规则“{name}”？除非仍有其他规则需要，否则将停止捕获其地址的邮件。"
   },
   "overview": {
     "mailServer": "邮件服务器",
@@ -267,6 +318,11 @@
     "logs": "日志",
     "openLogs": "打开日志",
     "up": "已运行 {time}",
+    "optional": "可选",
+    "daemonHint": {
+      "fatal": "supervisord 已放弃，不会自行重试。请从菜单中重启。",
+      "backoff": "反复崩溃，supervisord 仍在重试。查看日志了解原因。"
+    },
     "menu": {
       "restart": "重启",
       "restarting": "重启中…",
@@ -284,7 +340,9 @@
       "restartFailed": "重启失败",
       "startFailedTitle": "{label} 启动失败",
       "stopFailedTitle": "{label} 停止失败",
-      "restartFailedTitle": "{label} 重启失败"
+      "restartFailedTitle": "{label} 重启失败",
+      "notConfirmedTitle": "{label} 尚未启动",
+      "notConfirmed": "监控进程已接受请求，但 {label} 当前为 {state}。请打开日志查看原因。"
     },
     "daemonStatus": {
       "running": "运行中",
@@ -292,6 +350,7 @@
       "stopping": "停止中",
       "stopped": "已停止",
       "failed": "失败",
+      "crashed": "已崩溃",
       "missing": "缺失",
       "unknown": "未知"
     },
@@ -319,6 +378,10 @@
       "partDnsOne": "缺少 {count} 条 DNS 记录",
       "partDnsOther": "缺少 {count} 条 DNS 记录",
       "partDelivery": "外发邮件未被投递",
+      "degradedLabel": "可用，但防护能力下降",
+      "partScanning": "{names} 未运行 - 新邮件正在未经病毒扫描的情况下投递",
+      "partSignatures": "{names} 未运行 - 病毒特征库不再更新，邮件将使用逐渐过期的特征库进行扫描",
+      "partAdvisory": "{names} 未运行",
       "almostSubQueueOne": "{count} 封邮件等待外发 - 请查看下方的外发投递。",
       "almostSubQueueOther": "{count} 封邮件等待外发 - 请查看下方的外发投递。"
     },
@@ -554,6 +617,6 @@
     "close": "关闭",
     "logsLoadFailed": "加载日志失败",
     "loadingLogs": "正在加载日志…",
-    "noJournal": "此单元没有日志条目。"
+    "noLogLines": "此组件暂无日志内容。"
   }
 }

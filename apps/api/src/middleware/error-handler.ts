@@ -64,8 +64,15 @@ export function handleApiError(err: unknown, c: Context) {
   return c.json({ error: "Internal server error" }, 500);
 }
 
-/** `METHOD /path` for a log line. Query string omitted: it can carry tokens. */
-function requestTag(c: Context): string {
+/**
+ * `METHOD /path` for a log line. Query string omitted: it can carry tokens.
+ *
+ * Exported for the handlers that answer a 5xx THEMSELVES (the mail funnels), so every
+ * server-fault line in the log reads the same and is greppable by route. The try/catch
+ * below is load-bearing for those callers: a handler under test can be driven with a
+ * context that has no `method`/`url`, and this must not throw from inside a catch block.
+ */
+export function requestTag(c: Context): string {
   try {
     return `${c.req.method} ${new URL(c.req.url).pathname}`;
   } catch {

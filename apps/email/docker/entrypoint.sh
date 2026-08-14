@@ -4,7 +4,8 @@
 # Idempotent by construction — this is what makes `docker pull` + recreate safe:
 #   1. seed-if-absent: copy baked config into empty bind mounts, never overwrite
 #      operator edits (config dirs are host bind mounts; the queue/maildir/DKIM
-#      data dirs start empty and are left alone).
+#      data dirs start empty and are left alone — except ClamAV's signature
+#      database, which is data clamd cannot start without: see 6).
 #   2. reconcile: rewrite the baked placeholders in every daemon config to the
 #      real per-install values from the --env-file — the `build-placeholder` DB
 #      password (shared role) and the `build.invalid` domain (-> $FIRST_DOMAIN),
@@ -17,7 +18,11 @@
 #      log; a jail whose logpath is missing at start would crash-loop).
 #   5. reuse-or-generate the DKIM key on its bind mount (never regenerate — a new
 #      selector breaks DMARC until DNS repropagates).
-#   6. hand off to supervisord (the CMD).
+#   6. ClamAV: seed the signature database onto its bind mount from the baked copy
+#      (no network), hand the mount to the `clamav` user, and create clamd's socket
+#      directory. Without a database clamd exits 1, and amavis — whose only scanner
+#      it is — then defers every inbound message (issue #565).
+#   7. hand off to supervisord (the CMD).
 #
 # Env (from ensure-container-mail.ts --env-file): FIRST_DOMAIN,
 # OPENSHIP_MAIL_DB_{HOST,PORT,NAME,USER}, plus iRedMail secrets
@@ -171,6 +176,32 @@ if [ -n "$FIRST_DOMAIN" ] && [ ! -s "/var/lib/dkim/${FIRST_DOMAIN}.pem" ]; then
     log "WARN: DKIM keygen failed (no amavisd binary?)"
 fi
 chown -R amavis:amavis /var/lib/dkim 2>/dev/null || true
+
+# 6. ClamAV: signatures onto the mount, and clamd's runtime directory.
+#
+#    The seed is NOT allowed to be fatal, unlike the config seeds above: this one copies
+#    a few hundred MB onto a host bind mount, so a full or read-only disk would take
+#    Postfix and Dovecot down with it. A missing virus scanner must not cost the box its
+#    mail service.
+seed clamav /var/lib/clamav \
+  || log "WARN: could not seed ClamAV signatures — freshclam will fetch them"
+#    Ownership is fixed on EVERY boot, not only when seeding: the mount is created
+#    root-owned by ensure-container-mail, both daemons drop to the `clamav` user
+#    (clamd.conf User, freshclam.conf DatabaseOwner), and Debian allocates that uid at
+#    package-install time — so a rebuilt image can hand the same host directory a
+#    different uid. Chowning by NAME is why this cannot be done host-side.
+if getent passwd clamav >/dev/null 2>&1; then
+  chown -R clamav:clamav /var/lib/clamav 2>/dev/null \
+    || log "WARN: could not chown /var/lib/clamav — freshclam cannot write signatures"
+  # clamd's LocalSocket (/var/run/clamav/clamd.ctl — what amavis connects to) and
+  # freshclam's pid file live here. Debian creates this from the tmpfiles.d rule its
+  # systemd units carry; under supervisord nothing does, and /run starts empty on every
+  # recreate. clamd does not create it either — it fails to open its socket and exits.
+  install -d -m 0755 -o clamav -g clamav /var/run/clamav \
+    || log "WARN: could not create /var/run/clamav — clamd cannot open its socket"
+else
+  log "WARN: no clamav user in this image — ClamAV will not start"
+fi
 
 log "starting supervisord"
 exec "$@"

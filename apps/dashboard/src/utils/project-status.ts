@@ -55,53 +55,20 @@ export type ProjectStatusSource = {
 
 // CSS-only presentation. The human-readable label is resolved from the
 // active dictionary via `projectStatusLabel(status, t)` so badges localize.
-export const PROJECT_STATUS_META: Record<
-  ProjectStatus,
-  { badge: string; dot: string }
-> = {
-  live: {
-    badge: "bg-success-bg text-success",
-    dot: "bg-success-solid",
-  },
+export const PROJECT_STATUS_META: Record<ProjectStatus, { badge: string }> = {
+  live: { badge: "bg-success-bg text-success" },
   // Muted, not amber: a paused project is a state the operator CHOSE, so it must
   // not read as something demanding their attention.
-  paused: {
-    badge: "bg-muted text-muted-foreground",
-    dot: "bg-muted-foreground",
-  },
-  attention: {
-    badge: "bg-warning-bg text-warning",
-    dot: "bg-warning-solid",
-  },
-  queued: {
-    badge: "bg-info-bg text-info",
-    dot: "bg-info-solid",
-  },
-  building: {
-    badge: "bg-info-bg text-info",
-    dot: "bg-info-solid",
-  },
-  deploying: {
-    // primary = brand accent, intentionally not a status token.
-    badge: "bg-primary/10 text-primary",
-    dot: "bg-primary",
-  },
-  failed: {
-    badge: "bg-danger-bg text-danger",
-    dot: "bg-danger-solid",
-  },
-  cancelled: {
-    badge: "bg-muted text-muted-foreground",
-    dot: "bg-muted-foreground",
-  },
-  deleting: {
-    badge: "bg-danger-bg text-danger",
-    dot: "bg-danger-solid animate-pulse",
-  },
-  draft: {
-    badge: "bg-warning-bg text-warning",
-    dot: "bg-warning-solid",
-  },
+  paused: { badge: "bg-muted text-muted-foreground" },
+  attention: { badge: "bg-warning-bg text-warning" },
+  queued: { badge: "bg-info-bg text-info" },
+  building: { badge: "bg-info-bg text-info" },
+  // primary = brand accent, intentionally not a status token.
+  deploying: { badge: "bg-primary/10 text-primary" },
+  failed: { badge: "bg-danger-bg text-danger" },
+  cancelled: { badge: "bg-muted text-muted-foreground" },
+  deleting: { badge: "bg-danger-bg text-danger" },
+  draft: { badge: "bg-warning-bg text-warning" },
 };
 
 /** Localized status label for a project/deployment status pill. */

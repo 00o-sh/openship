@@ -14,8 +14,8 @@
 
 import { randomBytes } from "node:crypto";
 import type { CommandExecutor, SystemLogCallback, SystemLog } from "@repo/adapters";
-import { checkMailHealth } from "./mail-health.service";
-import { safeErrorMessage } from "@repo/core";
+import { checkMailHealth, requiresMailComponent } from "./mail-health.service";
+import { safeErrorMessage, mailHostname } from "@repo/core";
 import {
   installDocker,
   installContainerEdge,
@@ -28,6 +28,7 @@ import {
   MAIL_PORTS,
   opScript,
   resolveEnvironment,
+  rootOrDegrade,
 } from "@repo/adapters";
 import {
   HOST_AMAVIS_CONF_CANDIDATES,
@@ -495,10 +496,20 @@ export async function stepOpenMailFirewall(
   // collapsing the whole step. No check-then-insert guard any more: we only get here for
   // ufw and firewalld, both of which are idempotent about a rule they already hold — the
   // duplicate-stacking that guard existed for was a raw-iptables property.
+  // Elevated: `ufw`/`firewall-cmd` are root-only, and this ran on the raw executor — so on
+  // a box we log into as a non-root sudo user every rule failed and the step reported the
+  // ports as rejected by the firewall rather than as never attempted. The profile above
+  // only chooses the SYNTAX; it never decided who runs it.
+  const fw = await rootOrDegrade(exec, {
+    purpose: "Opening the inbound mail ports",
+    consequence: "The ports may stay closed, so inbound mail is rejected at the edge of the host.",
+    report: (message) => log(stepId, "warn", message),
+  });
+
   const failed: string[] = [];
   for (const { port, script } of rules) {
     try {
-      await exec.exec(script);
+      await fw.exec(script);
     } catch (err) {
       // A dropped connection is not a firewall verdict, and retrying it seven more times
       // just delays the real error.
@@ -632,9 +643,11 @@ export async function stepDeployEngine(
   const health = await checkMailHealth(exec).catch(() => null);
   if (health) {
     // Only the mail-path daemons gate the deploy; ClamAV/freshclam can still be
-    // warming up (large signature load) without blocking a working mail server.
-    const CRITICAL = new Set(["postfix", "dovecot", "postgresql"]);
-    const down = health.filter((c) => CRITICAL.has(c.key) && c.status !== "active");
+    // warming up (large signature load) without blocking a working mail server. The
+    // marker lives on the catalog (mail-health.service) so the Health tab grades the
+    // same daemons the same way — this was a private Set here, and the banner's own
+    // idea of "down" had drifted into painting an advisory daemon red.
+    const down = health.filter((c) => requiresMailComponent(c.key) && c.status !== "active");
     if (down.length > 0) {
       return {
         stepId,
@@ -690,7 +703,7 @@ export async function stepDkimKeys(
   domain: string,
   log: StepLogger,
 ): Promise<StepResult> {
-  const mailDomain = `mail.${domain}`;
+  const mailDomain = mailHostname(domain);
   log(6, "info", "Locating amavis binary...");
 
   let amavis: Awaited<ReturnType<typeof resolveAmavis>>;
@@ -993,7 +1006,7 @@ export async function stepRequestSSL(
   target: MailSslTarget,
 ): Promise<StepResult> {
   const stepId = 7;
-  const mailDomain = `mail.${domain}`;
+  const mailDomain = mailHostname(domain);
   if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(mailDomain)) {
     return { stepId, success: false, message: `Invalid mail domain: ${mailDomain}` };
   }
@@ -1060,7 +1073,7 @@ export async function stepConfigureSSL(
   log: StepLogger,
 ): Promise<StepResult> {
   const stepId = 8;
-  const mailDomain = `mail.${domain}`;
+  const mailDomain = mailHostname(domain);
 
   let flavor: MailEngineFlavor;
   try {

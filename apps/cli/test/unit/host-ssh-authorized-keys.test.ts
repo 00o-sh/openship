@@ -147,23 +147,26 @@ describe("chooseHostChannelUser", () => {
     expect(out).toEqual({
       user: "root",
       authKeysPath: "/root/.ssh/authorized_keys",
-      viaSudo: false,
       rootUnavailable: false,
+      elevation: "login",
     });
   });
 
-  it("authorizes root via sudo when a non-root user has passwordless sudo", () => {
+  it("logs in as the invoker and elevates when a non-root user has passwordless sudo", () => {
     const out = chooseHostChannelUser({
       invokerUid: 1000,
       invokerName: "ubuntu",
       invokerHome: "/home/ubuntu",
       hasPasswordlessSudo: true,
     });
+    // The change #527 argued for: root is reached by ELEVATING this session, not by
+    // minting a standing root SSH credential. `rootUnavailable` stays false because root
+    // is still reachable — through sudo — so the caller must not warn that mail/edge fail.
     expect(out).toEqual({
-      user: "root",
-      authKeysPath: "/root/.ssh/authorized_keys",
-      viaSudo: true,
+      user: "ubuntu",
+      authKeysPath: "/home/ubuntu/.ssh/authorized_keys",
       rootUnavailable: false,
+      elevation: "sudo",
     });
   });
 
@@ -177,8 +180,8 @@ describe("chooseHostChannelUser", () => {
     expect(out).toEqual({
       user: "deploy",
       authKeysPath: "/home/deploy/.ssh/authorized_keys",
-      viaSudo: false,
       rootUnavailable: true,
+      elevation: "none",
     });
   });
 });

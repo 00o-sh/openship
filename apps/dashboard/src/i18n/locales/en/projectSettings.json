@@ -119,6 +119,11 @@
     "breadcrumbApps": "Apps",
     "appEyebrow": "App",
     "stopFailed": "Couldn't stop the install",
+    "progressStep": "Step {current} of {total}",
+    "progressServicesReady": "{done} of {total} services ready",
+    "summaryTitle": "Configuration",
+    "summaryDestination": "Destination",
+    "summaryServices": "Services",
     "mail": {
       "title": "Set up mail",
       "subtitle": "Deploy webmail on your own domain, or connect an existing mailbox.",

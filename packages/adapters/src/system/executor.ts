@@ -3,13 +3,15 @@ import { networkInterfaces } from "node:os";
 
 import {
   explainHostChannelCause,
+  hostChannelAccount,
   hostFirewallRule,
+  HOST_CHANNEL_AUTH_REJECTED,
   HOST_CHANNEL_NOT_PROVISIONED,
   HOST_CHANNEL_UNPROVISIONED,
 } from "@repo/core";
 
 import type { CommandExecutor, SshConfig } from "../types";
-import { HostChannelUnavailableError } from "./errors";
+import { HostChannelUnavailableError, isSshAuthError } from "./errors";
 import { LocalExecutor } from "./local-executor";
 import { probeTcpDetailed, type TcpProbeFailure, type TcpProbeResult } from "./reachability";
 import { SshExecutor } from "./ssh-executor";
@@ -116,7 +118,7 @@ function hostChannelPort(): number {
 }
 
 function hostChannelUser(): string {
-  return process.env.OPENSHIP_HOST_SSH_USER?.trim() || "root";
+  return hostChannelAccount(process.env);
 }
 
 /**
@@ -181,7 +183,14 @@ export type HostChannelCode =
   | "not_configured"
   | "key_unreadable"
   /** Configured, but the TCP connection to the host SSH port never completed. */
-  | "unreachable";
+  | "unreachable"
+  /**
+   * The port answered and sshd then REFUSED the key. Its own state rather than a
+   * refinement of `unreachable`, because the remedy shares nothing with a dropped
+   * packet: re-authorize the key, or permit the account to log in. Conflating the two
+   * is what sent #490's reporters to audit firewalls and #527's to audit key files.
+   */
+  | "auth_rejected";
 
 export interface HostChannelHealth {
   /** Host ("this machine") operations can be performed at all. */
@@ -246,9 +255,84 @@ function explainDialFailure(
 }
 
 /**
+ * Auth verdicts are memoized: {@link hostChannelHealth} is called on every dashboard
+ * load, and an SSH handshake costs more than a TCP probe. A rejection is cached far
+ * shorter than a success, so a channel the operator has just re-authorized stops
+ * reporting broken within seconds rather than within a cache generation.
+ */
+const AUTH_MEMO_OK_MS = 30_000;
+const AUTH_MEMO_FAIL_MS = 5_000;
+let authMemo: { key: string; hint: string | null; expires: number } | null = null;
+
+/** Drop the memoized auth verdict. For a caller that just CHANGED the channel — a
+ *  re-provision — and must not then read its own stale "refused". */
+export function invalidateHostChannelAuth(): void {
+  authMemo = null;
+}
+
+/**
+ * Does the host channel's key actually AUTHENTICATE?
+ *
+ * The gap this closes is #527: an open port is not a working channel. sshd answers the
+ * SYN and then refuses — the key was never authorized for the account we dial, or sshd
+ * permits that account no login at all — and every consumer keyed on the TCP probe
+ * called that healthy. The local row's badge read fine while every host operation
+ * failed, and the failure surfaced as "SSH credentials rejected" against credentials
+ * this channel does not read.
+ *
+ * Only an AUTH rejection becomes a verdict. A connect failure is left alone: the TCP
+ * probe already ran and `explainDialFailure` describes it better, so reporting it twice
+ * would overwrite a specific firewall diagnosis with a vaguer one (#490).
+ */
+async function verifyHostChannelAuth(config: {
+  host: string;
+  port: number;
+  username: string;
+  privateKey: string;
+  timeoutMs: number;
+}): Promise<{ hint: string } | null> {
+  // The key's LENGTH, not the key: enough to notice a re-provision swapped the material,
+  // without holding a credential in a module-level cache for 30 seconds.
+  const memoKey = `${config.username}@${config.host}:${config.port}#${config.privateKey.length}`;
+  if (authMemo?.key === memoKey && authMemo.expires > Date.now()) {
+    return authMemo.hint ? { hint: authMemo.hint } : null;
+  }
+
+  let hint: string | null = null;
+  try {
+    // Dynamic for the reason every SSH import on this path is dynamic: this function is
+    // reachable from the boot hook and from unauthenticated /health/env, and must not
+    // drag ssh2 in before something has actually asked it to dial.
+    const { connectSshClient } = await import("./ssh-client");
+    const client = await connectSshClient({
+      host: config.host,
+      port: config.port,
+      username: config.username,
+      privateKey: config.privateKey,
+      readyTimeoutMs: config.timeoutMs,
+      // Load-bearing: it selects describeSshAuthFailure's host-channel wording, so the
+      // hint an operator reads here is the same sentence the deploy log gives them.
+      hostChannel: true,
+    });
+    client.end();
+  } catch (err) {
+    if (isSshAuthError(err)) {
+      hint = err instanceof Error ? err.message : HOST_CHANNEL_AUTH_REJECTED;
+    }
+  }
+
+  authMemo = {
+    key: memoKey,
+    hint,
+    expires: Date.now() + (hint ? AUTH_MEMO_FAIL_MS : AUTH_MEMO_OK_MS),
+  };
+  return hint ? { hint } : null;
+}
+
+/**
  * Can this instance actually drive its host? Cheap enough to call on every page
- * load: one TCP handshake to the host SSH port, or no I/O at all when the answer
- * is decided by env.
+ * load: one TCP handshake to the host SSH port — plus, when that answers, one
+ * memoized auth handshake — or no I/O at all when the answer is decided by env.
  *
  * Exists because {@link createHostExecutor} has no "configured but unreachable"
  * state — it returns an executor that has not dialed anything, so a filtered
@@ -284,34 +368,55 @@ export async function hostChannelHealth(timeoutMs = 2_500): Promise<HostChannelH
   const port = hostChannelPort();
   const target = `${hostChannelUser()}@${host}:${port}`;
   const keyPath = process.env.OPENSHIP_HOST_SSH_KEY?.trim();
+  // Kept rather than discarded: the auth probe below needs the same material the real
+  // dial uses, and reading it twice would let the two disagree.
+  let privateKey: string | undefined;
   if (keyPath) {
-    const { reason } = readHostChannelKey(keyPath);
-    if (reason) {
+    const read = readHostChannelKey(keyPath);
+    if (read.reason) {
       return {
         ok: false,
         code: "key_unreadable",
         host,
         port,
         target,
-        hint: `${reason} ${HOST_CHANNEL_NOT_PROVISIONED}`,
+        hint: `${read.reason} ${HOST_CHANNEL_NOT_PROVISIONED}`,
       };
     }
+    privateKey = read.key;
   }
 
   const probe = await probeTcpDetailed(host, port, timeoutMs);
-  if (probe.ok) {
-    return { ok: true, code: "ok", host, port, target };
+  if (!probe.ok) {
+    return {
+      ok: false,
+      code: "unreachable",
+      host,
+      port,
+      target,
+      cause: probe.reason,
+      ...explainDialFailure(probe, host, port, target),
+    };
   }
 
-  return {
-    ok: false,
-    code: "unreachable",
-    host,
-    port,
-    target,
-    cause: probe.reason,
-    ...explainDialFailure(probe, host, port, target),
-  };
+  // Reached and keyed — so the one remaining way for this channel to be broken is that
+  // sshd refuses the key, and this is the only place cheap enough to find that out
+  // before an operation needs it (#527). Spent only on the path where it can change the
+  // answer: an unreachable port never gets here, and a verdict is memoized.
+  if (privateKey) {
+    const rejected = await verifyHostChannelAuth({
+      host,
+      port,
+      username: hostChannelUser(),
+      privateKey,
+      timeoutMs,
+    });
+    if (rejected) {
+      return { ok: false, code: "auth_rejected", host, port, target, hint: rejected.hint };
+    }
+  }
+
+  return { ok: true, code: "ok", host, port, target };
 }
 
 /**

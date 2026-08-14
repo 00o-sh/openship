@@ -1,5 +1,5 @@
 import { eq, and, asc, inArray } from "drizzle-orm";
-import { commandToArgv, generateId, mergeAdvanced, normalizeCustomHostname, type ComposeAdvanced } from "@repo/core";
+import { commandToArgv, generateId, mergeAdvanced, normalizeCustomHostname, resolveCommandArgv, type ComposeAdvanced } from "@repo/core";
 import type { Database } from "../client";
 import { service, serviceDeployment } from "../schema";
 import type { ComposeServiceSpec, ServicePublicEndpoint } from "../schema/service";
@@ -99,16 +99,32 @@ export const composeSpecsEqual = (a: ComposeServiceSpec, b: ComposeServiceSpec) 
  * SHOULD disappear, and the 3-way merge against `importedSpec` is what decides
  * whether that is safe.
  */
-function composeWritePatch(
+export function composeWritePatch(
   parsed: ParsedComposeService,
-  stored?: { advanced?: ComposeAdvanced | null } | null,
+  stored?:
+    | { advanced?: ComposeAdvanced | null; command?: string | null; commandArgv?: string[] | null }
+    | null,
   /** `parsed` is a full re-read of the compose FILE, so an absent compose-owned
    *  key means the author deleted it. See {@link COMPOSE_OWNED_ADVANCED_KEYS}. */
   composeAuthoritative = false,
 ): ComposeServiceSpec {
   const advanced = mergeAdvanced(stored?.advanced ?? null, parsed.advanced);
+  const spec = toComposeSpec(parsed);
+  // #332: several wire shapes into this path carry `command` as a STRING only
+  // (BuildServiceInput on the deploy request, the sync endpoint), and the stored
+  // string is a lossy display join for a list command. toComposeSpec's fallback
+  // would re-split it — turning a correct `["sh","-c","a && b"]` into five words on
+  // the next deploy. An unchanged string therefore keeps the stored argv; only a
+  // real change re-derives. See resolveCommandArgv.
+  const commandArgv = resolveCommandArgv({
+    incomingArgv: parsed.commandArgv,
+    incomingCommand: parsed.command ?? null,
+    storedCommand: stored?.command,
+    storedArgv: stored?.commandArgv,
+  });
   return {
-    ...toComposeSpec(parsed),
+    ...spec,
+    ...(commandArgv !== undefined ? { commandArgv } : {}),
     advanced: composeAuthoritative ? clearComposeOwnedKeys(advanced, parsed.advanced) : advanced,
   };
 }
@@ -775,6 +791,70 @@ export function createServiceRepo(db: Database) {
             reasonSkipped: data.reasonSkipped ?? null,
             updatedAt: new Date(),
           },
+        });
+    },
+
+    /**
+     * Record that a service FAILED in this deployment, whether or not a row for it
+     * already exists.
+     *
+     * Why this exists next to `upsertServiceDeployment` rather than reusing it: a
+     * smart/partial redeploy pre-creates a `skipped` row for every service it did not
+     * target (service-checks.ts), and that row carries the LIVE runtime details of a
+     * container that is still running — `containerId`, `imageDigest`, `hostPort`, `ip`.
+     * `upsertServiceDeployment` coalesces all of those to null, so using it here would
+     * erase the record of a running container just because a *different* service
+     * failed. Using a plain insert instead is what violated
+     * `uq_service_deployment_dep_svc` and killed the deploy on its own bookkeeping.
+     *
+     * So the `set` below lists ONLY the failure facts. Drizzle updates just the listed
+     * columns, so every runtime field is preserved by OMISSION — that is the load-bearing
+     * detail, and the reason not to "simplify" this into the sibling method.
+     *
+     * `imageRef` is overwritten only when one is actually known: several call sites fail
+     * before an image is resolved, and passing null there must not blank the image the
+     * carried-forward row recorded.
+     */
+    async markServiceDeploymentFailed(data: {
+      deploymentId: string;
+      serviceId: string;
+      serviceName: string;
+      /** Defaults to "failure". Present so a caller can record e.g. "cancelled". */
+      status?: string;
+      imageRef?: string | null;
+      /** Operator-facing reason. Persisted so it outlives the deploy's SSE session. */
+      errorMessage?: string | null;
+      reason?: string | null;
+    }) {
+      const now = new Date();
+      const status = data.status ?? "failure";
+
+      const set: Partial<NewServiceDeployment> = {
+        serviceName: data.serviceName,
+        status,
+        finishedAt: now,
+        updatedAt: now,
+      };
+      if (data.errorMessage !== undefined) set.errorMessage = data.errorMessage;
+      if (data.reason !== undefined) set.reason = data.reason;
+      if (data.imageRef) set.imageRef = data.imageRef;
+
+      await db
+        .insert(serviceDeployment)
+        .values({
+          id: generateId("sd"),
+          deploymentId: data.deploymentId,
+          serviceId: data.serviceId,
+          serviceName: data.serviceName,
+          status,
+          imageRef: data.imageRef ?? null,
+          errorMessage: data.errorMessage ?? null,
+          reason: data.reason ?? null,
+          finishedAt: now,
+        })
+        .onConflictDoUpdate({
+          target: [serviceDeployment.deploymentId, serviceDeployment.serviceId],
+          set,
         });
     },
 

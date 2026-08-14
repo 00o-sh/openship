@@ -281,10 +281,12 @@ export const servicesApi = {
       `${endpoints.services.envGet(projectId, serviceId)}${environment ? `?environment=${environment}` : ""}`,
     ),
 
-  /** #336: real (unmasked) compose `environment` map — write-gated on the API. */
-  revealEnv: (projectId: string | number, serviceId: string) =>
-    api.get<{ success: boolean; environment: Record<string, string> }>(
+  /** #336: real (unmasked) values for the named env keys ONLY — write-gated on
+   *  the API, which rejects an empty `keys` (no "reveal everything" request). */
+  revealEnv: (projectId: string | number, serviceId: string, keys: string[]) =>
+    api.post<{ success: boolean; environment: Record<string, string> }>(
       endpoints.services.envReveal(projectId, serviceId),
+      { keys },
     ),
 
   /** Set environment variables for a service */

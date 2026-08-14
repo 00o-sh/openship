@@ -183,6 +183,10 @@ r.get("/containers/issues", { tag: "server:read", collection: true }, serverCont
 // Global infra view — every server × component. No :id, so collection:true scopes
 // the check to the active org (same as /containers/behind). Scan is detect-only.
 r.get("/containers", { tag: "server:read", collection: true }, serverContainers.listAllContainers);
+// Live progress for the fleet view: what's queued/running right now (cached rows ×
+// in-memory sessions) plus what just settled, which is the only place an outcome
+// lives — a finished row clears its drift and its in-progress flag together.
+r.get("/containers/applying", { tag: "server:read", collection: true }, serverContainers.listApplyingContainers);
 r.post("/containers/scan", { tag: "server:write", collection: true }, serverContainers.scanAllContainers);
 // Fleet bulk apply — targets are derived from the cache server-side, so the body
 // only carries which intents to run ("update" swaps, "repair" restarts).

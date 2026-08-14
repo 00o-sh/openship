@@ -61,6 +61,7 @@ const h = vi.hoisted(() => ({
   requestBuildAccess: vi.fn(async () => ({ deployment_id: "dep-new" })),
   setWebmailProject: vi.fn(async () => {}),
   updateService: vi.fn(async () => {}),
+  ensureGeneratedAppSecrets: vi.fn(async () => [] as string[]),
 }));
 
 vi.mock("@repo/db", () => ({
@@ -88,6 +89,7 @@ vi.mock("../../apps/catalog-source", () => ({
 vi.mock("../../apps/app-install.service", () => ({
   installApp: h.installApp,
   planInstallRouting: vi.fn(() => new Map()),
+  ensureGeneratedAppSecrets: h.ensureGeneratedAppSecrets,
 }));
 vi.mock("../../apps/app-settings.service", () => ({
   updateAppProjectSettings: h.updateAppProjectSettings,
@@ -161,9 +163,13 @@ describe("legacy webmail replace", () => {
       force: true,
       wipeVolumes: true,
     });
-    // Fresh install, NOT a redeploy of the row that just went.
+    // Fresh install, NOT a redeploy of the row that just went: `installApp` owns the
+    // routing, so no service row is patched with a routing plan. The one updateService
+    // call here is the restart-loop watch (#566), which every path arms.
     expect(h.installApp).toHaveBeenCalledOnce();
-    expect(h.updateService).not.toHaveBeenCalled();
+    for (const call of h.updateService.mock.calls as unknown as unknown[][]) {
+      expect(Object.keys(call[3] as object)).toEqual(["advanced"]);
+    }
     // Link stamped before the build is queued, so the deploy hook can resolve it.
     expect(h.setWebmailProject).toHaveBeenCalledWith("mail-1", WEBMAIL_PROJECT.id);
     expect(res).toEqual({ projectId: WEBMAIL_PROJECT.id, deploymentId: "dep-new" });

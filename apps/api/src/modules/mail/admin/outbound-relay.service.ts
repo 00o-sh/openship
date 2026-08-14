@@ -38,6 +38,15 @@
  *              smtp_sasl_password_maps=hash:/etc/postfix/sasl_passwd
  *              smtp_sasl_security_options=noanonymous
  *              smtp_tls_security_level=encrypt|may
+ *   postconf -P smtp-amavis/unix/smtp_tls_security_level=none
+ *
+ * That last line is the third way a global TLS level goes wrong, and the one
+ * that bites hardest: `smtp-amavis` is an smtp CLIENT service inheriting
+ * smtp_tls_security_level, and amavisd's :10024 offers no STARTTLS, so a global
+ * `encrypt` stops INBOUND mail entirely (GH-392) — not just outbound. The
+ * exemption is pinned at the transport for new installs (see
+ * apps/email/engine/samples/postfix/master.cf) and re-applied here so boxes
+ * built before that fix are repaired on the next save.
  *              smtp_tls_policy_maps=hash:…          (selected only, merged)
  *   postmap + postfix reload
  *
@@ -515,8 +524,26 @@ export async function configureOutboundRelay(
     "smtp_sasl_security_options=noanonymous",
   ];
 
+  // 3a) Exempt the content filter from whatever global TLS level we are about to
+  //     set. `smtp-amavis` is an smtp CLIENT service, so it inherits
+  //     smtp_tls_security_level, and amavisd's :10024 offers no STARTTLS: a
+  //     global `encrypt` defers EVERY INBOUND message with "TLS is required, but
+  //     was not offered" (GH-392). New installs get this from
+  //     apps/email/engine/samples/postfix/master.cf, but a box deployed before
+  //     that fix has its own master.cf on the /etc/postfix bind mount and would
+  //     never pick it up — so repair it here, at the moment the global is
+  //     written. `postconf -P` edits the master.cf override in place and is
+  //     idempotent, so re-saving a relay is a no-op. Unconditional rather than
+  //     inside the "all" branch: "selected" leaves the global at `may` today,
+  //     but an operator may have hardened it by hand.
+  await exec
+    .exec(engine(`postconf -P ${sq("smtp-amavis/unix/smtp_tls_security_level=none")}`))
+    .catch(() => {});
+
   if (scope === "all") {
-    // Everything leaves via the relay, so global relay-grade TLS is safe.
+    // Everything leaves via the relay, so global relay-grade TLS is safe for
+    // OUTBOUND. The Postfix→Amavis hop is exempted above; it is an inbound path
+    // that happens to use the same smtp client.
     sasl.push("smtp_tls_security_level=encrypt");
     if (input.port === IMPLICIT_TLS_PORT) sasl.push("smtp_tls_wrappermode=yes");
     await exec.exec(engine(`postconf -e ${[`relayhost=${nexthop}`, ...sasl].map(sq).join(" ")}`));

@@ -64,6 +64,20 @@ describe("parseMailUnitProbe — container flavor", () => {
     );
 
     expect(state.status).toBe("failed");
+    // FATAL and BACKOFF are both `failed`; `subState` is the ONLY thing that says
+    // whether supervisord is still trying, and the row's hint reads it.
+    expect(state.subState).toBe("fatal");
+  });
+
+  it("keeps BACKOFF distinguishable from FATAL through the sub-state", () => {
+    const state = parse(
+      "clamav-daemon   BACKOFF   Exited too quickly",
+      "clamav",
+      "clamav-daemon",
+    );
+
+    expect(state.status).toBe("failed");
+    expect(state.subState).toBe("backoff");
   });
 
   describe("postgresql sidecar", () => {
