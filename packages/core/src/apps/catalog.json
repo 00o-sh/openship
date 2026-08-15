@@ -509,7 +509,7 @@
     },
     {
       "available": true,
-      "verified": true,
+      "verified": false,
       "id": "mongodb",
       "name": "MongoDB",
       "description": "MongoDB document database with the Mongo Express web admin UI.",
@@ -2214,7 +2214,7 @@
     },
     {
       "available": true,
-      "verified": true,
+      "verified": false,
       "id": "kafka",
       "name": "Apache Kafka",
       "description": "Apache Kafka event-streaming broker (KRaft mode — no ZooKeeper) with the Kafbat Kafka UI web console for topics, messages, and consumer groups.",
@@ -3496,7 +3496,7 @@
     },
     {
       "available": true,
-      "verified": true,
+      "verified": false,
       "id": "redis",
       "name": "Valkey (Redis)",
       "description": "In-memory data store for caching, sessions, rate limits, and queues — Valkey, the open-source Redis fork. Drop-in Redis-compatible: point any redis client at it. Ships with RedisInsight, a browser UI that arrives already connected to this instance.",
@@ -3974,7 +3974,7 @@
     },
     {
       "available": true,
-      "verified": true,
+      "verified": false,
       "id": "clickhouse",
       "name": "ClickHouse",
       "description": "The columnar SQL database for analytics — billions of rows scanned per second. Ships with the CH-UI console, so you get a SQL editor, schema browser and dashboards the moment it installs: sign in with the ClickHouse user and password below, no extra setup.",
