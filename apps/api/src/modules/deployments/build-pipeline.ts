@@ -58,8 +58,7 @@ import {
   type DeployRouting,
 } from "./build-execution-plan";
 import { attachLinkedNetworks } from "./attach-linked-networks";
-import { resolveReadinessTarget } from "./readiness-target";
-import { waitForReadyFromExecutor } from "./forwarded-readiness";
+import { probeDeployedReadiness } from "./readiness-probe";
 import { syncProjectToServerManifest } from "../../lib/openship-manifest-sync";
 import { syncManagedEdgeRoutes, edgeUnsyncedWarning } from "../../lib/managed-edge-proxy";
 import { decryptEnvMap } from "../../lib/encryption";
@@ -1592,51 +1591,28 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
         },
         resolveRoute: undefined,
         readiness: async (containerId, cfg) => {
-          const { host, port } = await resolveReadinessTarget({
+          // Address, dialing machine, and every message: all in probeDeployedReadiness, so
+          // the compose per-service probe cannot answer this differently.
+          const verdict = await probeDeployedReadiness({
             runtime,
             containerId,
             primaryPort: cfg.port,
-            probePort: readinessGate.probe.port,
+            probe: readinessGate.probe,
+            targetExecutor: phase.targetExecutor,
+            log: (message, level) => logger.log(message, level),
           });
-          // Name the address actually dialed. Reporting `cfg.port` here sent
-          // operators to look at the app's own port (3000) when the probe had
-          // really been talking to the published host port, so a wrong-port or
-          // unreachable-address failure read as "my app is broken".
-          const target = `${host}:${port}${readinessGate.probe.path ?? ""}`;
-          const seconds = Math.round(readinessGate.probe.timeoutMs / 1000);
-          logger.log(
-            `Health check: waiting up to ${seconds}s for the app to answer at ${target}` +
-              `${readinessGate.probe.path ? "" : " (TCP connect)"}…\n`,
-          );
-          let ready: boolean;
-          try {
-            // A containerized OpenShip API has its own loopback/network namespace.
-            // Probe from the host through the same pooled SSH channel used for
-            // local host operations; a non-containerized install transparently
-            // falls back to the executor process's direct socket path.
-            ready = await sshManager.withHostExecutor((executor) =>
-              waitForReadyFromExecutor(executor, host, port, {
-                path: readinessGate.probe.path,
-                timeoutMs: readinessGate.probe.timeoutMs,
-                intervalMs: readinessGate.probe.intervalMs,
-              }),
+          // Could not ASK — so there is no verdict, and a verdict is the only thing
+          // allowed to fail a deploy. Warn and pass: destroying a running deployment
+          // because the probe couldn't reach it is GH-583, where a host channel that
+          // forbade port forwarding read exactly like a dead app.
+          if (verdict.skipped) {
+            logger.log(
+              `Health check SKIPPED: ${verdict.skipped} The deploy is left live and unverified.\n`,
+              "warn",
             );
-          } catch (error) {
-            return (
-              `OpenShip could not probe ${target} from the deployment host: ` +
-              `${safeErrorMessage(error)}. Check the local host-control channel.`
-            );
+            return null;
           }
-          if (!ready) {
-            return (
-              `The app never answered at ${target} within ${seconds}s` +
-              `${readinessGate.probe.path ? " (or answered 500+)" : ""}. It may have crashed on ` +
-              `startup, may still be booting, or may be listening on a different port than ${cfg.port} ` +
-              `— check the runtime logs.`
-            );
-          }
-          logger.log(`Health check passed: the app answered at ${target}.\n`);
-          return null;
+          return verdict.failure;
         },
       };
 

@@ -105,6 +105,14 @@ export function streamSSE(
   return _streamSSE(c, async (sseStream) => {
     const drain = serializeWrites(sseStream);
 
+    // Put a byte on the wire before the handler does any work. The heartbeat's
+    // first ping is a full interval away, so a handler that takes seconds to
+    // produce its first frame leaves the response headed-but-empty until then —
+    // indistinguishable, to a client or an intermediary, from a dead stream. A
+    // comment frame is inert: every SSE parser skips it (pipe_stream.lua opens
+    // the same way).
+    void sseStream.write(": ok\n\n").catch(() => {});
+
     const heartbeat = setInterval(() => {
       void sseStream
         .writeSSE({ event: "ping", data: "{}" })

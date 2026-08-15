@@ -102,7 +102,11 @@ describe("Neon ships as one bundle with a console AND a connection", () => {
     const neon = getAppTemplate("neon");
     expect(neon).toBeDefined();
     expect(neon!.kind).toBe("template");
-    expect(neon!.hosting).toBe("experimental");
+    // No longer badged experimental: it was booted end to end — console served,
+    // bootstrap ran at the earliest install timing, and the advertised URL
+    // reached Postgres. Absent `hosting` defaults to "self-hosted".
+    expect(neon!.hosting).toBeUndefined();
+    expect(neon!.verified).toBe(true);
     expect(neon!.services).toHaveLength(1);
     const svc = neon!.services![0];
     expect(svc.name).toBe("neond");

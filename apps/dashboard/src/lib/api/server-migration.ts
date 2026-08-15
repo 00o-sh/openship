@@ -267,6 +267,31 @@ export interface TransferProgress {
 }
 
 /**
+ * GH-570: an intermediary that buffers `text/event-stream` answers 200 and then
+ * delivers nothing. A read on that body neither resolves nor rejects, so the caller
+ * waits forever — the reported "spinner spins, wizard never times out". An idle
+ * watchdog is the only thing that separates a buffered transport from a genuinely
+ * slow scan, and it is safe here precisely BECAUSE the server heartbeats every
+ * SYSTEM.SSE.HEARTBEAT_INTERVAL_MS (25s): silence past that is the transport, never
+ * the work, however long the work takes.
+ */
+const SCAN_STREAM_FIRST_BYTE_MS = 15_000;
+/** One missed 25s heartbeat plus slack for a loaded box. */
+const SCAN_STREAM_IDLE_MS = 45_000;
+
+/** The stream never delivered, as distinct from the scan having failed. Callers should
+ *  retry through the non-streaming `scan()`, which crosses the same hops as any POST. */
+export class ScanStreamStalledError extends Error {
+  constructor(reason: string) {
+    super(`Scan stream unusable (${reason})`);
+    this.name = "ScanStreamStalledError";
+  }
+}
+
+export const isScanStreamStalled = (e: unknown): e is ScanStreamStalledError =>
+  e instanceof ScanStreamStalledError;
+
+/**
  * Docker migration API client — talks to /api/migration (self-hosted only).
  * Distinct from `migrationApi` (lib/api/migration.ts), which is the unrelated
  * team-instance/data migration.

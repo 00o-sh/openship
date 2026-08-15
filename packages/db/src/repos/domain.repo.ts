@@ -1,4 +1,4 @@
-import { eq, and, ne, lt, inArray, sql } from "drizzle-orm";
+import { eq, and, ne, lt, asc, inArray, sql } from "drizzle-orm";
 import { generateId } from "@repo/core";
 import type { Database } from "../client";
 import { domain, project, service } from "../schema";
@@ -142,6 +142,88 @@ export function createDomainRepo(db: Database) {
         )
         .limit(limit);
       return rows.map((r) => r.id);
+    },
+
+    /**
+     * Hostnames of the org's Cloud-managed (free) subdomains.
+     *
+     * Returns hostnames, not a count, because the CALLER owns the predicate: what
+     * makes a hostname "ours" is `isCloudManagedHostname` (a `.opsh.io` suffix
+     * test) which lives in the API next to the rest of the routing truth. A count
+     * computed here would have to re-implement it in SQL and drift.
+     *
+     * Deliberately NOT filtered on `domain_type = 'free'`: that column is derived
+     * against `HOST_DOMAIN || CLOUD_DOMAIN`, so on a box with
+     * `HOST_DOMAIN=example.com` the operator's own `api.example.com` is stored as
+     * "free" while costing Cloud nothing. Counting it would bill an operator for
+     * their own DNS.
+     *
+     * Joined through `project` (domain has no organizationId) which also excludes
+     * webhook- and mail-owned rows — those carry a NULL projectId and are always
+     * custom hostnames. Soft-deleted projects are excluded: their rows are
+     * unreachable, and a slot that can't be used must not be charged for.
+     */
+    async listHostnamesForOrg(organizationId: string): Promise<string[]> {
+      const rows = await db
+        .select({ hostname: domain.hostname })
+        .from(domain)
+        .innerJoin(project, eq(domain.projectId, project.id))
+        .where(
+          and(
+            eq(project.organizationId, organizationId),
+            sql`${project.deletedAt} IS NULL`,
+          ),
+        );
+      return rows.map((r) => r.hostname);
+    },
+
+    /**
+     * Every domain in the org WITH the project that holds it.
+     *
+     * The counterpart to `listHostnamesForOrg`, which returns bare strings and so
+     * can only ever produce a number. A number is not actionable: a user at their
+     * free-subdomain limit was told "you're using 10" with no way to discover
+     * where — a subdomain created by a CLI deploy months ago, in a project they'd
+     * forgotten, was invisible (there is no org-wide domains page and
+     * `GET /api/domains` requires a projectId).
+     *
+     * Same join and filters as the counting query, so the list and the count can
+     * never disagree about what occupies a slot.
+     */
+    async listForOrgWithProject(organizationId: string): Promise<
+      {
+        id: string;
+        hostname: string;
+        domainType: string | null;
+        isPrimary: boolean;
+        projectId: string | null;
+        projectName: string;
+        projectSlug: string;
+        serviceId: string | null;
+        createdAt: Date;
+      }[]
+    > {
+      return db
+        .select({
+          id: domain.id,
+          hostname: domain.hostname,
+          domainType: domain.domainType,
+          isPrimary: domain.isPrimary,
+          projectId: domain.projectId,
+          projectName: project.name,
+          projectSlug: project.slug,
+          serviceId: domain.serviceId,
+          createdAt: domain.createdAt,
+        })
+        .from(domain)
+        .innerJoin(project, eq(domain.projectId, project.id))
+        .where(
+          and(
+            eq(project.organizationId, organizationId),
+            sql`${project.deletedAt} IS NULL`,
+          ),
+        )
+        .orderBy(asc(project.name), asc(domain.hostname));
     },
 
     async listByIds(ids: string[]) {
