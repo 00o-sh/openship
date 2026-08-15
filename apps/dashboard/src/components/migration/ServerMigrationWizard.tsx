@@ -225,6 +225,11 @@ type VolumeStrategy = "reuse" | "copy";
 interface MigrateItem {
   name: string;
   serviceNames: string[];
+  /** Container ids of the picked services (`svcUid`). Sent alongside the names so the
+   *  server resolves the selection by IDENTITY: a compose service name is only unique
+   *  within its own stack, so a name-only migrate also matched same-named containers
+   *  from every other stack on the host — including Openship's own `postgres` (#584). */
+  serviceContainerIds?: string[];
   /** serviceName → "copy" (only copy entries are sent; reuse is the default). */
   volumeStrategies: Record<string, VolumeStrategy>;
   /** Project-level repo to link (records source; sent to the migrate API). */
@@ -766,6 +771,22 @@ export function ServerMigrationWizard({
       ),
     [migratable, stack],
   );
+  // The same union by IDENTITY — the plan is sized from this set, so a name-only
+  // preview also sized another stack's volumes into this migration (#584).
+  const planServiceContainerIds = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          migratable.flatMap((p) =>
+            (stack?.services ?? [])
+              .filter((s) => p.services.has(svcUid(s)))
+              .map((s) => s.containerId)
+              .filter((id): id is string => Boolean(id)),
+          ),
+        ),
+      ),
+    [migratable, stack],
+  );
   const canMigrate =
     Boolean(selectedId) && Boolean(targetId) && migratable.length > 0 && !starting && !queue;
 
@@ -779,6 +800,7 @@ export function ServerMigrationWizard({
         sourceServerId: selectedId,
         targetServerId: targetId,
         serviceNames: item.serviceNames,
+        serviceContainerIds: item.serviceContainerIds,
         projectName: item.name,
         killOriginals,
         volumeStrategies: Object.keys(item.volumeStrategies).length
@@ -814,20 +836,24 @@ export function ServerMigrationWizard({
 
   const handleMigrate = () => {
     if (!canMigrate) return;
-    // Selection is keyed by uid; the migration API wants the actual container
-    // names — resolve uid → name from the scanned stack. Copy choices apply only
+    // Selection is keyed by uid, and so are the per-service maps we send: the server
+    // reads them back with the same precedence (`perService` — uid, then name), so a
+    // service keeps its own volume strategy / env / route even when another selected
+    // stack has a service by the same name. Collapsing these onto names is what let a
+    // "reuse in place" choice be applied to the wrong container (#584 class). Repo
+    // compose services with no container are still keyed by name below — they have no
+    // uid, and the server's name fallback is for exactly them. Copy choices apply only
     // to same-server migrations (cross-server always copies A→B and keeps A).
     const items: MigrateItem[] = migratable.map((p) => {
       const picked = (stack?.services ?? []).filter((s) => p.services.has(svcUid(s)));
       const volumeStrategies: Record<string, VolumeStrategy> = {};
       if (sameServer) {
         for (const s of picked) {
-          if (volumeStrategy[svcUid(s)] === "copy") volumeStrategies[s.name] = "copy";
+          if (volumeStrategy[svcUid(s)] === "copy") volumeStrategies[svcUid(s)] = "copy";
         }
       }
-      // Resolve the per-service maps from svcUid keys → service names (what the
-      // API + the post-verify apply key on). The build subpath is DERIVED from
-      // the discovered→compose mapping (matched compose service's build context).
+      // The build subpath is DERIVED from the discovered→compose mapping (the matched
+      // compose service's build context).
       const composeByName = new Map(p.composeServices.map((c) => [c.name, c]));
       const serviceSubpaths: Record<string, string> = {};
       const serviceRenames: Record<string, string> = {};
@@ -836,12 +862,12 @@ export function ServerMigrationWizard({
       for (const s of picked) {
         const mapped = p.serviceMap[svcUid(s)];
         const build = mapped ? composeByName.get(mapped)?.build?.trim() : undefined;
-        if (build) serviceSubpaths[s.name] = build;
+        if (build) serviceSubpaths[svcUid(s)] = build;
         // Adopt the row under the mapped REPO compose service name so a later
         // git-compose reconcile matches it in place (no duplicate / empty volume).
-        if (mapped && mapped !== s.name) serviceRenames[s.name] = mapped;
+        if (mapped && mapped !== s.name) serviceRenames[svcUid(s)] = mapped;
         const env = p.serviceEnvs[svcUid(s)];
-        if (env) serviceEnv[s.name] = env; // only edited services carry an override
+        if (env) serviceEnv[svcUid(s)] = env; // only edited services carry an override
         // Resolve the route by the per-container mode. "keep" reuses the domain
         // the foreign proxy already served; free/custom take the editor value
         // (domain-less placeholders filtered here, not mid-edit); none → skip.
@@ -864,7 +890,9 @@ export function ServerMigrationWizard({
         } else if (mode === "free" || mode === "custom") {
           routes = (p.serviceRoutes[uid] ?? []).filter(routeHasDomain);
         }
-        if (routes.length) routesByServiceName[s.name] = routes;
+        // Keyed by uid like the rest; the server translates these onto the adopted ROW
+        // names via the (now identity-keyed) rename map before publishing.
+        if (routes.length) routesByServiceName[uid] = routes;
       }
       // Repo compose services with no running container (built/pulled fresh from
       // the repo): carry their route + env override keyed by the REPO service
@@ -888,6 +916,7 @@ export function ServerMigrationWizard({
       return {
         name: p.name.trim(),
         serviceNames: picked.map((s) => s.name),
+        serviceContainerIds: picked.map((s) => s.containerId).filter((id): id is string => Boolean(id)),
         volumeStrategies,
         gitSource: p.repo
           ? { provider: "github" as const, owner: p.repo.owner, repo: p.repo.repo, branch: p.repo.branch }
@@ -1493,6 +1522,8 @@ export function ServerMigrationWizard({
                         sourceId={selectedId}
                         targetId={targetId}
                         serviceNames={planServiceNames}
+                        serviceContainerIds={planServiceContainerIds}
+                        flatDocker={flatDocker}
                         transferMode={transferMode}
                         setTransferMode={setTransferMode}
                         compress={compress}
@@ -1996,6 +2027,8 @@ export function ServerMigrationWizard({
                   sourceId={selectedId}
                   targetId={targetId}
                   serviceNames={planServiceNames}
+                        serviceContainerIds={planServiceContainerIds}
+                        flatDocker={flatDocker}
                   transferMode={transferMode}
                   setTransferMode={setTransferMode}
                   compress={compress}
@@ -2220,6 +2253,8 @@ export function ServerMigrationWizard({
                     sourceId={selectedId}
                     targetId={targetId}
                     serviceNames={planServiceNames}
+                        serviceContainerIds={planServiceContainerIds}
+                        flatDocker={flatDocker}
                     transferMode={transferMode}
                     setTransferMode={setTransferMode}
                     compress={compress}
@@ -3439,6 +3474,8 @@ function TransferPlanSummary({
   sourceId,
   targetId,
   serviceNames,
+  serviceContainerIds,
+  flatDocker,
   transferMode,
   setTransferMode,
   compress,
@@ -3453,6 +3490,10 @@ function TransferPlanSummary({
   sourceId: string | null;
   targetId: string | null;
   serviceNames: string[];
+  /** Container ids for the same set — resolves the plan by identity (#584). */
+  serviceContainerIds?: string[];
+  /** The scan mode the selection came from; the plan must be sized in the same mode. */
+  flatDocker?: boolean;
   transferMode: TransferModeSel;
   setTransferMode: (v: TransferModeSel) => void;
   compress: boolean;
@@ -3474,7 +3515,11 @@ function TransferPlanSummary({
 
   // Re-size when the service set OR the custom paths change (each is a discrete
   // add/remove action, so no keystroke spam).
-  const key = `${sourceId}|${targetId}|${[...serviceNames].sort().join(",")}|${customPaths
+  const key = `${sourceId}|${targetId}|${[...serviceNames].sort().join(",")}|${[
+    ...(serviceContainerIds ?? []),
+  ]
+    .sort()
+    .join(",")}|${flatDocker ? "flat" : "grouped"}|${customPaths
     .map((c) => `${c.source}>${c.dest}`)
     .join(",")}`;
 
@@ -3498,7 +3543,14 @@ function TransferPlanSummary({
     setErr(null);
     onReady?.(false);
     dockerMigrationApi
-      .preview({ sourceServerId: sourceId, targetServerId: targetId, serviceNames, customPaths })
+      .preview({
+        sourceServerId: sourceId,
+        targetServerId: targetId,
+        serviceNames,
+        serviceContainerIds,
+        flatDocker,
+        customPaths,
+      })
       .then((res) => {
         if (!live) return;
         cache.current.set(key, res.preview);

@@ -59,7 +59,14 @@ import { linkProjectRepo } from "../projects/project-crud.service";
 import type { ProjectCompositeRoute, ProxySettings } from "@repo/core";
 import { teardownProject } from "../projects/project-teardown";
 import { discoverServerStack } from "./docker-inspect.service";
-import { adoptServerStack, attachLiveRuntime, joinReusedContainersToGroup, parseRepoCompose } from "./migrate.service";
+import {
+  adoptServerStack,
+  attachLiveRuntime,
+  joinReusedContainersToGroup,
+  parseRepoCompose,
+} from "./migrate.service";
+import { excludeAlreadyManaged } from "./managed-containers";
+import { perService, selectDiscoveredServices } from "./select-services";
 import { isMovableBind } from "./migration-preflight";
 import { migrationRunBus } from "./migration.sse";
 
@@ -119,6 +126,10 @@ export interface StartMigrationInput {
    *  wizard unmounted or a run was opened from the list). `targetPath` marks a
    *  service that serves a PATH of a shared domain (path fan-out). */
   routesByServiceName?: Record<string, MigrationRouteSpec>;
+  /** Container ids of the selected services — globally unique, unlike a compose
+   *  service name. Sent by the wizard; absent from older clients, which fall back to
+   *  the ambiguous name match. See {@link selectDiscoveredServices}. */
+  serviceContainerIds?: string[];
   /** Adopt in flat-docker mode — MUST match the scan the user selected from, or
    *  openship-labeled containers get treated as managed and "none are found". */
   flatDocker?: boolean;
@@ -434,7 +445,13 @@ class MigrationOrchestratorImpl {
       const stack = await discoverServerStack(sourceServerId, organizationId, undefined, {
         flatDocker: input.flatDocker,
       });
-      const selected = stack.services.filter((s) => serviceNames.includes(s.name));
+      // Identity-first (see select-services): a bare name is only unique within its
+      // compose project, so a name match over the whole server also selected the
+      // control plane's own same-named containers (#584).
+      const selected = selectDiscoveredServices(stack.services, {
+        containerIds: input.serviceContainerIds,
+        names: serviceNames,
+      });
       if (selected.length === 0) {
         throw new Error("None of the selected services were found on the server.");
       }
@@ -444,12 +461,19 @@ class MigrationOrchestratorImpl {
       // we never blind-stop the user's proxy. It's reclaimed later — with
       // consent — when the user adds a domain to a migrated service and the
       // routed deploy's edge-takeover modal offers to take over 80/443.
-      const chosen = selected.filter((s) => !s.proxyKind);
+      let chosen = selected.filter((s) => !s.proxyKind);
       if (chosen.length === 0) {
         throw new Error(
           "Only a reverse proxy was selected. Openship installs its own edge on 80/443 — pick the app services to migrate instead.",
         );
       }
+      // The SAME gate adoptServerStack applies, applied HERE too — this set is not
+      // adopt's. It decides `scannedContainerIds`, and moveData's first act is
+      // `rtA.stop(cid)` on every id in it. A name-only client cannot tell the user's
+      // `postgres` from the control plane's, so without this the run would stop
+      // Openship's own database to copy its volume (#584). Also fails a genuine
+      // re-import before any container is touched, rather than after.
+      chosen = await excludeAlreadyManaged(chosen, organizationId);
       const blocked = chosen.filter((s) => Boolean(s.build) && !s.image);
       if (blocked.length > 0) {
         throw new Error(
@@ -463,17 +487,15 @@ class MigrationOrchestratorImpl {
       //           redeploy, no volume move, zero downtime).
       //   copy  → DEPLOY a fresh container on a duplicated volume.
       // Cross-server is always a deploy (the volume streams to a fresh target).
-      const isAttach = (name: string) =>
-        sameServer && (input.volumeStrategies?.[name] ?? "reuse") !== "copy";
-      const attachChosen = chosen.filter((s) => isAttach(s.name));
-      const deployChosen = chosen.filter((s) => !isAttach(s.name));
+      // Resolved per SERVICE, not per name: two selected containers sharing a name
+      // (trivial across compose projects) collapsed onto one strategy entry, so a
+      // service the operator set to "reuse in place" could be copied instead — or a
+      // "copy" service attached live, taking over the original in place (#584 class).
+      const isAttach = (svc: (typeof chosen)[number]) =>
+        sameServer && (perService(input.volumeStrategies, svc) ?? "reuse") !== "copy";
+      const attachChosen = chosen.filter((s) => isAttach(s));
+      const deployChosen = chosen.filter((s) => !isAttach(s));
 
-      // Only the DEPLOY set's originals are quiesced / copied / cut over —
-      // attach-live containers are adopted as-is and must never be stopped or
-      // killed (that would take down the very containers we're taking control of).
-      scannedContainerIds = Object.fromEntries(
-        deployChosen.filter((s) => s.containerId).map((s) => [s.name, s.containerId as string]),
-      );
 
       // Parse the linked repo's compose so adopted rows take their NATIVE
       // build/image spec (mapped by the wizard) instead of a frozen running-image
@@ -497,11 +519,32 @@ class MigrationOrchestratorImpl {
         serviceSubpaths: input.serviceSubpaths,
         serviceEnv: input.serviceEnv,
         serviceRenames: input.serviceRenames,
+        serviceContainerIds: input.serviceContainerIds,
         flatDocker: input.flatDocker,
         repoServices,
       });
       const projectId = adopt.projectId;
       if (adopt.created) createdProjectId = projectId;
+
+      // Only the DEPLOY set's originals are quiesced / copied / cut over —
+      // attach-live containers are adopted as-is and must never be stopped or
+      // killed (that would take down the very containers we're taking control of).
+      //
+      // Keyed by the FINAL ROW NAME, which `buildAdoptedServiceRows` guarantees is
+      // unique. Keying by discovered name did two things wrong: two same-named picks
+      // collapsed to one entry, so moveData stopped only one original (inconsistent
+      // volume copy) and rollback restarted only one; and `resolveScannedContainerId`
+      // looks this up BY ROW NAME, so a renamed or `-2`-suffixed row never resolved
+      // its container and fell back to a guessed volume name.
+      const rowNameOf = (svc: (typeof chosen)[number]) => perService(adopt.renames, svc) ?? svc.name;
+      scannedContainerIds = Object.fromEntries(
+        deployChosen.filter((s) => s.containerId).map((s) => [rowNameOf(s), s.containerId as string]),
+      );
+      // Row-keyed too: moveData works in adopted service ROWS, so handing it the
+      // request's identity-keyed map would match nothing.
+      const rowVolumeStrategies: Record<string, VolumeStrategy> = Object.fromEntries(
+        chosen.map((s) => [rowNameOf(s), perService(input.volumeStrategies, s) ?? "reuse"]),
+      );
       await this.transition(id, "adopting", { projectId, scannedContainerIds });
 
       // Link the repo (if the user picked one) BEFORE deploy so source + push
@@ -610,7 +653,7 @@ class MigrationOrchestratorImpl {
           organizationId,
           scannedContainerIds,
           sameServer,
-          input.volumeStrategies ?? {},
+          rowVolumeStrategies,
           builtImages,
           input.customPaths ?? [],
           { mode: input.transferMode, compression: input.transferCompression },

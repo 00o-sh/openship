@@ -294,6 +294,8 @@
       "savedTitle": "Gespeichert",
       "saveFailed": "Speichern der Umgebungsvariablen fehlgeschlagen",
       "saveFailedTitle": "Speichern fehlgeschlagen",
+      "noChanges": "Keine Änderungen zu speichern — gespeicherte Werte bleiben erhalten.",
+      "noChangesTitle": "Nichts zu speichern",
       "applying": "Der Dienst wird mit der neuen Umgebung neu gestartet — kein Neubau.",
       "applyingTitle": "Wird angewendet",
       "applyFailed": "Umgebung konnte nicht auf den laufenden Dienst angewendet werden",

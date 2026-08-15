@@ -231,6 +231,9 @@ export async function adoptServer(c: Context) {
     serverId?: string;
     projectName?: string;
     serviceNames?: string[];
+    /** Container ids of the selected services — globally unique, unlike a compose
+     *  service name (#584). Optional: older clients send names only. */
+    serviceContainerIds?: string[];
     flatDocker?: boolean;
     volumeStrategies?: Record<string, "reuse" | "copy">;
     serviceSubpaths?: Record<string, string>;
@@ -240,7 +243,7 @@ export async function adoptServer(c: Context) {
      *  share service names like `app`/`db`/`redis`. */
     composeProject?: string | null;
   }>();
-  const { serverId, projectName, serviceNames, flatDocker, volumeStrategies, serviceSubpaths, serviceEnv } = body;
+  const { serverId, projectName, serviceNames, serviceContainerIds, flatDocker, volumeStrategies, serviceSubpaths, serviceEnv } = body;
   if (!serverId) return c.json({ error: "serverId is required" }, 400);
   if (!projectName?.trim()) return c.json({ error: "projectName is required" }, 400);
   if (!Array.isArray(serviceNames) || serviceNames.length === 0) {
@@ -263,6 +266,7 @@ export async function adoptServer(c: Context) {
       organizationId: ctx.organizationId,
       projectName: projectName.trim(),
       serviceNames,
+      serviceContainerIds,
       flatDocker,
       volumeStrategies,
       serviceSubpaths,
@@ -329,6 +333,11 @@ export async function previewMigration(c: Context) {
     sourceServerId?: string;
     targetServerId?: string;
     serviceNames?: string[];
+    /** Container ids of the selected services — globally unique, unlike a compose
+     *  service name (#584). Optional: older clients send names only. */
+    serviceContainerIds?: string[];
+    /** Must match the scan the operator selected from — see buildMigrationPreview. */
+    flatDocker?: boolean;
     customPaths?: unknown;
   }>();
   const sourceServerId = body.sourceServerId;
@@ -348,7 +357,9 @@ export async function previewMigration(c: Context) {
       sourceServerId,
       targetServerId,
       serviceNames: body.serviceNames,
+      serviceContainerIds: body.serviceContainerIds,
       organizationId: guard.organizationId,
+      flatDocker: body.flatDocker,
       customPaths: sanitizeCustomPaths(body.customPaths),
     });
     return c.json({ success: true, preview });
@@ -370,6 +381,9 @@ export async function startMigration(c: Context) {
     sourceServerId?: string;
     targetServerId?: string;
     serviceNames?: string[];
+    /** Container ids of the selected services — globally unique, unlike a compose
+     *  service name (#584). Optional: older clients send names only. */
+    serviceContainerIds?: string[];
     projectName?: string;
     killOriginals?: boolean;
     volumeStrategies?: Record<string, unknown>;
@@ -414,6 +428,7 @@ export async function startMigration(c: Context) {
       sourceServerId,
       targetServerId,
       serviceNames: body.serviceNames,
+      serviceContainerIds: body.serviceContainerIds,
       projectName: body.projectName.trim(),
       killOriginals: body.killOriginals === true,
       volumeStrategies: sanitizeVolumeStrategies(body.volumeStrategies),

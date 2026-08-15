@@ -364,7 +364,14 @@ export const dockerMigrationApi = {
     ),
 
   /** Create an Openship project from the selected discovered services (records only). */
-  adopt: (input: { serverId: string; projectName: string; serviceNames: string[] }) =>
+  adopt: (input: {
+    serverId: string;
+    projectName: string;
+    serviceNames: string[];
+    /** Container ids of the picked services (`svcUid`) — globally unique, unlike a
+     *  compose service name, which is only unique within its own stack (#584). */
+    serviceContainerIds?: string[];
+  }) =>
     api.post<AdoptResult>(endpoints.dockerMigration.adopt, input),
 
   /** Re-import an orphaned Openship project (DR / cross-instance), preserving its id.
@@ -381,6 +388,11 @@ export const dockerMigrationApi = {
     sourceServerId: string;
     targetServerId: string;
     serviceNames: string[];
+    /** Container ids of the picked services (`svcUid`) — globally unique, unlike a
+     *  compose service name, which is only unique within its own stack (#584). */
+    serviceContainerIds?: string[];
+    /** Must match the scan the plan is derived from (the "Flat listing" toggle). */
+    flatDocker?: boolean;
     /** Extra paths to size in the plan (cross-server). */
     customPaths?: CustomPath[];
   }) =>
@@ -403,6 +415,9 @@ export const dockerMigrationApi = {
     sourceServerId: string;
     targetServerId: string;
     serviceNames: string[];
+    /** Container ids of the picked services (`svcUid`) — globally unique, unlike a
+     *  compose service name, which is only unique within its own stack (#584). */
+    serviceContainerIds?: string[];
     projectName: string;
     killOriginals?: boolean;
     /** Same-server only: serviceName → "reuse" (take over in place) | "copy". */

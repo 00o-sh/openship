@@ -289,7 +289,9 @@
       "saved": "Variáveis de ambiente guardadas",
       "savedTitle": "Guardado",
       "saveFailed": "Falha ao guardar as variáveis de ambiente",
-      "saveFailedTitle": "Falha ao guardar"
+      "saveFailedTitle": "Falha ao guardar",
+      "noChanges": "Nenhuma alteração para guardar — os valores guardados foram mantidos.",
+      "noChangesTitle": "Nada para guardar"
     },
     "linkedBadge": "Vinculado",
     "linkedManaged": "via {app}",

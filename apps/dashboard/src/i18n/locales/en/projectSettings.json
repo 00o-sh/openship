@@ -453,6 +453,8 @@
       "savedTitle": "Saved",
       "saveFailed": "Failed to save environment variables",
       "saveFailedTitle": "Save failed",
+      "noChanges": "No changes to save — your saved values were kept.",
+      "noChangesTitle": "Nothing to save",
       "applying": "Restarting the service with the new env — no rebuild.",
       "applyingTitle": "Applying",
       "applyFailed": "Couldn't apply the env to the running service",
