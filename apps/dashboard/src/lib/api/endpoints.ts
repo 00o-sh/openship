@@ -162,6 +162,16 @@ export const endpoints = {
   /* ---------------------------------------------------------------- */
   /*  DNS (Provider credentials & zones)                              */
   /* ---------------------------------------------------------------- */
+  /* ---------------------------------------------------------------- */
+  /*  Credentials (third-party secrets: registry logins, DNS tokens)  */
+  /* ---------------------------------------------------------------- */
+  credentials: {
+    providers: "credentials/providers",
+    list: "credentials",
+    byId: (id: string) => `credentials/${encodeURIComponent(id)}`,
+    verify: (id: string) => `credentials/${encodeURIComponent(id)}/verify`,
+  },
+
   dns: {
     providers: "dns/providers",
     credentials: "dns/credentials",

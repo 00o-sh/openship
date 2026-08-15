@@ -17,7 +17,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Settings as SettingsIcon, Users, ClipboardList, Cloud, Server, Bell, KeyRound, Boxes, Mail, Globe } from "lucide-react";
+import { Settings as SettingsIcon, Users, ClipboardList, Cloud, Server, Bell, KeyRound, Boxes, Mail } from "lucide-react";
 import { usePlatform } from "@/context/PlatformContext";
 import { useSession, authClient } from "@/lib/auth-client";
 import { useI18n } from "@/components/i18n-provider";
@@ -49,7 +49,7 @@ function useInfraIssuesCount(): number {
   return enabled ? count : 0;
 }
 
-export type SettingsTabId = "general" | "tokens" | "mcp" | "team" | "notifications" | "email" | "dns" | "audit" | "cloud" | "infrastructure" | "instance";
+export type SettingsTabId = "general" | "tokens" | "mcp" | "team" | "notifications" | "email" | "credentials" | "dns" | "audit" | "cloud" | "infrastructure" | "instance";
 
 export interface SettingsTab {
   id: SettingsTabId;
@@ -66,8 +66,14 @@ export function useSettingsTabs(): { tabs: SettingsTab[]; activeTab: SettingsTab
   const { t } = useI18n();
   const searchParams = useSearchParams();
   const raw = (searchParams.get("tab") ?? "general") as SettingsTabId;
-  const allowedTabs: SettingsTabId[] = ["general", "tokens", "mcp", "team", "notifications", "email", "dns", "audit", "cloud", "infrastructure", "instance"];
-  const activeTab: SettingsTabId = allowedTabs.includes(raw) ? raw : "general";
+  // `dns` is still accepted, though the DNS tab is gone: AutoDnsPanel deep-links to
+  // `/settings?tab=dns` in two places (and a render test pins that string), and a value
+  // missing from this list silently falls back to "general".
+  const allowedTabs: SettingsTabId[] = ["general", "tokens", "mcp", "team", "notifications", "email", "credentials", "dns", "audit", "cloud", "infrastructure", "instance"];
+  const requested: SettingsTabId = allowedTabs.includes(raw) ? raw : "general";
+  // DNS credentials moved into Credentials — one screen for every third-party secret
+  // instead of three. The old link lands on the screen that now owns them.
+  const activeTab: SettingsTabId = requested === "dns" ? "credentials" : requested;
 
   const tabs: SettingsTab[] = [
     { id: "general", label: t.settings.sidebar.tabs.general, icon: SettingsIcon, visible: true },
@@ -88,10 +94,11 @@ export function useSettingsTabs(): { tabs: SettingsTab[]; activeTab: SettingsTab
       visible: selfHosted,
       requiresRole: "admin",
     },
-    // DNS provider credentials — one org-wide record that lets Openship write a
-    // domain's records. Every mode: the cloud target automates its CNAME + TXT
-    // exactly like a self-hosted box automates its A record.
-    { id: "dns", label: t.settings.sidebar.tabs.dns, icon: Globe, visible: true, requiresRole: "admin" },
+    // Every third-party credential Openship holds — registry logins for private images,
+    // the DNS token that lets it write a domain's records. Replaces the DNS-only tab: the
+    // secret, not the feature it serves, is the thing being managed. Every mode, since a
+    // cloud target automates its CNAME + TXT exactly as a self-hosted box does its A record.
+    { id: "credentials", label: t.settings.sidebar.tabs.credentials, icon: KeyRound, visible: true, requiresRole: "admin" },
     { id: "audit", label: t.settings.sidebar.tabs.audit, icon: ClipboardList, visible: true, requiresRole: "admin" },
     { id: "cloud", label: t.settings.sidebar.tabs.cloud, icon: Cloud, visible: selfHosted },
     // The servers this install runs — edge/mail container versions + global scan

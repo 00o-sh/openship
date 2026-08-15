@@ -43,7 +43,7 @@ import { InfrastructureTab } from "./_components/InfrastructureTab";
 import { TeamTab } from "./_components/TeamTab";
 import { NotificationsTab } from "./_components/NotificationsTab";
 import { EmailSettings } from "./_components/EmailSettings";
-import { DnsProviders } from "./_components/DnsProviders";
+import { Credentials } from "./_components/Credentials";
 import { AuditTab } from "./_components/AuditTab";
 import { DataTransferTab } from "./_components/DataTransferTab";
 import {
@@ -161,7 +161,7 @@ function SettingsPageInner() {
 
           {activeTab === "email" && selfHosted && <EmailSettings />}
 
-          {activeTab === "dns" && <DnsProviders />}
+          {activeTab === "credentials" && <Credentials />}
 
           {activeTab === "audit" && <AuditTab />}
 
