@@ -758,6 +758,10 @@
       "noneYet": "Aún no se ha ejecutado ninguna comprobación, así que no hay resultado. Añade los registros DNS mostrados y luego pulsa Verificar.",
       "attempts": "{count} intento(s) fallido(s) hasta ahora.",
       "pillHint": "Ver el motivo"
+    },
+    "records": {
+      "failed": "No se pudieron cargar los registros DNS de este dominio.",
+      "retry": "Reintentar"
     }
   }
 }

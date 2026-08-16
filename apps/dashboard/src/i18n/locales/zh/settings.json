@@ -48,12 +48,12 @@
     "title": "设置",
     "tabs": {
       "general": "常规",
-      "tokens": "令牌",
+      "git": "Git",
+      "tokens": "API 令牌",
       "mcp": "MCP",
       "team": "团队",
       "notifications": "通知",
       "credentials": "凭据",
-      "audit": "审计日志",
       "cloud": "云",
       "infrastructure": "基础设施",
       "instance": "实例"

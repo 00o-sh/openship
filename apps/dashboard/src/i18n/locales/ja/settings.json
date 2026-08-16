@@ -48,12 +48,12 @@
     "title": "設定",
     "tabs": {
       "general": "一般",
-      "tokens": "トークン",
+      "git": "Git",
+      "tokens": "API トークン",
       "mcp": "MCP",
       "team": "チーム",
       "notifications": "通知",
       "credentials": "認証情報",
-      "audit": "監査ログ",
       "cloud": "クラウド",
       "infrastructure": "インフラ",
       "instance": "インスタンス"

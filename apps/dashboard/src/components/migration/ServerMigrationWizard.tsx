@@ -31,6 +31,7 @@ import { Modal } from "@/components/ui/Modal";
 import ServerSelector, { type ServerOption } from "@/components/shared/ServerSelector";
 import {
   dockerMigrationApi,
+  isScanStreamStalled,
   deployApi,
   githubApi,
   getApiErrorMessage,
@@ -410,6 +411,9 @@ export function ServerMigrationWizard({
   // doesn't re-hit the server (the scan `du`s volumes — expensive). Cleared on
   // reset(); a changed key (new services / custom paths) fetches fresh.
   const planCacheRef = useRef<Map<string, MigrationPreview>>(new Map());
+  /** Bumped by every scan and every reset; a scan whose generation has moved on has
+   *  lost its claim on the wizard's state. See handleScan. */
+  const scanGen = useRef(0);
 
   const reset = () => {
     setStep("select");
@@ -425,6 +429,7 @@ export function ServerMigrationWizard({
     setCustomPaths([]);
     setConflictResolution({});
     planCacheRef.current.clear();
+    scanGen.current++;
     setQueue(null);
     setQueueIndex(0);
     setCompleted([]);
@@ -505,6 +510,12 @@ export function ServerMigrationWizard({
   const handleScan = async (flatOverride?: boolean) => {
     if (!selectedId) return;
     const flat = flatOverride ?? flatDocker;
+    // The fallback below can land up to two minutes after the stream gave up, and
+    // closing the wizard does NOT unmount this component — only the Modal's children
+    // go. Without a claim check, a scan the user walked away from repopulates the
+    // stack, and of the wrong server if they picked another one meanwhile.
+    const gen = ++scanGen.current;
+    const stale = () => scanGen.current !== gen;
     setScanning(true);
     setScanStatus("");
     setError(null);
@@ -512,13 +523,23 @@ export function ServerMigrationWizard({
     setProjects([]);
     setStep("select");
     try {
-      // Stream the inspect (SSE): step progress + no fixed timeout, so a slow
-      // SSH + docker inspect doesn't get aborted (the old plain POST hit the
-      // 15s client default through the same-origin proxy).
-      const scanned = await dockerMigrationApi.scanStream(selectedId, {
-        onProgress: setScanStatus,
-        flatDocker: flat,
-      });
+      // Stream the inspect (SSE): step progress + no total-duration bound, so a slow
+      // SSH + docker inspect doesn't get aborted (the old plain POST hit the 15s
+      // client default through the same-origin proxy). When the STREAM is what fails
+      // — an intermediary buffering text/event-stream, GH-570 — the plain POST still
+      // beats a spinner that never stops, so take it silently: same stack, only
+      // without the progress lines.
+      const scanned = await dockerMigrationApi
+        .scanStream(selectedId, { onProgress: setScanStatus, flatDocker: flat })
+        .catch(async (e: unknown) => {
+          if (!isScanStreamStalled(e)) throw e;
+          // Recovered, but an operator's proxy is still misconfigured — say so
+          // somewhere rather than hiding it behind a scan that silently got slower.
+          // The aborted scan also keeps running server-side; it's read-only.
+          console.warn(`[migration] ${(e as Error).message} — falling back to a plain scan`);
+          return (await dockerMigrationApi.scan(selectedId, { flatDocker: flat })).stack;
+        });
+      if (stale()) return;
       setStack(scanned);
       if (!scanned.adoptable) {
         setError(m.discover.nothing);
@@ -552,9 +573,10 @@ export function ServerMigrationWizard({
         ]);
       }
     } catch (e) {
+      if (stale()) return;
       setError(getApiErrorMessage(e, m.scanFailed));
     } finally {
-      setScanning(false);
+      if (!stale()) setScanning(false);
     }
   };
 
@@ -3454,6 +3476,7 @@ function ServiceConfigCard({
           <EnvironmentVariables
             mode="settings"
             borderless
+            hideTitle
             envVars={envRows}
             onEnvVarsChange={(rows) => onSetEnv(rowsToEnv(rows))}
             onReveal={onReveal}

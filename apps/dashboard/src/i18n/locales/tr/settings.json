@@ -48,13 +48,13 @@
     "title": "Ayarlar",
     "tabs": {
       "general": "Genel",
-      "tokens": "Jetonlar",
+      "git": "Git",
+      "tokens": "API jetonları",
       "mcp": "MCP",
       "team": "Ekip",
       "notifications": "Bildirimler",
       "email": "E-posta",
       "credentials": "Kimlik bilgileri",
-      "audit": "Denetim günlüğü",
       "cloud": "Bulut",
       "infrastructure": "Altyapı",
       "instance": "Kurulum"

@@ -61,11 +61,13 @@ import {
   writeAppConfigFile,
 } from "./app-config-host";
 import {
+  auditRoutedDomainTls,
   buildServiceRouteDomains,
   createTrackedSslProvider,
   ensureRouteDomainRecord,
   hostTerminatesTlsLocally,
   toRoutedDomainInputs,
+  withEnsuredDomainRecord,
   type PlannedRouteDomain,
 } from "../../../lib/routing-domains";
 import {
@@ -159,6 +161,13 @@ export interface ComposeDeployResult {
    *  optional — a routing failure never fails a compose deploy). Surfaced as the
    *  project "routing action required" signal. Empty/absent = all routes OK. */
   routeWarnings?: string[];
+  /**
+   * Domains that ARE routed but hold no certificate — `registerRoute` succeeds
+   * without one (the edge keeps a bootstrap self-signed cert on :443), so these
+   * never appear in `routeWarnings`. Kept as their own list because the remedy is
+   * different: point DNS, then Verify — not "retry routing".
+   */
+  tlsPendingDomains?: string[];
   error?: string;
   publicUrl?: string;
   /** Advisory per-service port-probe results (exposed services only). */
@@ -741,7 +750,14 @@ async function prepareServiceRoutes(opts: {
           serviceName: service.name,
         });
       }
-      ensured.push(route);
+      // Re-resolve the SSL gate against the row that exists NOW. The plan above
+      // was built from the rows read BEFORE this loop, so a hostname this deploy
+      // mints itself was planned with no row at all and came out
+      // `provisionSsl: false` — see withEnsuredDomainRecord. A compose service's
+      // row is ALWAYS minted here (syncFromCompose writes routing columns and no
+      // domain row), so without this a compose custom domain never attempted a
+      // certificate on the deploy that created it.
+      ensured.push(withEnsuredDomainRecord(route, domainRecord));
     } catch (err) {
       // Owned by another project / unclaimable → skip it entirely (NOT routed,
       // or we'd hijack their hostname). Domains are optional — never fatal.
@@ -1118,6 +1134,20 @@ export async function deployComposeServices(
   let mutated = false;
   let firstPublicUrl: string | undefined;
   const seenRouteDomains = new Set<string>();
+  /**
+   * Routes this pass really put on the edge, across all services. Read once at the
+   * end by the TLS audit — a registered route with no certificate is the one
+   * routing outcome nothing used to report.
+   *
+   * Only ever appended AFTER the registration it describes succeeded, because the
+   * audit's claim ("this IS routed, and has no cert") is false for anything else.
+   * The proxied path registers inside `runDeployPipeline`, which throws on a failed
+   * health gate with `routeWarnings` unset — so a pre-emptive push there produced
+   * exactly that false claim, with no warning for the audit's exclusion to
+   * subtract. `auditRoutedDomainTls` still subtracts warned hostnames on top, for
+   * the per-domain failures the pipeline DOES report while its other routes land.
+   */
+  const registeredRoutes: PlannedRouteDomain[] = [];
   const unavailableServiceNames = new Set<string>();
   /**
    * serviceName → the container id currently backing it, for resolving a sibling's
@@ -1581,8 +1611,8 @@ export async function deployComposeServices(
           const routeKey = route.hostname.toLowerCase();
           if (seenRouteDomains.has(routeKey)) continue;
           seenRouteDomains.add(routeKey);
-          await routeContext.routing
-            .registerRoute({
+          try {
+            await routeContext.routing.registerRoute({
               domain: route.hostname,
               staticRoot: image,
               tls: true,
@@ -1596,12 +1626,43 @@ export async function deployComposeServices(
               // ever gets cleanUrls/trailingSlash, so without it the flags never applied.
               ...routingFields,
               ...(routeContext.proxy ? { proxy: routeContext.proxy } : {}),
-            })
-            .catch((err) => {
-              composeRouteWarnings.push(
-                `${route.hostname}: ${err instanceof Error ? err.message : "route registration failed"}`,
+            });
+          } catch (err) {
+            composeRouteWarnings.push(
+              `${route.hostname}: ${err instanceof Error ? err.message : "route registration failed"}`,
+            );
+            // No vhost → nothing for ACME to answer the challenge on. Attempting a
+            // cert here would burn a guaranteed-failed Let's Encrypt attempt.
+            continue;
+          }
+          // Past the register: this route really is on the edge, so the TLS audit
+          // may ask about it.
+          registeredRoutes.push(route);
+
+          // SSL parity with a PROXIED service. A proxied route goes through
+          // `registerResolvedRoutes`, which owns the `provisionSsl` step; this
+          // branch calls `registerRoute` directly, so it owned no SSL step at all —
+          // a static compose sub-app on a custom domain got a vhost and never a
+          // certificate, on this deploy or any later one.
+          //
+          // Same contract as the proxied path: the HTTP route is already on disk and
+          // is what answers the ACME challenge, so a failed cert is a follow-up (the
+          // tracked provider records it as Action Required), never a failed deploy.
+          // Kept OUT of the try above so a cert failure can never be reported as a
+          // route-registration failure.
+          if (route.provisionSsl) {
+            logger.log(`Checking SSL for ${route.hostname}...\n`, "info", {
+              serviceName: svc.name,
+            });
+            await routeContext.trackedSsl.provisionCert(route.hostname).catch((err) => {
+              logger.log(
+                `SSL provisioning failed for ${route.hostname} (route is up on HTTP, retry from ` +
+                  `the Domains tab): ${safeErrorMessage(err)}\n`,
+                "warn",
+                { serviceName: svc.name },
               );
             });
+          }
         }
       }
 
@@ -1971,6 +2032,16 @@ export async function deployComposeServices(
       // fatal — the service container is up. Feeds the action-required signal.
       if (deployResult.routeWarnings?.length) {
         composeRouteWarnings.push(...deployResult.routeWarnings);
+      }
+
+      // Recorded as attempted ONLY now. `registerResolvedRoutes` runs inside the
+      // pipeline, after activate + the health gate — so a service that fails the
+      // health gate throws below with `routeWarnings` UNSET and no vhost written.
+      // Pushing before the call meant the TLS audit saw that hostname as routed and
+      // reported "routed but no HTTPS" for a domain that was never routed at all,
+      // with no route warning for the audit's exclusion to subtract.
+      if (deployResult.status !== "failed") {
+        registeredRoutes.push(...proxyRoutes);
       }
 
       if (deployResult.status === "failed") {
@@ -2816,6 +2887,16 @@ export async function deployComposeServices(
     }
   }
 
+  // Routed, but is it actually serving HTTPS? One shared auditor with the
+  // single-app pipeline — `composeRouteWarnings` is passed so a host already
+  // reported as UNROUTED isn't also reported as routed-without-a-cert.
+  const tlsPendingDomains = await auditRoutedDomainTls({
+    projectId: project.id,
+    routes: registeredRoutes,
+    routeWarnings: composeRouteWarnings,
+    log: (message) => logger.log(`${message}\n`, "warn"),
+  });
+
   const failed = results.filter((r) => r.status === "failed");
   const failedNames = failed.map((r) => r.serviceName);
   const indeterminate = results.filter((r) => r.status === "indeterminate");
@@ -2930,6 +3011,7 @@ export async function deployComposeServices(
     primaryContainerId,
     warning,
     ...(composeRouteWarnings.length ? { routeWarnings: composeRouteWarnings } : {}),
+    ...(tlsPendingDomains.length ? { tlsPendingDomains } : {}),
     // `skipNotice` before the generic: when a scoped deploy named no enabled service, every
     // service is out of scope and nothing failed — so "No services deployed successfully"
     // is true but useless, while the notice names what was left out and what to do.

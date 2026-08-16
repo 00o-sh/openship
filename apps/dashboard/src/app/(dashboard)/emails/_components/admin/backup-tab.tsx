@@ -21,6 +21,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { Checkbox } from "@/components/ui/Checkbox";
 import Link from "next/link";
 import {
   DatabaseBackup,
@@ -568,23 +569,23 @@ function CheckRow({
   desc: string;
 }) {
   return (
-    <label
-      className={`flex items-start gap-3 rounded-xl border border-border/60 px-4 py-3 ${
+    <button
+      type="button"
+      onClick={() => onChange(!checked)}
+      disabled={disabled}
+      aria-pressed={checked}
+      className={`flex w-full items-start gap-3 rounded-xl border border-border/60 px-4 py-3 text-start ${
         disabled ? "opacity-70" : "cursor-pointer hover:bg-muted/30"
       } transition-colors`}
     >
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        onChange={(e) => onChange(e.target.checked)}
-        className="mt-0.5 size-4 accent-primary"
-      />
+      {/* `accent-primary` was the tell: the native box could only be tinted, never themed —
+          its border, radius and check glyph stayed the browser's. */}
+      <Checkbox checked={checked} disabled={disabled} className="pointer-events-none mt-0.5" />
       <div className="min-w-0">
         <p className="text-sm font-medium text-foreground">{title}</p>
         <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{desc}</p>
       </div>
-    </label>
+    </button>
   );
 }
 

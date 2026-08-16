@@ -48,12 +48,12 @@
     "title": "الإعدادات",
     "tabs": {
       "general": "عام",
-      "tokens": "الرموز",
+      "git": "Git",
+      "tokens": "رموز واجهة البرمجة",
       "mcp": "MCP",
       "team": "الفريق",
       "notifications": "الإشعارات",
       "credentials": "بيانات الاعتماد",
-      "audit": "سجل التدقيق",
       "cloud": "السحابة",
       "infrastructure": "البنية التحتية",
       "instance": "النسخة"

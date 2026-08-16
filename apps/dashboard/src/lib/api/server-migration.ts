@@ -276,8 +276,10 @@ export interface TransferProgress {
  * the work, however long the work takes.
  */
 const SCAN_STREAM_FIRST_BYTE_MS = 15_000;
-/** One missed 25s heartbeat plus slack for a loaded box. */
-const SCAN_STREAM_IDLE_MS = 45_000;
+/** TWO missed 25s heartbeats plus slack. One (50s) is not enough headroom: a single
+ *  delayed ping on a loaded box would read as a stall. Being wrong here is cheap —
+ *  the fallback is a read-only re-scan — but there's no reason to spend one. */
+const SCAN_STREAM_IDLE_MS = 70_000;
 
 /** The stream never delivered, as distinct from the scan having failed. Callers should
  *  retry through the non-streaming `scan()`, which crosses the same hops as any POST. */
@@ -309,10 +311,10 @@ export const dockerMigrationApi = {
     ),
 
   /**
-   * Streaming inspect (SSE): same result as scan(), but step-progress events +
-   * NO fixed client timeout — the stream stays alive via heartbeats, so a slow
-   * SSH + docker inspect (esp. through the same-origin proxy hop) can't be
-   * aborted mid-flight. Resolves with the stack; rejects on the error frame.
+   * Streaming inspect (SSE): same result as scan(), but with step progress and no
+   * bound on TOTAL duration — a slow SSH + docker inspect is never aborted for
+   * merely taking long. What IS bound is silence; see ScanStreamStalledError, and
+   * fall back to scan() when it's thrown.
    */
   scanStream: (
     serverId: string,
@@ -323,19 +325,55 @@ export const dockerMigrationApi = {
         const url =
           `${getApiBaseUrl()}${endpoints.dockerMigration.scanStream}?serverId=${encodeURIComponent(serverId)}` +
           (opts.flatDocker ? "&flatDocker=1" : "");
+        const abort = new AbortController();
+        let stallReason: string | null = null;
+        let watchdog: ReturnType<typeof setTimeout> | undefined;
+        // One watchdog covers connect, headers, first byte and mid-stream silence:
+        // aborting rejects the fetch AND any in-flight read, so every way the
+        // transport can go quiet arrives at the same branch.
+        const arm = (ms: number) => {
+          clearTimeout(watchdog);
+          watchdog = setTimeout(() => {
+            stallReason = `no data for ${Math.round(ms / 1000)}s`;
+            abort.abort();
+          }, ms);
+        };
+        const asError = (e: unknown) =>
+          stallReason
+            ? new ScanStreamStalledError(stallReason)
+            : e instanceof Error
+              ? e
+              : new Error(String(e));
+
+        arm(SCAN_STREAM_FIRST_BYTE_MS);
         let res: Response;
         try {
           res = await fetch(url, {
             method: "GET",
             credentials: "include",
             headers: { Accept: "text/event-stream" },
+            signal: abort.signal,
           });
         } catch (e) {
-          reject(e instanceof Error ? e : new Error(String(e)));
+          clearTimeout(watchdog);
+          reject(asError(e));
           return;
         }
         if (!res.ok || !res.body) {
-          reject(new Error(await res.text().catch(() => res.statusText)));
+          // Watchdog stays armed across this read: a hop that stalls a stream stalls
+          // an error body too, and aborting here just falls back to the status text.
+          const detail = await res.text().catch(() => res.statusText);
+          clearTimeout(watchdog);
+          reject(new Error(detail));
+          return;
+        }
+        // A 200 that isn't an event-stream means something between us and the API
+        // answered in its place; the frame loop would read to EOF and find nothing.
+        const contentType = res.headers.get("content-type") ?? "";
+        if (!contentType.includes("text/event-stream")) {
+          clearTimeout(watchdog);
+          void res.body.cancel().catch(() => {});
+          reject(new ScanStreamStalledError(`200 response was "${contentType || "untyped"}"`));
           return;
         }
         const reader = res.body.getReader();
@@ -345,6 +383,7 @@ export const dockerMigrationApi = {
         const finish = (fn: () => void) => {
           if (settled) return;
           settled = true;
+          clearTimeout(watchdog);
           try { void reader.cancel(); } catch { /* noop */ }
           fn();
         };
@@ -352,6 +391,9 @@ export const dockerMigrationApi = {
           for (;;) {
             const { value, done } = await reader.read();
             if (done) break;
+            // Re-arm on the raw chunk, not on a parsed frame: a heartbeat comment and
+            // a half-delivered frame both prove the transport is still moving.
+            arm(SCAN_STREAM_IDLE_MS);
             buf += decoder.decode(value, { stream: true });
             // Parse whole "…\n\n" frames so a large result payload split across
             // reads is never half-parsed.
@@ -372,9 +414,13 @@ export const dockerMigrationApi = {
               else if (msg.type === "error") return finish(() => reject(new Error(msg.error || "Scan failed")));
             }
           }
-          if (!settled) reject(new Error("Scan stream ended without a result"));
+          clearTimeout(watchdog);
+          // Closed with no result: a hop that buffered and flushed only at EOF looks
+          // like this too, so it carries the same "retry unstreamed" signal.
+          if (!settled) reject(new ScanStreamStalledError("stream ended without a result"));
         } catch (e) {
-          if (!settled) reject(e instanceof Error ? e : new Error(String(e)));
+          clearTimeout(watchdog);
+          if (!settled) reject(asError(e));
         }
       })();
     }),

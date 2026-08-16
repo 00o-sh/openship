@@ -48,12 +48,12 @@
     "title": "Ajustes",
     "tabs": {
       "general": "General",
-      "tokens": "Tokens",
+      "git": "Git",
+      "tokens": "Tokens de API",
       "mcp": "MCP",
       "team": "Equipo",
       "notifications": "Notificaciones",
       "credentials": "Credenciales",
-      "audit": "Registro de auditoría",
       "cloud": "Cloud",
       "infrastructure": "Infraestructura",
       "instance": "Instancia"

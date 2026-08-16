@@ -38,6 +38,7 @@ import {
   inputClassName,
 } from "./_shared/form-modal-content";
 import { useI18n, interpolate } from "@/components/i18n-provider";
+import { Checkbox } from "@/components/ui/Checkbox";
 import { useMailRailOwnsTabs } from "../../_lib/mail-section";
 
 interface MailboxesTabProps {
@@ -582,13 +583,8 @@ function EditMailboxForm({
           className={inputClassName}
         />
       </Field>
-      <label className="flex items-start gap-3 cursor-pointer p-3 -mx-1 rounded-xl hover:bg-muted/30 transition-colors">
-        <input
-          type="checkbox"
-          checked={active}
-          onChange={(e) => setActive(e.target.checked)}
-          className="rounded border-border mt-0.5"
-        />
+      <button type="button" onClick={() => setActive(!active)} aria-pressed={active} className="flex w-full items-start gap-3 cursor-pointer p-3 -mx-1 rounded-xl text-start hover:bg-muted/30 transition-colors">
+        <Checkbox checked={active} className="pointer-events-none mt-0.5" />
         <span>
           <span className="block text-sm font-medium text-foreground">
             {t.emailsAdmin.mailboxes.editForm.activeLabel}
@@ -597,7 +593,7 @@ function EditMailboxForm({
             {t.emailsAdmin.mailboxes.editForm.activeDesc}
           </span>
         </span>
-      </label>
+      </button>
     </FormModalContent>
   );
 }
@@ -643,13 +639,13 @@ function DeleteMailboxConfirm({
       onCancel={onCancel}
     >
       {!isPostmaster ? (
-        <label className="flex items-start gap-3 cursor-pointer p-3 -mx-1 rounded-xl hover:bg-danger-bg transition-colors">
-          <input
-            type="checkbox"
-            checked={hardDelete}
-            onChange={(e) => setHardDelete(e.target.checked)}
-            className="rounded border-border mt-0.5"
-          />
+        <button
+          type="button"
+          onClick={() => setHardDelete(!hardDelete)}
+          aria-pressed={hardDelete}
+          className="flex w-full items-start gap-3 cursor-pointer p-3 -mx-1 rounded-xl text-start hover:bg-danger-bg transition-colors"
+        >
+          <Checkbox checked={hardDelete} tone="destructive" className="pointer-events-none mt-0.5" />
           <span>
             <span className="block text-sm font-medium text-danger">
               {t.emailsAdmin.mailboxes.deleteForm.hardDeleteLabel}
@@ -658,7 +654,7 @@ function DeleteMailboxConfirm({
               {t.emailsAdmin.mailboxes.deleteForm.hardDeleteDesc}
             </span>
           </span>
-        </label>
+        </button>
       ) : (
         <div className="rounded-xl border border-warning-border bg-warning-bg px-4 py-3 text-sm text-warning">
           {t.emailsAdmin.mailboxes.deleteForm.postmasterNote}

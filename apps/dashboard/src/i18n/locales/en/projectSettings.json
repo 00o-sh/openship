@@ -65,10 +65,16 @@
     "openApp": "Open app",
     "goToApp": "Go to app",
     "installFailed": "Install failed",
+    "installFailedBody": "It stopped before everything was running. The technical details carry the full build log.",
+    "installCancelledSelf": "You stopped this install.",
+    "installCancelledBody": "The containers and images it had created were removed, and data volumes were kept — installing again reuses them. Anything already live was left alone.",
+    "settledAtPhase": "Stopped at {phase}",
     "viewDetails": "View technical details",
     "showLogs": "Show logs",
     "hideLogs": "Hide logs",
     "deployLogs": "deploy logs",
+    "logsWaiting": "Waiting for output…",
+    "logsEmpty": "No output was captured.",
     "back": "Back",
     "phaseImages": "Preparing images",
     "phaseServices": "Starting services",
@@ -844,7 +850,9 @@
       "toggle": "DNS records",
       "hint": "Add these at your DNS provider, then click Verify.",
       "loading": "Loading records…",
-      "none": "No records to add for this domain."
+      "none": "No records to add for this domain.",
+      "failed": "Couldn't load the DNS records for this domain.",
+      "retry": "Try again"
     },
     "verifyMissing": {
       "both": "Neither the CNAME nor the TXT record is resolving yet — add the records below, wait for DNS to propagate, then Verify.",

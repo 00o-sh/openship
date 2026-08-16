@@ -69,14 +69,14 @@
     "title": "Settings",
     "tabs": {
       "general": "General",
-      "tokens": "Tokens",
+      "git": "Git",
+      "tokens": "API tokens",
       "mcp": "MCP",
       "team": "Team",
       "notifications": "Notifications",
       "email": "Email",
       "systemSender": "System sender",
       "credentials": "Credentials",
-      "audit": "Audit log",
       "cloud": "Cloud",
       "infrastructure": "Infrastructure",
       "instance": "Instance"

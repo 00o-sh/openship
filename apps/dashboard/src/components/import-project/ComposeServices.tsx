@@ -906,6 +906,7 @@ const ServiceCard: React.FC<{
             isEditingMode={true}
             showSettingsActions={false}
             borderless
+            hideTitle
             envVars={envRows}
             envMeta={service.environmentMeta}
             onEnvVarsChange={handleEnvChange}

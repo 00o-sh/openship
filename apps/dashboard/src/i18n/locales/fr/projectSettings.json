@@ -768,7 +768,9 @@
       "toggle": "Enregistrements DNS",
       "hint": "Ajoutez-les chez votre fournisseur DNS, puis cliquez sur Vérifier.",
       "loading": "Chargement des enregistrements…",
-      "none": "Aucun enregistrement à ajouter pour ce domaine."
+      "none": "Aucun enregistrement à ajouter pour ce domaine.",
+      "failed": "Impossible de charger les enregistrements DNS de ce domaine.",
+      "retry": "Réessayer"
     },
     "verifyMissing": {
       "both": "Ni le CNAME ni le TXT ne sont encore résolus — ajoutez les enregistrements ci-dessous, attendez la propagation DNS, puis Vérifiez.",

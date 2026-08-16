@@ -48,12 +48,12 @@
     "title": "Paramètres",
     "tabs": {
       "general": "Général",
-      "tokens": "Jetons",
+      "git": "Git",
+      "tokens": "Jetons d'API",
       "mcp": "MCP",
       "team": "Équipe",
       "notifications": "Notifications",
       "credentials": "Identifiants",
-      "audit": "Journal d'audit",
       "cloud": "Cloud",
       "infrastructure": "Infrastructure",
       "instance": "Instance"

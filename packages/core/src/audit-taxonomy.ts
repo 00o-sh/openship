@@ -458,8 +458,8 @@ export const AUDIT_EVENTS: Record<string, AuditEventDef> = {
   // suite fails; with it, an operator who DOES surface these sees a real label.
   "mail.inbound_received": {
     category: "servers",
-    action: "received inbound mail matching an inbound rule on",
-    label: "Inbound email received",
+    action: "received mail matching a notification rule on",
+    label: "Mail arrived at a watched address",
     tone: "info",
   },
 

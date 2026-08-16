@@ -35,6 +35,36 @@ export function createDomainRepo(db: Database) {
       .where(eq(domain.id, domainId));
   }
 
+  /**
+   * Insert a row and return it as the DB actually stored it.
+   *
+   * `{ ...values } as Domain` was a lie for every column the caller didn't pass:
+   * `sslStatus`, `status`, `verified`, `verifyAttempts`, `externalIngress`,
+   * `manualSsl` and `ownerType` are NOT-NULL columns with DB DEFAULTS, so the
+   * returned object satisfied the type while carrying `undefined` for each of
+   * them. Readers that compare against the default then quietly take the wrong
+   * branch — the deploy's first-issuance gate asks `row.sslStatus === "none"`, got
+   * `undefined === "none"` → false, and skipped the certificate for every
+   * domain minted at deploy time.
+   *
+   * One extra SELECT on a path that runs once per new domain, and it cannot drift
+   * as the schema's defaults change.
+   */
+  async function insertAndRead(row: NewDomain & { id: string }): Promise<Domain> {
+    await db.insert(domain).values(row);
+    // NON-THROWING on purpose. The INSERT has already landed, so a rejecting
+    // read-back (connection blip, statement timeout, pool exhaustion) must not
+    // turn a SUCCESSFUL create into a create failure — the caller would then
+    // treat the hostname as unclaimable and skip routing it while the row exists.
+    // `findOrCreate`'s own catch can't save it either: that only re-reads on a
+    // unique violation. Degrade to the insert values (the pre-existing return
+    // shape) instead, which is strictly better than throwing.
+    const created = await db.query.domain
+      .findFirst({ where: eq(domain.id, row.id) })
+      .catch(() => undefined);
+    return created ?? ({ ...row, createdAt: new Date(), updatedAt: new Date() } as Domain);
+  }
+
   return {
     async findById(id: string) {
       return db.query.domain.findFirst({
@@ -274,14 +304,12 @@ export function createDomainRepo(db: Database) {
 
     async create(data: Omit<NewDomain, "id"> & { verificationToken?: string }) {
       const id = generateId("dom");
-      const row = {
+      return insertAndRead({
         id,
         ...data,
         hostname: data.hostname.toLowerCase(),
         verificationToken: data.verificationToken ?? id,
-      };
-      await db.insert(domain).values(row);
-      return { ...row, createdAt: new Date(), updatedAt: new Date() } as Domain;
+      });
     },
 
     /**
@@ -317,9 +345,12 @@ export function createDomainRepo(db: Database) {
         verificationToken: data.verificationToken ?? id,
       };
       try {
-        await db.insert(domain).values(row);
-        if (row.isPrimary && row.projectId) await promotePrimary(row.projectId, id);
-        return { ...row, createdAt: new Date(), updatedAt: new Date() } as Domain;
+        const created = await insertAndRead(row);
+        if (row.isPrimary && row.projectId) {
+          await promotePrimary(row.projectId, id);
+          return { ...created, isPrimary: true };
+        }
+        return created;
       } catch (err: any) {
         // Handle race: another deploy inserted between our check and insert
         if (err?.message?.includes("unique") || err?.code === "23505") {

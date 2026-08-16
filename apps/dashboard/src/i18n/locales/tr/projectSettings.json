@@ -84,6 +84,12 @@
     "stopInstall": "Yüklemeyi durdur",
     "stopping": "Durduruluyor…",
     "installCancelled": "Yükleme iptal edildi",
+    "installFailedBody": "Her şey çalışmaya başlamadan önce durdu. Tam derleme günlüğü teknik detaylarda yer alıyor.",
+    "installCancelledSelf": "Bu yüklemeyi siz durdurdunuz.",
+    "installCancelledBody": "Oluşturduğu konteynerler ve imajlar kaldırıldı, veri birimleri ise korundu — yeniden yüklediğinizde bunlar tekrar kullanılır. Halihazırda çalışan hiçbir şeye dokunulmadı.",
+    "settledAtPhase": "{phase} adımında durdu",
+    "logsWaiting": "Çıktı bekleniyor…",
+    "logsEmpty": "Hiçbir çıktı kaydedilmedi.",
     "startOver": "Baştan başla",
     "breadcrumbApps": "Uygulamalar",
     "appEyebrow": "Uygulama",
@@ -808,7 +814,9 @@
       "toggle": "DNS kayıtları",
       "hint": "Bunları DNS sağlayıcınıza ekleyin, ardından Doğrula'ya tıklayın.",
       "loading": "Kayıtlar yükleniyor…",
-      "none": "Bu alan adı için eklenecek kayıt yok."
+      "none": "Bu alan adı için eklenecek kayıt yok.",
+      "failed": "Bu alan adı için DNS kayıtları yüklenemedi.",
+      "retry": "Yeniden dene"
     },
     "verifyMissing": {
       "both": "Ne CNAME ne de TXT kaydı henüz çözümlenmiyor — aşağıdaki kayıtları ekleyin, DNS yayılmasını bekleyin ve ardından Doğrula'ya basın.",

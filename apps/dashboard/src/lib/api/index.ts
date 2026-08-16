@@ -86,7 +86,7 @@ export type {
   RescanResult,
 } from "./issues";
 export { migrationApi } from "./migration";
-export { dockerMigrationApi } from "./server-migration";
+export { dockerMigrationApi, isScanStreamStalled } from "./server-migration";
 export type {
   DiscoveredStack,
   DiscoveredGroup,

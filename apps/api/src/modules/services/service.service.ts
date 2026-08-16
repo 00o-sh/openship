@@ -44,7 +44,11 @@ import { deploymentWorkload } from "../deployments/deployment-class";
 import { hasSourceBuildRecipe } from "../../lib/deployable-service";
 import { deriveProjectRouteState } from "../domains/project-route.service";
 import { registerStartupHook } from "../../lib/startup";
-import { buildServiceRouteDomains, serviceCustomHostnames } from "../../lib/routing-domains";
+import {
+  buildServiceRouteDomains,
+  serviceCustomHostnames,
+  serviceDomainRowsToEnsure,
+} from "../../lib/routing-domains";
 import {
   mergeServiceRoutingPatch,
   publicEndpointHostname,
@@ -656,9 +660,15 @@ export async function createService(
   // Mint verifiable PENDING rows for any custom domain configured at create
   // time, so the routing UI shows Verify/DNS/SSL immediately — parity with the
   // edit path. Live route registration still happens through the deploy/add
-  // flow, not here.
-  for (const hostname of serviceCustomHostnames(created)) {
-    await ensurePendingServiceDomain({ projectId, serviceId: created.id, hostname });
+  // flow, not here. `serviceDomainRowsToEnsure` is the shared derivation (it also
+  // attaches each hostname's port, which this site used to drop).
+  for (const row of serviceDomainRowsToEnsure(created)) {
+    await ensurePendingServiceDomain({
+      projectId,
+      serviceId: created.id,
+      hostname: row.hostname,
+      targetPort: row.targetPort,
+    });
   }
 
   // #231: keep the app deployable once it gains a compose sidecar (see helper).
@@ -938,17 +948,22 @@ export async function updateService(
       // Track the freshly-created ones so we can reuse an existing on-server cert
       // for them below (migration / first publish) instead of forcing an ACME
       // re-issue.
+      // Same shared derivation as create + compose sync, so the three cannot
+      // disagree about which hostnames get a row. It reads the CONFIG, so it also
+      // covers a custom hostname whose port hasn't been set yet — `nextRoutes`
+      // dropped those (no resolvable port → no route), which is how the same
+      // config could get a row from create and none from an edit. Still gated on
+      // `isRoutable`: an unexposed service publishes nothing, and only a route we
+      // just published is a candidate for adopting an existing on-server cert.
       const freshlyPublishedDomainIds: string[] = [];
-      for (const route of nextRoutes) {
-        if (route.domainType === "custom") {
-          const ensured = await ensurePendingServiceDomain({
-            projectId: project.id,
-            serviceId,
-            hostname: route.hostname,
-            targetPort: route.targetPort,
-          });
-          if (ensured.created && ensured.domainId) freshlyPublishedDomainIds.push(ensured.domainId);
-        }
+      for (const row of isRoutable ? serviceDomainRowsToEnsure(updated) : []) {
+        const ensured = await ensurePendingServiceDomain({
+          projectId: project.id,
+          serviceId,
+          hostname: row.hostname,
+          targetPort: row.targetPort,
+        });
+        if (ensured.created && ensured.domainId) freshlyPublishedDomainIds.push(ensured.domainId);
       }
       // Drop the derived row for any custom hostname the service no longer
       // CONFIGURES (cleared / renamed / switched to free) — keyed on config,
@@ -1210,6 +1225,68 @@ export async function syncComposeServices(
   const synced = await repos.service.syncFromCompose(projectId, reconciled, {
     composeAuthoritative: true,
   });
+
+  // Mint a verifiable PENDING row for every custom hostname this sync persisted —
+  // the same thing createService and updateService already do, and the reason they
+  // do it: the row is what the routing UI keys Verify / DNS-records / SSL on.
+  //
+  // This path wrote the routing COLUMNS straight through `syncFromCompose` and no
+  // domain row at all, which is how a wizard-configured compose project reached its
+  // first deploy with none: the Domains tab then rendered cards synthesized from the
+  // service config (Pending / Inactive, with a Verify button keyed on an id that
+  // doesn't exist), and the deploy planned every route against a missing row — the
+  // exact condition that made `provisionSsl` false and skipped the certificate.
+  //
+  // Best-effort per hostname: an invalid or foreign hostname throws here (Validation
+  // / Conflict), and a compose sync that already persisted its services must not
+  // fail on the follow-up bookkeeping. The deploy path re-attempts the same
+  // ensure and reports what it couldn't claim.
+  // Verifiable PENDING rows for every custom hostname this sync persisted — the
+  // same thing createService and updateService do, and for the same reason: the row
+  // is what the routing UI keys Verify / DNS-records / SSL on. This path wrote the
+  // routing COLUMNS straight through `syncFromCompose` and no row at all, which is
+  // how a wizard-configured compose project reached its first deploy with none.
+  //
+  // BOTH halves of the lifecycle, like updateService: mint what the config now
+  // declares, then drop the row for any hostname that LEFT it. Minting alone left a
+  // renamed or cleared custom domain's row behind forever — `syncFromCompose`
+  // updates a surviving service in place, so the serviceId FK cascade never fires
+  // — and the orphan kept appearing in the Domains tab and being retried by the
+  // verify cron.
+  //
+  // One derivation for all three write paths (`serviceDomainRowsToEnsure`), so the
+  // sync can't disagree with create/update about which hostnames get a row.
+  // Best-effort per hostname: an invalid or foreign hostname throws here
+  // (Validation / Conflict) and a sync that already persisted its services must not
+  // fail on the follow-up bookkeeping; the deploy path re-attempts the same ensure.
+  const storedByName = new Map(stored.map((svc) => [svc.name, svc]));
+  for (const svc of synced) {
+    for (const row of serviceDomainRowsToEnsure(svc)) {
+      await ensurePendingServiceDomain({
+        projectId,
+        serviceId: svc.id,
+        hostname: row.hostname,
+        targetPort: row.targetPort,
+      }).catch((err: unknown) => {
+        console.warn(
+          `[services] ${svc.name}: could not record domain "${row.hostname}" — ${safeErrorMessage(err)}`,
+        );
+      });
+    }
+
+    const previous = storedByName.get(svc.name);
+    if (!previous) continue;
+    const stillConfigured = new Set(serviceCustomHostnames(svc));
+    for (const hostname of serviceCustomHostnames(previous)) {
+      if (stillConfigured.has(hostname)) continue;
+      await removeServiceDomain({ serviceId: svc.id, hostname }).catch((err: unknown) => {
+        console.warn(
+          `[services] ${svc.name}: could not drop stale domain "${hostname}" — ${safeErrorMessage(err)}`,
+        );
+      });
+    }
+  }
+
   return synced.map(maskServiceEnv);
 }
 

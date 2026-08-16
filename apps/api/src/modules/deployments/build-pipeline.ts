@@ -63,10 +63,12 @@ import { syncProjectToServerManifest } from "../../lib/openship-manifest-sync";
 import { syncManagedEdgeRoutes, edgeUnsyncedWarning } from "../../lib/managed-edge-proxy";
 import { decryptEnvMap } from "../../lib/encryption";
 import {
+  auditRoutedDomainTls,
   buildProjectRouteDomains,
   createTrackedSslProvider,
   ensureRouteDomainRecord,
   toRoutedDomainInputs,
+  withEnsuredDomainRecord,
 } from "../../lib/routing-domains";
 import { normalizeTargetPath } from "../../lib/public-endpoints";
 import { resolveRuntimeResources, resolveBuildResources } from "../../lib/resources";
@@ -1814,7 +1816,11 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
         createdDomainIds.push(created.id);
         logger.log(`Created domain record for "${route.hostname}".\n`);
       }
-      routableDomains.push(route);
+      // Same ordering hole the compose path has: the plan above was built from the
+      // rows read BEFORE this loop, so a hostname minted right here was planned
+      // with no row and came out `provisionSsl: false` — see
+      // withEnsuredDomainRecord. Re-resolve against the row that exists now.
+      routableDomains.push(withEnsuredDomainRecord(route, created));
     } catch (err) {
       const message = safeErrorMessage(err);
       logger.log(`Skipping domain "${route.hostname}" (not routed — ${message}).\n`, "warn");
@@ -1841,7 +1847,12 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
     onReadinessWarning: (detail) => readinessWarnings.push(detail),
   });
 
-  const deploySsl = plannedDomains.some((domain) => domain.provisionSsl)
+  // Gate on the ROUTABLE set, not the plan: `routableDomains` carries the
+  // post-ensure SSL verdict (and drops hostnames another project owns), and it is
+  // what `toRoutedDomainInputs` hands the pipeline. Reading the pre-ensure plan
+  // here left the tracked provider unwired for a first-deploy domain — so even
+  // once issuance fired, nothing persisted the cert status onto the row.
+  const deploySsl = routableDomains.some((domain) => domain.provisionSsl)
     ? createTrackedSslProvider(ssl, domainByHostname, (m) => logger.log(`${m}\n`))
     : ssl;
 
@@ -2033,8 +2044,20 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
   // + the Domains-tab dot instead of failing an otherwise-good deploy. Cleared
   // by Retry routing / the next clean deploy.
   const routeIssues = [...domainClaimWarnings, ...(deployResult.routeWarnings ?? [])];
-  if (routeIssues.length) {
-    const msg = routeIssuesWarning(routeIssues);
+  // Routed, but is it serving HTTPS? `registerRoute` succeeds without a certificate
+  // (the edge keeps a bootstrap self-signed cert on :443) and the issuance failure
+  // inside registerResolvedRoutes is caught and only logged — so a domain could
+  // finish a green deploy routed, serving a self-signed cert, with nothing saying
+  // so. One shared auditor with the compose pipeline; `routeIssues` is passed so a
+  // host already reported as UNROUTED isn't also reported as uncertified.
+  const tlsPending = await auditRoutedDomainTls({
+    projectId: project.id,
+    routes: routableDomains,
+    routeWarnings: routeIssues,
+    log: (message) => logger.log(`${message}\n`, "warn"),
+  });
+  if (routeIssues.length || tlsPending.length) {
+    const msg = routeIssuesWarning(routeIssues, tlsPending);
     metaPatch.deployWarning = metaPatch.deployWarning ? `${metaPatch.deployWarning} · ${msg}` : msg;
     metaPatch.edgeUnsynced = true;
   }

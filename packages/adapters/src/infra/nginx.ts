@@ -91,6 +91,12 @@ const CTL = "\\x00-\\x1f\\x7f";
  * this one had correctly let through — SSE arriving as one blob at close, or not at
  * all (GH-570). Re-exposing the header costs nothing for a response that doesn't set
  * it, which is every response but a stream.
+ *
+ * Hop 2 is NOT configured from this repo (managed-edge-proxy only hands Cloud a slug
+ * and a target), so that it honours the header is inference from nginx's defaults, not
+ * something a test here can prove. Confirm it once against a live `*.opsh.io` SSE
+ * endpoint. It names one field deliberately: X-Accel-Redirect stays hidden, so a
+ * tenant app cannot drive an internal redirect inside Cloud's shared edge.
  */
 const PROXY_HEADERS = `proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;

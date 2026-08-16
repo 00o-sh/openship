@@ -44,7 +44,6 @@ import { TeamTab } from "./_components/TeamTab";
 import { NotificationsTab } from "./_components/NotificationsTab";
 import { EmailSettings } from "./_components/EmailSettings";
 import { Credentials } from "./_components/Credentials";
-import { AuditTab } from "./_components/AuditTab";
 import { DataTransferTab } from "./_components/DataTransferTab";
 import {
   SettingsSidebar,
@@ -131,7 +130,6 @@ function SettingsPageInner() {
         <div className="space-y-6 min-w-0">
           {activeTab === "general" && (
             <>
-              {!mailOnly && <GitHubConnection />}
               {/* Deploy Defaults + Routing hidden for now — advanced/rarely-needed,
                   reduces general-settings noise. The edge defaults to loopback-port
                   and both keep a per-project override; re-enable by uncommenting. */}
@@ -146,12 +144,9 @@ function SettingsPageInner() {
             </>
           )}
 
-          {activeTab === "tokens" && (
-            <>
-              <PersonalAccessTokens />
-              {!mailOnly && <CloneCredentials />}
-            </>
-          )}
+          {/* Tokens is INBOUND only — somebody authenticating TO Openship. The clone PAT
+              moved to Credentials, which is everything pointing the other way. */}
+          {activeTab === "tokens" && <PersonalAccessTokens />}
 
           {activeTab === "mcp" && <McpConnection />}
 
@@ -161,9 +156,18 @@ function SettingsPageInner() {
 
           {activeTab === "email" && selfHosted && <EmailSettings />}
 
-          {activeTab === "credentials" && <Credentials />}
+          {/* Git sources — the App installation (per-org, mints tokens on demand) and the
+              clone PAT (per-USER). Neither fits an org-scoped credential row, which is why
+              they keep their own storage; they get their own TAB because they are one
+              subject with several shapes, and further providers land beside them. */}
+          {activeTab === "git" && !mailOnly && (
+            <>
+              <GitHubConnection />
+              <CloneCredentials />
+            </>
+          )}
 
-          {activeTab === "audit" && <AuditTab />}
+          {activeTab === "credentials" && <Credentials />}
 
           {activeTab === "cloud" && selfHosted && <CloudConnection />}
 

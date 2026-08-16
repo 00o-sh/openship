@@ -307,6 +307,32 @@ describe("NginxProvider.reapplyStoredRoutes", () => {
     expect(conf("myapp-opsh-io")).toContain("proxy_pass http://127.0.0.1:3009");
   });
 
+  /**
+   * The fleet is at generation 1, not at "unstamped": `age()` above removes the marker
+   * line entirely, so every test here exercises only the `gen === null` branch. The
+   * numbered one (`gen < VHOST_GENERATION`) is the branch every already-provisioned box
+   * actually takes, and it had no coverage.
+   */
+  test("replays a vhost stamped with an OLDER generation, not just an unstamped one", async () => {
+    const { nginx, files, conf } = setup();
+    await nginx.registerRoute(FREE_ROUTE);
+    files.set(
+      `${SITES}/myapp-opsh-io.conf`,
+      conf("myapp-opsh-io")!
+        .replace(/^# openship-vhost-gen: \d+$/m, "# openship-vhost-gen: 1")
+        .replace(/^\s*proxy_pass_header X-Accel-Buffering;\n/m, ""),
+    );
+    expect(readVhostGeneration(conf("myapp-opsh-io")!)).toBe(1);
+    expect(conf("myapp-opsh-io")).not.toContain("proxy_pass_header");
+
+    const result = await nginx.reapplyStoredRoutes();
+
+    expect(result.repaired).toEqual(["myapp.opsh.io"]);
+    expect(result.failed).toEqual([]);
+    expect(readVhostGeneration(conf("myapp-opsh-io")!)).toBe(VHOST_GENERATION);
+    expect(conf("myapp-opsh-io")).toContain("proxy_pass_header X-Accel-Buffering;");
+  });
+
   test("a converged box writes nothing and reloads nothing", async () => {
     // This runs on the ordinary edge-ensure path, so the steady state has to be free.
     const { nginx, calls, writes } = setup();
@@ -2478,5 +2504,33 @@ describe("slug collisions between dotted and dashed hostnames", () => {
     await nginx.registerRoute(route(DASHED, 3006));
     expect(confs(files)).toHaveLength(1);
     expect(files.get(`${SITES}/${BASE}.conf`)).toContain("127.0.0.1:3006");
+  });
+});
+
+/**
+ * GH-570. An upstream defeats proxy buffering by answering with
+ * `X-Accel-Buffering: no` — which nginx honours and then STRIPS, because the whole
+ * X-Accel-* family is hidden from the downstream response by default. One hop, that
+ * is invisible and correct. A Cloud-fronted `*.opsh.io` host has two, and the second
+ * hop buffered the SSE this one had already let through.
+ */
+describe("NginxProvider SSE buffering passthrough", () => {
+  const FREE: RouteConfig = { domain: "myapp.opsh.io", tls: false, targetUrl: "http://127.0.0.1:3009" };
+
+  test("re-exposes X-Accel-Buffering so a second proxy hop sees it", async () => {
+    const { nginx, conf } = setup();
+    await nginx.registerRoute(FREE);
+    expect(conf("myapp-opsh-io")).toContain("proxy_pass_header X-Accel-Buffering;");
+  });
+
+  test("carries it on a TLS vhost as well as a plain one", async () => {
+    const { nginx, conf } = setup();
+    await nginx.registerRoute(OURS);
+    expect(conf("app-example-com")).toContain("proxy_pass_header X-Accel-Buffering;");
+  });
+
+  /** Without a generation bump the directive reaches only boxes that redeploy. */
+  test("is stamped at a generation that supersedes the pre-passthrough vhosts", () => {
+    expect(VHOST_GENERATION).toBeGreaterThanOrEqual(2);
   });
 });

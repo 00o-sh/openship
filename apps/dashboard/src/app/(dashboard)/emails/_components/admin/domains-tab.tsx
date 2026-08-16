@@ -30,6 +30,7 @@ import {
 } from "./_shared/form-modal-content";
 import { useToast } from "@/context/ToastContext";
 import { useI18n, interpolate } from "@/components/i18n-provider";
+import { Checkbox } from "@/components/ui/Checkbox";
 import { useMailRailOwnsTabs } from "../../_lib/mail-section";
 import type { DnsRecords } from "@/lib/api";
 import { DnsHoldBanner } from "../dns-hold-banner";
@@ -570,13 +571,8 @@ function EditDomainForm({
           className={inputClassName}
         />
       </Field>
-      <label className="flex items-start gap-3 cursor-pointer p-3 -mx-1 rounded-xl hover:bg-muted/30 transition-colors">
-        <input
-          type="checkbox"
-          checked={active}
-          onChange={(e) => setActive(e.target.checked)}
-          className="rounded border-border mt-0.5"
-        />
+      <button type="button" onClick={() => setActive(!active)} aria-pressed={active} className="flex w-full items-start gap-3 cursor-pointer p-3 -mx-1 rounded-xl text-start hover:bg-muted/30 transition-colors">
+        <Checkbox checked={active} className="pointer-events-none mt-0.5" />
         <span>
           <span className="block text-sm font-medium text-foreground">
             {t.emailsAdmin.domains.editForm.activeLabel}
@@ -585,7 +581,7 @@ function EditDomainForm({
             {t.emailsAdmin.domains.editForm.activeDesc}
           </span>
         </span>
-      </label>
+      </button>
     </FormModalContent>
   );
 }
@@ -654,13 +650,13 @@ function DeleteDomainConfirm({
       disabled={hasDependents && !cascade}
     >
       {hasDependents ? (
-        <label className="flex items-start gap-2.5 cursor-pointer rounded-lg border border-danger-border bg-danger-bg px-3 py-2.5">
-          <input
-            type="checkbox"
-            checked={cascade}
-            onChange={(e) => setCascade(e.target.checked)}
-            className="mt-0.5 size-4 rounded border-danger-border text-danger focus:ring-danger-border"
-          />
+        <button
+          type="button"
+          onClick={() => setCascade(!cascade)}
+          aria-pressed={cascade}
+          className="flex w-full items-start gap-2.5 cursor-pointer rounded-lg border border-danger-border bg-danger-bg px-3 py-2.5 text-start"
+        >
+          <Checkbox checked={cascade} tone="destructive" className="pointer-events-none mt-0.5" />
           <span className="text-sm leading-snug">
             <span className="font-medium text-foreground">
               {interpolate(dt.alsoDelete, { parts: partsLabel })}
@@ -669,7 +665,7 @@ function DeleteDomainConfirm({
               {dt.alsoDeleteDesc}
             </span>
           </span>
-        </label>
+        </button>
       ) : (
         <div />
       )}

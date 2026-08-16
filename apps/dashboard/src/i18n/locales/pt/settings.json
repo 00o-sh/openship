@@ -48,12 +48,12 @@
     "title": "Configurações",
     "tabs": {
       "general": "Geral",
-      "tokens": "Tokens",
+      "git": "Git",
+      "tokens": "Tokens de API",
       "mcp": "MCP",
       "team": "Equipe",
       "notifications": "Notificações",
       "credentials": "Credenciais",
-      "audit": "Registro de auditoria",
       "cloud": "Cloud",
       "infrastructure": "Infraestrutura",
       "instance": "Instância"
