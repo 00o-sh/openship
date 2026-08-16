@@ -165,6 +165,45 @@ export interface ServiceDeployStatus {
   build?: string;
 }
 
+/**
+ * How many services are in each state, for the "0/5 running · 2 built · 1 building"
+ * readout.
+ *
+ * Shared because that sentence is rendered TWICE on the compose deploy screen — the
+ * logs-panel chip and the Deployment Details row, side by side in the same grid —
+ * and each used to filter the same array itself against its own copy of the
+ * strings. A status-set change (counting `deploying` as in-flight) or a wording
+ * change applied to one made the two contradict each other about one stack, at the
+ * same instant, with nothing able to catch it: both i18n keys existed in every
+ * locale, so only their VALUES drifted.
+ *
+ * `status` is a single scalar and the SSE reducer upserts by `serviceId`, so these
+ * counts are mutually exclusive and sum to at most the service count.
+ *
+ * `total` is deliberately NOT here: the two callers legitimately disagree — the
+ * logs panel counts services that have produced log lines but aren't in the roster
+ * yet (`Math.max(services.length, logServiceNames.length)`), the sidebar counts
+ * only known services.
+ */
+export function composeServiceTally(services: readonly ServiceDeployStatus[]): {
+  running: number;
+  built: number;
+  building: number;
+  failed: number;
+} {
+  let running = 0;
+  let built = 0;
+  let building = 0;
+  let failed = 0;
+  for (const service of services) {
+    if (service.status === "running") running += 1;
+    else if (service.status === "built") built += 1;
+    else if (service.status === "building") building += 1;
+    else if (service.status === "failed") failed += 1;
+  }
+  return { running, built, building, failed };
+}
+
 // ─── Build Strategy ──────────────────────────────────────────────────────────
 
 export type { BuildStrategy, RuntimeMode, DeployTarget } from "@repo/core";

@@ -289,7 +289,9 @@
       "saved": "环境变量已保存",
       "savedTitle": "已保存",
       "saveFailed": "保存环境变量失败",
-      "saveFailedTitle": "保存失败"
+      "saveFailedTitle": "保存失败",
+      "noChanges": "没有需要保存的更改——已保留已保存的值。",
+      "noChangesTitle": "无需保存"
     },
     "linkedBadge": "已链接",
     "linkedManaged": "通过 {app}",
@@ -756,6 +758,10 @@
       "noneYet": "尚未执行任何检查，因此没有可显示的结果。请添加此域名所需的 DNS 记录，然后运行“验证”。",
       "attempts": "目前已失败 {count} 次。",
       "pillHint": "查看原因"
+    },
+    "records": {
+      "failed": "无法加载此域名的 DNS 记录。",
+      "retry": "重试"
     }
   }
 }

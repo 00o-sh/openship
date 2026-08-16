@@ -289,7 +289,9 @@
       "saved": "Variables de entorno guardadas",
       "savedTitle": "Guardado",
       "saveFailed": "No se pudieron guardar las variables de entorno",
-      "saveFailedTitle": "Error al guardar"
+      "saveFailedTitle": "Error al guardar",
+      "noChanges": "No hay cambios que guardar: se conservaron los valores guardados.",
+      "noChangesTitle": "Nada que guardar"
     },
     "linkedBadge": "Vinculado",
     "linkedManaged": "vía {app}",
@@ -756,6 +758,10 @@
       "noneYet": "Aún no se ha ejecutado ninguna comprobación, así que no hay resultado. Añade los registros DNS mostrados y luego pulsa Verificar.",
       "attempts": "{count} intento(s) fallido(s) hasta ahora.",
       "pillHint": "Ver el motivo"
+    },
+    "records": {
+      "failed": "No se pudieron cargar los registros DNS de este dominio.",
+      "retry": "Reintentar"
     }
   }
 }

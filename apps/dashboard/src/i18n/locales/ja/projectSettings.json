@@ -289,7 +289,9 @@
       "saved": "環境変数を保存しました",
       "savedTitle": "保存しました",
       "saveFailed": "環境変数の保存に失敗しました",
-      "saveFailedTitle": "保存に失敗しました"
+      "saveFailedTitle": "保存に失敗しました",
+      "noChanges": "保存する変更はありません — 保存済みの値はそのまま維持されます。",
+      "noChangesTitle": "保存する変更なし"
     },
     "linkedBadge": "リンク済み",
     "linkedManaged": "{app} 経由",
@@ -756,6 +758,10 @@
       "noneYet": "まだチェックが実行されていないため、表示できる結果がありません。表示されている DNS レコードを追加してから「検証」を実行してください。",
       "attempts": "これまでに {count} 回失敗しています。",
       "pillHint": "理由を表示"
+    },
+    "records": {
+      "failed": "このドメインの DNS レコードを読み込めませんでした。",
+      "retry": "再試行"
     }
   }
 }

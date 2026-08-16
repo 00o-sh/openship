@@ -294,6 +294,8 @@
       "savedTitle": "Gespeichert",
       "saveFailed": "Speichern der Umgebungsvariablen fehlgeschlagen",
       "saveFailedTitle": "Speichern fehlgeschlagen",
+      "noChanges": "Keine Änderungen zu speichern — gespeicherte Werte bleiben erhalten.",
+      "noChangesTitle": "Nichts zu speichern",
       "applying": "Der Dienst wird mit der neuen Umgebung neu gestartet — kein Neubau.",
       "applyingTitle": "Wird angewendet",
       "applyFailed": "Umgebung konnte nicht auf den laufenden Dienst angewendet werden",
@@ -763,6 +765,10 @@
       "noneYet": "Es wurde noch keine Prüfung ausgeführt, daher gibt es kein Ergebnis. Fügen Sie die angezeigten DNS-Einträge hinzu und führen Sie dann „Verifizieren“ aus.",
       "attempts": "Bisher {count} fehlgeschlagene Versuche.",
       "pillHint": "Grund anzeigen"
+    },
+    "records": {
+      "failed": "Die DNS-Einträge für diese Domain konnten nicht geladen werden.",
+      "retry": "Erneut versuchen"
     }
   }
 }

@@ -415,9 +415,6 @@ export const auth = betterAuth({
         // types are not enabled, so they fall through and send nothing.
         if (type === "email-verification") {
           const tmpl = verifyOtpEmailTemplate(otp, { expiresMinutes: 10 });
-<<<<<<< HEAD
-          await sendMail({ to: email, ...tmpl });
-=======
           if (!(await sendMail({ to: email, ...tmpl }))) {
             throw new APIError("SERVICE_UNAVAILABLE", {
               message:
@@ -425,7 +422,6 @@ export const auth = betterAuth({
                 "email transport. Configure SMTP in Settings → Email.",
             });
           }
->>>>>>> a52e2566 (patch v0.6.6)
           return;
         }
         // Password reset. This replaced the link flow (`sendResetPassword` in the
@@ -644,6 +640,22 @@ export const auth = betterAuth({
               },
             },
           );
+
+          // Give the org its Oblien namespace and push its tier's ceilings.
+          // Cloud only, and fire-and-forget: a slow or unreachable Oblien must
+          // not fail org creation (the boot backfill re-attempts anything that
+          // fails here). Without this a free org had no namespace recorded and
+          // therefore no credit quota and no resource ceiling — metered,
+          // joinable, and uncapped.
+          if (env.CLOUD_MODE) {
+            void import("../modules/billing/billing-namespace.provision")
+              .then(({ provisionOrgNamespace }) => provisionOrgNamespace(organization.id))
+              .catch((err) =>
+                console.warn(
+                  `[auth] namespace provisioning failed for org ${organization.id}: ${err instanceof Error ? err.message : String(err)}`,
+                ),
+              );
+          }
         },
 
         beforeDeleteOrganization: async ({ organization, user }) => {

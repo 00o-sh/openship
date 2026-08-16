@@ -83,13 +83,29 @@ const { dirname, join } = edgePath;
  */
 const CTL = "\\x00-\\x1f\\x7f";
 
+/**
+ * `proxy_pass_header X-Accel-Buffering` is load-bearing, not decoration: nginx hides
+ * the whole X-Accel-* family from the response it passes downstream, so an upstream's
+ * "don't buffer me" instruction is consumed by the FIRST proxy that honours it. A
+ * Cloud-fronted `*.opsh.io` host has two hops, and the second one buffered a stream
+ * this one had correctly let through — SSE arriving as one blob at close, or not at
+ * all (GH-570). Re-exposing the header costs nothing for a response that doesn't set
+ * it, which is every response but a stream.
+ *
+ * Hop 2 is NOT configured from this repo (managed-edge-proxy only hands Cloud a slug
+ * and a target), so that it honours the header is inference from nginx's defaults, not
+ * something a test here can prove. Confirm it once against a live `*.opsh.io` SSE
+ * endpoint. It names one field deliberately: X-Accel-Redirect stays hidden, so a
+ * tenant app cannot drive an internal redirect inside Cloud's shared edge.
+ */
 const PROXY_HEADERS = `proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $openship_fwd_proto;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";`;
+        proxy_set_header Connection "upgrade";
+        proxy_pass_header X-Accel-Buffering;`;
 
 /**
  * Per-request vars every generated server block opens with.
@@ -139,8 +155,11 @@ const FORWARD_VARS = `    set $openship_fwd_proto $scheme;
  *
  * 1 — server-scope X-Real-IP recovery for Cloud-fronted `*.opsh.io` hosts. Vhosts written
  *     before it log every free-domain visitor as Openship Cloud's edge.
+ * 2 — `proxy_pass_header X-Accel-Buffering`, so an upstream's no-buffering instruction
+ *     survives the second proxy hop. Vhosts written before it stall SSE behind Cloud's
+ *     edge (GH-570).
  */
-export const VHOST_GENERATION = 1;
+export const VHOST_GENERATION = 2;
 
 /** Marker line carrying {@link VHOST_GENERATION}, matched by {@link readVhostGeneration}. */
 const GENERATION_MARKER = `# openship-vhost-gen: ${VHOST_GENERATION}`;

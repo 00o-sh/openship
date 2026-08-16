@@ -58,6 +58,11 @@ import { applyProjectRouting } from "../domains/routing-apply.service";
 import { syncProjectManagedEdge } from "./project-runtime.service";
 import { normalizeStoredPublicEndpoints, publicEndpointHostname } from "../../lib/public-endpoints";
 import { assertFreeEndpointsAllowed } from "../../lib/free-domain-guard";
+import {
+  currentPlanTier,
+  planProjectLimit,
+  PlanUpgradeRequiredError,
+} from "../../lib/plan-guard";
 import { assertValidCustomDomains, customHostnamesOf } from "../../lib/custom-domain-guard";
 import { hasMaskedValue, unmaskEnv } from "../../lib/secret-env";
 import { getFolderSession } from "./folder/session-store";
@@ -987,23 +992,42 @@ async function findProjectByAppSlug(
 // ─── Ensure project (create or return existing) ─────────────────────────────
 
 /**
- * Enforce the project cap before creating one. On Openship Cloud (CLOUD_MODE) a
- * cloud org maps 1:1 to its owning SaaS user, so this per-org count IS the
- * per-user cap (env CLOUD_MAX_PROJECTS_PER_USER, default 2). Self-hosted is not
- * metered — it uses the high SYSTEM.PROJECTS.MAX_PER_USER safety cap. Called
- * from BOTH createProject and ensureProject so the folder-upload/ensure path
- * can't bypass it.
+ * Enforce the project cap before creating one.
+ *
+ * On Openship Cloud the cap comes from the org's PLAN (`limits.maxProjects` in
+ * the pricing catalog). It used to be a single env value,
+ * `CLOUD_MAX_PROJECTS_PER_USER` (default 2), applied to every cloud org
+ * regardless of tier — so a customer paying $99 was capped at two projects
+ * exactly like a free one, and no amount of upgrading changed it. The env var is
+ * kept as the fallback for a tier that publishes no project limit and for an
+ * unknown tier id, so a misconfigured catalog can't accidentally uncap.
+ *
+ * Self-hosted is not metered — it uses the high SYSTEM.PROJECTS.MAX_PER_USER
+ * safety cap. Called from BOTH createProject and ensureProject so the
+ * folder-upload/ensure path can't bypass it.
+ *
+ * Refuses with the plan-shaped 402 on cloud (so the dashboard can offer an
+ * upgrade) and keeps the plain 400 for the self-hosted safety cap, which is not
+ * something you can buy your way past.
  */
 async function assertProjectQuota(organizationId: string): Promise<void> {
-  const cap = env.CLOUD_MODE
-    ? env.CLOUD_MAX_PROJECTS_PER_USER
-    : SYSTEM.PROJECTS.MAX_PER_USER;
-  const { total } = await repos.projectGroup.listByOrganization(organizationId, {
-    page: 1,
-    perPage: 1,
-  });
+  if (!env.CLOUD_MODE) {
+    const { total } = await repos.projectGroup.listByOrganization(organizationId, { page: 1, perPage: 1 });
+    if (total >= SYSTEM.PROJECTS.MAX_PER_USER) {
+      throw new ValidationError(`Project limit reached (${SYSTEM.PROJECTS.MAX_PER_USER})`);
+    }
+    return;
+  }
+
+  const planCap = await planProjectLimit(organizationId);
+  const cap = planCap ?? env.CLOUD_MAX_PROJECTS_PER_USER;
+  const { total } = await repos.projectGroup.listByOrganization(organizationId, { page: 1, perPage: 1 });
   if (total >= cap) {
-    throw new ValidationError(`Project limit reached (${cap})`);
+    throw new PlanUpgradeRequiredError(
+      `Your plan includes ${cap} projects and you're using ${total}. Upgrade to add more.`,
+      "project-limit",
+      await currentPlanTier(organizationId),
+    );
   }
 }
 
@@ -1643,10 +1667,15 @@ export async function createProjectEnvironment(
   });
 
   const baseRouteState = await resolveProjectRouteState(base);
-  await persistProjectRouteState(
-    created.id,
-    deriveEnvironmentPublicEndpoints(baseRouteState.publicEndpoints, projectSlug),
+  const environmentEndpoints = deriveEnvironmentPublicEndpoints(
+    baseRouteState.publicEndpoints,
+    projectSlug,
   );
+  // Every environment mints its OWN free subdomain, so this path could walk an
+  // org past its allowance one environment at a time — it had neither the Cloud
+  // gate nor the quota check the project create/update paths have.
+  await assertFreeEndpointsAllowed(organizationId, environmentEndpoints);
+  await persistProjectRouteState(created.id, environmentEndpoints);
 
   return environmentSummary(created);
 }

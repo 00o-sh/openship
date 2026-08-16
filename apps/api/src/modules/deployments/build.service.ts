@@ -24,6 +24,7 @@ import {
   safeErrorMessage,
   getRuntimeImage,
   isReleaseProvider,
+  looksLikeSecretKey,
   resolveProjectVolumes,
   type StackId,
   type DeployTarget,
@@ -52,6 +53,11 @@ import { resolveProjectInfo } from "./prepare.service";
 import { getFolderSession } from "../projects/folder/session-store";
 import { hasMaskedValue, unmaskEnv } from "../../lib/secret-env";
 import { assertValidCustomDomains, customHostnamesOf } from "../../lib/custom-domain-guard";
+import {
+  assertBuildMinutesAvailable,
+  assertPlanAllowsDeployShape,
+  assertPlanAllowsResourceTier,
+} from "../../lib/plan-guard";
 import { type RequestContext } from "../../lib/request-context";
 import { type PortCheckResult } from "../../lib/deployment-runtime";
 import * as sessionManager from "./session-manager";
@@ -65,6 +71,7 @@ import {
   isMultiServiceProject,
   listProjectComposeServices,
   projectServicesToDeployableServices,
+  shouldUseProjectServicePipeline,
 } from "./compose";
 import * as settingsService from "../settings/settings.service";
 import { type DeployableService, serviceKind } from "../../lib/deployable-service";
@@ -818,6 +825,28 @@ export async function createQueuedDeployment(opts: {
     meta = { ...meta, refreshServiceIds: opts.refreshServiceIds };
   }
 
+  // Plan entitlements, checked BEFORE the row exists so an out-of-allowance org
+  // gets a clean 402 instead of a `failed` deployment to clean up. This is THE
+  // enforcement point: every deploy entry funnels here — requestBuildAccess,
+  // redeployBuildSession (which runs no preflight, so a preflight-only gate would
+  // be bypassed by the Redeploy button and by apply-update) and
+  // triggerDeployment (webhook push, incoming webhooks, service-connection
+  // auto-redeploy). Both gates no-op unless CLOUD_MODE.
+  await assertPlanAllowsDeployShape(opts.organizationId, {
+    workload: snapshotToClass(meta).workload,
+    targetServiceIds: meta.targetServiceIds ?? null,
+    // Workload alone is not enough: a compose/services project deploying ALL its
+    // services carries no targetServiceIds, and if its `hasServer` is false the
+    // workload resolves to "static" — so a container stack would read as a static
+    // site. This is the same predicate the pipeline itself branches on, so the
+    // gate and the executor can't disagree about what will run.
+    usesServicePipeline: async () => {
+      const project = await repos.project.findById(opts.projectId).catch(() => null);
+      return project ? shouldUseProjectServicePipeline(project, meta.composeServices) : false;
+    },
+  });
+  await assertBuildMinutesAvailable(opts.organizationId);
+
   // Version is NOT assigned here. A version number represents a shipped
   // release (a successful deploy of a commit), so it's assigned in onSuccess —
   // per-commit, reusing the number when the same commit is redeployed. Failed
@@ -1220,6 +1249,18 @@ export async function requestBuildAccess(ctx: RequestContext, input: BuildAccess
     snapshotToClass(snapshot).workload !== "static" &&
     cloudResourceTier
   ) {
+    // The plan's per-service size cap, enforced HERE because Oblien cannot do it:
+    // its vCPU/RAM ceilings are per-workspace and applied namespace-wide, and a
+    // transient build workspace needs 4 vCPU / 8 GB — so the Oblien ceiling has to
+    // be build-sized and is useless as a cap on a runtime service. This is the
+    // point where the size is actually chosen, and it had NO bound of any kind:
+    // `cloudResourceCustom` carries no min/max, so a free org could ask for 1024
+    // vCPU and only find out from an opaque Oblien error mid-build.
+    await assertPlanAllowsResourceTier(ctx.organizationId, {
+      tier: cloudResourceTier,
+      cpuCores: cloudResourceCustom?.cpuCores ?? null,
+      memoryMb: cloudResourceCustom?.memoryMb ?? null,
+    });
     snapshot.resources = resolveCloudResourceConfig(cloudResourceTier, cloudResourceCustom);
   }
 
@@ -1284,10 +1325,23 @@ export async function requestBuildAccess(ctx: RequestContext, input: BuildAccess
 
   // Store env vars on project as "latest defaults"
   if (envVars && Object.keys(envVars).length > 0) {
+    // These arrive as a flat name→value map — a pasted `.env`, an upload, a CLI deploy —
+    // carrying no per-variable intent, and every one of them used to be stored
+    // `isSecret: false`. So an `OPENAI_API_KEY`, or a `DATABASE_URL` with a password in
+    // it, was flagged an ordinary value: returned in cleartext by GET /env and rendered
+    // as readable text in the editor to anyone with project access (#587). The name is
+    // the only signal available here, so default from it and let the operator correct it
+    // with the editor's per-row secret toggle.
+    //
+    // An EXISTING variable keeps its stored flag. `bulkSetEnvVars` replaces the whole
+    // set, so re-deriving the default every time would overturn that toggle on the
+    // operator's very next deploy.
+    const prior = await repos.project.listEnvVars(project.id, env).catch(() => []);
+    const priorSecret = new Map(prior.map((v) => [v.key, v.isSecret]));
     const vars = Object.entries(envVars).map(([key, value]) => ({
       key,
       value: encrypt(value),
-      isSecret: false,
+      isSecret: priorSecret.get(key) ?? looksLikeSecretKey(key),
     }));
     await repos.project.bulkSetEnvVars(project.id, env, vars);
   }
@@ -1384,7 +1438,16 @@ export async function cancelBuildSession(
   // cancelled redeploy has zero effect on the project's live state.
   await repos.deployment.updateStatus(dep.id, "cancelled");
   if (buildSession) {
-    await repos.deployment.finishBuildSession(buildSession.id, "cancelled", 0);
+    // Record the time the build actually consumed, not 0. This is metered
+    // (build_session.duration_ms is what the build-minute allowance sums), so a
+    // hardcoded 0 made cancelling a free bypass: burn 14 minutes, cancel, pay
+    // nothing, repeat. Derived from startedAt because the pipeline's own
+    // onCancelled — which does write the real duration — races this write, and
+    // last-write-wins was non-deterministic between the two. Both now agree.
+    const elapsedMs = buildSession.startedAt
+      ? Math.max(0, Date.now() - new Date(buildSession.startedAt).getTime())
+      : 0;
+    await repos.deployment.finishBuildSession(buildSession.id, "cancelled", elapsedMs);
   }
   // Broadcast cancelled AFTER service statuses so UI receives the service updates first
   sessionManager.updateStatus(dep.id, "cancelled");
