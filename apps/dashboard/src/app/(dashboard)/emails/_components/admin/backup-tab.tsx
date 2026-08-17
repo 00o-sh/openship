@@ -22,6 +22,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Checkbox } from "@/components/ui/Checkbox";
+import { CustomSelect } from "@/components/ui/CustomSelect";
 import Link from "next/link";
 import {
   DatabaseBackup,
@@ -305,39 +306,27 @@ export function BackupTab({ serverId, domain }: { serverId: string; domain: stri
                     </Link>
                   )}
                 </div>
-                <select
+                <CustomSelect
                   value={destinationId}
-                  onChange={(e) => setDestinationId(e.target.value)}
-                  className={inputClass}
-                >
-                  {destinations.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.name}
-                    </option>
-                  ))}
-                </select>
+                  options={destinations.map((d) => ({ value: d.id, label: d.name }))}
+                  onChange={setDestinationId}
+                />
               </div>
-              <label className="block">
+              <div>
                 <span className="block text-sm font-medium text-foreground mb-1.5">
                   {t.emailsAdmin.backup.autoLabel}
                 </span>
-                <select
+                <CustomSelect
                   value={schedule.frequency}
-                  onChange={(e) =>
-                    setSchedule((p) => ({
-                      ...p,
-                      frequency: e.target.value as BackupFrequency,
-                    }))
+                  options={FREQUENCIES.map((f) => ({
+                    value: f,
+                    label: t.emailsAdmin.backup.schedules[f],
+                  }))}
+                  onChange={(v) =>
+                    setSchedule((p) => ({ ...p, frequency: v as BackupFrequency }))
                   }
-                  className={inputClass}
-                >
-                  {FREQUENCIES.map((f) => (
-                    <option key={f} value={f}>
-                      {t.emailsAdmin.backup.schedules[f]}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                />
+              </div>
             </div>
 
             {schedule.frequency !== "manual" && (
@@ -379,44 +368,34 @@ export function BackupTab({ serverId, domain }: { serverId: string; domain: stri
                       </span>
                     </label>
                     {schedule.frequency === "weekly" && (
-                      <label className="block">
+                      <div>
                         <span className="block text-sm font-medium text-foreground mb-1.5">
                           {t.emailsAdmin.backup.weekdayLabel}
                         </span>
-                        <select
-                          value={schedule.weekday}
-                          onChange={(e) =>
-                            setSchedule((p) => ({ ...p, weekday: Number(e.target.value) }))
-                          }
-                          className={inputClass}
-                        >
-                          {WEEKDAY_KEYS.map((key, i) => (
-                            <option key={key} value={i}>
-                              {t.emailsAdmin.backup.weekdays[key]}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
+                        <CustomSelect
+                          value={String(schedule.weekday)}
+                          options={WEEKDAY_KEYS.map((key, i) => ({
+                            value: String(i),
+                            label: t.emailsAdmin.backup.weekdays[key],
+                          }))}
+                          onChange={(v) => setSchedule((p) => ({ ...p, weekday: Number(v) }))}
+                        />
+                      </div>
                     )}
                     {schedule.frequency === "monthly" && (
-                      <label className="block">
+                      <div>
                         <span className="block text-sm font-medium text-foreground mb-1.5">
                           {t.emailsAdmin.backup.dayOfMonthLabel}
                         </span>
-                        <select
-                          value={schedule.dayOfMonth}
-                          onChange={(e) =>
-                            setSchedule((p) => ({ ...p, dayOfMonth: Number(e.target.value) }))
-                          }
-                          className={inputClass}
-                        >
-                          {DAYS_OF_MONTH.map((d) => (
-                            <option key={d} value={d}>
-                              {d}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
+                        <CustomSelect
+                          value={String(schedule.dayOfMonth)}
+                          options={DAYS_OF_MONTH.map((d) => ({
+                            value: String(d),
+                            label: String(d),
+                          }))}
+                          onChange={(v) => setSchedule((p) => ({ ...p, dayOfMonth: Number(v) }))}
+                        />
+                      </div>
                     )}
                   </>
                 )}

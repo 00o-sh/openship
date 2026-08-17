@@ -622,6 +622,7 @@
     "close": "Fermer",
     "logsLoadFailed": "Échec du chargement des journaux",
     "loadingLogs": "Chargement des journaux…",
-    "noLogLines": "Aucune ligne de journal pour ce composant pour le moment."
+    "noLogLines": "Aucune ligne de journal pour ce composant pour le moment.",
+    "rowActions": "Actions pour {name}"
   }
 }

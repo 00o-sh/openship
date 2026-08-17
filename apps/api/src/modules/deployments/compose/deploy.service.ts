@@ -1936,23 +1936,42 @@ export async function deployComposeServices(
           containerPort === primaryRoutedPort
             ? previousByServiceId.get(svc.id)?.hostPort
             : undefined;
-        let hostPort: number;
-        if (carried) {
-          hostPort = carried;
-        } else {
-          const allocation = await allocateHostPort(opts.executor, { avoid: usedHostPorts });
-          hostPort = allocation.port;
-          // "Couldn't read occupancy" is not "nothing is listening" — without this the
-          // bind failure that follows blames Docker for an unreachable host (#490).
-          if (!allocation.scanned) {
-            logger.log(
-              `Couldn't read live port occupancy on the target, so ${allocation.port} for ` +
-                `${svc.name} avoids only ports this deploy already took. If publishing it fails ` +
-                `as "already allocated", check that Openship can reach this host ` +
-                `(Servers → this box).\n`,
-              "warn",
-            );
-          }
+        /**
+         * A carried port is a PREFERENCE, never a given.
+         *
+         * It used to be taken verbatim whenever one existed, which is right for the case it was
+         * written for — a redeploy on the same host, where the port was ours and still is. It is
+         * wrong the moment the host changes: a MIGRATION carries the source's port to a target
+         * that knows nothing about it, and if anything there holds it Docker refuses the bind
+         * with "port is already allocated" and the service (plus everything depending on it)
+         * fails. A host port is a property of the HOST, not of the project, so it cannot travel
+         * with one.
+         *
+         * `preferred` is the allocator's own word for exactly this: keep it if it's free, pick
+         * another if it isn't. Passing it there rather than branching around the allocator means
+         * one rule for both cases and no second place that decides what a free port is.
+         */
+        const allocation = await allocateHostPort(opts.executor, {
+          preferred: carried,
+          avoid: usedHostPorts,
+        });
+        const hostPort = allocation.port;
+        if (carried && hostPort !== carried) {
+          logger.log(
+            `Host port ${carried} for ${svc.name} is taken on this server — using ${hostPort}. ` +
+              `(Expected when a project moves to a different host.)\n`,
+          );
+        }
+        // "Couldn't read occupancy" is not "nothing is listening" — without this the
+        // bind failure that follows blames Docker for an unreachable host (#490).
+        if (!allocation.scanned) {
+          logger.log(
+            `Couldn't read live port occupancy on the target, so ${allocation.port} for ` +
+              `${svc.name} avoids only ports this deploy already took. If publishing it fails ` +
+              `as "already allocated", check that Openship can reach this host ` +
+              `(Servers → this box).\n`,
+            "warn",
+          );
         }
         usedHostPorts.add(hostPort);
         pinnedHostPortByContainerPort.set(containerPort, hostPort);

@@ -67,6 +67,43 @@ describe("EnvironmentVariables empty state", () => {
   });
 });
 
+describe("EnvironmentVariables reveal affordance", () => {
+  // The mask sentinel, shared with the API via @repo/core. A row holding it has no real
+  // value in local state, so its eye is only meaningful when something can resolve it.
+  const MASKED = [{ key: "POSTGRES_DB", value: "••••••••", visible: false }];
+
+  /** The eye/eye-off toggle sits inside the value field's relative wrapper. */
+  const eyeCount = (html: string) => (html.match(/class="absolute end-2\.5/g) ?? []).length;
+
+  it("gives a masked row an eye when a reveal source is wired", () => {
+    // The regression: an edit of an existing compose project wired no source, so rows
+    // rendered as dots with no toggle — unreadable AND unrevealable.
+    const html = render({ envVars: MASKED, onReveal: async () => ({}) });
+    expect(eyeCount(html)).toBe(1);
+  });
+
+  it("omits it when nothing can resolve the sentinel", () => {
+    // Deliberate: the toggle could only ever display the dots themselves as text.
+    expect(eyeCount(render({ envVars: MASKED }))).toBe(0);
+  });
+
+  it("gives a plaintext row an eye with or without a source", () => {
+    // This asymmetry is what the operator saw as "some rows have no show button": an
+    // empty or typed value isn't masked, so it kept its eye while masked neighbours in
+    // the SAME list had none.
+    expect(eyeCount(render({ envVars: ROWS }))).toBe(1);
+    expect(eyeCount(render({ envVars: [{ key: "POSTGRES_PASSWORD", value: "", visible: false }] }))).toBe(1);
+  });
+
+  it("gives every row in a mixed list an eye once a source is wired", () => {
+    const html = render({
+      envVars: [...MASKED, { key: "POSTGRES_PASSWORD", value: "", visible: false }],
+      onReveal: async () => ({}),
+    });
+    expect(eyeCount(html)).toBe(2);
+  });
+});
+
 describe("EnvironmentVariables hideTitle", () => {
   it("keeps the toolbar but drops the title a host header already shows", () => {
     const html = render({ hideTitle: true, borderless: true });

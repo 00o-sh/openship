@@ -622,6 +622,7 @@
     "close": "关闭",
     "logsLoadFailed": "加载日志失败",
     "loadingLogs": "正在加载日志…",
-    "noLogLines": "此组件暂无日志内容。"
+    "noLogLines": "此组件暂无日志内容。",
+    "rowActions": "{name} 的操作"
   }
 }

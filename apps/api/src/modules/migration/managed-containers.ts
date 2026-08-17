@@ -104,6 +104,12 @@ export async function classifyManagedContainers(
  * `scannedContainerIds`, and moveData's first act is `rtA.stop(cid)` on every id in
  * it. Skipping it there would stop Openship's own database to copy its volume.
  */
+// NO opt-out parameter. This briefly took a `duplicatingToAnotherHost` flag, because duplicating
+// a project ran its own containers through this gate and needed the refusal suppressed. A
+// duplicate now COPIES the project's records instead of re-adopting its containers
+// (`cloneProjectToServer`), so it never reaches here — and the gate is back to meaning one
+// thing: containers this instance already manages are never adopted again, full stop. A gate
+// with a caller-supplied exemption is a gate you have to read every caller to trust.
 export async function excludeAlreadyManaged(
   chosen: DiscoveredService[],
   organizationId: string,

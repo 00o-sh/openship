@@ -76,6 +76,11 @@ export type ComposeServiceInfo = PrepareComposeService;
  * result. All carry the same camelCase fields but with nullable columns.
  */
 export type RawComposeService = {
+  /** The persisted service row's id, when this came from saved rows rather than a
+   *  fresh compose scan. Carried so an edit flow can reveal that service's stored
+   *  env — the reveal endpoint is keyed by service id, and re-deriving it from the
+   *  name later would be a second source of truth for the same fact. */
+  id?: string | null;
   name: string;
   image?: string | null;
   build?: string | null;
@@ -106,8 +111,35 @@ export type RawComposeService = {
  * and build-session hydration paths can't drift. Nullable columns collapse to
  * undefined / empty collections.
  */
+/**
+ * Re-attach persisted service ids to a freshly-hydrated compose list.
+ *
+ * A deployment SNAPSHOT carries the full compose config but no service-row ids (it is
+ * also the path used when a deploy failed before its rows existed, where there are none
+ * to carry). It overwrites `config.services` wholesale, so hydrating from a snapshot
+ * after the rows had already loaded silently dropped the ids — and with them the env
+ * editor's ability to reveal stored values.
+ *
+ * Matched on name because that is the only join the two sides share, and within ONE
+ * project's compose file names are unique by construction — compose itself keys services
+ * by name. An id already on the incoming row always wins; this only fills blanks.
+ */
+export function carryServiceIds(
+  next: ComposeServiceInfo[],
+  prev: ComposeServiceInfo[] | undefined,
+): ComposeServiceInfo[] {
+  if (!prev?.length) return next;
+  const idByName = new Map<string, string>();
+  for (const s of prev) if (s.serviceId) idByName.set(s.name, s.serviceId);
+  if (idByName.size === 0) return next;
+  return next.map((s) =>
+    s.serviceId ? s : { ...s, serviceId: idByName.get(s.name) ?? undefined },
+  );
+}
+
 export function normalizeComposeService(raw: RawComposeService): ComposeServiceInfo {
   return {
+    serviceId: raw.id ?? undefined,
     name: raw.name,
     image: raw.image ?? undefined,
     build: raw.build ?? undefined,

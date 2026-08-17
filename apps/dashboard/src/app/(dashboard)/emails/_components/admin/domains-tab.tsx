@@ -19,7 +19,7 @@ import {
 import { useModal } from "@/context/ModalContext";
 import {
   DataTable,
-  RowIconButton,
+  RowActionsMenu,
   type DataTableColumn,
 } from "./_shared/data-table";
 import { StatusPill } from "./_shared/status-pill";
@@ -245,7 +245,7 @@ export function DomainsTab({
       width: "minmax(220px, 1.5fr)",
       cell: (r) => (
         <div className="flex items-center gap-3 min-w-0">
-          <div className="w-9 h-9 rounded-lg bg-muted flex items-center justify-center shrink-0">
+          <div className="size-9 rounded-xl bg-muted/50 flex items-center justify-center shrink-0">
             <Globe className="size-4 text-muted-foreground" strokeWidth={2} />
           </div>
           <div className="min-w-0">
@@ -306,11 +306,11 @@ export function DomainsTab({
       cell: (r) => (
         <div className="flex items-center gap-1.5 flex-wrap">
           {r.active ? (
-            <StatusPill tone="success" dot>
+            <StatusPill tone="success">
               {t.emailsAdmin.domains.active}
             </StatusPill>
           ) : (
-            <StatusPill tone="neutral" dot>
+            <StatusPill tone="neutral">
               {t.emailsAdmin.domains.disabled}
             </StatusPill>
           )}
@@ -390,20 +390,27 @@ export function DomainsTab({
         rowKey={(r) => r.domain}
         loading={loading}
         rowActions={(row) => (
-          <>
-            <RowIconButton
-              icon={Pencil}
-              label={t.emailsAdmin.domains.editAction}
-              onClick={() => openEdit(row)}
-            />
-            <RowIconButton
-              icon={Trash2}
-              label={t.emailsAdmin.domains.deleteAction}
-              variant="danger"
-              disabled={row.domain === primaryDomain && row.mailboxes > 0}
-              onClick={() => openDelete(row)}
-            />
-          </>
+          <RowActionsMenu
+            label={interpolate(t.emailsAdmin.shared.rowActions, { name: row.domain })}
+            actions={[
+              {
+                id: "edit",
+                label: t.emailsAdmin.domains.editAction,
+                icon: <Pencil className="size-4" />,
+                onClick: () => openEdit(row),
+              },
+              { id: "sep", divider: true },
+              {
+                id: "delete",
+                label: t.emailsAdmin.domains.deleteAction,
+                icon: <Trash2 className="size-4" />,
+                variant: "danger",
+                // The install domain can't be dropped while it still holds mail.
+                disabled: row.domain === primaryDomain && row.mailboxes > 0,
+                onClick: () => openDelete(row),
+              },
+            ]}
+          />
         )}
         empty={{
           icon: Globe,

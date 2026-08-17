@@ -622,6 +622,7 @@
     "close": "Cerrar",
     "logsLoadFailed": "No se pudieron cargar los registros",
     "loadingLogs": "Cargando registros…",
-    "noLogLines": "Aún no hay líneas de registro para este componente."
+    "noLogLines": "Aún no hay líneas de registro para este componente.",
+    "rowActions": "Acciones para {name}"
   }
 }

@@ -283,6 +283,16 @@ export async function setDeploymentStatus(
         errorDetails?: Record<string, unknown>;
         warningMessage?: string;
         errorMessage?: string;
+        /**
+         * A keep/reject decision is being HELD for this deployment (a partial failure).
+         *
+         * Sent explicitly because it is not derivable from anything else on the event. The client
+         * used to infer it from "there is a warningMessage and the deploy succeeded", which is
+         * true of a partial failure and also of every routing/TLS advisory on a perfectly
+         * successful deploy — so a project whose domains had no cert yet was shown "Deployment
+         * finished with failed services · 0 of 5 services failed".
+         */
+        decisionPending?: boolean;
       };
     };
   },

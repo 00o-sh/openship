@@ -622,6 +622,7 @@
     "close": "Schließen",
     "logsLoadFailed": "Protokolle konnten nicht geladen werden",
     "loadingLogs": "Protokolle werden geladen…",
-    "noLogLines": "Noch keine Protokollzeilen für diese Komponente."
+    "noLogLines": "Noch keine Protokollzeilen für diese Komponente.",
+    "rowActions": "Aktionen für {name}"
   }
 }

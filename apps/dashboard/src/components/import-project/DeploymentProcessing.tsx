@@ -19,7 +19,8 @@ import type { Terminal } from "@xterm/xterm";
 import BuildTerminal from "./BuildTerminal";
 import { PortAdvisoryModal } from "./PortAdvisoryModal";
 import { PromptDetails } from "./PromptDetails";
-import { describeBuildStrategy, describeBuildTarget } from "./deploy-target-label";
+import { describeBuildStrategy } from "./deploy-target-label";
+import { DeployTargetValue } from "./DeployTargetValue";
 import { generateIcon } from "@/utils/icons";
 import { useRouter } from "next/navigation";
 import { encodeRepoSlug } from "@/utils/repoSlug";
@@ -505,7 +506,7 @@ const DeploymentDetails = memo(() => {
             <p className={`text-sm font-medium truncate ${statusColor}`}>{statusLabel}</p>
           </div>
         </div>
-        <DetailRow icon={InstanceIcon} label={dp.detailInstance} value={describeBuildTarget(config, t)} />
+        <DetailRow icon={InstanceIcon} label={dp.detailInstance} value={<DeployTargetValue config={config} />} />
         <DetailRow icon={Hammer} label={dp.detailBuild} value={describeBuildStrategy(config, t)} />
         <DetailRow icon={Clock} label={dp.detailBuildTime} value={<BuildTimeLabel />} />
         <DetailRow icon={Layers} label={dp.detailFramework} value={config.framework} />
