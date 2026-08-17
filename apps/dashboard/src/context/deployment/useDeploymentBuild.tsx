@@ -22,15 +22,18 @@ import {
   BUILD_PHASES,
   DEFAULT_CONFIG,
   INITIAL_STATE,
-  carryServiceIds,
   ensurePublicEndpoints,
-  normalizeComposeService,
   resolveBuildElapsedMs,
   syncPublicEndpointState,
   usesServiceDeployment,
   workloadOf,
 } from "./types";
-import type { RawComposeService } from "./types";
+import {
+  BUILD_SESSION_ERROR_FALLBACK,
+  classifyBuildSessionFailure,
+  hydrateSnapshotServices,
+  type BuildSessionLoadResult,
+} from "./load-session";
 import type { WorkloadType } from "@repo/core";
 import {
   deployErrorCloudCapability,
@@ -1086,7 +1089,7 @@ export function useDeploymentBuild(
   ]);
 
   const loadBuildSession = useCallback(
-    async (deploymentId: string): Promise<{ success: boolean; error?: string }> => {
+    async (deploymentId: string): Promise<BuildSessionLoadResult> => {
       try {
         lastErrorRef.current = null;
 
@@ -1100,9 +1103,13 @@ export function useDeploymentBuild(
         const data = await deployApi.getBuildStatus(deploymentId);
 
         if (!data.success) {
-          const errorMessage = data.error || "Failed to load build session";
+          const errorMessage = data.error || BUILD_SESSION_ERROR_FALLBACK;
           showToast(errorMessage, "error", "Error");
-          return { success: false, error: errorMessage };
+          // The server answered and said no: the only arm that legitimately
+          // renders the page's "not found" state (a genuine miss comes through
+          // here as a soft failure or, more often, as the 404 classified in the
+          // catch below). Everything else must stay distinguishable from it.
+          return { success: false, notFound: true, error: errorMessage };
         }
 
         // Restore config from session
@@ -1188,15 +1195,13 @@ export function useDeploymentBuild(
             // "Edit Configuration" — so the compose wizard shows them even when
             // the service table is empty (e.g. a deploy that failed before its
             // rows were persisted). Falls back to whatever's already loaded.
-            // `carryServiceIds`: the snapshot has no service-row ids, and this assignment
-            // REPLACES the list — so without it, hydrating here after the rows had loaded
-            // dropped the ids the env editor needs to reveal stored values.
-            services: Array.isArray(data.composeServices)
-              ? carryServiceIds(
-                  (data.composeServices as RawComposeService[]).map(normalizeComposeService),
-                  prev.services,
-                )
-              : prev.services,
+            // `carryServiceIds` (inside the helper): the snapshot has no service-row ids,
+            // and this assignment REPLACES the list — so without it, hydrating here after
+            // the rows had loaded dropped the ids the env editor needs to reveal stored
+            // values. The helper also falls back to the loaded list when the snapshot ships
+            // an EMPTY array, which a `services`-type deploy does (#604): `[]` must not
+            // blank a populated list.
+            services: hydrateSnapshotServices(data.composeServices, prev.services),
             options: {
               buildCommand: apiConfig.buildCommand || prev.options.buildCommand,
               outputDirectory: apiConfig.outputDirectory || prev.options.outputDirectory,
@@ -1327,9 +1332,14 @@ export function useDeploymentBuild(
         return { success: true };
       } catch (err) {
         console.error("Error loading build session:", err);
-        const errorMessage = getApiErrorMessage(err, "Failed to load build session");
+        // Only a server-confirmed 404 is "this deployment does not exist". A
+        // throw while hydrating a successful response — or a 5xx/network
+        // failure — is a load error the page can retry, not proof the resource
+        // is gone (#604: this catch used to feed every one of them into the
+        // "not found" screen).
+        const { notFound, error: errorMessage } = classifyBuildSessionFailure(err);
         showToast(errorMessage, "error", "Error");
-        return { success: false, error: errorMessage };
+        return { success: false, notFound, error: errorMessage };
       }
     },
     [buildStream, setConfig, showToast, writeToTerminal, handleSuccessMessage, handleFailureMessage, handleCanceled],

@@ -3,6 +3,7 @@ import type { FrameworkId, EnvironmentVariable } from "@/components/import-proje
 import type { PrepareComposeService, PrepareSingleAppCandidate } from "@/lib/api/deploy";
 import { getBuildImage, STACKS, resolveWorkload, type WorkloadType, type ProjectType, type BuildStrategy, type DeployTarget, type RuntimeMode, type StackId, type RoutingConfig, type OpenshipReadiness, type ResourceTier as CoreResourceTier } from "@repo/core";
 import type { BuildLog } from "@/utils/deploymentPhaseDetector";
+import type { BuildSessionLoadResult } from "./load-session";
 import { randomUUID } from "@/lib/random-uuid";
 
 // ─── Monorepo sub-app ────────────────────────────────────────────────────────
@@ -895,7 +896,7 @@ export interface DeploymentContextType {
   // Build lifecycle
   startDeployment: (overrides?: { runtimeMode?: RuntimeMode; buildStrategy?: BuildStrategy; saveConfigOnly?: boolean }) => Promise<string | null>;
   connectToBuild: (deploymentId?: string, startBuild?: boolean) => Promise<void>;
-  loadBuildSession: (deploymentId: string) => Promise<{ success: boolean; error?: string }>;
+  loadBuildSession: (deploymentId: string) => Promise<BuildSessionLoadResult>;
   stopDeployment: () => Promise<void>;
   redeploy: (deploymentId: string) => Promise<string | null>;
   respondToPrompt: (action: string) => Promise<void>;
