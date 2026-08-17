@@ -455,6 +455,9 @@ export const endpoints = {
     repoCompose: "migration/repo-compose",
     preview: "migration/preview",
     migrate: "migration/migrate",
+    /** Move a project we already own to another server (door B) — the run it starts is an
+     *  ordinary migration run, so every id-addressed route above serves it too. */
+    projectMove: "migration/project",
     migration: (id: string) => `migration/migrations/${id}`,
     cutover: (id: string) => `migration/migrations/${id}/cutover`,
     cancel: (id: string) => `migration/migrations/${id}/cancel`,

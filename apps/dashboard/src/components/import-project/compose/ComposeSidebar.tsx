@@ -10,7 +10,8 @@ import {
 } from "@/context/deployment/types";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import type { Dictionary } from "@/i18n";
-import { describeBuildStrategy, describeBuildTarget } from "../deploy-target-label";
+import { describeBuildStrategy } from "../deploy-target-label";
+import { DeployTargetValue } from "../DeployTargetValue";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -45,24 +46,29 @@ const Row: React.FC<{ label: string; children: React.ReactNode }> = ({ label, ch
   </div>
 );
 
+/**
+ * The status pill's tint + text colour. No border on any variant: the tinted fill
+ * already separates the pill from the card, so an outline on top of it reads as a
+ * control you can press. Same reason the cards here carry no resting border.
+ */
 function statusBadge(status: DeploymentStatus, hasWarning: boolean, t: Dictionary) {
   const s = t.importProject.composeSidebar.status;
   if (status === "failed" || status === "cancelled") {
     return {
       label: status === "cancelled" ? s.cancelled : s.failed,
-      cls: "bg-destructive/10 text-destructive border-destructive/20",
+      cls: "bg-destructive/10 text-destructive",
     };
   }
   if (hasWarning) {
     return {
       label: s.warnings,
-      cls: "bg-warning-bg text-warning border-warning-border",
+      cls: "bg-warning-bg text-warning",
     };
   }
   if (status === "ready") {
-    return { label: s.ready, cls: "bg-primary/10 text-primary border-primary/20" };
+    return { label: s.ready, cls: "bg-primary/10 text-primary" };
   }
-  return { label: s.deploying, cls: "bg-primary/10 text-primary border-primary/20" };
+  return { label: s.deploying, cls: "bg-primary/10 text-primary" };
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -115,7 +121,7 @@ const ComposeSidebar: React.FC = () => {
       <h3 className="text-base font-normal text-foreground mb-4">{sb.detailsTitle}</h3>
       <div className="space-y-3">
         <Row label={sb.rowStatus}>
-          <span className={`text-sm font-normal px-3 py-1 rounded-full border ${badge.cls}`}>
+          <span className={`text-sm font-normal px-3 py-1 rounded-full ${badge.cls}`}>
             {badge.label}
           </span>
         </Row>
@@ -125,7 +131,7 @@ const ComposeSidebar: React.FC = () => {
         <Row label={sb.rowTarget}>
           <span className="inline-flex min-w-0 items-center gap-1.5">
             <TargetIcon className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
-            <span className="truncate">{describeBuildTarget(config, t)}</span>
+            <DeployTargetValue config={config} className="truncate" />
           </span>
         </Row>
 

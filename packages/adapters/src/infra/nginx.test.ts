@@ -1,6 +1,9 @@
 import { describe, expect, test, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   NginxProvider,
+  isAcmePortBindFailure,
+  summarizeCertbotFailure,
   VHOST_GENERATION,
   readVhostGeneration,
   renderProxyOptions,
@@ -2532,5 +2535,105 @@ describe("NginxProvider SSE buffering passthrough", () => {
   /** Without a generation bump the directive reaches only boxes that redeploy. */
   test("is stamped at a generation that supersedes the pre-passthrough vhosts", () => {
     expect(VHOST_GENERATION).toBeGreaterThanOrEqual(2);
+  });
+});
+
+/**
+ * The ACME design has exactly one moving part, and this is its failure.
+ *
+ * Issuance is EDGE-DRIVEN: Let's Encrypt hits :80, the edge proxies
+ * `/.well-known/acme-challenge/` to certbot's transient standalone server on a fixed loopback
+ * port. No port-80 fight, no webroot, no DNS-01 — one path. Certbot holds that port only while
+ * issuing, and nothing else in the design binds it.
+ *
+ * When the bind fails, the operator used to get certbot's wall verbatim — "Saving debug log to
+ * /var/log/letsencrypt/letsencrypt.log · Could not bind TCP port 49180 … · Ask for help at
+ * community.letsencrypt.org" — because no branch matched and the fallback prints the last three
+ * lines. Which is precisely the opener `summarizeCertbotFailure` exists to replace.
+ */
+describe("a failed challenge-listener bind is diagnosed, not dumped", () => {
+  const raw = [
+    "Saving debug log to /var/log/letsencrypt/letsencrypt.log",
+    "Could not bind TCP port 49180 because it is already in use by another process on this system (such as a web server). Please stop the program in question and then try again.",
+    "Ask for help or search for solutions at https://community.letsencrypt.org.",
+  ].join("\n");
+
+  test("names the port and what actually holds it", () => {
+    const msg = summarizeCertbotFailure(raw, "api.example.com");
+    expect(msg).toContain("49180");
+    expect(msg).toContain("earlier attempt");
+  });
+
+  test("says it is NOT a DNS or routing problem", () => {
+    // The failure precedes any validation attempt, so every other diagnosis in this function
+    // would send the operator after something that was never tried.
+    const msg = summarizeCertbotFailure(raw, "api.example.com");
+    expect(msg).toContain("not a DNS or routing problem");
+    expect(msg).not.toContain("isn't reachable from the internet");
+    expect(msg).not.toContain("doesn't resolve to this server");
+  });
+
+  test("gives a command that finds the holder", () => {
+    expect(summarizeCertbotFailure(raw, "api.example.com")).toContain("ss -ltnp");
+  });
+
+  test("drops certbot's opener and its community-forum footer", () => {
+    const msg = summarizeCertbotFailure(raw, "api.example.com");
+    expect(msg).not.toContain("Saving debug log");
+    expect(msg).not.toContain("community.letsencrypt.org");
+  });
+
+  test("wins over the reachability branch, which the same output would also match", () => {
+    // "already in use ... such as a web server" is close enough to the :80 story that ordering
+    // is what keeps them apart — the bind check must come first.
+    const withTimeout = `${raw}\nTimeout during connect (likely firewall problem)`;
+    expect(summarizeCertbotFailure(withTimeout, "api.example.com")).toContain("49180");
+  });
+
+  test("also recognises certbot's other wording for the same failure", () => {
+    for (const line of ["Problem binding to port 49180: Could not bind to IPv4 or IPv6.", "Address already in use"]) {
+      expect(summarizeCertbotFailure(line, "api.example.com"), line).toContain("49180");
+    }
+  });
+});
+
+/**
+ * One definition of "certbot failed to BIND", shared by the diagnosis and by the live probe at
+ * the issuance site. Two copies of that regex drift into a message naming the wrong cause, or a
+ * probe that runs on the wrong failure.
+ */
+describe("isAcmePortBindFailure", () => {
+  test("matches every wording certbot has used for it", () => {
+    for (const line of [
+      "Could not bind TCP port 49180 because it is already in use by another process on this system",
+      "Problem binding to port 49180: Could not bind to IPv4 or IPv6.",
+      "OSError: [Errno 98] Address already in use",
+    ]) {
+      expect(isAcmePortBindFailure(line), line).toBe(true);
+    }
+  });
+
+  test("does not match a validation failure", () => {
+    // These must fall through to the branches that DID try to validate — the whole reason the
+    // bind check is ordered first.
+    for (const line of [
+      "Timeout during connect (likely firewall problem)",
+      "DNS problem: NXDOMAIN looking up A for api.example.com",
+      "Invalid response from http://api.example.com/.well-known/acme-challenge/x: 404",
+      "",
+    ]) {
+      expect(isAcmePortBindFailure(line), JSON.stringify(line)).toBe(false);
+    }
+  });
+
+  test("the diagnosis branch is driven by it, not by its own copy of the regex", () => {
+    // Guards the pair: if the branch grew a private regex, this file's other suite would still
+    // pass while the probe gate silently disagreed.
+    const src = readFileSync(new URL("./nginx.ts", import.meta.url), "utf8");
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(code).toContain("if (isAcmePortBindFailure(text)) {");
+    expect(code).toContain("isAcmePortBindFailure(raw) && this.executor");
+    // Exactly one place spells the pattern out.
+    expect((code.match(/could not bind \(\?:tcp \)\?port/g) ?? []).length).toBe(1);
   });
 });

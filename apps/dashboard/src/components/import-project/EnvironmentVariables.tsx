@@ -1,5 +1,5 @@
 "use client";
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   ChevronDown,
@@ -71,6 +71,18 @@ interface EnvironmentVariablesPropsOptional {
    * source (a new, unsaved service) — they simply won't show.
    */
   onReveal?: (keys: string[]) => Promise<Record<string, string>>;
+  /**
+   * Reveal every masked row once, on mount, instead of waiting for the operator to
+   * click. For the surfaces you reach by pressing "Edit" on env that ALREADY exists:
+   * you opened it to read and change values, and a column of dots is nothing to edit —
+   * the first action would always have been "show values" anyway.
+   *
+   * Opt-in per host, not the default. On a surface that merely LISTS env next to other
+   * settings, disclosing every secret to anyone who scrolls past is a different
+   * bargain than disclosing them to someone who opened the editor. Needs {@link
+   * onReveal}; without a source there is nothing to fetch.
+   */
+  revealOnOpen?: boolean;
 }
 
 const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
@@ -90,6 +102,7 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
   envMeta,
   onEnvVarsChange,
   onReveal,
+  revealOnOpen = false,
 }) => {
   const deployment = useOptionalDeployment();
   const { showToast } = useToast();
@@ -237,6 +250,25 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
     },
     [ensureRevealed, showToast, ev]
   );
+
+  // `revealOnOpen`: fetch every masked row once, so an editor opened on existing env
+  // shows values instead of a column of dots.
+  //
+  // Guarded by a ref, not by the masked-key list: `revealAndShow` writes state, which
+  // re-renders, and the rows stay masked the whole time (the row keeps the sentinel by
+  // design — see `revealedValues`). Keyed off the list, this would re-fire on every
+  // render and hammer the endpoint. It fires for the FIRST non-empty set of masked keys
+  // and never again — a later paste or a new row is the operator's own doing, and they
+  // can use the eye. A failure isn't retried either: `revealAndShow` has already
+  // toasted, and a silent retry loop against a failing endpoint is worse than a row
+  // the operator can click.
+  const autoRevealed = useRef(false);
+  useEffect(() => {
+    if (!revealOnOpen || !onReveal || autoRevealed.current) return;
+    if (maskedKeys.length === 0) return;
+    autoRevealed.current = true;
+    void revealAndShow(maskedKeys);
+  }, [revealOnOpen, onReveal, maskedKeys, revealAndShow]);
 
   // Drop plaintext for `keys` from the overlay as they're hidden, so a revealed
   // secret doesn't linger in component state after the operator hides it. Showing

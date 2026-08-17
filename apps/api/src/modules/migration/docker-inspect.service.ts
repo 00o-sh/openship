@@ -133,10 +133,34 @@ export async function discoverServerStack(
      *  deploy containers are adopted as PLAIN compose/standalone (no re-import,
      *  no snapshot restore). The one filter (`isOpenshipOwned`) is bypassed. */
     flatDocker?: boolean;
+    /**
+     * PRE-SET SELECTION: consider only these container ids.
+     *
+     * The scan exists to answer "what is on this box?", which is the right question when the
+     * operator is about to choose from a grid. A project move already knows its answer — the
+     * `openship.project` label names its containers exactly — so scanning the whole host to
+     * throw most of it away is work the operator waits through ("Inspecting 20 container(s)…"
+     * to keep 5), and on a busy box most of the elapsed time.
+     *
+     * Narrowing here rather than in the caller is what makes it cheap: it lands before the
+     * inspect fan-out, so the compose-file reads and the per-image env/CMD lookups are scoped
+     * for free, and the derivation of each `DiscoveredService` stays the SAME code the scan
+     * flow uses — a project move must not get its own dialect of "what is this container".
+     *
+     * NOT an authorisation boundary. It is a performance scope; the caller still filters by
+     * label afterwards (see `planProjectMove`), because a scan option must never be the thing
+     * that decides which containers are ours.
+     */
+    onlyContainerIds?: string[];
   },
 ): Promise<DiscoveredStack> {
   const step = (m: string) => onProgress?.(m);
   const flatDocker = opts?.flatDocker === true;
+  // `undefined` = unscoped (scan the box). `[]` = an EMPTY scope, and therefore no candidates —
+  // not "everything", which is the tempting `length > 0` reading and would turn a caller's
+  // "these zero containers" into a full-host scan.
+  const only = opts?.onlyContainerIds;
+  const scoped = Array.isArray(only) ? new Set(only.filter(Boolean)) : null;
   step("Connecting to Docker…");
   const rt = await createServerDockerRuntime(serverId, organizationId);
   try {
@@ -169,11 +193,20 @@ export async function discoverServerStack(
     return await withTimeout(
       (async (): Promise<DiscoveredStack> => {
         step("Listing containers, volumes and networks…");
-        const [containers, volumes, networks] = await Promise.all([
+        const [allContainers, volumes, networks] = await Promise.all([
           rt.listAllContainers(),
           rt.listAllVolumes(),
           rt.listAllNetworks(),
         ]);
+
+        // Narrow to the pre-set selection BEFORE anything expensive. Everything downstream —
+        // the ownership split, the inspect fan-out, the compose reads, the image lookups — is
+        // driven off this list, so one filter here scopes the whole scan. The volume and
+        // network lists stay whole: reconciliation matches mounts against them by name, and a
+        // filtered volume list would make a moved volume look like it does not exist.
+        const containers = scoped
+          ? allContainers.filter((c) => scoped.has(c.id))
+          : allContainers;
 
         // OPENSHIP'S OWN STACK IS NEVER A CANDIDATE — structurally, not because the
         // database happens to remember it.
@@ -217,7 +250,14 @@ export async function discoverServerStack(
           (c) => c.labels["openship.project"] && !isBuildHelper(c.labels),
         );
 
-        step(`Inspecting ${candidates.length} container(s)…`);
+        // Say WHICH containers, not just how many. A pre-set selection reporting a bare
+        // "Inspecting 5 container(s)…" on a 20-container box reads like the scan missed
+        // fifteen; naming the scope is the difference between a narrowed scan and a broken one.
+        step(
+          scoped
+            ? `Inspecting ${candidates.length} of ${allContainers.length} container(s) (this project's)…`
+            : `Inspecting ${candidates.length} container(s)…`,
+        );
         const [details, managedDetails] = await Promise.all([
           mapLimit(candidates, 5, (c) => rt.inspectContainer(c.id)).then((d) =>
             d.filter((x): x is DockerContainerDetail => x !== null),
@@ -289,19 +329,30 @@ export async function discoverServerStack(
         // unbounded. Drop THIS org's entries that are neither a live DB project nor
         // backed by a running container — i.e. true orphans. A running container's
         // id is kept so a soft-deleted (record-only) workload stays re-importable.
-        try {
-          const liveDb = await repos.project.listByOrganization(organizationId, {
-            page: 1,
-            perPage: 1000,
-          });
-          const liveProjectIds = new Set<string>([...liveDb.rows.map((p) => p.id), ...projectIds]);
-          await sshManager
-            .withExecutor(serverId, (exec) =>
-              pruneOrphanManifestArtifacts(exec, { organizationId, liveProjectIds }),
-            )
-            .catch(() => {});
-        } catch {
-          /* best-effort — never fail discovery on a prune hiccup */
+        //
+        // Housekeeping for the RECOVERY path below, so it is skipped when that path cannot
+        // run: a pre-set selection has nothing to recover (it already knows its project), and
+        // this costs a 1000-row project read plus its own SSH session. Pruning a whole box's
+        // manifest from a scan that deliberately looked at five containers would also be
+        // deciding "orphan" from an incomplete picture.
+        if (!scoped) {
+          try {
+            const liveDb = await repos.project.listByOrganization(organizationId, {
+              page: 1,
+              perPage: 1000,
+            });
+            const liveProjectIds = new Set<string>([
+              ...liveDb.rows.map((p) => p.id),
+              ...projectIds,
+            ]);
+            await sshManager
+              .withExecutor(serverId, (exec) =>
+                pruneOrphanManifestArtifacts(exec, { organizationId, liveProjectIds }),
+              )
+              .catch(() => {});
+          } catch {
+            /* best-effort — never fail discovery on a prune hiccup */
+          }
         }
 
         if (projectIds.length > 0) {

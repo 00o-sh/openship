@@ -72,7 +72,7 @@ import {
 } from "../../lib/routing-domains";
 import { normalizeTargetPath } from "../../lib/public-endpoints";
 import { resolveRuntimeResources, resolveBuildResources } from "../../lib/resources";
-import { resolveBuildGitToken } from "../github/clone-auth";
+import { cloneOnServerAvailable, resolveBuildGitToken } from "../github/clone-auth";
 import { openDeployRelay } from "../../lib/git-forwarding";
 import { resolveOrgOwner } from "../../lib/org-actor";
 import { resolveAcmeProviderOptions } from "../../lib/acme-config";
@@ -411,7 +411,13 @@ export async function finalizeComposeDeploy(opts: {
           extra: { meta: { ...meta, composeDeployment } },
           sse: {
             status: "ready",
-            meta: { warningMessage },
+            // `decisionPending` explicitly, because THIS is the only thing that means a
+            // keep/reject decision is being held. The live event used to carry only
+            // `warningMessage`, so the client inferred the decision from "a warning exists on
+            // success" — and every OTHER warning then opened the failed-services modal. A
+            // successful deploy whose domains have no cert yet showed "Deployment finished with
+            // failed services · 0 of 5 services failed · Retry 0 Failed Services".
+            meta: { warningMessage, decisionPending: true },
           },
         });
       } else if (rolled === "failed") {
@@ -777,12 +783,9 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
     // nothing qualifies, fall back to cloning on the API host and transferring the
     // context — warn, never hard-fail. (The BARE runtime always clones on the
     // target and is gated by preflight separately, so this only changes DOCKER.)
-    const cloneCredentialAvailable =
-      !!gitCred.ambient ||
-      gitCred.relay === true ||
-      !!gitCred.ssh ||
-      gitCred.anonymous === true ||
-      (!!gitCred.token && !gitCred.apiHostFallback);
+    // The rule itself lives with the credential type (`cloneOnServerAvailable`), so a capability
+    // check shown in the picker and the decision made here can never disagree.
+    const cloneCredentialAvailable = cloneOnServerAvailable(gitCred).available;
     const effectiveCloneOnServer =
       cloneOnServer && (runtime.name === "bare" || cloneCredentialAvailable);
     if (cloneOnServer && runtime.name !== "bare" && !cloneCredentialAvailable) {

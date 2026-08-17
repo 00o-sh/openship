@@ -22,7 +22,9 @@ import {
   SYSTEM,
   STACKS,
   safeErrorMessage,
+  compareCommitSha,
   getRuntimeImage,
+  isFullCommitSha,
   isReleaseProvider,
   looksLikeSecretKey,
   resolveProjectVolumes,
@@ -43,7 +45,7 @@ import { resolveCloudResourceConfig } from "./cloud-resources";
 import type { TBuildAccessBody } from "./deployment.schema";
 import { platform } from "../../lib/controller-helpers";
 import { encrypt } from "../../lib/encryption";
-import { getLatestCommit, getRepository } from "../github/github.service";
+import { getCommitByRef, getLatestCommit, getRepository } from "../github/github.service";
 import { assertGitHubRepoAccess } from "../github/github-access";
 import { firePreDeployBackups } from "../backups/triggers/pre-deploy";
 import { resolveSmartRoute } from "./smart-route";
@@ -474,6 +476,36 @@ async function resolveLatestCommitInfo(ctx: RequestContext, project: Project, br
 
   const head = await getLatestCommit(ctx, project.gitOwner, project.gitRepo, branch);
   return head ? { commitSha: head.sha, commitMessage: head.message } : {};
+}
+
+/**
+ * Canonicalize a caller-supplied commit ref to the commit's full sha.
+ *
+ * `POST /deployments` takes `commitSha` as a free string — `openship deploy
+ * --commit 1eeaf76`, the MCP deploy tool, a CI script — and git checks out
+ * anything it is given, so an abbreviated sha builds exactly the right code while
+ * the row records a name nothing downstream can match by value: the drift check
+ * compares it against a 40-char branch HEAD (which is how a project deployed at
+ * `1eeaf76` ends up being offered `1eeaf76` as a new commit, permanently), the
+ * commit-status API rejects a short sha outright, and the in-flight webhook dedupe
+ * misses. Resolved ONCE here, before anything compares or stores it.
+ *
+ * Fail-soft: an unresolvable ref (no GitHub repo, no credential, rate limit) is
+ * kept verbatim. The deploy still knows how to check it out; only the bookkeeping
+ * is less precise, and that is not worth failing a deploy over.
+ */
+async function canonicalizeCommitRef(
+  ctx: RequestContext,
+  project: Project,
+  ref: string | undefined,
+): Promise<string | undefined> {
+  const trimmed = ref?.trim();
+  if (!trimmed || isFullCommitSha(trimmed)) return trimmed;
+  if (!project.gitOwner || !project.gitRepo) return trimmed;
+  const found = await getCommitByRef(ctx, project.gitOwner, project.gitRepo, trimmed).catch(
+    () => null,
+  );
+  return found?.sha ?? trimmed;
 }
 
 async function resolveProjectBranch(ctx: RequestContext, project: Project, branch?: string) {
@@ -1791,20 +1823,26 @@ export async function triggerDeployment(
 
   const branch = await resolveProjectBranch(ctx, project, data.branch);
   const environment = data.environment ?? "production";
+  // Before the dedupe below and before anything stores it: one canonical sha, so
+  // the row a webhook compares against and the row the drift check reads are
+  // written in the same alphabet. See canonicalizeCommitRef.
+  const requestedCommitSha = await canonicalizeCommitRef(ctx, project, data.commitSha);
 
   // Skip an auto (webhook) deploy whose commit is already in-flight or live —
   // closes the App + repo-webhook double-deploy window. Manual/forceAll bypass.
-  if (data.trigger === "webhook" && !data.forceAll && data.commitSha) {
+  if (data.trigger === "webhook" && !data.forceAll && requestedCommitSha) {
     const inFlight = await repos.deployment
-      .findInProgressByCommit(project.id, data.commitSha)
+      .findInProgressByCommit(project.id, requestedCommitSha)
       .catch(() => undefined);
     const active = project.activeDeploymentId
       ? await repos.deployment.findById(project.activeDeploymentId).catch(() => null)
       : null;
-    const existing = inFlight ?? (active?.commitSha === data.commitSha ? active : null);
+    const existing =
+      inFlight ??
+      (compareCommitSha(active?.commitSha, requestedCommitSha) === "same" ? active : null);
     if (existing) {
       console.log(
-        `[Deploy] project ${project.id}: webhook deploy for ${data.commitSha} skipped — already ${inFlight ? "in progress" : "live"} (${existing.id}).`,
+        `[Deploy] project ${project.id}: webhook deploy for ${requestedCommitSha} skipped — already ${inFlight ? "in progress" : "live"} (${existing.id}).`,
       );
       return { deployment: existing, skipped: true as const };
     }
@@ -1901,7 +1939,7 @@ export async function triggerDeployment(
   }
 
   // ── Resolve commit info: fetch HEAD from GitHub if not provided ────
-  let commitSha = data.commitSha;
+  let commitSha = requestedCommitSha;
   let commitMessage = data.commitMessage;
   if (data.refresh) {
     // Refresh recreates the running containers with current env — it never

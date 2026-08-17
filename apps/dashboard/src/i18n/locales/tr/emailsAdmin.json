@@ -679,6 +679,7 @@
     "close": "Kapat",
     "logsLoadFailed": "Günlükler yüklenemedi",
     "loadingLogs": "Günlükler yükleniyor…",
-    "noLogLines": "Bu bileşen için henüz günlük satırı yok."
+    "noLogLines": "Bu bileşen için henüz günlük satırı yok.",
+    "rowActions": "{name} için işlemler"
   }
 }

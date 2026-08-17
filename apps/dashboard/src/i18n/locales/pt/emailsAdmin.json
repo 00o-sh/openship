@@ -622,6 +622,7 @@
     "close": "Fechar",
     "logsLoadFailed": "Falha ao carregar os logs",
     "loadingLogs": "Carregando logs…",
-    "noLogLines": "Ainda não há linhas de log para este componente."
+    "noLogLines": "Ainda não há linhas de log para este componente.",
+    "rowActions": "Ações para {name}"
   }
 }

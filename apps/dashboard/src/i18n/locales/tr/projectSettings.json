@@ -175,7 +175,43 @@
       "liveAccessible": "Yayında ve erişilebilir",
       "pausedInaccessible": "Duraklatıldı ve erişilemez",
       "disable": "Devre Dışı Bırak",
-      "enable": "Etkinleştir"
+      "enable": "Etkinleştir",
+      "migrating": "Taşınıyor",
+      "migratingHint": "Başka bir sunucuya taşınıyor"
+    },
+    "migration": {
+      "title": "Taşıma",
+      "description": "Bu projeyi başka bir sunucuya taşı",
+      "currentServer": "Mevcut sunucu",
+      "migrate": "Taşı",
+      "noOtherServers": "Bu projeyi taşımak için ikinci bir sunucu ekleyin.",
+      "cloudLater": "Sunucudan sunucuya. Openship Cloud'a veya oradan taşıma henüz desteklenmiyor.",
+      "startFailed": "Taşıma başlatılamadı",
+      "confirmTitle": "{project} projesini {server} sunucusuna taşı",
+      "confirmSubtitle": "Taşımayı başlatana kadar hiçbir şey değişmez.",
+      "svcVolumes": "{count} volume",
+      "downtimeNote": "Veriler kopyalanırken ve yeni sunucu projeyi başlatırken proje çevrimdışı olur. Durum tutan servisler aktarım boyunca kapalı kalır.",
+      "dnsNote": "DNS hâlâ eski sunucuyu gösteriyor — yeni sunucu yanıt vermeye başladığında kayıtlarınızı taşıyın.",
+      "cancel": "İptal",
+      "confirmStart": "Taşımayı başlat",
+      "duplicate": "Çoğalt",
+      "intentMove": "Taşı",
+      "intentCopy": "Çoğalt",
+      "intentMoveHint": "Proje taşınır. Onayladığınızda konteynerleri ve volume'ları eski sunucudan silinir.",
+      "intentCopyHint": "Özgün proje çalışmaya devam eder. Yeni sunucuda, verinin bir kopyasıyla ikinci bir proje oluşur.",
+      "confirmTitleCopy": "{project} projesini {server} sunucusuna çoğalt",
+      "confirmStartCopy": "Çoğaltmayı başlat",
+      "downtimeNoteCopy": "Veriler kopyalanırken proje kısa süre çevrimdışı olur — düzgün kopyalanabilmesi için volume'ların durması gerekir. Kopyalama biter bitmez eski sunucuda yeniden başlar.",
+      "copyNoDomainsNote": "Kopya alan adı olmadan başlar — mevcut alan adları, onları sunan projede kalır.",
+      "fromLabel": "Kaynak",
+      "toLabel": "Hedef",
+      "modeLabel": "Mod",
+      "scopeLabel": "Neler çoğaltılacak",
+      "scopeAll": "Tümünü seç",
+      "scopeHintAll": "Tüm servisler ve verileri.",
+      "scopeHintSome": "{count} servis — gerisi yalnızca özgün projede kalır.",
+      "sourceServices": "{count} servis",
+      "runningStatus": "Sürüyor — {status}"
     },
     "cache": {
       "title": "Önbellek",
@@ -637,6 +673,10 @@
       "high": {
         "name": "Yüksek",
         "description": "Yüksek trafikli uygulamalar"
+      },
+      "xlarge": {
+        "name": "Çok büyük",
+        "description": "Veritabanları ve yoğun iş yükleri"
       }
     },
     "custom": {

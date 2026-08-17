@@ -2,7 +2,14 @@
  * Project CRUD service - create, read, update, list, ensure.
  */
 
-import { repos, type Deployment, type NewProject, type Project, type Server } from "@repo/db";
+import {
+  repos,
+  type Deployment,
+  type DockerMigrationRun,
+  type NewProject,
+  type Project,
+  type Server,
+} from "@repo/db";
 import {
   slugify,
   NotFoundError,
@@ -12,6 +19,7 @@ import {
   SYSTEM,
   safeErrorMessage,
   compareSemver,
+  compareCommitSha,
   isReleaseProvider,
   isBehind,
   GITHUB_REPO,
@@ -182,6 +190,51 @@ export async function resolveProjectDeployTarget(
 import { deploymentIsBlocked, deploymentRoutingUnsynced } from "./deployment-flags";
 export { deploymentIsBlocked, deploymentRoutingUnsynced };
 
+// Same reason: the run→payload projection is an allowlist that must be readable and
+// testable without this file's graph. See the module doc for what it deliberately drops.
+import { readActiveMigration } from "./active-migration";
+
+/**
+ * Is a live migration even POSSIBLE for a project on this instance?
+ *
+ * Every migration route is `localOnly` — a run SSHes into the operator's own box — so on the
+ * cloud control plane no project can have one, and the lookup below would be a query per
+ * project read that is guaranteed to answer nothing. The hottest read in the product is the
+ * SaaS home page, so it doesn't pay for a self-hosted feature.
+ */
+const MIGRATIONS_POSSIBLE = !env.CLOUD_MODE;
+
+/**
+ * The live migration for one project, and never a reason a project read fails.
+ *
+ * try/catch, not `.catch()`: the promise chain only covers a rejection, and the first way this
+ * broke was a SYNCHRONOUS throw — a caller whose `repos` didn't have the run repo at all, where
+ * the property access blew up before there was a promise to reject. A project's page must load
+ * for the operator to reach anything, including the migration panel itself, so a status
+ * annotation is never allowed to take it down. Logged rather than swallowed silently: a project
+ * reading "not migrating" while it is being moved is the wrong answer to have no trace of.
+ */
+async function loadActiveMigration(projectId: string) {
+  if (!MIGRATIONS_POSSIBLE) return null;
+  try {
+    return readActiveMigration(await repos.dockerMigrationRun.findActiveForProject(projectId));
+  } catch (err) {
+    console.error(`[projects] active-migration lookup failed for ${projectId}:`, err);
+    return null;
+  }
+}
+
+/** {@link loadActiveMigration} for a whole list — ONE statement for N projects, same rules. */
+async function loadActiveMigrations(projectIds: string[]): Promise<Map<string, DockerMigrationRun>> {
+  if (!MIGRATIONS_POSSIBLE) return new Map();
+  try {
+    return await repos.dockerMigrationRun.findActiveForProjects(projectIds);
+  } catch (err) {
+    console.error("[projects] batched active-migration lookup failed:", err);
+    return new Map();
+  }
+}
+
 /** The live release's human version + state, surfaced on project cards so the
  *  UI can show "which v is live" and flag a partial deploy that is still
  *  awaiting the operator's keep/reject decision (`awaitingDecision`). Derived
@@ -191,6 +244,7 @@ function readActiveDeploymentSummary(dep: Deployment | null | undefined): {
   activeDeploymentStatus: string | null;
   awaitingDecision: boolean;
   routingUnsynced: boolean;
+  routingWarning: string | null;
 } {
   const meta = (dep?.meta ?? null) as {
     composeDeployment?: { decision?: string };
@@ -201,9 +255,20 @@ function readActiveDeploymentSummary(dep: Deployment | null | undefined): {
     activeVersion: dep?.version ?? null,
     activeDeploymentStatus: dep?.status ?? null,
     awaitingDecision: meta?.composeDeployment?.decision === "pending",
-    // Live, but the free .opsh.io edge route didn't sync — surfaced as
-    // "Action Required" with a Retry routing action (see routing/retry).
+    // Live, but the routes in front of it didn't sync — surfaced as "Action Required" with a
+    // Retry routing action (see routing/retry).
     routingUnsynced: deploymentRoutingUnsynced(dep),
+    /**
+     * WHY they didn't sync, in the server's own words (`routeIssuesWarning`).
+     *
+     * The flag alone was not enough, and the gap showed: the banner had one hardcoded sentence
+     * about a free `.opsh.io` URL failing to route through Openship Cloud's edge, and showed it
+     * for every cause. A self-hosted project with three CUSTOM domains waiting on certificates
+     * was told its free domain hadn't routed through a cloud it doesn't use — while the accurate
+     * sentence ("routed but no HTTPS certificate yet — point DNS here, then Verify") sat unread
+     * in this same meta blob.
+     */
+    routingWarning: (meta?.deployWarning ?? null) || null,
   };
 }
 
@@ -246,11 +311,19 @@ export async function enrichProject(p: Project) {
     serverName = server?.name || server?.sshHost || null;
   }
 
+  // The live migration, if any. Here rather than in the migration module because it is
+  // STATUS: a project being moved between servers is not simply "Live", and every surface
+  // that renders a project — cards, sidebar, the page header, its own Advanced tab — already
+  // reads this payload. Anywhere else would be a second thing to fetch and a second place
+  // for the answer to disagree.
+  const activeMigration = await loadActiveMigration(p.id);
+
   return {
     ...p,
     deployTarget,
     serverId,
     serverName,
+    activeMigration,
     ...readEnabled(p),
     ...readActiveDeploymentSummary(activeDep),
     // isCloud decides the fallback when nothing is configured: the metered free
@@ -269,7 +342,8 @@ export async function enrichProject(p: Project) {
  * source of N+1 latency.
  *
  * Per-project query count: 0 (data is pre-fetched).
- * Total SQL cost: 1 (deployment.findManyById) + 1 (server.getMany).
+ * Total SQL cost: 1 (deployment.findManyById) + 1 (server.getMany) + 1
+ * (dockerMigrationRun.findActiveForProjects, self-hosted only).
  */
 export async function enrichProjectsBatch(
   projects: Project[],
@@ -295,6 +369,11 @@ export async function enrichProjectsBatch(
     .getMany(Array.from(serverIds))
     .catch(() => new Map<string, Server>());
 
+  // ONE statement for every project's live run, so the "Migrating" pill on a list of 50
+  // projects costs a query rather than 50. The map is empty on cloud (no migrations there)
+  // and on any failure — a lookup for a status pill must never fail a project list.
+  const activeMigrations = await loadActiveMigrations(projects.map((p) => p.id));
+
   return projects.map((p) => {
     const production = p.resources as ResourceConfig | null;
     const build = p.buildResources as ResourceConfig | null;
@@ -315,6 +394,7 @@ export async function enrichProjectsBatch(
       deployTarget,
       serverId,
       serverName,
+      activeMigration: readActiveMigration(activeMigrations.get(p.id)),
       ...readEnabled(p),
       ...readActiveDeploymentSummary(activeDep),
       // isCloud decides the fallback when nothing is configured: the metered
@@ -904,7 +984,9 @@ export async function linkProjectRepo(
   return { ok: true, owner, repo, branch: defaultBranch, strategy, autoDeploy: !!gitFields.autoDeploy };
 }
 
-async function uniqueProjectSlug(organizationId: string, baseSlug: string) {
+/** Exported for the project CLONE, which needs the same "-2, -3, …" rule a fresh project gets —
+ *  a duplicate named after its source collides by construction. */
+export async function uniqueProjectSlug(organizationId: string, baseSlug: string) {
   let slug = baseSlug;
   let suffix = 2;
 
@@ -1009,8 +1091,11 @@ async function findProjectByAppSlug(
  * Refuses with the plan-shaped 402 on cloud (so the dashboard can offer an
  * upgrade) and keeps the plain 400 for the self-hosted safety cap, which is not
  * something you can buy your way past.
+ *
+ * Exported for the project CLONE: a duplicate is a new project and must count like one, or
+ * "duplicate" becomes the way around the cap.
  */
-async function assertProjectQuota(organizationId: string): Promise<void> {
+export async function assertProjectQuota(organizationId: string): Promise<void> {
   if (!env.CLOUD_MODE) {
     const { total } = await repos.projectGroup.listByOrganization(organizationId, { page: 1, perPage: 1 });
     if (total >= SYSTEM.PROJECTS.MAX_PER_USER) {
@@ -1957,7 +2042,11 @@ export async function evaluateDrift(p: Project, upstream: UpstreamDrift) {
   if (upstream.mode === "commit" && deployed.mode === "commit") {
     const latestSha = upstream.key === commitSourceKey(p) ? upstream.latestSha : null;
     const { deployedSha } = deployed;
-    const behind = Boolean(latestSha && deployedSha && latestSha !== deployedSha);
+    // Not `!==`. The deployed sha is whatever the caller that triggered the deploy
+    // supplied (an abbreviated `--commit`, a tag), so only a PROVABLE difference is
+    // drift — otherwise a project deployed at `1eeaf76` is told a new commit
+    // `1eeaf76` is available, forever. See compareCommitSha.
+    const behind = compareCommitSha(latestSha, deployedSha) === "different";
     // Is the latest commit already deploying? Then there's nothing to redeploy —
     // it's in flight, so the nudge is suppressed. Computed live, which is why
     // pressing Update quiets every surface immediately.

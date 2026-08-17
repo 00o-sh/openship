@@ -45,7 +45,8 @@ import { ChannelLogo } from "@/components/ui/ChannelLogo";
 import { Choice } from "@/components/ui/Choice";
 import { useModal } from "@/context/ModalContext";
 import { useI18n, interpolate } from "@/components/i18n-provider";
-import { DataTable, RowIconButton, type DataTableColumn } from "./_shared/data-table";
+import { DataTable, RowActionsMenu, type DataTableColumn } from "./_shared/data-table";
+import { CustomSelect } from "@/components/ui/CustomSelect";
 import { StatusPill } from "./_shared/status-pill";
 import { Field, FormModalContent, inputClassName } from "./_shared/form-modal-content";
 import { useMailRailOwnsTabs } from "../../_lib/mail-section";
@@ -185,7 +186,7 @@ export function NotificationsTab({ serverId, primaryDomain }: NotificationsTabPr
       width: "minmax(220px, 1.4fr)",
       cell: (r) => (
         <div className="flex items-center gap-3 min-w-0">
-          <div className="w-9 h-9 rounded-lg bg-muted flex items-center justify-center shrink-0">
+          <div className="size-9 rounded-xl bg-muted/50 flex items-center justify-center shrink-0">
             <Bell className="size-4 text-muted-foreground" strokeWidth={2} />
           </div>
           <p className="text-sm font-medium text-foreground truncate">{r.name}</p>
@@ -220,15 +221,15 @@ export function NotificationsTab({ serverId, primaryDomain }: NotificationsTabPr
       width: "150px",
       cell: (r) =>
         r.pausedReason ? (
-          <StatusPill tone="warning" dot>
+          <StatusPill tone="warning">
             {a.paused}
           </StatusPill>
         ) : r.enabled ? (
-          <StatusPill tone="success" dot>
+          <StatusPill tone="success">
             {a.active}
           </StatusPill>
         ) : (
-          <StatusPill tone="neutral" dot>
+          <StatusPill tone="neutral">
             {a.disabled}
           </StatusPill>
         ),
@@ -318,15 +319,25 @@ export function NotificationsTab({ serverId, primaryDomain }: NotificationsTabPr
             ),
         }}
         rowActions={(r) => (
-          <>
-            <RowIconButton icon={Pencil} label={a.edit} onClick={() => openEditor(r)} />
-            <RowIconButton
-              icon={Trash2}
-              label={a.deleteConfirm}
-              variant="danger"
-              onClick={() => openDelete(r)}
-            />
-          </>
+          <RowActionsMenu
+            label={interpolate(t.emailsAdmin.shared.rowActions, { name: r.name })}
+            actions={[
+              {
+                id: "edit",
+                label: a.edit,
+                icon: <Pencil className="size-4" />,
+                onClick: () => openEditor(r),
+              },
+              { id: "sep", divider: true },
+              {
+                id: "delete",
+                label: a.deleteConfirm,
+                icon: <Trash2 className="size-4" />,
+                variant: "danger",
+                onClick: () => openDelete(r),
+              },
+            ]}
+          />
         )}
       />
     </div>
@@ -448,17 +459,11 @@ function RuleForm({
       </Field>
 
       <Field label={a.fieldScope}>
-        <select
-          className={inputClassName}
+        <CustomSelect
           value={scope}
-          onChange={(e) => setScope(e.target.value as InboundScope)}
-        >
-          {SCOPES.map((s) => (
-            <option key={s} value={s}>
-              {scopeLabel(s)}
-            </option>
-          ))}
-        </select>
+          options={SCOPES.map((s) => ({ value: s, label: scopeLabel(s) }))}
+          onChange={(v) => setScope(v as InboundScope)}
+        />
       </Field>
 
       {needsTarget && (

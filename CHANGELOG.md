@@ -12,6 +12,17 @@ one-off DNS token table and unlocks private image pulls on any host. The app
 catalog is installable end to end, the audit log moves out of Settings onto its
 own page, and uploads stop failing at 1 MB.
 
+### Security
+
+- **Job writes are authorized against the job's own target servers** — jobs are
+  instance-wide, so the `job:write` permission (which checks organization
+  membership) is not by itself authority over the servers a command job runs on.
+  Editing and deleting a job now go through the same per-target server check that
+  creating and running one already did, and a denial is indistinguishable from a
+  job that doesn't exist. Reported externally; regression tests added.
+  Self-hosted instances with more than one trust level should upgrade; Openship
+  Cloud was never affected (the Jobs API is `localOnly`).
+
 ### Credentials
 
 - **One store for third-party secrets** — a provider registry (container
@@ -103,6 +114,19 @@ own page, and uploads stop failing at 1 MB.
 
 ### Fixes
 
+- **`openship reset-admin-password` works on a Compose install** — it
+  authenticated with `~/.openship/internal-token`, a file the Compose path never
+  writes: the api container is booted with the `INTERNAL_TOKEN` from
+  `~/.openship/compose/.env`. So on a Compose box the command *minted* a brand-new
+  random token, sent that, and reported `Unauthorized` — the lockout-recovery
+  command was unusable on exactly the install that needed it. Which token this box
+  is running with is now resolved in one place, readers never mint, and a
+  root-owned `.env` this user can't open says so (re-run with sudo) instead of
+  reporting an authorization failure. Same fix reaches the control panel's "Reset
+  admin password", `openship doctor` (whose health readout came back empty on
+  every Compose stack), and a bare box's `:80/:443` takeover, which looked for the
+  Compose token and skipped importing the migrated sites after stopping the
+  operator's proxy.
 - **A password reset uses a 6-digit code** — rather than an emailed link.
 - **A cancelled deployment keeps its reason** — the failure message was gated on
   `failed` alone, which blanked the reason on every cancelled row. But a cancel is
@@ -117,6 +141,19 @@ own page, and uploads stop failing at 1 MB.
   to the bare hostname as its id, and every guard downstream reads that id as
   proof the server row exists. So a hostname with no row yet rendered a live
   Verify button that 404'd, along with a DNS-records panel that couldn't load.
+- **An abbreviated commit is not a new commit** — `POST /deployments` takes
+  `commitSha` as whatever the caller sends (`openship deploy --commit 1eeaf76`, the
+  MCP deploy tool, a CI script), and git checks an abbreviation out happily: the
+  right code shipped while the row recorded a name no comparison could match. The
+  drift check compared it against the 40-char branch HEAD, and since both sides
+  render seven characters, the project page advertised "New commit available
+  1eeaf76 … you're deployed on 1eeaf76" — permanently, with a Redeploy that could
+  never clear it. Two shas now name the same commit when one is a prefix of the
+  other at git's own abbreviation floor, a ref that is not a sha at all (a tag,
+  `HEAD`) reads as "can't tell" rather than as drift, and a caller's ref is
+  resolved to the full sha before anything stores or compares it — which also
+  unbreaks the per-service commit checks GitHub rejects a short sha for, and the
+  webhook's already-deploying dedupe.
 
 ## 0.6.5
 

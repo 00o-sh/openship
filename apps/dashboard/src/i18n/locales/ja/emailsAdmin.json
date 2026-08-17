@@ -622,6 +622,7 @@
     "close": "閉じる",
     "logsLoadFailed": "ログの読み込みに失敗しました",
     "loadingLogs": "ログを読み込み中…",
-    "noLogLines": "このコンポーネントのログ行はまだありません。"
+    "noLogLines": "このコンポーネントのログ行はまだありません。",
+    "rowActions": "{name} の操作"
   }
 }

@@ -143,3 +143,40 @@ describe("excludeAlreadyManaged — rows that must not block anything", () => {
     expect(findByContainerIds).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * The gate has NO exemption, and that is the invariant.
+ *
+ * It briefly took a `duplicatingToAnotherHost` flag that suppressed the re-import refusal, so
+ * that duplicating a project could push its own containers through here. A duplicate now copies
+ * the project's RECORDS instead (`cloneProjectToServer`) and never reaches this function, so the
+ * flag is gone and the rule is unconditional again.
+ *
+ * Worth pinning because the flag was reasonable and would be reasonable to re-add: a gate whose
+ * refusal a caller can switch off is one you must read every caller to trust. If a future flow
+ * genuinely needs it, deleting these assertions should be the deliberate first step.
+ */
+describe("excludeAlreadyManaged takes no exemption", () => {
+  it("refuses a managed container with no way to ask it not to", async () => {
+    findByContainerIds.mockResolvedValue([row("c-web", "dep_user")]);
+    await expect(excludeAlreadyManaged(USER_STACK, ORG)).rejects.toThrow(/already managed here/);
+  });
+
+  it("accepts exactly two arguments, so there is no options bag to smuggle one in", () => {
+    expect(excludeAlreadyManaged.length).toBe(2);
+  });
+
+  it("still drops Openship's own containers rather than refusing over them", async () => {
+    // Unchanged by the above: the control-plane rule was never the flag's business.
+    findByContainerIds.mockResolvedValue([row("c-openship-pg", "dep_openship")]);
+    const kept = await excludeAlreadyManaged(WITH_OURS, ORG);
+    expect(kept.map((s) => s.containerId)).toEqual(["c-web", "c-dependabot-pg"]);
+  });
+
+  it("refuses when ONLY our own containers matched", async () => {
+    findByContainerIds.mockResolvedValue([row("c-openship-pg", "dep_openship")]);
+    await expect(
+      excludeAlreadyManaged([svc("postgres", "c-openship-pg")], ORG),
+    ).rejects.toThrow(/Openship's own containers/);
+  });
+});

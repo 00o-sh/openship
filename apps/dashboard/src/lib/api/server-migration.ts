@@ -232,7 +232,14 @@ export interface PendingItem {
 export interface MigrationRun {
   id: string;
   status: MigrationStatus;
-  mode: "cross_server" | "same_server";
+  /**
+   * How the run was started. The first two come from a SCAN (adopt someone else's stack);
+   * the `project_*` pair from a project this instance already owns — a move relocates it, a
+   * copy leaves it running and builds a second one on the target. Both of those are
+   * cross-server by construction, so anything keying off `same_server` treats them
+   * correctly by falling through.
+   */
+  mode: "cross_server" | "same_server" | "project_move" | "project_copy";
   projectName?: string | null;
   projectId?: string | null;
   deploymentId?: string | null;
@@ -531,6 +538,42 @@ export const dockerMigrationApi = {
       input,
     ),
 
+  /**
+   * Start the move. Returns the same `{ migrationId, confirmationToken }` as `migrate`, so
+   * the caller opens the ORDINARY run panel by id (`initialRunId`) and confirms the cutover
+   * through the ordinary route — there is no project-specific progress UI.
+   *
+   * No `killOriginals`: a project move always parks at `awaiting_cutover` so the operator's
+   * live project can never be retired without an explicit confirmation. The server enforces
+   * that; it is not a client courtesy.
+   */
+  startProjectMove: (input: {
+    projectId: string;
+    targetServerId: string;
+    /**
+     * `move` — the project relocates: one project, new host, source retired at cutover.
+     * `copy` — the original stays put and a SECOND project appears on the target.
+     *
+     * Omitted defaults to `move` server-side: the safer reading of a malformed request is
+     * the one that doesn't quietly create a project.
+     */
+    intent?: "move" | "copy";
+    /** `copy` only — name for the new project. Defaults to `<name>-copy`, de-duplicated. */
+    newName?: string;
+    /** `copy` only — duplicate just these services (service-level copy). Omit for all.
+     *  A scoped MOVE is refused: a project is bound to one server. */
+    serviceNames?: string[];
+    transferMode?: "auto" | "stream" | "direct" | "rsync";
+    transferCompression?: "auto" | "zstd" | "gzip" | "none";
+    /** volumeName → how to resolve a target volume that already holds data. */
+    conflictResolution?: Record<string, ConflictAction>;
+    customPaths?: CustomPath[];
+  }) =>
+    api.post<{ success: boolean; migrationId: string; confirmationToken: string }>(
+      endpoints.dockerMigration.projectMove,
+      input,
+    ),
+
   /** Poll a migration run's current state (+ coarse live transfer progress). */
   getMigration: (id: string) =>
     api.get<{ success: boolean; run: MigrationRun; progress?: TransferProgress | null }>(
@@ -630,6 +673,25 @@ export const dockerMigrationApi = {
   getActive: (serverId: string) =>
     api.get<{ success: boolean; run: MigrationRun | null; confirmationToken: string | null }>(
       `${endpoints.dockerMigration.active}?serverId=${encodeURIComponent(serverId)}`,
+    ),
+
+  // NO per-project variant of the above. A project's live run reaches the client on the
+  // PROJECT payload (`activeMigration`), which is what every surface that renders a project
+  // already loads — so the status pill, the page header and the project's own migration panel
+  // all read one field instead of each asking this module a question it can only answer while
+  // mounted. See `readActiveMigration` (api) and `ProjectStatusSource` (utils/project-status).
+
+  /**
+   * Recent runs about a PROJECT (newest first) — its migration history, listed beside the
+   * migration card the way deployments are listed on the Deployments tab.
+   *
+   * Includes a duplicate taken FROM this project as well as runs of the project itself, because
+   * both are things that happened to it. Same endpoint and same row shape as the per-server
+   * list — one history, two viewpoints.
+   */
+  listForProject: (projectId: string) =>
+    api.get<{ success: boolean; runs: MigrationRun[] }>(
+      `${endpoints.dockerMigration.runs}?projectId=${encodeURIComponent(projectId)}`,
     ),
 
   /** Recent runs for a server (newest first) — the "Migrations" tab list. */
