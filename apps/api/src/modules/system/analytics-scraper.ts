@@ -255,6 +255,15 @@ export function scrapeServerIfStale(serverId: string): Promise<void> {
           .set(key, Date.now(), SCRAPE_STALE_SECONDS)
           .catch(() => {});
       }
+    } catch (err) {
+      // Restores the "never throws" contract this function documents and that
+      // `runAnalyticsScrapeSweep` relies on. The inner catch only covers
+      // `scrapeServer`; `cacheStore()` and `store.get()` sit ABOVE it, so a cache
+      // backend error (Redis down, connection reset) rejected the promise instead.
+      // The three `void scrapeServerIfStale(...)` read handlers turned that into an
+      // unhandled rejection — process-fatal on Node's default settings — and the
+      // sweep's un-guarded `await` abandoned every server after the failing one.
+      debug(`scrape-on-demand:cache-error server=${serverId} ${safeErrorMessage(err)}`);
     } finally {
       inflightScrape.delete(serverId);
     }
