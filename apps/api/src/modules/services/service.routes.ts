@@ -141,7 +141,10 @@ r.patch(
   {
     tag: "project:service:write",
     body: UpdateServiceBody,
-    mcp: { description: "Update a service's configuration." },
+    mcp: {
+      description:
+        "Update a service's configuration. Partial: an omitted field is left alone. `environment` and `advanced` are MERGED onto the stored values rather than replacing them — omit a key to keep it, set a key to null to remove it, send null for the whole field to clear it. Env values read back masked as `••••••••`; echo the sentinel to keep one unchanged. Every other field (`ports`, `volumes`, `dependsOn`, `publicEndpoints`, …) REPLACES its stored value wholesale, so send the complete list.",
+    },
   },
   cloudProjectProxy,
   ctrl.update,

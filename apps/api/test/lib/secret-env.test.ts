@@ -10,6 +10,7 @@ import {
   maskScanService,
   maskServiceEnv,
   maskServicesEnv,
+  mergeServiceEnv,
   unmaskEnv,
 } from "../../src/lib/secret-env";
 
@@ -66,6 +67,73 @@ describe("unmaskEnv", () => {
   });
   test("no stored map → sentinels drop, real values kept", () => {
     expect(unmaskEnv({ A: ENV_MASK, B: "real" }, undefined)).toEqual({ B: "real" });
+  });
+});
+
+/**
+ * The PATCH counterpart (#619). `unmaskEnv` above deletes by omission, which is
+ * right for the whole-set writers but destroys a masked value the caller could
+ * never have read back. Here omission means "keep" and a delete is spelled null.
+ */
+describe("mergeServiceEnv", () => {
+  const stored = { API_TOKEN: "real-token", DB_PASSWORD: "hunter2", NODE_ENV: "production" };
+
+  test("a key absent from the patch keeps its stored value", () => {
+    expect(mergeServiceEnv(stored, { PORT: "8080" })).toEqual({ ...stored, PORT: "8080" });
+  });
+  test("a named key is overwritten, the rest survive", () => {
+    expect(mergeServiceEnv(stored, { NODE_ENV: "staging" })).toEqual({
+      ...stored,
+      NODE_ENV: "staging",
+    });
+  });
+  test("null removes just that key", () => {
+    expect(mergeServiceEnv(stored, { NODE_ENV: null, PORT: "3000" })).toEqual({
+      API_TOKEN: "real-token",
+      DB_PASSWORD: "hunter2",
+      PORT: "3000",
+    });
+  });
+  test("sentinel keeps the stored secret", () => {
+    expect(mergeServiceEnv(stored, { API_TOKEN: ENV_MASK, NEW: "v" })).toEqual({
+      ...stored,
+      NEW: "v",
+    });
+  });
+  test("sentinel with no stored counterpart is dropped (never persists dots)", () => {
+    expect(mergeServiceEnv(stored, { GHOST: ENV_MASK })).toEqual(stored);
+    expect(mergeServiceEnv(undefined, { A: ENV_MASK, B: "real" })).toEqual({ B: "real" });
+  });
+  // #472: maskValue leaves "" alone, so an unset variable reads back as empty and
+  // has to round-trip as empty — masking it would have the merge restore a value
+  // the operator had just cleared.
+  test("an empty value round-trips as empty rather than being treated as a sentinel", () => {
+    expect(mergeServiceEnv({ ...stored, EMPTY: "" }, { EMPTY: "" })).toEqual({
+      ...stored,
+      EMPTY: "",
+    });
+    expect(mergeServiceEnv(stored, { API_TOKEN: "" })).toEqual({ ...stored, API_TOKEN: "" });
+  });
+  test("null for the whole map clears it; undefined and {} leave it alone", () => {
+    expect(mergeServiceEnv(stored, null)).toEqual({});
+    expect(mergeServiceEnv(stored, undefined)).toEqual(stored);
+    expect(mergeServiceEnv(stored, {})).toEqual(stored);
+  });
+  test("a non-string value is dropped rather than written into the map", () => {
+    expect(mergeServiceEnv(stored, { N: 7 as unknown as string })).toEqual(stored);
+  });
+  // The map is attacker-influenced (any PATCH body key), and the sentinel arm asks
+  // whether a key exists in `stored` — a prototype-chain hit there would resurrect
+  // an inherited value under an attacker-chosen name.
+  test("prototype keys neither pollute nor resolve through the chain", () => {
+    const merged = mergeServiceEnv(stored, {
+      ["__proto__"]: "polluted",
+      constructor: ENV_MASK,
+      toString: ENV_MASK,
+    });
+    expect(merged).toEqual(stored);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(merged, "toString")).toBe(false);
   });
 });
 
