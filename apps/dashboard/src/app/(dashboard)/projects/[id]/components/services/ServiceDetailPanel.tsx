@@ -16,6 +16,7 @@ import {
 } from "@/lib/api/services";
 import { deployApi } from "@/lib/api/deploy";
 import { formatBytes } from "@/lib/formatBytes";
+import { serviceEnvPatch } from "@/lib/service-env-payload";
 import { internalServiceAddress, effectiveServiceAlias, type ComposeAdvanced } from "@repo/core";
 import { serviceDisplayUrl } from "@/utils/route-display";
 import {
@@ -256,7 +257,9 @@ export function ServiceDetailPanel({
     setEnvSaving(true);
     try {
       const result = await servicesApi.update(projectId, service.id, {
-        environment: envRecordFromRows(envRows),
+        // Merge semantics on the API side: name the removed keys as null, or
+        // deleting a variable here would silently no-op (#619).
+        environment: serviceEnvPatch(envRows, service.environment),
       });
       if (!result.success) throw new Error(t.projectDetail.services.detail.toast.envSaveFailed);
       await onRefresh();

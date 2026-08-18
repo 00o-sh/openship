@@ -234,6 +234,25 @@ export const UpdateServiceBody = Type.Object(
     // spelling of absent.
     domain: Type.Optional(Type.Union([Type.String({ maxLength: 255 }), Type.Null()])),
     customDomain: Type.Optional(Type.Union([Type.String({ maxLength: 255 }), Type.Null()])),
+    // #619: same reasoning as the two above, and for the same reason as `advanced`
+    // — a keyed map on a PATCH has to be able to say "keep" and "clear" separately.
+    // It matters more here than anywhere else on this endpoint: `environment` is the
+    // only field MASKED on read, and reveal is off the automation surface, so a
+    // client that replaced the whole map could neither see nor recover what it
+    // destroyed. Nullable ONLY on update — Create/Sync own the whole set and keep
+    // `Record<string,string>` (the ratchet in test/modules/services/service-schema-env
+    // pins that asymmetry). The value type stays UNBOUNDED to match them: capping it
+    // here alone would make a long value (CA chain, base64 kubeconfig) creatable and
+    // then un-PATCH-able.
+    environment: Type.Optional(
+      Type.Union(
+        [Type.Record(Type.String(), Type.Union([Type.String(), Type.Null()])), Type.Null()],
+        {
+          description:
+            "MERGED onto the stored map, not replaced: omit a key to keep it, set a key to null to remove it, send null to clear every variable. An empty object changes nothing. Echo the •••••••• sentinel to keep a masked value unchanged.",
+        },
+      ),
+    ),
   },
   { additionalProperties: false },
 );

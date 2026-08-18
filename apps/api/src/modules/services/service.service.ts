@@ -15,7 +15,7 @@ import {
 import { scopedVolumeName, type CommandExecutor } from "@repo/adapters";
 import { execInContainer } from "../../lib/agent-exec";
 import { encrypt, decrypt } from "../../lib/encryption";
-import { ENV_MASK, hasMaskedValue, maskDriftChanges, maskServiceEnv, unmaskEnv } from "../../lib/secret-env";
+import { ENV_MASK, hasMaskedValue, maskDriftChanges, maskServiceEnv, mergeServiceEnv, unmaskEnv } from "../../lib/secret-env";
 import {
   assertNotControlPlane,
   assertNotControlPlaneById,
@@ -694,13 +694,17 @@ export async function updateService(
   // When domainType changes, clear the irrelevant domain field.
   const patch: Record<string, any> = { ...data };
 
-  // #336: env values are masked on read. Restore any sentinel the client echoed
-  // back to the stored value so editing an unrelated field never overwrites a
-  // secret with "••••••••". A real (revealed-and-changed) value passes through.
+  // #336/#619: env values are masked on read, so a client cannot see what it is
+  // about to overwrite. Merge onto what's stored rather than replacing: a partial
+  // body used to delete every variable it merely failed to mention, and because
+  // reveal is off the automation surface (see service.routes.ts) the caller could
+  // not read those values back. Sentinels the client echoed restore to the stored
+  // value, so editing an unrelated field never writes "••••••••" over a secret; a
+  // revealed-and-changed value passes through; an explicit null removes the key.
   if ("environment" in patch) {
-    patch.environment = unmaskEnv(
-      patch.environment,
+    patch.environment = mergeServiceEnv(
       svc.environment as Record<string, string> | null,
+      patch.environment,
     );
   }
 

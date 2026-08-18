@@ -175,7 +175,14 @@ export type ServiceInput = {
   dockerfile?: string;
   ports?: string[];
   dependsOn?: string[];
-  environment?: Record<string, string>;
+  /**
+   * Nulls are UPDATE-only — a key set to null removes it, and `null` clears the
+   * map (#619). Create and sync own the whole set and take `Record<string,string>`,
+   * so a null there is rejected by the API validator. Widened on the shared input
+   * for the same reason `advanced` carries the nullable `ComposeAdvancedPatch`:
+   * one payload shape for both verbs beats two near-identical types.
+   */
+  environment?: Record<string, string | null> | null;
   volumes?: string[];
   command?: string;
   restart?: string;

@@ -62,6 +62,12 @@ function maskValue(value: string): string {
  * Keys absent from `incoming` are absent from the result: a full-map write still
  * deletes keys the client removed. Callers that only want partial semantics must
  * pre-merge (this is a whole-map replace with sentinel protection).
+ *
+ * This is the right helper when the caller genuinely owns the WHOLE set — create,
+ * compose sync, and the migration/deploy paths, which each rebuild the map from an
+ * upstream spec and must be able to drop a variable the spec no longer declares.
+ * The PATCH endpoint wants `mergeServiceEnv` below instead: a partial body there
+ * would otherwise delete every variable it merely failed to mention.
  */
 export function unmaskEnv(
   incoming: Record<string, string> | null | undefined,
@@ -79,6 +85,48 @@ export function unmaskEnv(
     }
   }
   return out;
+}
+
+/**
+ * Merge an incoming compose-service `environment` patch onto what's stored,
+ * preserving untouched variables and restoring masked secrets (#336, #619).
+ *
+ * `environment` is the only field on the PATCH endpoint that is masked on read,
+ * and reveal is deliberately off the automation surface — so a client cannot see
+ * what a whole-map replace is about to destroy, and cannot read it back. Omission
+ * therefore has to mean "keep", and removal has to be explicit. Same triad as
+ * `mergeAdvanced`, plus the sentinel arm that only a masked field needs:
+ *
+ *   - key absent from patch  → leave the stored value alone
+ *   - key value === null     → remove it
+ *   - key value === ENV_MASK → keep the stored value (dropped if not in stored)
+ *   - key value === string   → update/insert that key
+ *   - incoming === null      → clear the entire environment map
+ *   - incoming === undefined → leave the stored map alone
+ */
+export function mergeServiceEnv(
+  stored: Record<string, string> | null | undefined,
+  incoming: Record<string, string | null | undefined> | null | undefined,
+): Record<string, string> {
+  if (incoming === null) return {};
+  if (incoming === undefined || typeof incoming !== "object" || Array.isArray(incoming)) {
+    return { ...(stored ?? {}) };
+  }
+  const base: Record<string, string> = { ...(stored ?? {}) };
+  for (const [key, value] of Object.entries(incoming)) {
+    if (value === null) {
+      delete base[key];
+    } else if (isMaskedValue(value)) {
+      if (stored && Object.hasOwn(stored, key)) {
+        base[key] = stored[key];
+      } else {
+        delete base[key];
+      }
+    } else if (typeof value === "string") {
+      base[key] = value;
+    }
+  }
+  return base;
 }
 
 /** Whether an env map contains any mask sentinel (i.e. an un-revealed value). */
