@@ -47,6 +47,7 @@ export {
   sq,
   assembleGitClone,
   injectGitToken,
+  gitCredentialPair,
   toGitHubSshUrl,
   type GitCloneAuth,
   type GitCloneInvocation,
