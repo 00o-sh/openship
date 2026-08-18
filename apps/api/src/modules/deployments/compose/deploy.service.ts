@@ -434,13 +434,33 @@ export function mergeServiceDeployEnv(
   layers: ServiceEnvLayers,
   frozenWins: boolean,
 ): Record<string, string> {
-  return {
-    ...layers.project,
-    ...(frozenWins ? {} : layers.frozen),
-    ...layers.inline,
-    ...layers.service,
-    ...(frozenWins ? layers.frozen : {}),
-  };
+  const result: Record<string, string> = { ...layers.project };
+
+  if (!frozenWins && layers.frozen) {
+    Object.assign(result, layers.frozen);
+  }
+
+  // Layer inline compose environment.
+  // Non-empty inline values override project values (e.g. compose literals).
+  // Empty inline values (from compose passthrough placeholders like ${VAR:-}) do NOT
+  // clobber non-empty project values.
+  for (const [key, value] of Object.entries(layers.inline ?? {})) {
+    if (value === "" && result[key] !== undefined && result[key] !== "") {
+      continue;
+    }
+    result[key] = value;
+  }
+
+  // Layer service-scoped environment rows (explicit service overrides win)
+  for (const [key, value] of Object.entries(layers.service ?? {})) {
+    result[key] = value;
+  }
+
+  if (frozenWins && layers.frozen) {
+    Object.assign(result, layers.frozen);
+  }
+
+  return result;
 }
 
 /**
