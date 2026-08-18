@@ -17,7 +17,7 @@ import { assertResourceInOrg } from "../../lib/controller-helpers";
 import { permission } from "../../lib/permission";
 import { getAppConnectionView } from "../apps/app-settings.service";
 import { mergeEnvVars } from "./project-env.service";
-import { toInternalUrl } from "./project-connection.util";
+import { toInternalUrl, isNetworkUrl } from "./project-connection.util";
 
 const ENVIRONMENT = "production";
 
@@ -246,7 +246,9 @@ export async function createConnection(
     // the east-west address as its value — the synthesizer built it from the same
     // alias+port the container answers to on the shared network. Inject verbatim;
     // toInternalUrl would need a template and return null.
-    if (!output.internal) {
+    // Non-URL values (passwords, tokens, API keys) don't carry a host or port —
+    // inject verbatim in both internal and public modes.
+    if (!output.internal && isNetworkUrl(value)) {
       // Template source: rewrite host → the source app's internal service alias.
       // The output's declared/derived `service` is authoritative for which
       // alias+port to target; if it can't resolve, internal isn't viable here.

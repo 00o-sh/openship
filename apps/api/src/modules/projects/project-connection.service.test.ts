@@ -5,7 +5,7 @@ import {
   resolveInternalEndpoint,
   isValidEnvKey,
 } from "@repo/core";
-import { toInternalUrl } from "./project-connection.util";
+import { toInternalUrl, isNetworkUrl } from "./project-connection.util";
 
 // Minimal templates — getAppEndpoints reads `endpoints` when present.
 const MONGO = {
@@ -111,5 +111,25 @@ describe("isValidEnvKey", () => {
     expect(isValidEnvKey("1BAD")).toBe(false);
     expect(isValidEnvKey("has-dash")).toBe(false);
     expect(isValidEnvKey("")).toBe(false);
+  });
+});
+
+describe("isNetworkUrl", () => {
+  it("returns true for valid network URLs", () => {
+    expect(isNetworkUrl("postgresql://postgres:pw@db:5432/postgres")).toBe(true);
+    expect(isNetworkUrl("http://203.0.113.5:8000")).toBe(true);
+    expect(isNetworkUrl("https://studio.opsh.io")).toBe(true);
+    expect(isNetworkUrl("mongodb://root:s3cr3t@mongo:27017/")).toBe(true);
+    expect(isNetworkUrl("redis://:secret@redis:6379/0")).toBe(true);
+  });
+
+  it("returns false for non-URL strings like tokens, secrets, usernames", () => {
+    expect(isNetworkUrl("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiJ9.xyz")).toBe(false);
+    expect(isNetworkUrl("0198c246743de5d952712004d56b18a8aab8c5a9a56bca04eb7b9d79cc452811")).toBe(false);
+    expect(isNetworkUrl("supabase")).toBe(false);
+    expect(isNetworkUrl("my-bucket")).toBe(false);
+    expect(isNetworkUrl("not a url")).toBe(false);
+    expect(isNetworkUrl("")).toBe(false);
+    expect(isNetworkUrl("a:b")).toBe(false);
   });
 });

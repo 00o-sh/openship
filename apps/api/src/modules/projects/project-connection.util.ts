@@ -47,3 +47,13 @@ export function toInternalUrl(
   u.port = String(ep.port);
   return u.href;
 }
+
+/** Check if a string parses as a network URL (protocol + hostname). */
+export function isNetworkUrl(value: string): boolean {
+  try {
+    const u = new URL(value);
+    return Boolean(u.protocol && u.hostname);
+  } catch {
+    return false;
+  }
+}

@@ -52,6 +52,14 @@ vi.mock("../../../src/modules/projects/project-env.service", () => ({
 
 vi.mock("../../../src/modules/projects/project-connection.util", () => ({
   toInternalUrl: h.toInternalUrl,
+  isNetworkUrl: (val: string) => {
+    try {
+      const u = new URL(val);
+      return Boolean(u.protocol && u.hostname);
+    } catch {
+      return false;
+    }
+  },
 }));
 
 import { createConnection } from "../../../src/modules/projects/project-connection.service";
@@ -159,5 +167,40 @@ describe("createConnection — synthesized internal source", () => {
         upserts: [{ key: "DB_URL", value: "postgres://my-app:5432/db", isSecret: true }],
       }),
     );
+  });
+
+  it("a TEMPLATE non-URL output (token, password, key) is injected verbatim in internal mode", async () => {
+    h.getAppConnectionView.mockResolvedValue({
+      outputs: [
+        {
+          id: "anonKey",
+          label: "Anon Key",
+          value: "eyJhbGciOiJIUzI1NiJ9.abc.def",
+          envKey: "SUPABASE_ANON_KEY",
+          service: "kong",
+          internal: false,
+          secret: false,
+          width: "full" as const,
+        },
+      ],
+    });
+    h.getTemplateForOrg.mockResolvedValue({ id: "supabase", connection: { outputs: [] } });
+
+    const res = await createConnection(
+      ctx,
+      "app-a",
+      { sourceProjectId: "db-c", outputId: "anonKey", envKey: "SUPABASE_ANON_KEY", mode: "internal" },
+      { defer: true },
+    );
+
+    expect(h.toInternalUrl).not.toHaveBeenCalled();
+    expect(h.mergeEnvVars).toHaveBeenCalledWith(
+      "app-a",
+      "org1",
+      expect.objectContaining({
+        upserts: [{ key: "SUPABASE_ANON_KEY", value: "eyJhbGciOiJIUzI1NiJ9.abc.def", isSecret: true }],
+      }),
+    );
+    expect(res.connection.mode).toBe("internal");
   });
 });
