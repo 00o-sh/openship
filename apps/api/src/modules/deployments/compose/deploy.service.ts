@@ -95,6 +95,7 @@ import {
 } from "../../../lib/deployment-runtime";
 import { isRealContainerRef } from "../../../lib/container-ref";
 import { resolveServicePort } from "./domain-helpers";
+import { mergeServiceDeployEnv } from "./service-env-layers";
 import { compileProjectRoutingFields } from "../../../lib/project-routing-fields";
 import { buildCompositeRegistration, buildDomainFanoutRegistrations } from "./composite-route";
 import { newerThanRestoredRelease, serviceKind } from "./project-services";
@@ -400,67 +401,6 @@ export function resolveEnvPublicUrls(
     out[key] = resolved.value;
   }
   return { env: out, unresolved };
-}
-
-/** The four env layers a compose service is deployed with, before token resolution. */
-export interface ServiceEnvLayers {
-  /** Project-scoped rows, live. */
-  project: Record<string, string>;
-  /** This deployment's frozen capture (`dep.envVars`, decrypted). Flat, unscoped. */
-  frozen: Record<string, string>;
-  /** The compose file's inline `environment:` for this service. */
-  inline: Record<string, string>;
-  /** Service-scoped rows for this service, live. */
-  service: Record<string, string>;
-}
-
-/**
- * Layer a service's env. Service rows beat inline compose env beats project rows,
- * so the compose UI can override a global per service.
- *
- * `frozenWins` moves the frozen layer LAST, which is what makes a rollback replay
- * the release it restores instead of running old code against today's config —
- * the one combination nobody ever ran. It is layered last rather than used alone
- * because `dep.envVars` is flat and unscoped: it cannot express "this key was
- * never set here", so dropping the live layers would delete keys the snapshot
- * never captured. Last-wins shadows exactly the keys the release had.
- *
- * It shadows inline and service-scoped values too, which for a key that was
- * project-scoped at capture and is service-scoped now means one value lands on
- * every service. That case is unresolvable from a flat map, so it is surfaced per
- * key as `scopeAmbiguous` in the rollback confirm diff rather than hidden.
- */
-export function mergeServiceDeployEnv(
-  layers: ServiceEnvLayers,
-  frozenWins: boolean,
-): Record<string, string> {
-  const result: Record<string, string> = { ...layers.project };
-
-  if (!frozenWins && layers.frozen) {
-    Object.assign(result, layers.frozen);
-  }
-
-  // Layer inline compose environment.
-  // Non-empty inline values override project values (e.g. compose literals).
-  // Empty inline values (from compose passthrough placeholders like ${VAR:-}) do NOT
-  // clobber non-empty project values.
-  for (const [key, value] of Object.entries(layers.inline ?? {})) {
-    if (value === "" && result[key] !== undefined && result[key] !== "") {
-      continue;
-    }
-    result[key] = value;
-  }
-
-  // Layer service-scoped environment rows (explicit service overrides win)
-  for (const [key, value] of Object.entries(layers.service ?? {})) {
-    result[key] = value;
-  }
-
-  if (frozenWins && layers.frozen) {
-    Object.assign(result, layers.frozen);
-  }
-
-  return result;
 }
 
 /**
@@ -1521,16 +1461,32 @@ export async function deployComposeServices(
     // rollback moves the frozen layer last), THEN resolve
     // `{{publicUrl:<service>}}` against live routing — which is why a frozen
     // token still points at today's hostname rather than the release's.
+    const layered = mergeServiceDeployEnv(
+      {
+        project: decryptedProjectEnv,
+        frozen: depEnv,
+        inline: (svc.environment as Record<string, string>) ?? {},
+        service: decryptedServiceEnv,
+      },
+      frozenEnvWins,
+    );
+    // Say so when a variable is not what any UI shows. The service Env tab and
+    // the wizard both keep rendering the empty value this merge ignored, so the
+    // deploy log is the only surface that can explain the container — same
+    // reason `resolveEnvPublicUrls` reports what it omitted just below. Names
+    // only: values are output-masked everywhere else.
+    if (layered.deferredEmpty.length > 0) {
+      logger.log(
+        `Service "${svc.name}": ${layered.deferredEmpty.join(", ")} ${
+          layered.deferredEmpty.length === 1 ? "is" : "are"
+        } empty in the compose config — using the configured value instead. ` +
+          `(An empty compose value never clears a configured one; to force a variable blank here, set it empty as a service-scoped variable.)\n`,
+        "info",
+        { serviceName: svc.name },
+      );
+    }
     const { env: mergedEnv, unresolved: unresolvedEnvUrls } = resolveEnvPublicUrls(
-      mergeServiceDeployEnv(
-        {
-          project: decryptedProjectEnv,
-          frozen: depEnv,
-          inline: (svc.environment as Record<string, string>) ?? {},
-          service: decryptedServiceEnv,
-        },
-        frozenEnvWins,
-      ),
+      layered.env,
       urlForPublicUrlToken,
     );
     if (unresolvedEnvUrls.length > 0) {

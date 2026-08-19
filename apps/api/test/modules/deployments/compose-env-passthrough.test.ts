@@ -1,19 +1,33 @@
+/**
+ * Issue #614: a compose passthrough variable (`${VAR:-}` / `${VAR}`) parses to
+ * `""`, is persisted onto the service row with its provenance stripped, and then
+ * replaced the operator's project-level value with an empty string at deploy —
+ * worse than unset, since `KEY=` also masks the image's own `ENV` default.
+ *
+ * The rule under test: an empty INLINE value never clears a configured one. The
+ * trade-off that buys, and the escape hatch that survives it, are pinned below
+ * so neither can be removed by accident.
+ */
+
 import { describe, expect, it } from "vitest";
 
 import { parseComposeFile } from "../../../src/lib/compose-parser";
 import {
   mergeServiceDeployEnv,
   type ServiceEnvLayers,
-} from "../../../src/modules/deployments/compose/deploy.service";
+} from "../../../src/modules/deployments/compose/service-env-layers";
 
-/**
- * Fix for Issue #614:
- * Compose passthrough environment variables (${VAR:-} / ${VAR}) must not clobber
- * non-empty project-level environment variables during container deploy.
- */
-describe("Issue #614 - Compose environment passthrough vs project env vars", () => {
-  it("imports compose passthrough variable (${VAR:-}) as empty string in service environment", () => {
-    const yaml = `
+const layers = (over: Partial<ServiceEnvLayers> = {}): ServiceEnvLayers => ({
+  project: {},
+  frozen: {},
+  inline: {},
+  service: {},
+  ...over,
+});
+
+describe("compose env passthrough vs configured values (#614)", () => {
+  it("parses passthrough placeholders to empty strings, keeping provenance the row will lose", () => {
+    const parsed = parseComposeFile(`
 services:
   web:
     image: node:20
@@ -21,17 +35,20 @@ services:
       CONFIG_VAR: \${CONFIG_VAR:-}
       ANOTHER_VAR: \${ANOTHER_VAR}
       WITH_DEFAULT: \${WITH_DEFAULT:-default_fallback}
-`;
-    const parsed = parseComposeFile(yaml);
+      AUTHORED_EMPTY: ""
+`);
     const service = parsed.services[0];
 
-    expect(service).toBeDefined();
     expect(service?.environment).toEqual({
       CONFIG_VAR: "",
       ANOTHER_VAR: "",
       WITH_DEFAULT: "default_fallback",
+      AUTHORED_EMPTY: "",
     });
 
+    // The parser CAN tell the two empties apart — a placeholder carries meta, an
+    // authored literal carries none. The service row has no `environmentMeta`
+    // column, which is why the merge has to decide on value shape instead.
     expect(service?.environmentMeta?.CONFIG_VAR).toMatchObject({
       source: "default",
       variable: "CONFIG_VAR",
@@ -41,10 +58,12 @@ services:
       source: "missing",
       variable: "ANOTHER_VAR",
     });
+    expect(service?.environmentMeta?.AUTHORED_EMPTY).toBeUndefined();
   });
 
-  it("preserves non-empty project-level env vars when compose specifies empty passthrough placeholders", () => {
-    const yaml = `
+  it("keeps the project value the operator configured, and reports the substitution", () => {
+    const inline =
+      parseComposeFile(`
 services:
   api:
     image: my-app:latest
@@ -52,77 +71,135 @@ services:
       DATABASE_URL: \${DATABASE_URL:-}
       API_SECRET: \${API_SECRET}
       PORT: "3000"
-`;
-    const parsed = parseComposeFile(yaml);
-    const inlineEnv = parsed.services[0]?.environment ?? {};
+`).services[0]?.environment ?? {};
 
-    // Project-level environment variables configured by the operator:
-    const projectEnv = {
-      DATABASE_URL: "postgresql://user:pass@db:5432/production_db",
-      API_SECRET: "super-secret-token-12345",
-      PORT: "8080",
-    };
+    const merged = mergeServiceDeployEnv(
+      layers({
+        project: {
+          DATABASE_URL: "postgresql://user:pass@db:5432/production_db",
+          API_SECRET: "super-secret-token-12345",
+          PORT: "8080",
+        },
+        inline,
+      }),
+      false,
+    );
 
-    const layers: ServiceEnvLayers = {
-      project: projectEnv,
-      frozen: {},
-      inline: inlineEnv,
-      service: {},
-    };
+    expect(merged.env.DATABASE_URL).toBe("postgresql://user:pass@db:5432/production_db");
+    expect(merged.env.API_SECRET).toBe("super-secret-token-12345");
+    // A non-empty inline literal still wins — that precedence is the point of
+    // the inline layer and is unchanged.
+    expect(merged.env.PORT).toBe("3000");
 
-    const merged = mergeServiceDeployEnv(layers, false);
-
-    // FIXED: Project-level environment variables are preserved
-    expect(merged.DATABASE_URL).toBe("postgresql://user:pass@db:5432/production_db");
-    expect(merged.API_SECRET).toBe("super-secret-token-12345");
-
-    // Literal inline value (PORT: "3000") still overrides project (PORT: "8080")
-    expect(merged.PORT).toBe("3000");
+    // Names only, never values: this goes to the deploy log.
+    expect(merged.deferredEmpty.sort()).toEqual(["API_SECRET", "DATABASE_URL"]);
   });
 
-  it("allows explicit service-scoped overrides to take precedence over project and inline", () => {
-    const projectEnv = {
-      DATABASE_URL: "postgresql://user:pass@db:5432/production_db",
-      API_SECRET: "global-secret",
-    };
+  it("defers to the frozen capture too — the layer every real non-rollback deploy has", () => {
+    // `dep.envVars` is a snapshot of the operator's env, not of this service's
+    // inline map, so on a normal deploy the frozen layer is what an empty inline
+    // value is actually measured against.
+    const merged = mergeServiceDeployEnv(
+      layers({
+        project: { CONFIG_PARAM: "stale-project" },
+        frozen: { CONFIG_PARAM: "captured-at-deploy" },
+        inline: { CONFIG_PARAM: "" },
+      }),
+      false,
+    );
 
-    const inlineEnv = {
-      DATABASE_URL: "",
-      API_SECRET: "",
-    };
-
-    const serviceEnv = {
-      DATABASE_URL: "postgresql://user:pass@db:5432/special_service_db",
-    };
-
-    const layers: ServiceEnvLayers = {
-      project: projectEnv,
-      frozen: {},
-      inline: inlineEnv,
-      service: serviceEnv,
-    };
-
-    const merged = mergeServiceDeployEnv(layers, false);
-
-    // Service-scoped override wins for DATABASE_URL
-    expect(merged.DATABASE_URL).toBe("postgresql://user:pass@db:5432/special_service_db");
-    // Project-level value is preserved for API_SECRET
-    expect(merged.API_SECRET).toBe("global-secret");
+    expect(merged.env.CONFIG_PARAM).toBe("captured-at-deploy");
+    expect(merged.deferredEmpty).toEqual(["CONFIG_PARAM"]);
   });
 
-  it("retains empty string when no project variable exists for the passthrough key", () => {
-    const inlineEnv = {
-      UNSET_PASSTHROUGH: "",
-    };
+  it("replays the release unchanged on a rollback, and reports nothing it did not decide", () => {
+    const merged = mergeServiceDeployEnv(
+      layers({
+        project: { CONFIG_PARAM: "today" },
+        frozen: { CONFIG_PARAM: "release" },
+        inline: { CONFIG_PARAM: "" },
+      }),
+      true,
+    );
 
-    const layers: ServiceEnvLayers = {
-      project: {},
-      frozen: {},
-      inline: inlineEnv,
-      service: {},
-    };
+    // frozenWins: the snapshot is layered last and still wins outright.
+    expect(merged.env.CONFIG_PARAM).toBe("release");
+    // The deferral didn't pick this value, so naming it in the log would point
+    // the operator at the wrong layer.
+    expect(merged.deferredEmpty).toEqual([]);
+  });
 
-    const merged = mergeServiceDeployEnv(layers, false);
-    expect(merged.UNSET_PASSTHROUGH).toBe("");
+  it("still lets a service-scoped row force a variable blank — the escape hatch", () => {
+    const merged = mergeServiceDeployEnv(
+      layers({
+        project: { HTTP_PROXY: "http://corp:3128" },
+        inline: { HTTP_PROXY: "" },
+        service: { HTTP_PROXY: "" },
+      }),
+      false,
+    );
+
+    expect(merged.env.HTTP_PROXY).toBe("");
+    expect(merged.deferredEmpty).toEqual([]);
+  });
+
+  it("ACCEPTED TRADE-OFF: an inline empty can no longer blank a configured value", () => {
+    // Deliberate, and the cost of deciding on value shape rather than on the
+    // parser's recorded intent: an author who wrote `HTTP_PROXY: ""` on purpose
+    // (or blanked it in the service Env tab, which writes the same column) no
+    // longer clears the project value — they must use a service-scoped row, as
+    // in the case above. Carrying `environmentMeta` onto the row via `advanced`
+    // would let this decide on intent instead; if that lands, this expectation
+    // is the one to revisit.
+    const merged = mergeServiceDeployEnv(
+      layers({ project: { HTTP_PROXY: "http://corp:3128" }, inline: { HTTP_PROXY: "" } }),
+      false,
+    );
+
+    expect(merged.env.HTTP_PROXY).toBe("http://corp:3128");
+    expect(merged.deferredEmpty).toEqual(["HTTP_PROXY"]);
+  });
+
+  it("KNOWN GAP: a partially interpolated value is not empty, so it still wins", () => {
+    // The same bug class as #614 with a one-line-different compose file. A
+    // value-shaped rule cannot reach it; only carrying the parser's meta can.
+    // Pinned so the gap is visible rather than assumed fixed.
+    const inline =
+      parseComposeFile(`
+services:
+  api:
+    image: my-app:latest
+    environment:
+      DATABASE_URL: postgres://\${POSTGRES_USER}:\${POSTGRES_PASSWORD}@db:5432/\${POSTGRES_DB}
+`).services[0]?.environment ?? {};
+
+    expect(inline.DATABASE_URL).toBe("postgres://:@db:5432/");
+
+    const merged = mergeServiceDeployEnv(
+      layers({ project: { DATABASE_URL: "postgres://real:s3cret@db:5432/prod" }, inline }),
+      false,
+    );
+
+    expect(merged.env.DATABASE_URL).toBe("postgres://:@db:5432/");
+    expect(merged.deferredEmpty).toEqual([]);
+  });
+
+  it("sets a passthrough key that no other layer defines, rather than dropping it", () => {
+    // Skipping instead of assigning would delete the variable from the container
+    // — a third behavior neither reading of the compose file asked for.
+    const merged = mergeServiceDeployEnv(layers({ inline: { UNSET_PASSTHROUGH: "" } }), false);
+
+    expect(merged.env).toHaveProperty("UNSET_PASSTHROUGH", "");
+    expect(merged.deferredEmpty).toEqual([]);
+  });
+
+  it("does not defer when the configured value is itself empty", () => {
+    const merged = mergeServiceDeployEnv(
+      layers({ project: { CONFIG_PARAM: "" }, inline: { CONFIG_PARAM: "" } }),
+      false,
+    );
+
+    expect(merged.env.CONFIG_PARAM).toBe("");
+    expect(merged.deferredEmpty).toEqual([]);
   });
 });
