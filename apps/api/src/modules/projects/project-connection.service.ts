@@ -16,12 +16,12 @@ import {
   getAppEndpoints,
   getAppConnection,
   getOutputPort,
-  deriveProjectDeployTarget,
   type AppTemplate,
 } from "@repo/core";
 import { getTemplateForOrg } from "../apps/catalog-source";
 import type { RequestContext } from "../../lib/request-context";
 import { assertResourceInOrg } from "../../lib/controller-helpers";
+import { isLocalHostRow } from "../../lib/box-org";
 import { permission } from "../../lib/permission";
 import { getAppConnectionView, type AppConnectionOutput } from "../apps/app-settings.service";
 import { mergeEnvVars } from "./project-env.service";
@@ -234,6 +234,63 @@ async function loadConnectionEnds(
   return { source, target, output, template, declaredPort: spec ? getOutputPort(spec) : null };
 }
 
+/**
+ * WHICH MACHINE a project's workload sits on, collapsed so that every encoding of
+ * "this box" compares equal.
+ *
+ * `box` covers all of them deliberately: a project with no server binding deploys to
+ * the host docker socket, and so does the auto-registered isLocal "This Server" row
+ * AND a plain loopback/SERVER_IP row for this host (deployment-runtime
+ * `resolveTargetPlatform`, `isLocalHostRow`). One daemon means one set of
+ * `openship-<slug>` networks, so treating those as different machines refuses pairs
+ * that are demonstrably co-located.
+ */
+type ProjectHost = { kind: "cloud" } | { kind: "box" } | { kind: "server"; id: string };
+
+const hostKey = (h: ProjectHost): string => (h.kind === "server" ? `server:${h.id}` : h.kind);
+
+/**
+ * Resolve which machine a project's workload sits on.
+ *
+ * Snapshot serverId FIRST, durable column second — the order `readDeployMeta` uses,
+ * and for its reason: the snapshot is where the live release ACTUALLY runs while the
+ * column is where the project is bound, and an alias only resolves next to the
+ * running container. (`resolveSnapshotTarget` and `countActiveByServer` deliberately
+ * invert this — they answer "where would the NEXT deploy go", a different question.)
+ *
+ * Cloud is the UNION of both signals, mirroring project-resources.service: the
+ * `cloudWorkspaceId` column alone is not enough, because a self-hosted instance
+ * orchestrating a cloud deploy deliberately leaves it null to stay local-canonical
+ * (deployment-lifecycle, `isLocalOrchestratedCloud`) — for that shape the snapshot is
+ * the only cloud signal there is, and reading the column alone declares it local.
+ *
+ * A project bound to nothing and never deployed is NOT unknown: `resolveSnapshotTarget`
+ * resolves exactly that shape to the host default, so its first deploy lands on this
+ * box and `box` is the honest answer. Reporting it as "no idea" instead read as
+ * "nothing to refuse" at the call sites, which handed a remote source's alias to a
+ * project that was about to deploy somewhere else entirely.
+ */
+async function resolveProjectHost(project: Project): Promise<ProjectHost> {
+  const dep = project.activeDeploymentId
+    ? await repos.deployment.findById(project.activeDeploymentId).catch(() => null)
+    : null;
+  const meta = (dep?.meta ?? null) as { deployTarget?: string; serverId?: string } | null;
+  if (meta?.deployTarget === "cloud" || project.cloudWorkspaceId) return { kind: "cloud" };
+
+  const serverId = meta?.serverId ?? project.serverId ?? null;
+  if (!serverId) return { kind: "box" };
+
+  const row = await repos.server
+    .getInOrganization(serverId, project.organizationId)
+    .catch(() => null);
+  // A row we cannot read is not PROVABLY this box, so it stays its own machine — the
+  // failure mode of guessing "local" here is a dead alias, which is what this check
+  // exists to prevent.
+  return row && (await isLocalHostRow(row).catch(() => false))
+    ? { kind: "box" }
+    : { kind: "server", id: serverId };
+}
+
 /** The east-west value an internal connection should inject, or why it can't. */
 type InternalResolution = { value: string } | { error: string };
 
@@ -243,31 +300,30 @@ type InternalResolution = { value: string } | { error: string };
  * infer availability from WHICH error `createConnection` happened to throw first —
  * so the answer depended on the shape of an unrelated output's value.
  */
-function resolveInternalValue(ends: ConnectionEnds): InternalResolution {
+async function resolveInternalValue(ends: ConnectionEnds): Promise<InternalResolution> {
   const { source, target, output, template, declaredPort } = ends;
 
   // GH-631: a non-URL value (password, token, API key, bucket name) names no host,
   // so internal mode has nothing to rewrite and nothing to reach — inject it
   // verbatim. Answered BEFORE reachability on purpose: a credential is equally
-  // valid whichever box the source runs on, and gating it on network topology
-  // would re-break the case that was reported.
+  // valid whichever box the source runs on, gating it on network topology would
+  // re-break the case that was reported, and resolving hosts costs queries this
+  // path has no use for.
   if (!isNetworkUrl(output.value)) return { value: output.value };
 
   // Everything below hands the consumer a HOST to reach east-west, which rides on
-  // joining the source app's docker network at deploy (attachLinkedNetworks).
-  // Those networks are per-HOST, so both ends must land on the same box: a
-  // cloud-hosted project has no attachable shared network on this pipe yet, and
-  // one server cannot see another's — the alias would resolve nowhere, and the
-  // attach only WARNS, so the deploy goes green around a dead host. `serverId` is
-  // the durable binding behind `deriveProjectDeployTarget`; the per-deployment
-  // snapshot is re-derived, and a deploy that failed to would silently pass here.
-  if (
-    deriveProjectDeployTarget(source) === "cloud" ||
-    deriveProjectDeployTarget(target) === "cloud"
-  ) {
+  // joining the source app's docker network at deploy (attachLinkedNetworks). Those
+  // networks are per-machine and a failed attach only WARNS, so a link across two
+  // machines injects an alias that resolves nowhere and still deploys green.
+  const [sourceHost, targetHost] = await Promise.all([
+    resolveProjectHost(source),
+    resolveProjectHost(target),
+  ]);
+
+  if (sourceHost.kind === "cloud" || targetHost.kind === "cloud") {
     return { error: "Internal mode isn't available for a cloud-hosted app yet — use Public." };
   }
-  if ((source.serverId ?? null) !== (target.serverId ?? null)) {
+  if (hostKey(sourceHost) !== hostKey(targetHost)) {
     return {
       error:
         "Internal mode needs both projects on the same server — they're on different servers, so use Public.",
@@ -310,7 +366,7 @@ export async function internalModeAvailable(
     input.sourceProjectId,
     input.outputId,
   );
-  return !("error" in resolveInternalValue(ends));
+  return !("error" in (await resolveInternalValue(ends)));
 }
 
 export async function createConnection(
@@ -350,7 +406,7 @@ export async function createConnection(
 
   let value = output.value;
   if (mode === "internal") {
-    const resolved = resolveInternalValue(ends);
+    const resolved = await resolveInternalValue(ends);
     if ("error" in resolved) {
       // An EXPLICIT internal ask gets the reason. A DEFAULTED one falls back to
       // public — failing a request that never asked for internal turns a working
