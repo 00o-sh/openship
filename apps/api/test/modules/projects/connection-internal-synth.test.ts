@@ -6,7 +6,8 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
  * (`http://<alias>:<port>`), tagged `internal: true`. `createConnection` must
  * inject that value VERBATIM in internal mode — never route it through
  * `toInternalUrl`, which needs a template and would return null (killing the
- * link). The cloud-source guard still fires first, so a cloud-hosted source is
+ * link). The co-location guard still fires first, so a cloud-hosted source — or
+ * one on a different server, since `openship-<slug>` networks are per-host — is
  * steered to Public even when it carries a synthesized internal value.
  */
 
@@ -50,16 +51,15 @@ vi.mock("../../../src/modules/projects/project-env.service", () => ({
   mergeEnvVars: h.mergeEnvVars,
 }));
 
-vi.mock("../../../src/modules/projects/project-connection.util", () => ({
+// Only `toInternalUrl` is driven by this suite. Everything else — notably
+// `isNetworkUrl`, which decides whether a value even HAS a host to rewrite — must
+// be the shipped implementation: a hand-copy inside the factory would keep these
+// tests green while the production predicate rotted.
+vi.mock("../../../src/modules/projects/project-connection.util", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("../../../src/modules/projects/project-connection.util")
+  >()),
   toInternalUrl: h.toInternalUrl,
-  isNetworkUrl: (val: string) => {
-    try {
-      const u = new URL(val);
-      return Boolean(u.protocol && u.hostname);
-    } catch {
-      return false;
-    }
-  },
 }));
 
 import { createConnection } from "../../../src/modules/projects/project-connection.service";
@@ -122,12 +122,15 @@ describe("createConnection — synthesized internal source", () => {
   });
 
   it("still steers a CLOUD-hosted source to Public before injecting anything", async () => {
+    // Read from the DURABLE binding (`cloudWorkspaceId`, via
+    // deriveProjectDeployTarget), not the per-deployment meta snapshot: a project
+    // bound to cloud that hasn't redeployed has no snapshot to read, and used to
+    // sail through this guard.
     h.findById.mockImplementation(async (id: string) =>
       id === "app-a"
         ? { id: "app-a", name: "App A", slug: "app-a", organizationId: "org1", activeDeploymentId: null }
-        : { id: "db-c", name: "Plain App", slug: "plain-app", organizationId: "org1", appTemplateId: null, activeDeploymentId: "dep1" },
+        : { id: "db-c", name: "Plain App", slug: "plain-app", organizationId: "org1", appTemplateId: null, activeDeploymentId: null, cloudWorkspaceId: "ws_1" },
     );
-    h.deploymentFindById.mockResolvedValue({ id: "dep1", meta: { deployTarget: "cloud" } });
 
     await expect(
       createConnection(
@@ -141,6 +144,72 @@ describe("createConnection — synthesized internal source", () => {
     // Guard fires before the env write — no half-wired state.
     expect(h.mergeEnvVars).not.toHaveBeenCalled();
     expect(h.upsert).not.toHaveBeenCalled();
+  });
+
+  it("refuses internal when the two projects sit on DIFFERENT servers", async () => {
+    // `openship-<slug>` networks are per-host, and attachLinkedNetworks only
+    // WARNS when the attach fails — so a cross-server internal link injected an
+    // alias that resolves nowhere and still deployed green.
+    h.findById.mockImplementation(async (id: string) =>
+      id === "app-a"
+        ? { id: "app-a", name: "App A", slug: "app-a", organizationId: "org1", activeDeploymentId: null, serverId: "srv-a" }
+        : { id: "db-c", name: "Plain App", slug: "plain-app", organizationId: "org1", appTemplateId: null, activeDeploymentId: null, serverId: "srv-b" },
+    );
+
+    await expect(
+      createConnection(
+        ctx,
+        "app-a",
+        { sourceProjectId: "db-c", outputId: "svc", envKey: "DB_URL", mode: "internal" },
+        { defer: true },
+      ),
+    ).rejects.toThrow(/same server/i);
+
+    expect(h.mergeEnvVars).not.toHaveBeenCalled();
+    expect(h.upsert).not.toHaveBeenCalled();
+  });
+
+  it("allows internal for two projects on the SAME server", async () => {
+    h.findById.mockImplementation(async (id: string) =>
+      id === "app-a"
+        ? { id: "app-a", name: "App A", slug: "app-a", organizationId: "org1", activeDeploymentId: null, serverId: "srv-a" }
+        : { id: "db-c", name: "Plain App", slug: "plain-app", organizationId: "org1", appTemplateId: null, activeDeploymentId: null, serverId: "srv-a" },
+    );
+
+    const res = await createConnection(
+      ctx,
+      "app-a",
+      { sourceProjectId: "db-c", outputId: "svc", envKey: "DB_URL", mode: "internal" },
+      { defer: true },
+    );
+
+    expect(res.connection.mode).toBe("internal");
+  });
+
+  it("a DEFAULTED mode falls back to public instead of failing the request", async () => {
+    // Only an EXPLICIT `mode: "internal"` gets the error. When the caller never
+    // chose, refusing would turn a working public wire-up into a dead end.
+    h.findById.mockImplementation(async (id: string) =>
+      id === "app-a"
+        ? { id: "app-a", name: "App A", slug: "app-a", organizationId: "org1", activeDeploymentId: null, serverId: "srv-a" }
+        : { id: "db-c", name: "Plain App", slug: "plain-app", organizationId: "org1", appTemplateId: null, activeDeploymentId: null, serverId: "srv-b" },
+    );
+
+    const res = await createConnection(
+      ctx,
+      "app-a",
+      { sourceProjectId: "db-c", outputId: "svc", envKey: "DB_URL" },
+      { defer: true },
+    );
+
+    expect(res.connection.mode).toBe("public");
+    expect(h.mergeEnvVars).toHaveBeenCalledWith(
+      "app-a",
+      "org1",
+      expect.objectContaining({
+        upserts: [{ key: "DB_URL", value: "http://my-app:8080", isSecret: true }],
+      }),
+    );
   });
 
   it("a TEMPLATE (non-internal) output still routes through toInternalUrl", async () => {
@@ -159,7 +228,9 @@ describe("createConnection — synthesized internal source", () => {
       { defer: true },
     );
 
-    expect(h.toInternalUrl).toHaveBeenCalledWith("postgres://host:5432/db", expect.anything(), "my-app");
+    // 4th arg = the container port the output's catalog source declares (null
+    // here — this fixture's `connection.outputs` is empty).
+    expect(h.toInternalUrl).toHaveBeenCalledWith("postgres://host:5432/db", expect.anything(), "my-app", null);
     expect(h.mergeEnvVars).toHaveBeenCalledWith(
       "app-a",
       "org1",
@@ -202,5 +273,47 @@ describe("createConnection — synthesized internal source", () => {
       }),
     );
     expect(res.connection.mode).toBe("internal");
+  });
+
+  it("a non-URL output is NOT gated on co-location — a key works from any server", async () => {
+    // The reachability guards must sit behind the verbatim path: a JWT carries no
+    // host, so refusing it because the two projects sit on different servers would
+    // re-break exactly what GH-631 reported.
+    h.findById.mockImplementation(async (id: string) =>
+      id === "app-a"
+        ? { id: "app-a", name: "App A", slug: "app-a", organizationId: "org1", activeDeploymentId: null, serverId: "srv-a" }
+        : { id: "db-c", name: "Supabase", slug: "supa", organizationId: "org1", appTemplateId: "supabase", activeDeploymentId: null, serverId: "srv-b" },
+    );
+    h.getAppConnectionView.mockResolvedValue({
+      outputs: [
+        {
+          id: "anonKey",
+          label: "Anon Key",
+          value: "eyJhbGciOiJIUzI1NiJ9.abc.def",
+          envKey: "SUPABASE_ANON_KEY",
+          service: "kong",
+          internal: false,
+          secret: false,
+          width: "full" as const,
+        },
+      ],
+    });
+    h.getTemplateForOrg.mockResolvedValue({ id: "supabase", connection: { outputs: [] } });
+
+    const res = await createConnection(
+      ctx,
+      "app-a",
+      { sourceProjectId: "db-c", outputId: "anonKey", envKey: "SUPABASE_ANON_KEY", mode: "internal" },
+      { defer: true },
+    );
+
+    expect(res.connection.mode).toBe("internal");
+    expect(h.mergeEnvVars).toHaveBeenCalledWith(
+      "app-a",
+      "org1",
+      expect.objectContaining({
+        upserts: [{ key: "SUPABASE_ANON_KEY", value: "eyJhbGciOiJIUzI1NiJ9.abc.def", isSecret: true }],
+      }),
+    );
   });
 });
