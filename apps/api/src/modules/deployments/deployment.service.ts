@@ -36,6 +36,7 @@ import {
 import { checkNoActiveBuild } from "./build.service";
 import { livePrimaryContainerId } from "../services/service-container";
 import { decryptEnvMap } from "../../lib/encryption";
+import { inlineEmptyDefers } from "./compose/service-env-layers";
 
 /**
  * #336: present a deployment to a CLIENT — masks `meta.composeServices[].environment`.
@@ -300,15 +301,23 @@ async function describeRestoreConsequences(
       rowsByService.set(row.serviceId, bucket);
     }
 
-    const liveServices = liveServiceRows.map((svc) => ({
-      name: svc.name,
+    const liveServices = liveServiceRows.map((svc) => {
       // Same precedence as the deploy merge: a service's own env rows win over
-      // inline compose `environment:`.
-      overrides: {
-        ...((svc.environment as Record<string, string> | null) ?? {}),
-        ...decryptEnvMap(rowsByService.get(svc.id) ?? {}),
-      },
-    }));
+      // inline compose `environment:` — INCLUDING the deferral, via the shared
+      // `inlineEmptyDefers`. An inline empty the deploy will not apply is not an
+      // override, and listing it here reported a `frozen-wins` revert (plus a
+      // `scopeAmbiguous` warning) for every compose passthrough key the rollback
+      // was never going to touch. This dialog's whole job is to be trusted.
+      const overrides: Record<string, string> = {};
+      for (const [key, value] of Object.entries(
+        (svc.environment as Record<string, string> | null) ?? {},
+      )) {
+        if (inlineEmptyDefers(value, liveProject[key])) continue;
+        overrides[key] = value;
+      }
+      Object.assign(overrides, decryptEnvMap(rowsByService.get(svc.id) ?? {}));
+      return { name: svc.name, overrides };
+    });
 
     return {
       env: diffFrozenEnv({ frozen, liveProject, liveServices, strategy }),
