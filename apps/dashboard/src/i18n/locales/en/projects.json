@@ -59,7 +59,8 @@
   "env": {
     "productionFallback": "Production",
     "switchAria": "Switch environment",
-    "addBranchAria": "Add branch",
+    "newEnvironment": "New environment",
+    "backToEnvironments": "Back to environments",
     "searchBranches": "Search branches",
     "refreshBranches": "Refresh branches",
     "noBranches": "No branches found",

@@ -3,8 +3,8 @@
 import {
   Check,
   Plus,
-  X,
   ChevronDown,
+  ChevronLeft,
   GitBranch,
   Tag,
   Loader2,
@@ -115,9 +115,11 @@ const EnvironmentSwitcher = () => {
     setLoadingBranches(false);
   }, []);
 
+  // ONE panel, two views. `isAdding` is a view of the open menu, not a second
+  // menu — see the render below for why the two-popover version was wrong.
   const activateBranchCreator = useCallback((branchSeed?: string) => {
+    setIsOpen(true);
     setIsAdding(true);
-    setIsOpen(false);
     setManualMode(false);
     setBranchQuery(branchSeed ?? "");
     setManualEnvironmentName("");
@@ -143,19 +145,28 @@ const EnvironmentSwitcher = () => {
 
   // Clears the loaded-for marker instead of fetching here: the effect below owns
   // the one branch load, so refresh and first-open can never drift apart.
+  //
+  // It also FORCES `loadingBranches` back to false rather than refusing while it
+  // is true. Refusing made this button a no-op in exactly the state the user
+  // reaches for it: if a request was ever superseded, the spinner stayed true
+  // forever, so the button was both disabled and early-returning, and a full page
+  // reload was the only way out. Bumping the request id retires whatever is in
+  // flight, so forcing the flag can't be overwritten by a stale response.
   const refreshBranches = useCallback(() => {
-    if (loadingBranches) return;
+    branchRequestId.current += 1;
+    setLoadingBranches(false);
     setBranchesLoadedForProject(null);
-  }, [loadingBranches]);
+  }, []);
 
-  const openBranchCreator = useCallback(() => {
-    if (isAdding) {
-      closeMenus();
-      return;
-    }
-
-    activateBranchCreator();
-  }, [activateBranchCreator, closeMenus, isAdding]);
+  /** Back out of the creator view to the environment list, same panel. */
+  const closeBranchCreator = useCallback(() => {
+    setIsAdding(false);
+    setManualMode(false);
+    setBranchQuery("");
+    setManualEnvironmentName("");
+    setManualBranch("");
+    setCreatingBranch(null);
+  }, []);
 
   useEffect(() => {
     const shouldCreateEnvironment = searchParams.get("createEnvironment") === "1";
@@ -202,7 +213,11 @@ const EnvironmentSwitcher = () => {
       })
       .catch((error) => {
         if (branchRequestId.current !== requestId) return;
-        const message = error instanceof Error ? error.message : t.projects.env.failedLoadBranches;
+        // The SERVER's reason, not `error.message`. For an `ApiError` that field is
+        // `` `API ${status}: ${statusText}` ``, so a project with no repo connected
+        // reported "API 400: Bad Request" while the body said exactly what to do.
+        // Same extractor the create path next to this one already uses.
+        const message = getApiErrorMessage(error, t.projects.env.failedLoadBranches);
         showToast(message, "error", t.projects.env.toastBranchesTitle);
       })
       .finally(() => {
@@ -211,12 +226,14 @@ const EnvironmentSwitcher = () => {
         setLoadingBranches(false);
       });
 
-    return () => {
-      if (branchRequestId.current === requestId) {
-        branchRequestId.current += 1;
-      }
-    };
-  }, [branchesLoadedForProject, isAdding, projectData.id, showToast]);
+    // NO cleanup that retires this request. It used to bump `branchRequestId` on
+    // every dep change, which made all three guards above fail — including the
+    // `finally`, so `loadingBranches` was never set back to false. The panel then
+    // showed a permanent spinner and `refreshBranches` (disabled while loading)
+    // could not clear it, which is why only a page reload fixed it. The guards on
+    // the response already prevent a stale write; retiring the request as well
+    // only guaranteed nobody would ever settle the flag.
+  }, [branchesLoadedForProject, isAdding, projectData.id, showToast, t]);
 
   if (!projectData.id) return null;
 
@@ -288,18 +305,26 @@ const EnvironmentSwitcher = () => {
   };
 
   return (
+    // ONE trigger, ONE panel. This used to be two buttons owning two separately
+    // positioned panels — a pill that listed environments and a `+` that opened a
+    // different dropdown to create one. They were mutually exclusive anyway, so
+    // the split bought nothing and cost the obvious thing: "add an environment"
+    // was a control you had to already know about, sitting outside the menu that
+    // lists environments. Now the list IS the menu, and creating is a view of it.
     <DismissiblePopover
-      open={isOpen || isAdding}
+      open={isOpen}
       onOpenChange={(open) => {
         if (!open) closeMenus();
       }}
-      className="relative flex items-center gap-2"
+      className="relative flex items-center"
     >
       <button
         type="button"
         onClick={openSwitcher}
         className="inline-flex h-9 max-w-[260px] items-center gap-2 rounded-full border border-border/50 bg-card px-3 text-sm font-medium text-foreground transition-colors hover:bg-muted/40"
         aria-label={t.projects.env.switchAria}
+        aria-expanded={isOpen}
+        aria-haspopup="menu"
       >
         <span className="truncate">{currentEnvironment.name}</span>
         {currentEnvironment.isApp ? (
@@ -317,18 +342,10 @@ const EnvironmentSwitcher = () => {
         )}
         <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
       </button>
-      <button
-        type="button"
-        onClick={openBranchCreator}
-        className="inline-flex size-9 items-center justify-center rounded-full border border-border/50 bg-card text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
-        aria-label={t.projects.env.addBranchAria}
-      >
-        {isAdding ? <X className="size-4" /> : <Plus className="size-4" />}
-      </button>
 
-      {isOpen && (
+      {isOpen && !isAdding && (
         <div
-          className="absolute end-11 top-full z-40 mt-2 w-[320px] overflow-hidden rounded-lg border border-border/50 shadow-xl"
+          className="absolute end-0 top-full z-40 mt-2 w-[340px] overflow-hidden rounded-lg border border-border/50 shadow-xl"
           style={{ backgroundColor: "var(--th-card-bg-solid, var(--card))" }}
         >
           <div className="max-h-[320px] overflow-y-auto p-1">
@@ -375,15 +392,38 @@ const EnvironmentSwitcher = () => {
               );
             })}
           </div>
+          <div className="border-t border-border/50 p-1">
+            <button
+              type="button"
+              onClick={() => activateBranchCreator()}
+              className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-start text-sm font-medium text-foreground transition-colors hover:bg-muted/50"
+            >
+              <Plus className="size-4 text-muted-foreground" />
+              {t.projects.env.newEnvironment}
+            </button>
+          </div>
         </div>
       )}
 
-      {isAdding && (
+      {isOpen && isAdding && (
         <div
           className="absolute end-0 top-full z-40 mt-2 w-[340px] rounded-lg border border-border/50 p-2 shadow-xl"
           style={{ backgroundColor: "var(--th-card-bg-solid, var(--card))" }}
         >
           <div className="space-y-2">
+            <div className="flex items-center gap-1 px-1">
+              <button
+                type="button"
+                onClick={closeBranchCreator}
+                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+                aria-label={t.projects.env.backToEnvironments}
+              >
+                <ChevronLeft className="size-4" />
+              </button>
+              <span className="truncate text-sm font-medium text-foreground">
+                {t.projects.env.newEnvironment}
+              </span>
+            </div>
             <div className="flex items-stretch gap-2">
               <input
                 value={branchQuery}

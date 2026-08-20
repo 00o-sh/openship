@@ -59,7 +59,8 @@
   "env": {
     "productionFallback": "生产环境",
     "switchAria": "切换环境",
-    "addBranchAria": "添加分支",
+    "newEnvironment": "新建环境",
+    "backToEnvironments": "返回环境列表",
     "searchBranches": "搜索分支",
     "refreshBranches": "刷新分支",
     "noBranches": "未找到分支",
