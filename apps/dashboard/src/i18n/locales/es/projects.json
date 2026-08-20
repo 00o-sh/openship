@@ -59,7 +59,8 @@
   "env": {
     "productionFallback": "Producción",
     "switchAria": "Cambiar de entorno",
-    "addBranchAria": "Agregar rama",
+    "newEnvironment": "Nuevo entorno",
+    "backToEnvironments": "Volver a los entornos",
     "searchBranches": "Buscar ramas",
     "refreshBranches": "Actualizar ramas",
     "noBranches": "No se encontraron ramas",

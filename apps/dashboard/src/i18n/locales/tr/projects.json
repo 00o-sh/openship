@@ -59,7 +59,8 @@
   "env": {
     "productionFallback": "Canlı ortam",
     "switchAria": "Ortamı değiştir",
-    "addBranchAria": "Dal ekle",
+    "newEnvironment": "Yeni ortam",
+    "backToEnvironments": "Ortamlara dön",
     "searchBranches": "Dallarda ara",
     "refreshBranches": "Dalları yenile",
     "noBranches": "Dal bulunamadı",

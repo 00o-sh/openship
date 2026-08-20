@@ -59,7 +59,8 @@
   "env": {
     "productionFallback": "本番環境",
     "switchAria": "環境を切り替える",
-    "addBranchAria": "ブランチを追加",
+    "newEnvironment": "新しい環境",
+    "backToEnvironments": "環境一覧に戻る",
     "searchBranches": "ブランチを検索",
     "refreshBranches": "ブランチを更新",
     "noBranches": "ブランチが見つかりません",

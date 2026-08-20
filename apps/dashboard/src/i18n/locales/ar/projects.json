@@ -59,7 +59,8 @@
   "env": {
     "productionFallback": "الإنتاج",
     "switchAria": "تبديل البيئة",
-    "addBranchAria": "إضافة فرع",
+    "newEnvironment": "بيئة جديدة",
+    "backToEnvironments": "العودة إلى البيئات",
     "searchBranches": "ابحث في الفروع",
     "refreshBranches": "تحديث الفروع",
     "noBranches": "لم يتم العثور على فروع",
