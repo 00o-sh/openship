@@ -117,6 +117,8 @@ describeDockerE2E("logical database backup — pg_dump against a live Postgres",
   const sql = async (statement: string): Promise<string> => {
     const { code, out } = await execIn([
       "psql",
+      "-h",
+      "127.0.0.1",
       "-U",
       "postgres",
       "-d",
@@ -189,7 +191,18 @@ describeDockerE2E("logical database backup — pg_dump against a live Postgres",
     // cluster mid-initialization fails in ways that would read as a product bug.
     const deadline = Date.now() + 120_000;
     for (;;) {
-      const probe = await execIn(["pg_isready", "-U", "postgres", "-d", "postgres"]);
+      // The postgres entrypoint starts a temporary socket-only server during initdb,
+      // then stops it before execing the final server. Probing TCP avoids passing in
+      // that temporary phase and racing the shutdown gap with the first fixture query.
+      const probe = await execIn([
+        "pg_isready",
+        "-h",
+        "127.0.0.1",
+        "-U",
+        "postgres",
+        "-d",
+        "postgres",
+      ]);
       if (probe.code === 0) break;
       if (Date.now() > deadline) throw new Error(`postgres never became ready: ${probe.out}`);
       await sleep(500);
@@ -354,6 +367,8 @@ describeDockerE2E("logical database backup — pg_dump against a live Postgres",
     // statement the archive carries is a HARD error against this cluster right now.
     const probe = await execIn([
       "psql",
+      "-h",
+      "127.0.0.1",
       "-U",
       "postgres",
       "-d",
