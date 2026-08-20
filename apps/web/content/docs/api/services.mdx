@@ -67,7 +67,7 @@ and optional; the `kind` decides which subset is the source of truth. Unknown ke
 <TypeTable
   type={{
     image: { type: 'string', description: 'Container image to run, e.g. postgres:16 (max 500).' },
-    build: { type: 'string', description: 'Build context path, relative to the repo root (max 500).' },
+    build: { type: 'string', description: 'Docker build context — the directory docker builds from. Relative to the compose file\u2019s folder, exactly as compose resolves it (max 500).' },
     dockerfile: { type: 'string', description: 'Dockerfile path relative to the build context (max 500).' },
     ports: { type: 'string[]', description: 'Port mappings like "8080:80" (max 50 entries, each ≤100 chars).' },
     dependsOn: { type: 'string[]', description: 'Names of services this one depends on (max 50).' },

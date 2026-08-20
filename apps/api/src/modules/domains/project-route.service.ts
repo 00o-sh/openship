@@ -13,6 +13,10 @@ import {
 } from "../../lib/public-endpoints";
 import { assertValidCustomDomain, assertValidCustomDomains } from "../../lib/custom-domain-guard";
 import { resolveLiveUpstreamUrl, resolveRouteStrategy } from "../../lib/upstream-url";
+import {
+  describeCandidatePorts,
+  resolveProjectServiceUpstream,
+} from "../../lib/project-service-upstream";
 import { isRealContainerRef } from "../../lib/container-ref";
 import { deregisterManagedEdgeRoutes, syncManagedEdgeRoutes } from "../../lib/managed-edge-proxy";
 import { syncProjectPublicRoutes } from "../../lib/project-route-store";
@@ -344,7 +348,15 @@ export async function reapplyProjectLiveRoutes(
   const isCloud = !!project.cloudWorkspaceId;
   if (!isCloud && !project.activeDeploymentId) return;
 
-  const state = await resolveProjectRouteState({ id: project.id, slug: project.slug });
+  // Read the project's rows ONCE. `state` needs the project-level subset;
+  // `allDomainRows` keeps the service-scoped ones too, because the canonical row
+  // (which may well be a service's) is what makes the multi-service upstream
+  // fallback agree with the project's access URL — see pickProjectPortOwner.
+  const allDomainRows = await listProjectRouteRows(project.id);
+  const state = await resolveProjectRouteState(
+    { id: project.id, slug: project.slug },
+    { projectDomains: allDomainRows },
+  );
   const current = normalizeProjectRouteRows(state.projectDomains);
   const currentHostnames = new Set(current.map((d) => d.hostname.toLowerCase()));
   // domainType isn't retained for a dropped row — infer managed vs custom from
@@ -452,13 +464,43 @@ export async function reapplyProjectLiveRoutes(
     };
 
     const containerId = deployment.containerId;
-    if (!isRealContainerRef(containerId)) {
-      // The `"compose"` sentinel means the release has no single upstream to point a
-      // project-level route at (per-service routes are handled in updateService). A
-      // REAL primary container is routed below — it is the container the project's
-      // canonical URL resolves to, which is what `primaryContainerId` now guarantees.
-      // Testing only for null sent the sentinel down that path as a container id.
-      // Still tear down any dropped hostnames on the correct host.
+    // The `"compose"` sentinel means the release has no single container a
+    // project-level question resolves to. It is NOT a container id — passing it to a
+    // runtime is what this guard exists to stop.
+    const primaryContainerId = isRealContainerRef(containerId) ? containerId : null;
+
+    /**
+     * A multi-service release routes a project-level domain through the SERVICE that
+     * owns the route's port (see project-service-upstream.ts).
+     *
+     * For an ADOPTED (in-place migrated) release this is the only upstream there is:
+     * both re-attach paths store the sentinel, so the sentinel branch below used to
+     * drop every project-level route with a warning — a migrated project's domain
+     * verified, took a certificate and never got a vhost (#618).
+     *
+     * Tried BEFORE the release's own primary container, and only for a port some
+     * service actually declares. That container is `pickPrimaryServiceId` over the
+     * same services, which the port match's own tie-break reuses — so where both can
+     * answer they agree, and where they don't the operator's port is the better
+     * answer. An unmatched port falls through to the primary container exactly as it
+     * did before, and is skipped (never guessed onto a service) when there isn't one.
+     */
+    const liveRows = await repos.service.listByDeployment(deployment.id).catch(() => []);
+    const serviceDefs =
+      liveRows.length > 0 ? await repos.service.listByProject(project.id).catch(() => []) : [];
+    const serviceUpstreams =
+      serviceDefs.length > 0
+        ? {
+            services: serviceDefs,
+            rowByService: new Map(liveRows.map((row) => [row.serviceId, row])),
+            domainRows: allDomainRows,
+          }
+        : null;
+
+    if (!primaryContainerId && !serviceUpstreams) {
+      // No primary container AND no service with one either: there is genuinely
+      // nothing to point a project-level route at. Still tear down any dropped
+      // hostnames on the correct host.
       console.warn(
         `[project-route] ${project.slug}: deployment ${deployment.id} has no containerId (target=${effectiveTarget}) — skipping single-app route registration`,
       );
@@ -471,14 +513,55 @@ export async function reapplyProjectLiveRoutes(
       return;
     }
 
-    const resolveTargetUrl = async (port: number): Promise<string | null> => {
+    const resolveTargetUrl = async (port: number, hostname: string): Promise<string | null> => {
       const strategy = resolveRouteStrategy(project.routeStrategy);
-      // loopback-port: dial the container's published loopback host port (read
-      // live). Bare / no-host-port fall back to container IP (or 127.0.0.1 bare).
-      const url = await resolveLiveUpstreamUrl({ strategy, runtime, containerId, containerPort: port });
+      // The port's owning SERVICE first, then the release's own primary container.
+      // Both are attempted rather than one or the other, so nothing that resolved
+      // before this change stops resolving: a compose release whose service rows have
+      // lost their container ids falls back to exactly the upstream it used.
+      //
+      // Either way the dial itself is `resolveLiveUpstreamUrl`'s call — loopback-port
+      // reads the container's published host port LIVE; bare / no-host-port fall back
+      // to the container IP (or 127.0.0.1 bare).
+      let url: string | null = null;
+      if (serviceUpstreams) {
+        const resolved = await resolveProjectServiceUpstream({
+          strategy,
+          runtime,
+          port,
+          ...serviceUpstreams,
+        });
+        if (resolved) {
+          // Say WHICH service the domain ended up pointed at, and at WHAT. Silence
+          // here is what made #618 undiagnosable from outside: a verified domain
+          // holding a certificate with no vhost looks the same whichever step dropped
+          // it, and a route pointed at the wrong sibling port looks like an app bug.
+          console.log(
+            `[project-route] ${project.slug}: ${hostname} → service "${resolved.owner.serviceName}" ` +
+              `at ${resolved.url} (port ${port}, matched by ${resolved.owner.via})`,
+          );
+          url = resolved.url;
+        }
+      }
+      if (!url && primaryContainerId) {
+        url = await resolveLiveUpstreamUrl({
+          strategy,
+          runtime,
+          containerId: primaryContainerId,
+          containerPort: port,
+        });
+      }
       if (!url) {
+        // Name the ports that ARE on offer. "no upstream for port 8443" alone is what
+        // left #618 to be diagnosed by hand from `ls sites-enabled`; the operator's fix
+        // is to correct the route's Mapped-to value, and this says to what.
+        const offered = serviceUpstreams
+          ? `, services offer ${describeCandidatePorts(serviceUpstreams)}`
+          : "";
         console.warn(
-          `[project-route] ${project.slug}: could not resolve upstream for ${containerId} (target=${effectiveTarget}, server=${serverId ?? "local"})`,
+          `[project-route] ${project.slug}: could not resolve an upstream for ${hostname} on port ${port} ` +
+            `(primary container ${primaryContainerId ?? "none"}${offered}, ` +
+            `target=${effectiveTarget}, server=${serverId ?? "local"})`,
         );
         return null;
       }
@@ -569,7 +652,7 @@ export async function reapplyProjectLiveRoutes(
         console.warn(`[project-route] ${project.slug}: no port for ${domain.hostname} — skipping`);
         continue;
       }
-      const targetUrl = await resolveTargetUrl(port);
+      const targetUrl = await resolveTargetUrl(port, domain.hostname);
       if (!targetUrl) continue;
       registers.push({ ...common, ...routingFields, targetUrl });
     }

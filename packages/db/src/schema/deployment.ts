@@ -134,13 +134,17 @@ export const deployment = pgTable("deployment", {
    */
   errorCode: text("error_code"),
   /**
-   * The `DeployError.details` bag verbatim — for `PORT_IN_USE`: `{ port, pid,
-   * command, rawCommand, systemdUnit, systemdDescription, deploymentId,
-   * isManagedDeployment }`. Process/port metadata only; never secrets.
+   * The `DeployError.details` bag verbatim — for `PORT_IN_USE`, whatever
+   * `portOccupantDetails` builds: `{ port, pid, command, rawCommand, systemdUnit,
+   * systemdDescription, deploymentId, isManagedDeployment, containerId,
+   * containerName, containerImage, ownerProjectId, serviceName, dockerPublished,
+   * ambiguousOwners, stopTarget }`. Process/port metadata only; never secrets.
    *
-   * `isManagedDeployment` is the load-bearing one: it separates "a stale
-   * Openship deployment is holding the port, safe to free" from "something else
-   * on this box owns it, ask a human".
+   * Two load-bearing keys. `isManagedDeployment` separates "a stale Openship
+   * deployment is holding the port, safe to free" from "something else on this box
+   * owns it, ask a human" — and stays THREE-valued, `undefined` meaning ownership was
+   * never established. `stopTarget` says what a redeploy would actually offer to stop;
+   * `"none"` means it will offer nothing, so copy must not promise a Free Port button.
    */
   errorDetails: jsonb("error_details"),
 

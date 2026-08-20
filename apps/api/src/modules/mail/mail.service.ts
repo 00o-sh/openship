@@ -1,15 +1,22 @@
 /**
- * Mail server setup service - orchestrates iRedMail installation against a
- * `CommandExecutor`, broken into discrete resumable steps.
+ * Mail server setup service — orchestrates mail provisioning against a
+ * `CommandExecutor`, broken into discrete resumable steps (`MAIL_SETUP_STEPS`
+ * below is the authoritative list).
  *
  * Locality-agnostic: every step receives a `CommandExecutor`, which can be
  * a `LocalExecutor` (same machine, child_process + fs) or an `SshExecutor`
- * (remote VPS, ssh2). This file does not know - or care - which.
+ * (remote VPS, ssh2). This file does not know — or care — which.
  *
- * The engine tree (`apps/email/engine/`) is the source of truth: step 6
- * transfers it onto the target box via `executor.transferIn`, and step 8
- * runs `iRedMail.sh` from that copy. We don't `wget` upstream tarballs;
- * the in-repo engine is what gets installed.
+ * The install is a CONTAINER PULL, not a host takeover: `stepDeployEngine` runs
+ * the `openship-mail` image plus its pinned postgres sidecar via
+ * `ensureContainerMail`. Nothing here transfers the engine tree or executes
+ * `iRedMail.sh` on the target any more — that installer now runs at image BUILD
+ * time (`apps/email/Dockerfile`), and `MAIL_SERVER_ENGINE_DIR` is vestigial.
+ *
+ * Legacy `iRedMail.sh` boxes remain first-class rather than migrated: the flavor
+ * probe (`detect-engine.ts`) reports `container | host | none`, and
+ * `mail-engine.ts` makes SQL transport, daemon probes and config paths a function
+ * of it. There is deliberately no host→container conversion yet.
  */
 
 import { randomBytes } from "node:crypto";

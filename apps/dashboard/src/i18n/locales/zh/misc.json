@@ -201,6 +201,8 @@
     "applyRestore": "应用恢复",
     "restoringData": "正在恢复数据……",
     "restoringHint": "服务正在停止 → 数据替换 → 重新启动。请勿关闭此窗口。",
+    "partialDataRunningNotice": "恢复目标中包含不完整的数据，而服务仍在其上运行。请先停止该服务，然后重新完整执行此次恢复（或更新的恢复）。",
+    "serviceDownNotice": "您的数据未被更改，但服务未在运行。准备好后请启动它。",
     "restoreComplete": "恢复完成。",
     "restoreStatus": "恢复{status}",
     "failed": "失败",

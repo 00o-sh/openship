@@ -25,7 +25,7 @@
  */
 
 import { sql, eq, inArray, getTableColumns } from "drizzle-orm";
-import type { PgTable } from "drizzle-orm/pg-core";
+import { getTableConfig, type PgTable } from "drizzle-orm/pg-core";
 import { db, getDriver } from "./client";
 import * as schema from "./schema";
 
@@ -173,7 +173,7 @@ type ScopeResolver =
   // Whole-instance only.
   | { in: "instance"; via: "all-rows" };
 
-interface TableSpec {
+export interface TableSpec {
   sqlName: string;
   table: PgTable;
   /** Strategies this table participates in, in evaluation order. */
@@ -193,6 +193,17 @@ const TABLES: ReadonlyArray<TableSpec> = [
   { sqlName: "invitation_pending_grant", table: schema.invitationPendingGrant, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
   { sqlName: "resource_grant", table: schema.resourceGrant, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
   { sqlName: "personal_access_token", table: schema.personalAccessToken, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  // The SCOPE of every scoped PAT. Travels with its token row or the token lands on
+  // the receiver as a scoped principal with zero grants — which fails closed (every
+  // resource check denies), so each scoped token silently stops working.
+  { sqlName: "personal_access_token_grant", table: schema.personalAccessTokenGrant, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
+  // OAuth 2.1 authorization-server state for MCP connections (Better Auth
+  // oidc-provider). The client REGISTRATION and the user's CONSENT travel so an
+  // already-connected MCP client can re-authenticate itself on the receiver;
+  // `oauth_access_token` deliberately does not (see EXCLUDED_TABLES) — shipping live
+  // bearer tokens in an export file buys nothing a refresh doesn't.
+  { sqlName: "oauth_application", table: schema.oauthApplication, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
+  { sqlName: "oauth_consent", table: schema.oauthConsent, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
 
   // User / instance settings — instance-only.
   //
@@ -214,6 +225,13 @@ const TABLES: ReadonlyArray<TableSpec> = [
   // GitHub — instance-only.
   { sqlName: "git_installation", table: schema.gitInstallation, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
   { sqlName: "cloud_webhook_binding", table: schema.cloudWebhookBinding, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  // How each server authenticates to GitHub for clone-on-server, and the per-repo
+  // deploy keys that back `ssh-deploy-key` mode. Both hang off `servers`, so both are
+  // instance-only — and both carry secrets registered in ENCRYPTED_COLUMNS, so the
+  // ciphertext is stripped and re-sealed under the receiver's key rather than
+  // travelling undecryptable.
+  { sqlName: "server_github_auth", table: schema.serverGithubAuth, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  { sqlName: "github_deploy_key", table: schema.githubDeployKey, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
 
   // ── Project subgraph (also part of organization scope) ─────────────────────
   //
@@ -299,6 +317,49 @@ const TABLES: ReadonlyArray<TableSpec> = [
       { in: "organization", via: "fk", column: "projectId" },
       { in: "project", via: "fk", column: "projectId" },
     ],
+    hasOrganizationId: true,
+  },
+  // Per-route edge rules (rate-limit / ban / allow-deny). The DB is the source of
+  // truth — the API serializes these into OpenResty's shared dict — so an instance
+  // that loses them silently drops every rate limit it was enforcing. Project-scoped
+  // as well, so a project transfer carries its own rules; `domainId` stays
+  // self-contained because a project's rules only ever reference that project's
+  // domains, which travel in the same scope.
+  {
+    sqlName: "route_rule",
+    table: schema.routeRule,
+    scopes: [
+      { in: "instance", via: "all-rows" },
+      { in: "organization", via: "fk", column: "projectId" },
+      { in: "project", via: "fk", column: "projectId" },
+    ],
+    hasOrganizationId: true,
+  },
+  // Inbound webhook SOURCES (Settings → Webhooks). MUST be catalogued: `domain`
+  // carries a `webhookSourceId` FK to it, so the first row this table ever holds
+  // makes an import fail on a violation no reordering can fix. Latent rather than
+  // live so far only because the table has a repo but no writer yet — and its HMAC
+  // secret was ALREADY registered in ENCRYPTED_COLUMNS + SECRET_COLUMNS, so the
+  // export/re-seal machinery for it was dead code while the rows never travelled.
+  //
+  // Instance-scope ONLY, deliberately: a webhook-owned domain has a null projectId,
+  // so it never travels in an organization/project dump and the parent is not needed
+  // there. Adding an org scope would put a secret-bearing table on the cloud-export
+  // surface for no gain.
+  {
+    sqlName: "webhook_source",
+    table: schema.webhookSource,
+    scopes: [{ in: "instance", via: "all-rows" }],
+    hasOrganizationId: true,
+  },
+  // DB-app → consumer links. Instance-scope only: a row references TWO projects
+  // (source + target), so a single-project transfer would carry a reference to a
+  // project that stays behind — the same dangling-parent reason backup_policy is
+  // instance/org only.
+  {
+    sqlName: "project_connection",
+    table: schema.projectConnection,
+    scopes: [{ in: "instance", via: "all-rows" }],
     hasOrganizationId: true,
   },
 
@@ -453,19 +514,186 @@ const TABLES: ReadonlyArray<TableSpec> = [
   // Travels with audit_event: without it, an instance migration silently turns
   // audit recording back on for an org that had switched it off.
   { sqlName: "audit_settings", table: schema.auditSettings, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
+
+  // ── Operator-owned state, instance-only ────────────────────────────────────
+  //
+  // Each of these is durable configuration or durable history that only the operator
+  // can reproduce, and every one of them hangs off an instance-scope parent
+  // (`servers` / `user` / `personal_access_token`) or has no parent at all.
+
+  // Scheduled-task DEFINITIONS. The boot reconciler re-seeds system jobs from the
+  // code registry, but the operator's own cron retunes and disables live only here.
+  // `key` is UNIQUE and every install seeds the same keys, so a MERGE import must
+  // keep the destination's rows — see SINGLETON_AND_AUTH in import.service.
+  { sqlName: "job", table: schema.job, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
+  // Per-org uploaded app templates — the org's own catalog cards.
+  { sqlName: "custom_app_template", table: schema.customAppTemplate, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  // The durable memory behind container health alerts. Losing it re-fires every
+  // still-open incident as brand new on the receiver.
+  { sqlName: "service_incident", table: schema.serviceIncident, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  // Docker-migration run history — deliberately durable (the runs list survives a
+  // restart), so a transfer that dropped it would contradict that.
+  { sqlName: "docker_migration_run", table: schema.dockerMigrationRun, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  // Proof that a routing target is ours, persisted precisely BECAUSE the upstream's
+  // list endpoint never returns the token again — a token that exists only on the old
+  // box is unrecoverable, which is exactly what a migration produces.
+  { sqlName: "edge_target_verification", table: schema.edgeTargetVerification, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  // Operator-pushed status banners; effective immediately, no redeploy, so they are
+  // config rather than cache.
+  { sqlName: "system_notice", table: schema.systemNotice, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
 ];
 
-// Deliberately NOT in the catalogue — ephemeral, cloud-only, or re-derived on
-// demand, so shipping them across a migration adds risk without value:
-// build_session, deployment_check_run, orphaned_resource, terminal_sessions,
-// service_terminal_sessions, verification, github_install_state,
-// webhook_delivery, oblien_webhook_event, cloud_handoff_code, and all
-// billing_* / credit_pack / stripe_* (CLOUD_MODE-only, absent on self-hosted).
+/**
+ * Every migration-managed table deliberately NOT in `TABLES`, with the reason.
+ *
+ * This is not documentation — it is the other half of a completeness invariant:
+ * `TABLES ∪ EXCLUDED_TABLES` must equal every table in the schema, asserted by a
+ * test. A new table is then a FAILING TEST rather than silent data loss, which is
+ * how ~14 durable tables (webhook_source, route_rule, project_connection, the PAT
+ * grants, the per-server GitHub credentials …) came to be missing from a
+ * whole-instance export that claims to carry "every migration-managed table".
+ */
+export const EXCLUDED_TABLES: Record<string, string> = {
+  // Ephemeral / in-flight — re-created on demand, meaningless on another host.
+  build_session: "in-flight build state; a migration never resumes a build mid-flight",
+  deployment_check_run: "GitHub check-run mirror, re-created by the next deploy",
+  terminal_sessions: "SSH session audit bound to a live WS; open rows are swept at boot",
+  service_terminal_sessions: "as terminal_sessions, for container shells",
+  verification: "Better Auth one-shot nonces, all short-TTL",
+  github_install_state: "one-shot install nonce, deleted on callback",
+  cloud_handoff_code: "60s one-time cloud-connect codes",
+  oauth_access_token:
+    "live MCP bearer/refresh tokens; the client re-authenticates against the " +
+    "oauth_application + oauth_consent rows that DO travel, so shipping them adds " +
+    "credentials to the export file for no gain",
 
-// Restore order = TABLES order (parents before children). Truncate uses reverse.
+  // Caches / host-derived — the host, not the DB, is the source of truth.
+  update_status: "cached upstream scan result; the next `updates:scan` refills it",
+  server_container_status: "cached container drift; re-probed from the host",
+  server_module_status: "cached module drift; re-probed from the host",
+
+  // History that is observability only — no config, no pending work, and prunable.
+  job_run: "append-only tick log; job DEFINITIONS travel, executions do not",
+  webhook_delivery: "inbound delivery feed + GitHub dedup claims, pruned by age",
+  oblien_webhook_event: "upstream webhook dedup ledger, cloud-side",
+
+  // Judgement call worth revisiting: this is a pending-work QUEUE, not history —
+  // leaked remote resources awaiting GC. An instance migration carries the
+  // `servers` rows, so the sweep would still be actionable on the receiver, and
+  // dropping the rows abandons the leaks permanently. Left excluded to preserve
+  // existing behaviour rather than change it silently.
+  orphaned_resource: "GC worklist; loss abandons already-leaked remote resources",
+
+  // CLOUD_MODE-only. Both exportInstance and importInstance refuse outright when
+  // CLOUD_MODE is set, so these tables are unreachable by this path by construction.
+  billing_customer: "CLOUD_MODE-only",
+  billing_subscription: "CLOUD_MODE-only",
+  billing_usage_snapshot: "CLOUD_MODE-only",
+  billing_anniversary_grant: "CLOUD_MODE-only",
+  credit_pack: "CLOUD_MODE-only",
+  stripe_topup_grant: "CLOUD_MODE-only",
+  stripe_webhook_event: "CLOUD_MODE-only",
+};
 
 /** sqlName → PgTable, so redaction can read column metadata (notNull/default). */
 const TABLE_BY_SQL_NAME = new Map<string, PgTable>(TABLES.map((t) => [t.sqlName, t.table]));
+
+// ─── Insert order (derived, never hand-maintained) ───────────────────────────
+//
+// `restoreSubgraph` must insert parents before children, because NONE of the
+// schema's foreign keys are declared DEFERRABLE — and Postgres honours
+// `SET CONSTRAINTS ALL DEFERRED` only for constraints that are. That statement is
+// therefore a silent no-op here (verified against PGlite), which means the insert
+// order is the ONLY thing standing between a restore and a raw FK violation.
+//
+// It used to be the literal order of `TABLES`, maintained by hand. It had drifted
+// in four places — `domain` before `service`, `env_var` before `service`,
+// `mail_servers` before `project`, `notification_delivery` before `audit_event` —
+// so an import died on the first instance that had a domain bound to a service,
+// i.e. any project with more than one service. Deriving the order from the real FK
+// graph removes ordering from the set of things a human can get wrong: add a table
+// anywhere in `TABLES` and it lands in the right place automatically.
+//
+// `TABLES` order is still meaningful and still authoritative for the DUMP side —
+// `dumpSubgraph` walks it so a child's FK-resolution parent ids are collected
+// before the child needs them. Only the restore/truncate order is derived.
+
+const CATALOGUED = new Set(TABLES.map((t) => t.sqlName));
+
+/**
+ * FK parents of `spec` that are themselves catalogued, as sqlNames. Self-references
+ * are dropped: Postgres fires RI triggers at end-of-statement, so a row referencing
+ * another row in the same multi-row INSERT is already fine.
+ */
+function catalogedFkParents(spec: TableSpec): Set<string> {
+  const out = new Set<string>();
+  for (const fk of getTableConfig(spec.table).foreignKeys) {
+    const parent = getTableConfig(fk.reference().foreignTable).name;
+    if (parent !== spec.sqlName && CATALOGUED.has(parent)) out.add(parent);
+  }
+  return out;
+}
+
+let topoCache: TableSpec[] | null = null;
+
+/**
+ * `TABLES` in a valid parent-before-child order. Kahn's algorithm, kept stable on
+ * `TABLES` order so the output is deterministic and diffable. Throws on a cycle
+ * rather than emitting a partial order — a cycle means the schema needs a
+ * DEFERRABLE constraint and no ordering could save the restore.
+ *
+ * Exported for the order-invariant test.
+ */
+export function topoOrderedTables(): TableSpec[] {
+  if (topoCache) return topoCache;
+
+  const pending = new Map<string, Set<string>>();
+  for (const spec of TABLES) pending.set(spec.sqlName, catalogedFkParents(spec));
+
+  const ordered: TableSpec[] = [];
+  const placed = new Set<string>();
+  while (placed.size < TABLES.length) {
+    // Stable: first table in TABLES order whose parents are all placed.
+    const next = TABLES.find(
+      (s) => !placed.has(s.sqlName) && [...pending.get(s.sqlName)!].every((p) => placed.has(p)),
+    );
+    if (!next) {
+      const stuck = TABLES.filter((s) => !placed.has(s.sqlName)).map((s) => s.sqlName);
+      throw new Error(
+        `dump catalogue has a foreign-key cycle involving: ${stuck.join(", ")} — ` +
+          `no insert order can satisfy it; the constraint must be made DEFERRABLE.`,
+      );
+    }
+    ordered.push(next);
+    placed.add(next.sqlName);
+  }
+
+  topoCache = ordered;
+  return ordered;
+}
+
+/**
+ * Largest number of rows of `table` that fit in ONE parameterised INSERT.
+ *
+ * The restore used to emit a single multi-row INSERT per table, so it broke on any
+ * table past its own parameter ceiling — and the error named neither the table nor
+ * the row count, just `bind message has N parameter formats but 0 parameters` or
+ * `RangeError: Invalid array length`. Any instance with a few thousand audit rows
+ * (i.e. any instance that had been running a while) hit it.
+ *
+ * The budget is 32767, not the 65535 the wire format allows: Postgres encodes a bind
+ * message's parameter count as int16, and PGlite's protocol layer reads it SIGNED, so
+ * 32768+ wraps negative and dies in the response parser. Measured against PGlite —
+ * 32760 parameters succeeds, 32773 fails — and PGlite is the desktop/dev driver, so
+ * it sets the ceiling for everyone. 32000 keeps headroom for a receiver whose schema
+ * has since gained columns.
+ */
+const MAX_BIND_PARAMS_PER_STATEMENT = 32_000;
+
+function insertChunkSize(table: PgTable): number {
+  const cols = Object.keys(getTableColumns(table)).length || 1;
+  return Math.max(1, Math.floor(MAX_BIND_PARAMS_PER_STATEMENT / cols));
+}
 
 // ─── Encrypted columns (single source of truth) ──────────────────────────────
 //
@@ -515,6 +743,19 @@ export const ENCRYPTED_COLUMNS: ReadonlyArray<EncryptedColumnSpec> = [
   { table: "servers", column: "sshPassword" },
   { table: "servers", column: "sshPrivateKey" },
   { table: "servers", column: "sshKeyPassphrase" },
+  // Per-server GitHub identity for clone-on-server. Sealed with the same
+  // encrypt()/decrypt() helper as project.webhookSecret (the `scalar` scheme), so
+  // it is undecryptable off-instance and must be lifted into the passphrase bundle.
+  { table: "server_github_auth", column: "tokenEncrypted" },
+  { table: "server_github_auth", column: "serverKeyPrivateEncrypted" },
+  // NOT NULL with no default, so the restore-side redaction writes the "" sentinel
+  // when no bundle is supplied — same shape as env_var.value.
+  { table: "github_deploy_key", column: "privateKeyEncrypted" },
+  // Stored in the CLEAR by the Better Auth oidc-provider plugin. Registered anyway
+  // so the export moves it out of the JSON payload and into the passphrase-sealed
+  // bundle instead of shipping an MCP client secret in plaintext — the same reason
+  // instance_settings.tunnelToken is registered with the `plaintext` scheme.
+  { table: "oauth_application", column: "clientSecret" },
   { table: "instance_settings", column: "tunnelToken" },
   { table: "instance_settings", column: "ghDeviceTokenEncrypted" },
   { table: "deployment", column: "envVars" },
@@ -743,7 +984,8 @@ export function stripEncryptedInPlace(
 export interface RestoreOptions {
   /**
    * wipe  — truncate every table in the dump's scope, then insert. Atomic
-   *         (one transaction, FK checks deferred). Used by team-mode
+   *         (one transaction). FK checks are NOT deferred — see
+   *         topoOrderedTables. Used by team-mode
    *         forward (Path A/B) and reverse migrations. Currently only
    *         supported for instance-scope dumps; org/project scope must
    *         use merge mode.
@@ -812,6 +1054,20 @@ export function assertDumpSelfContained(dump: DatabaseDump): void {
     // organization scope (see TABLES) so legit remap dumps never carry them;
     // this entry rejects such a row defensively if that scope is ever restored.
     channelId: "notification_channel",
+    // route_rule.domainId — the only remappable-scope table that references a domain.
+    // A project's rules only ever point at that project's own domains, which travel in
+    // the same scope, so a legitimate dump is self-contained; a crafted one pointing at
+    // a VICTIM's domain would otherwise attach a rate-limit / ban rule to their
+    // hostname (traffic denial on someone else's site).
+    domainId: "domain",
+    // webhook_source / project_connection / personal_access_token_grant are
+    // instance-scope only and never travel on a remap dump, so any value here could
+    // only be a pre-existing cross-tenant parent. Rejected defensively, exactly as
+    // channelId is.
+    webhookSourceId: "webhook_source",
+    sourceProjectId: "project",
+    targetProjectId: "project",
+    tokenId: "personal_access_token",
   };
 
   // Instance-scope parents (servers / mail_servers) NEVER travel in a remappable
@@ -876,6 +1132,10 @@ export async function restoreSubgraph(
   if (opts.remapOrgId) assertDumpSelfContained(dump);
 
   await db.transaction(async (tx) => {
+    // Kept for the day the schema declares its FKs DEFERRABLE — but DO NOT rely on
+    // it. Postgres applies this only to constraints declared DEFERRABLE, and none of
+    // ours are, so today it is a silent no-op. Correctness comes from
+    // topoOrderedTables(), not from this line.
     await tx.execute(sql`SET CONSTRAINTS ALL DEFERRED`);
 
     if (opts.mode === "wipe") {
@@ -900,8 +1160,9 @@ export async function restoreSubgraph(
           `wipe mode is only supported for instance-scope dumps; got ${dump.scope.kind}.`,
         );
       }
-      for (let i = TABLES.length - 1; i >= 0; i--) {
-        const spec = TABLES[i]!;
+      // Reverse of the derived insert order = children before parents.
+      const reverse = [...topoOrderedTables()].reverse();
+      for (const spec of reverse) {
         if (!pickResolver(spec, dump.scope)) continue;
         await tx.execute(
           sql`TRUNCATE TABLE ${sql.identifier(spec.sqlName)} RESTART IDENTITY CASCADE`,
@@ -927,7 +1188,10 @@ export async function restoreSubgraph(
       encryptedByTable.set(spec.table, list);
     }
 
-    for (const spec of TABLES) {
+    // Derived parent-before-child order — NOT `TABLES` order. See
+    // topoOrderedTables: the FKs are not DEFERRABLE, so this is what keeps the
+    // inserts legal.
+    for (const spec of topoOrderedTables()) {
       if (!pickResolver(spec, dump.scope)) continue;
       const rows = dump.tables[spec.sqlName];
       if (!rows || rows.length === 0) continue;
@@ -999,10 +1263,16 @@ export async function restoreSubgraph(
         (opts.mode === "merge" && !!opts.mergeConflictSkip?.includes(spec.sqlName));
 
       try {
-        if (skipOnConflict) {
-          await tx.insert(spec.table).values(prepared as never).onConflictDoNothing();
-        } else {
-          await tx.insert(spec.table).values(prepared as never);
+        // Chunked: one INSERT per `insertChunkSize(spec.table)` rows, so a large
+        // table cannot exceed the 65535 bind-parameter cap.
+        const chunk = insertChunkSize(spec.table);
+        for (let i = 0; i < prepared.length; i += chunk) {
+          const batch = prepared.slice(i, i + chunk);
+          if (skipOnConflict) {
+            await tx.insert(spec.table).values(batch as never).onConflictDoNothing();
+          } else {
+            await tx.insert(spec.table).values(batch as never);
+          }
         }
       } catch (err) {
         // PostgreSQL unique_violation = 23505 (PGlite mirrors this).

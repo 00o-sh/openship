@@ -108,7 +108,10 @@ vi.mock("../github/github.auth", () => ({
   getInstallationIdByOrg: async () => undefined,
   getInstallUrl: () => "",
 }));
-vi.mock("./project-git-webhook", () => ({ ensureSharedWebhook: async () => null }));
+vi.mock("./project-git-webhook", () => ({
+  ensureSharedWebhook: async () => null,
+  findSharedWebhookId: async () => null,
+}));
 vi.mock("../../lib/release-resolver", () => ({
   resolveLatestVersion: async () => null,
   resolveLatestReleaseTag: async () => null,

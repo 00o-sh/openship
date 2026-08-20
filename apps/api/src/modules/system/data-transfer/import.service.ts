@@ -44,6 +44,7 @@ const SINGLETON_AND_AUTH = [
   "invitation_pending_grant",
   "resource_grant",
   "user_settings",
+  "job",
 ];
 
 function assertValidEnvelope(file: DataTransferFile): void {

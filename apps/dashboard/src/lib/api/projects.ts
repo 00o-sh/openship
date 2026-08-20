@@ -151,6 +151,7 @@ export interface ScanProjectResponse {
   productionPaths: PrepareProjectResponse["productionPaths"];
   port: PrepareProjectResponse["port"];
   services?: PrepareComposeService[];
+  configDiagnostics?: PrepareProjectResponse["configDiagnostics"];
 }
 
 /** A route_rule row as returned by the API. */
@@ -372,7 +373,6 @@ export const projectsApi = {
   delete: (
     id: string | number,
     body: {
-      deleteApp?: boolean;
       wipeVolumes?: boolean;
       force?: boolean;
       forceOrphan?: boolean;

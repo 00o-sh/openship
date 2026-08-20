@@ -18,6 +18,7 @@ import { DockerRuntime, isEdgeDownMessage, type BuildLogger, type LogEntry } fro
 import type { RuntimeAdapter } from "@repo/adapters";
 import { SYSTEM, safeErrorMessage } from "@repo/core";
 import { env } from "../../config";
+import { isArtifactRef } from "../../lib/container-ref";
 import type { DeploymentMeta } from "../../lib/deployment-runtime";
 import { notification } from "../../lib/notification-dispatcher";
 import { audit } from "../../lib/audit";
@@ -242,10 +243,11 @@ export async function cleanupBuildArtifact(
 ): Promise<void> {
   // An absolute-path ref is a filesystem build DIRECTORY (a bare build dir, or a
   // static Docker build's extracted doc-root at STATIC_RELEASE_BASE/.builds/…),
-  // NOT a docker image. (Image tags contain "/" but never START with it.)
-  // removeImage would 404-no-op on a path and leak the dir, so remove it as a
-  // directory — destroy() rm's an absolute path on both runtimes.
-  if (artifactRef.startsWith("/")) {
+  // NOT a docker image. removeImage would fail on a path and leak the dir, so
+  // remove it as a directory — destroy() rm's an absolute path on both runtimes.
+  // The rule itself lives in `isArtifactRef`, shared with the teardown collector
+  // that used to open-code the opposite answer (issue #640).
+  if (isArtifactRef(artifactRef)) {
     await runtime.destroy(artifactRef);
     return;
   }

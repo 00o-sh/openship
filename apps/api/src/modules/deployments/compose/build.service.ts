@@ -28,7 +28,12 @@ import {
 import * as sessionManager from "../session-manager";
 import { pinnedImageForService } from "../pinned-artifacts";
 import { newerThanRestoredRelease } from "./project-services";
-import { serviceKind, isStaticService, hasSourceBuildRecipe } from "../../../lib/deployable-service";
+import {
+  serviceKind,
+  isStaticService,
+  hasSourceBuildRecipe,
+  resolveSubAppRecipe,
+} from "../../../lib/deployable-service";
 import { normalizeProjectRootDirectory } from "../../../lib/project-root-detector";
 import { resolveServicePort } from "./domain-helpers";
 
@@ -265,21 +270,26 @@ function resolveSubAppOverrides(opts: SubAppOverrideInputs): {
     }
   };
 
-  const installCommand = service.installCommand ?? snapshot.installCommand ?? undefined;
+  // The row-vs-snapshot RULE comes from the shared resolver; this function keeps
+  // only what is its own — the operator-facing log line per inherited command, and
+  // the wider set of build fields. Re-deriving the rule here is what let the
+  // buildable selector and the static-vs-server decision drift apart.
+  const recipe = resolveSubAppRecipe(service, snapshot);
+  const installCommand = recipe.installCommand ?? undefined;
   if (service.installCommand === null && installCommand !== undefined) {
     noteCommandFallback("installCommand", installCommand);
   }
-  const buildCommand = service.buildCommand ?? snapshot.buildCommand ?? undefined;
+  const buildCommand = recipe.buildCommand ?? undefined;
   if (service.buildCommand === null && buildCommand !== undefined) {
     noteCommandFallback("buildCommand", buildCommand);
   }
-  const startCommand = service.startCommand ?? snapshot.startCommand ?? undefined;
+  const startCommand = recipe.startCommand ?? undefined;
   if (service.startCommand === null && startCommand !== undefined) {
     noteCommandFallback("startCommand", startCommand);
   }
 
   return {
-    stack: service.framework ?? snapshot.framework ?? undefined,
+    stack: recipe.framework ?? undefined,
     buildImage: service.buildImage ?? snapshot.buildImage ?? undefined,
     packageManager: service.packageManager ?? snapshot.packageManager ?? undefined,
     installCommand,
@@ -385,20 +395,24 @@ export async function buildComposeImages(opts: {
         hasInlineBuild(service) ||
         (serviceKind(service) === "monorepo" &&
           !service.image &&
-          // Apply the SAME project-snapshot fallback that the build-spec resolver
-          // (resolveSubAppOverrides) and preflight use — a monorepo row whose
-          // command lives on the project snapshot (null on the row: an inheriting
-          // sub-app, or the #231 materialized app row) must be selected as
-          // buildable HERE too. Keying off the raw row dropped it to neither
-          // bucket → the misleading "No image available" the comment above warns of.
+          // Asked of the RESOLVED recipe, not the raw row: a monorepo row whose
+          // command lives on the project snapshot (an inheriting sub-app, or the
+          // #231 materialized app row) must be selected as buildable HERE too.
+          // Keying off the raw row dropped it to neither bucket → the misleading
+          // "No image available" the comment above warns of.
           //
-          // The verdict itself is `hasSourceBuildRecipe` so the row-materializer
-          // gates on the identical rule (#589) — only the fallback is local.
-          hasSourceBuildRecipe({
-            framework: service.framework ?? opts.snapshot.framework,
-            buildCommand: service.buildCommand ?? opts.snapshot.buildCommand,
-            startCommand: service.startCommand ?? opts.snapshot.startCommand,
-          }))),
+          // Two accepting verdicts, deliberately separate:
+          //   • `hasSourceBuildRecipe` — shared verbatim with the row-materializer
+          //     so the two cannot disagree (#589).
+          //   • `isStaticService` — a static sub-app is served as FILES, and its
+          //     extract-only recipe is a valid Dockerfile with an EMPTY build step.
+          //     So a sub-app that is already just files (hand-written HTML, a
+          //     committed `dist/`) has no command to declare and is still buildable.
+          //     This arm lives here rather than inside `hasSourceBuildRecipe`
+          //     because it is a row-level fact and that helper is shared with a
+          //     PROJECT-level gate — see its docblock.
+          (hasSourceBuildRecipe(resolveSubAppRecipe(service, opts.snapshot)) ||
+            isStaticService(resolveSubAppRecipe(service, opts.snapshot))))),
   );
   const external = enabled.filter(
     (service) =>
@@ -485,9 +499,26 @@ export async function buildComposeImages(opts: {
         : service.build != null
           ? resolveComposeBuildContext(opts.snapshot.rootDirectory ?? "", service.build)
           : (service.rootDirectory ?? opts.snapshot.rootDirectory);
+      // #634: `build` is a build CONTEXT, so the runtime must point docker AT it —
+      // not merely resolve the Dockerfile inside it while building the whole clone.
+      // Without this the service's own `COPY requirements.txt` looked for the file at
+      // the repo root, and the repo's root `.dockerignore` pruned the service's tree.
+      //
+      // Only where the user actually declared a context. `rootDirectory` (monorepo
+      // sub-apps) stays a subdir WITHIN a whole-repo context — those build from a
+      // generated recipe that COPYs the workspace root. An inline catalog build keeps
+      // the root too: its context is the materialized root and the per-service subdir
+      // rides in the Dockerfile path, which is what makes a template author's
+      // `COPY <service-name>/<file>` resolve.
+      const buildContextDirectory =
+        !inlineBuild && service.build != null ? context : undefined;
       const dockerfile = inlineBuild?.dockerfile ?? service.dockerfile;
+      const from =
+        buildContextDirectory !== undefined
+          ? `build context ${context || "."}`
+          : (context || ".");
       opts.logger.log(
-        `Building ${isMonorepo ? "monorepo app" : "compose service"} "${service.name}" from ${context || "."}${dockerfile ? ` using ${dockerfile}` : ""}...\n`,
+        `Building ${isMonorepo ? "monorepo app" : "compose service"} "${service.name}" from ${from}${dockerfile ? ` using ${dockerfile}` : ""}...\n`,
         "info",
         { serviceName: service.name },
       );
@@ -552,7 +583,7 @@ export async function buildComposeImages(opts: {
               // `staticExtractOnly` is gated on the runtime: on CLOUD there is no host
               // directory to serve (Oblien runs the workload), so those keep the
               // generated nginx image and stay a proxied container.
-              ...(isStaticService(service)
+              ...(isStaticService(resolveSubAppRecipe(service, opts.snapshot))
                 ? {
                     isStatic: true,
                     hasServer: false,
@@ -576,7 +607,12 @@ export async function buildComposeImages(opts: {
             gitToken: opts.gitToken,
             overrides: {
               slug: buildSlug,
+              // BOTH: `rootDirectory` stays the context because the cloud runtime
+              // reads only that field as its context root, while
+              // `buildContextDirectory` is what narrows the docker build on a
+              // self-hosted target. Same value, two readers.
               rootDirectory: context,
+              buildContextDirectory,
               dockerfilePath: dockerfile ?? undefined,
               // Inline catalog build: the source IS the materialized root, so
               // prepareSourceTree copies it instead of cloning a repo.

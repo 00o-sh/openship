@@ -61,6 +61,7 @@
     "switchAria": "Ortamı değiştir",
     "addBranchAria": "Dal ekle",
     "searchBranches": "Dallarda ara",
+    "refreshBranches": "Dalları yenile",
     "noBranches": "Dal bulunamadı",
     "environmentName": "Ortam adı",
     "branchLabel": "Dal etiketi",

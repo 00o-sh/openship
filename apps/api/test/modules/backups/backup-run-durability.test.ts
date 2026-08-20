@@ -68,8 +68,11 @@ function makePgFake(initial: Record<string, unknown> = {}): PgFake {
   };
   state.db = {
     update: () => ({
-      set: (values: Record<string, unknown>) => ({
-        where: async () => {
+      set: (values: Record<string, unknown>) => {
+        // Mirrors the real chain: `.where(...).returning({id})`. The repo now reads that
+        // array to detect a transition dropped by the terminal-status guard, so a fake
+        // that stopped at `.where()` would be testing a shape production no longer uses.
+        const apply = () => {
           state.statements++;
           for (const [key, value] of Object.entries(values)) {
             const reason = unstorableReason(value);
@@ -78,9 +81,18 @@ function makePgFake(initial: Record<string, unknown> = {}): PgFake {
               throw new Error(reason);
             }
           }
+          // The guard: a row that already reached a terminal status matches nothing.
+          const TERMINAL = ["succeeded", "failed", "cancelled", "server_error"];
+          if (TERMINAL.includes(String(state.row.status)) && "status" in values) {
+            return [] as Array<{ id: string }>;
+          }
           Object.assign(state.row, values);
-        },
-      }),
+          return [{ id: String(state.row.id) }];
+        };
+        return {
+          where: () => ({ returning: async () => apply() }),
+        };
+      },
     }),
   };
   return state;
@@ -194,6 +206,16 @@ vi.mock("@repo/db", () => ({
 // above the file's own imports, so closing over a top-level binding throws.
 vi.mock("@repo/adapters", async () => {
   const { Readable, PassThrough } = await import("node:stream");
+  // Pulled from the real (side-effect-free) leaf module rather than restated, so a
+  // key added to the canonical set cannot go missing in the mock and silently let a
+  // recorded command get credential-scrubbed again.
+  const { PRESERVED_ARTIFACT_METADATA_KEYS } = await import(
+    "../../../../../packages/adapters/src/backup/common/artifact-metadata"
+  );
+  // Likewise the real sanitizer, not a passthrough stub.
+  const { sanitizeProducerOpts } = await import(
+    "../../../../../packages/adapters/src/backup/common/producer-opts"
+  );
   class FakeHasher extends PassThrough {
     summary() {
       return { sha256: "d0", bytesWritten: 11 };
@@ -201,6 +223,8 @@ vi.mock("@repo/adapters", async () => {
   }
   return {
     HashingPassthrough: FakeHasher,
+    PRESERVED_ARTIFACT_METADATA_KEYS,
+    sanitizeProducerOpts,
     artifactKey: (_base: unknown, name: string) => `pfx/${name}`,
     manifestKey: () => "pfx/manifest.json",
     runPrefix: () => "pfx/",
@@ -260,6 +284,7 @@ vi.mock("../../../src/modules/backup-destinations/hydrate-server", () => ({
 
 vi.mock("../../../src/modules/services/service-container", () => ({
   liveContainerIdForService: async () => null,
+  liveContainerForService: async () => ({ containerId: null, running: null }),
 }));
 
 import { BackupOrchestrator } from "../../../src/modules/backups/backup.orchestrator";
@@ -288,6 +313,48 @@ beforeEach(() => {
   h.artifactMetadata = {};
   h.notifications.length = 0;
   h.verifyNotes.length = 0;
+});
+
+describe("a terminal status is final — one owner per verdict", () => {
+  it("refuses a later transition onto a run that already finished", async () => {
+    // The writers genuinely race. `sweepRunsWithStaleHeartbeat`'s ceiling can stamp
+    // `server_error` on a legitimately long upload while `execute()` is still running, and
+    // the unguarded write then let `succeeded` land on top — a run the system had already
+    // decided had failed becoming a green restore point. The guard is in the WHERE, not a
+    // read-then-check, because a read-then-check is the same race with more steps.
+    const pg = makePgFake({ id: "bkr_9", status: "succeeded" });
+    const repo = createBackupRunRepo(pg.db as never);
+
+    await repo.transition("bkr_9", "server_error", {
+      errorMessage: "stale heartbeat ceiling",
+    } as never);
+
+    expect(pg.row.status).toBe("succeeded");
+    // And the payload does not sneak in behind the refused status.
+    expect(pg.row.errorMessage).toBeUndefined();
+  });
+
+  it("refuses the dangerous direction too — failed must not become succeeded", async () => {
+    const pg = makePgFake({ id: "bkr_10", status: "failed", errorMessage: "pg_dump exited 1" });
+    const repo = createBackupRunRepo(pg.db as never);
+
+    await repo.transition("bkr_10", "succeeded", { bytesTransferred: 4096 } as never);
+
+    expect(pg.row.status).toBe("failed");
+    expect(pg.row.bytesTransferred).toBeUndefined();
+  });
+
+  it("still allows every non-terminal transition", async () => {
+    // The guard must not freeze a live run.
+    const pg = makePgFake({ id: "bkr_11", status: "queued" });
+    const repo = createBackupRunRepo(pg.db as never);
+
+    await repo.transition("bkr_11", "uploading", { bytesTransferred: 10 } as never);
+    expect(pg.row.status).toBe("uploading");
+    await repo.transition("bkr_11", "succeeded", { bytesTransferred: 20 } as never);
+    expect(pg.row.status).toBe("succeeded");
+    expect(pg.row.bytesTransferred).toBe(20);
+  });
 });
 
 describe("BackupOrchestrator.execute — hook output cannot fail the backup", () => {

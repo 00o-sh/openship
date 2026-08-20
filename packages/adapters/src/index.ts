@@ -89,6 +89,12 @@ export {
   type ImageTransferResult,
 } from "./runtime/image-transfer";
 export { BareRuntime, STATIC_RELEASE_BASE, type BareRuntimeOptions } from "./runtime/bare";
+export {
+  MANAGED_ARTIFACT_BASE,
+  assertManagedArtifactPath,
+  isArtifactPathRef,
+  removeManagedArtifact,
+} from "./runtime/managed-artifact";
 // The doc-root resolver, exported so the output-check path derives the served
 // location with the SAME confinement rules the deploy used (no reimplementation:
 // this function is what rejects absolute paths and `../` traversal out of the root).
@@ -127,9 +133,15 @@ export {
 } from "./runtime/stability";
 export {
   type PortOccupant,
+  type PortStopTarget,
   probeListeningPort,
   ensurePortAvailable,
 } from "./runtime/port-conflict";
+// Exported because apps/ consumes them, and only for that: the label keys and the
+// build-helper rule each existed in more than one place before, and both decide whether
+// something is treated as Openship's. The rest of the port-ownership vocabulary stays
+// internal — the two in-package consumers import it from ./system/port-owner directly.
+export { OPENSHIP_LABEL, isBuildHelperMarkers } from "./system/port-owner";
 export {
   allocateHostPort,
   pickHostPort,
@@ -138,7 +150,12 @@ export {
 } from "./runtime/host-port";
 export { type RuntimeMode, type CreateRuntimeOptions, createRuntime } from "./runtime/index";
 export { resolveDockerfileCandidates } from "./runtime/docker-paths";
-export { scopedVolumeName, scopeVolumeBinds, isHostPathSource } from "./runtime/volume-namespace";
+export {
+  scopedVolumeName,
+  ensureScopedVolumeName,
+  scopeVolumeBinds,
+  isHostPathSource,
+} from "./runtime/volume-namespace";
 
 // ─── Infrastructure layer ────────────────────────────────────────────────────
 export type { RoutingProvider, SslProvider } from "./infra/types";
@@ -367,6 +384,7 @@ export {
 export {
   probeTcp,
   probeTcpDetailed,
+  probeHostedHttp,
   probeHttp,
   waitForReady,
   type TcpProbeFailure,
@@ -391,7 +409,11 @@ export {
   type PortProto,
   type PortFamily,
 } from "./system/port-scan";
-export { probeStaticOutput, type OutputProbeResult } from "./system/output-exists";
+export {
+  probeStaticOutput,
+  type OutputProbeResult,
+  type StaticProbeOptions,
+} from "./system/output-exists";
 
 export {
   LocalExecutor,

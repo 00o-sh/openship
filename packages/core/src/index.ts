@@ -24,6 +24,8 @@ export * from "./service-routing";
 export * from "./source-access";
 export * from "./edge-orphans";
 export * from "./service-status";
+export * from "./backup-catalog";
+export * from "./backup-image-detect";
 export * from "./runtime-config";
 export * from "./resources";
 export * from "./rollback-window";

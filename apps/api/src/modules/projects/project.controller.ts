@@ -78,8 +78,8 @@ import {
   resolveDefaultBranch,
   listBranches as listGitHubBranches,
 } from "../github/github.service";
-import { getInstallationIdByOrg, getInstallUrl } from "../github/github.auth";
-import { ensureSharedWebhook, findSharedWebhookId } from "./project-git-webhook";
+import { getInstallUrl } from "../github/github.auth";
+import { ensureSharedWebhook } from "./project-git-webhook";
 import { listProjectRouteRows, resolveProjectRouteState } from "../domains/project-route.service";
 
 // Track which servers have had Lua scripts deployed this session
@@ -1368,31 +1368,11 @@ export async function getGitInfo(c: Context) {
     return c.json({ success: false, error: "No repository connected", code: "NO_REPOSITORY" });
   }
 
-  const strategy = await resolveWebhookStrategy(info);
-
-  // Cloud projects (deployTarget=cloud) need the GitHub App installed - regardless
-  // of whether this server is the SaaS or a local instance connected to cloud.
+  // Same resolver the project payload (`/info`) uses, so the Source tab and the
+  // Overview can't answer "is auto-deploy wired up?" differently.
   const isCloudProject = info.deployTarget === "cloud";
-  let installationInstalled = false;
-  if (isCloudProject && info.gitOwner) {
-    const instId = await getInstallationIdByOrg(organizationId, info.gitOwner);
-    installationInstalled = !!instId;
-  }
-
-  let sharedWebhookId = info.webhookId ?? null;
-  if (!sharedWebhookId && info.gitOwner && info.gitRepo) {
-    sharedWebhookId = await findSharedWebhookId(organizationId, info.gitOwner, info.gitRepo);
-  }
-
-  // Derive webhook_active from strategy + state
-  const webhookActive =
-    strategy === "app"
-      ? installationInstalled
-      : strategy === "domain"
-        ? !!(info.autoDeploy && sharedWebhookId)
-        : strategy === "repo"
-          ? !!(info.autoDeploy && sharedWebhookId)
-          : false;
+  const { strategy, webhookActive, installationInstalled } =
+    await projectService.resolveProjectWebhookState(organizationId, info);
 
   // Get available strategies for the UI
   const strategies = await getAvailableStrategies(ctx, info);
@@ -2170,6 +2150,18 @@ export async function getInfo(c: Context) {
     port: project.port ?? null,
   });
 
+  // Push auto-deploy state travels WITH the project payload, not only with
+  // `/git`. The Overview renders "auto-deploy / webhook" from this read, while
+  // `/git` is fetched lazily — only when the Source tab mounts, because it also
+  // calls GitHub for recent commits. A project whose pushes really did deploy
+  // therefore rendered "off" on every cold load (`autoDeploy` is exactly what
+  // webhook-push.ts gates on). Skipped for repo-less projects so an upload/app
+  // project pays none of it.
+  const webhookState =
+    project.gitOwner && project.gitRepo
+      ? await projectService.resolveProjectWebhookState(organizationId, { ...project, deployTarget })
+      : null;
+
   return c.json({
     success: true,
     data: {
@@ -2194,6 +2186,9 @@ export async function getInfo(c: Context) {
         latestDeploymentId: latestDeployment?.id ?? null,
         latestDeploymentStatus: latestDeployment?.status ?? null,
         latestDeploymentBlocked: projectService.deploymentIsBlocked(latestDeployment),
+        // `autoDeploy` itself already rides along in `...project` (the column).
+        webhookStrategy: webhookState?.strategy ?? null,
+        webhookActive: webhookState?.webhookActive ?? false,
       },
       environments,
     },

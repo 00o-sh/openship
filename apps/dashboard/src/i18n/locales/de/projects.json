@@ -61,6 +61,7 @@
     "switchAria": "Umgebung wechseln",
     "addBranchAria": "Branch hinzufügen",
     "searchBranches": "Branches durchsuchen",
+    "refreshBranches": "Branches aktualisieren",
     "noBranches": "Keine Branches gefunden",
     "environmentName": "Umgebungsname",
     "branchLabel": "Branch-Bezeichnung",

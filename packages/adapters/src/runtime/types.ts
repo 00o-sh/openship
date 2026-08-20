@@ -324,7 +324,13 @@ export interface RuntimeAdapter {
    * port. Best-effort + idempotent. Optional (docker only; cloud/bare skip —
    * cloud uses public host:port, its private-link mesh is group-scoped).
    */
-  attachToExternalNetworks?(projectId: string, networkNames: string[]): Promise<void>;
+  attachToExternalNetworks?(
+    projectId: string,
+    networkNames: string[],
+    /** Containers to include BEYOND the `openship.project` label match — an adopted
+     *  container keeps its original labels, so the filter cannot see it. */
+    extraContainerIds?: string[],
+  ): Promise<void>;
 
   /**
    * Join already-running containers (migration attach-live reuse) to a project's
@@ -546,7 +552,15 @@ export interface MultiServiceDeployResult {
   containerId: string;
   status: string;
   ip?: string;
+  /** The FIRST binding the daemon reports — arbitrary for a multi-port container.
+   *  Anything picking a proxy target for a SPECIFIC container port must read
+   *  `hostPortByContainerPort`; this stays for the one scalar `service_deployment`
+   *  can persist. */
   hostPort?: number;
+  /** Every published binding, keyed by CONTAINER port → host port. See
+   *  `ContainerInfo.hostPortByContainerPort`: without it a route for a container's
+   *  second port is dialed at the first port's publish, reaching a different app. */
+  hostPortByContainerPort?: Record<number, number>;
   /**
    * Content-addressable image digest actually running (`repo@sha256:…`), read
    * from the image's RepoDigests after create. The anchor the update scanner

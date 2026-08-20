@@ -203,6 +203,8 @@
     "applyRestore": "Geri yüklemeyi uygula",
     "restoringData": "Veriler geri yükleniyor…",
     "restoringHint": "Servis durduruluyor → veri değişimi → yeniden başlatılıyor. Bu pencereyi kapatmayın.",
+    "partialDataRunningNotice": "Geri yükleme hedefi kısmi veri içeriyor ve servis bunun üzerinde çalışmaya devam ediyor. Servisi durdurun, ardından bu geri yüklemeyi (veya daha yenisini) sonuna kadar yeniden çalıştırın.",
+    "serviceDownNotice": "Verileriniz değişmedi, ancak servis çalışmıyor. Hazır olduğunuzda yeniden başlatın.",
     "restoreComplete": "Geri yükleme tamamlandı.",
     "restoreStatus": "Geri yükleme {status}",
     "failed": "başarısız oldu",

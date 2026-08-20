@@ -20,6 +20,7 @@ export {
   updateProject,
   linkProjectRepo,
   getGitInfo,
+  resolveProjectWebhookState,
   setBranch,
   listProjectEnvironments,
   createProjectEnvironment,

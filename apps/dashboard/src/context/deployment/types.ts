@@ -414,6 +414,12 @@ export interface DeploymentConfig {
    */
   readiness?: OpenshipReadiness | null;
   /**
+   * What the scan's openship.json parse refused (#641). NOT a user setting — it's
+   * a fresh observation of the repo, so it is never hydrated from the saved
+   * project and never sent back on save.
+   */
+  configDiagnostics?: { errors: string[]; warnings: string[]; wholeFile?: true };
+  /**
    * Resource tier picked for Openship Cloud deploys. Self-hosted servers
    * inherit the host's capacity, so this field is meaningless for them
    * — kept on the config (not nested under cloud) because operators
@@ -718,6 +724,12 @@ export interface OutputCheckUI {
   found: boolean;
   hasIndex: boolean;
   checked: boolean;
+  /** Status the edge answered for a real request to this route. Absent = no HTTP
+   *  signal — pre-fix records have none. */
+  status?: number;
+  /** The edge answered and it was not a failure. ABSENT = no signal: test
+   *  `served === false`, never `!served`, or every older record reads as broken. */
+  served?: boolean;
   skippedReason?: string;
 }
 

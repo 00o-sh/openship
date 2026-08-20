@@ -94,10 +94,19 @@ export function resolveCloudWorkloadCmd(opts: {
   commandArgv?: string[] | null;
   startCommand?: string;
   workdir: string;
+  /**
+   * `export PATH=...` prelude from nodeBinPathExport, for a start command that
+   * names a dependency binary (`next start`). Applies ONLY to the string
+   * start-command branch: a compose service runs its own image's argv, where
+   * the image — not our buildpack — owns PATH. Empty string = nothing to add.
+   */
+  binPathExport?: string;
 }): string[] | undefined {
-  const { commandArgv, startCommand, workdir } = opts;
+  const { commandArgv, startCommand, workdir, binPathExport } = opts;
   if (commandArgv != null) return commandArgv.length > 0 ? commandArgv : undefined;
-  return startCommand ? ["sh", "-c", `cd ${sq(workdir)} && ${startCommand}`] : undefined;
+  if (!startCommand) return undefined;
+  const body = `cd ${sq(workdir)} && ${startCommand}`;
+  return ["sh", "-c", binPathExport ? `${binPathExport} && ${body}` : body];
 }
 
 function exposeTarget(port: number, serviceName: string, slug?: string, domain: string = SYSTEM.DOMAINS.CLOUD_DOMAIN) {

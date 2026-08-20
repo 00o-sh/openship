@@ -478,28 +478,7 @@
     "unlink": "Bağlantıyı kaldır"
   },
   "gitInfo": {
-    "repository": "Depo",
-    "autoDeploy": "Otomatik dağıtım",
-    "deploysOnPush": "Her push işleminde dağıtılır",
-    "manualOnly": "Yalnızca manuel dağıtımlar",
-    "branchToDeploy": "Dağıtılacak dal",
-    "chooseBranch": "Deponuzdan hangi dalın dağıtılacağını seçin",
-    "save": "Kaydet",
-    "cancel": "İptal",
-    "viewOnGithub": "GitHub'da Görüntüle",
-    "recentCommits": "Son commitler",
-    "totalCommits": "toplam {count}",
-    "noCommits": "Henüz commit yok",
-    "toast": {
-      "fetchBranchesFailed": "Dallar çekilemedi",
-      "errorTitle": "Hata",
-      "branchUpdated": "Dal başarıyla güncellendi",
-      "updatedTitle": "Güncellendi",
-      "branchUpdateFailed": "Dal güncellenemedi",
-      "autoDeployEnabled": "Otomatik dağıtım etkinleştirildi",
-      "autoDeployDisabled": "Otomatik dağıtım devre dışı bırakıldı",
-      "autoDeployFailed": "Otomatik dağıtım güncellenemedi"
-    }
+    "autoDeploy": "Otomatik dağıtım"
   },
   "git": {
     "connectFirst": {
@@ -731,10 +710,6 @@
     "cannotUndo": "Bu işlem geri alınamaz.",
     "aboutToPrefix": "Şunu silmek üzeresiniz: ",
     "aboutToSuffix": ".",
-    "deleteAllAria": "Tüm ortamları sil",
-    "deleteAll": "Tüm ortamları sil",
-    "deleteAllOn": "Proje uygulamasını ve altındaki her dal ortamını kaldırır.",
-    "deleteAllOff": "Yalnızca bu ortamı kaldırır. Diğer dallar kalır.",
     "scanning": "Bağlı servisler ve disk birimleri taranıyor…",
     "wipeAria": "Ayrıca servis verilerini de sil",
     "wipeLabelOne": "Ayrıca servis verilerini de sil ({count} disk birimi)",
@@ -749,9 +724,7 @@
     "typePrefix": "Onaylamak için ",
     "typeSuffix": " yazın.",
     "cancel": "İptal",
-    "confirmDeleteWipe": "Sil + verileri temizle",
     "confirmDeleteEnvWipe": "Ortamı sil + verileri temizle",
-    "confirmDelete": "Projeyi sil",
     "confirmDeleteEnv": "Ortamı sil",
     "linkedTitleOne": "{count} proje bu uygulamaya bağlı",
     "linkedTitleOther": "{count} proje bu uygulamaya bağlı",
@@ -868,7 +841,9 @@
       "bodyService": "\"{service}\" servisi: port {port} üzerinde hiçbir şey yanıt vermedi — orayı dinleyene kadar istekler 502 hatası verebilir."
     },
     "outputHint": {
-      "body": "{path} yolunda derleme çıktısı bulunamadı — Çıktı Dizininizi kontrol edip yeniden dağıtın."
+      "body": "{path} yolunda derleme çıktısı bulunamadı — Çıktı Dizininizi kontrol edip yeniden dağıtın.",
+      "noIndex": "{path} yolunda çıktı var ancak index dosyası yok — istekler 404 dönecek. Çıktı Dizininizi kontrol edin.",
+      "notServed": "Uç sunucu {path} için HTTP {status} yanıtı verdi — bu yol hizmet vermiyor. Çıktı Dizininizi ve yönlendirmeyi kontrol edin."
     },
     "overview": {
       "primary": "Birincil",

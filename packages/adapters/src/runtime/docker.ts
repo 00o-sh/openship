@@ -50,6 +50,7 @@ import type {
 } from "../types";
 import type { PortProbeExecutor } from "../system/port-listen";
 import { PassThrough, Writable, type Readable } from "node:stream";
+import { relative, sep } from "node:path";
 
 /**
  * Detect "not found" errors from the Docker SDK (dockerode). The daemon
@@ -100,6 +101,7 @@ function clampShellWindow(
 }
 import type { Feature, SystemLog } from "../system/types";
 import { isRuntimeNotFoundError } from "../system/errors";
+import { OPENSHIP_LABEL } from "../system/port-owner";
 import { dirOf, ensureOwnedDir } from "../system/elevated-executor";
 import { dockerConfigJsonFor, registryForImage, resolveDockerAuth } from "./docker-auth";
 
@@ -127,15 +129,33 @@ import {
   assembleGitClone,
 } from "./build-pipeline";
 import { materializeGitSsh, shellGitSshWriter, type GitSshMaterial } from "./git-ssh-material";
+import { isArtifactPathRef, removeManagedArtifact } from "./managed-artifact";
 import { githubTarballUrl, downloadTarballOnRemote } from "./source-tarball";
 import { scopeVolumeBinds, isHostPathSource } from "./volume-namespace";
-import { createDockerBuildContext, prepareSourceTree, resolveServiceDockerfile } from "./docker-build-context";
+import {
+  createDockerBuildContext,
+  missingContextDockerfileMessage,
+  prepareSourceTree,
+  resolveServiceDockerfile,
+} from "./docker-build-context";
+import { BuildKitTraceDecoder } from "./docker-buildkit-trace";
 import { startExecStream, daemonConnectionFrom } from "./docker-exec-stream";
 import { resolveComposeCmd, resolveComposeEntrypoint } from "./compose-cmd";
-import { resolveDockerfileCandidates } from "./docker-paths";
+import {
+  dockerBuildContextDirectory,
+  normalizeDockerRelativePath,
+  resolveContextDockerfileCandidates,
+  resolveDockerfileCandidates,
+} from "./docker-paths";
 import type { ContainerStabilitySample } from "./stability";
-import { generateDockerfile, staticBuilderOutputPath } from "./docker-build-plan";
+import {
+  builderContextRoot,
+  generateDockerfile,
+  isExcludedDocRootEntry,
+  staticBuilderOutputPath,
+} from "./docker-build-plan";
 import { transferLocalDirectory } from "./transfer";
+import { splitRuntimeEnv, droppedRuntimeEnvMessage } from "./runtime-env";
 import {
   ownsNetworkEndpoint,
   safeErrorMessage,
@@ -529,9 +549,17 @@ export function packBuildContext(
   contextDir: string,
   entries: string[],
   cancelSignal?: AbortSignal,
+  ignoreContextPath?: (relativePosixPath: string) => boolean,
 ): { body: NodeJS.ReadableStream; abortSignal: AbortSignal; takeError: () => Error | null } {
   const controller = new AbortController();
-  const pack = tarFs.pack(contextDir, { entries });
+  // tar-fs hands the predicate an absolute path; `.dockerignore` matches
+  // context-relative ones. Only set when the tree was NOT pruned destructively
+  // (per-service build contexts) — see ResolvedDockerfile.ignoreContextPath.
+  const ignore = ignoreContextPath
+    ? (absolutePath: string) =>
+        ignoreContextPath(relative(contextDir, absolutePath).split(sep).join("/"))
+    : undefined;
+  const pack = tarFs.pack(contextDir, { entries, ignore });
   const body = pack.pipe(createGzip());
   let contextError: Error | null = null;
   const capture = (err: unknown) => {
@@ -753,19 +781,35 @@ function firstNetworkIp(networks: unknown): string | undefined {
 function extractNetworkInfo(data: { NetworkSettings: any }): {
   ip?: string;
   hostPort?: number;
+  hostPortByContainerPort?: Record<number, number>;
 } {
   let ip: string | undefined;
   for (const net of Object.values(data.NetworkSettings.Networks ?? {}) as any[]) {
     if (net.IPAddress) { ip = net.IPAddress; break; }
   }
+  // Keyed by CONTAINER port, because that is what a caller choosing a proxy target
+  // actually knows. The scalar below is the first binding, kept for the callers that
+  // only persist one number (`service_deployment.host_port`) — it is arbitrary for a
+  // multi-port container, and reading it for a SPECIFIC port is how a route ends up
+  // dialing a different app.
+  const hostPortByContainerPort: Record<number, number> = {};
   let hostPort: number | undefined;
-  for (const bindings of Object.values(data.NetworkSettings.Ports ?? {}) as any[]) {
-    if (bindings?.[0]?.HostPort) {
-      hostPort = parseInt(bindings[0].HostPort, 10);
-      break;
-    }
+  for (const [key, bindings] of Object.entries(data.NetworkSettings.Ports ?? {}) as Array<
+    [string, any]
+  >) {
+    const bound = bindings?.[0]?.HostPort;
+    if (!bound) continue;
+    const parsed = parseInt(bound, 10);
+    if (!Number.isFinite(parsed)) continue;
+    const containerPort = parseInt(key.split("/")[0] ?? "", 10);
+    if (Number.isFinite(containerPort)) hostPortByContainerPort[containerPort] = parsed;
+    hostPort ??= parsed;
   }
-  return { ip, hostPort };
+  return {
+    ip,
+    hostPort,
+    ...(Object.keys(hostPortByContainerPort).length ? { hostPortByContainerPort } : {}),
+  };
 }
 
 /**
@@ -1016,14 +1060,14 @@ export class DockerRuntime implements RuntimeAdapter {
     service?: string;
   }) {
     const l: Record<string, string> = {
-      "openship.project": config.projectId,
+      [OPENSHIP_LABEL.project]: config.projectId,
     };
-    if (config.deploymentId) l["openship.deployment"] = config.deploymentId;
-    if (config.sessionId) l["openship.build"] = config.sessionId;
+    if (config.deploymentId) l[OPENSHIP_LABEL.deployment] = config.deploymentId;
+    if (config.sessionId) l[OPENSHIP_LABEL.build] = config.sessionId;
     // Present on single-app containers that joined the project network; lets the
     // label-scoped reconcileNetworkMembership re-alias them after an out-of-band
     // network rebuild, exactly like a compose service.
-    if (config.service) l["openship.service"] = config.service;
+    if (config.service) l[OPENSHIP_LABEL.service] = config.service;
     return l;
   }
 
@@ -1087,11 +1131,29 @@ export class DockerRuntime implements RuntimeAdapter {
       aux?: unknown;
     },
     logger: BuildLogger,
+    trace?: BuildKitTraceDecoder,
   ): string | null {
     const errorMessage = event.errorDetail?.message ?? event.error;
     if (errorMessage) {
       logger.log(errorMessage, "error");
       return errorMessage;
+    }
+
+    // A BuildKit build emits its whole progress stream as protobuf traces instead of
+    // `stream` lines, so without this the log would be empty until the final error.
+    // The classic builder's `aux` is an OBJECT ({"ID":"sha256:…"}), which is why the
+    // string check matters — it is not decoration.
+    if (event.id === "moby.buildkit.trace" && typeof event.aux === "string") {
+      let hint: string | null = null;
+      for (const line of trace?.push(event.aux) ?? []) {
+        // Same treatment the classic builder's `stream` lines get, deliberately: the
+        // failure hints (OOM-killed install, wrong rootDirectory, BuildKit refused)
+        // are the only thing that turns a bare exit code into an explanation, and
+        // BuildKit builds are precisely the ones with no other diagnostic.
+        logger.log(line.message, line.level === "error" ? "error" : parseLogLevel(line.message));
+        hint ??= this.extractBuildFailureHint(line.message);
+      }
+      return hint;
     }
 
     if (event.stream) {
@@ -1166,6 +1228,22 @@ export class DockerRuntime implements RuntimeAdapter {
       return line;
     }
 
+    // The legacy builder's own wording for "this Dockerfile needs BuildKit". Reached
+    // when the syntax sniff missed a construct, or on a remote host whose docker CLI
+    // has no buildx plugin — either way the raw message says nothing about what to
+    // do, and #634 lost a reporter to exactly that.
+    if (/requires? BuildKit|BuildKit is enabled but the buildx component/i.test(line)) {
+      return `${line} — this Dockerfile needs BuildKit. Install the docker buildx plugin on the build host (\`docker-buildx-plugin\`), or remove the BuildKit-only instruction.`;
+    }
+
+    // The other side of the same coin: this build asked the daemon for BuildKit and
+    // the daemon said no (BuildKit disabled in daemon.json, or an engine older than
+    // 18.09). Without this the user gets a bare daemon string for a build the classic
+    // builder would also have failed, and no way to tell the two apart.
+    if (/buildkit (is )?(not (supported|enabled)|disabled)|builder version.*not supported/i.test(line)) {
+      return `${line} — this Dockerfile needs BuildKit but this Docker daemon has it disabled. Enable it ("features": {"buildkit": true} in daemon.json) or remove the BuildKit-only instruction.`;
+    }
+
     if (/\/workspace\/package\.json/i.test(line) && /ENOENT/i.test(line)) {
       return "Docker build ran from /workspace but package.json was not found there. The configured rootDirectory is likely empty or incorrect.";
     }
@@ -1223,11 +1301,24 @@ export class DockerRuntime implements RuntimeAdapter {
     // Wipe stale dir from a previous failed deploy, if any. -rf is safe - the
     // path is namespaced and only ever holds the context we just transferred.
     await executor.exec(`rm -rf ${sq(remoteContextDir)} && mkdir -p ${sq(remoteContextDir)}`);
-    // `contextDir` is ALREADY the final build context (prepareSourceTree applied
+    // `contextDir` is ALREADY the prepared source tree (prepareSourceTree applied
     // git-truth / cloned the tracked set and stripped `.git`). Transfer it
     // VERBATIM — pass `excludes: []` so the transfer doesn't re-apply the
     // name-based default and delete tracked source (e.g. an `app/.../build`
     // route) that the prepare step deliberately kept.
+    //
+    // The whole tree ships even when a build narrows its context to a subdirectory:
+    // one batch shares one transfer across services whose contexts differ, and the
+    // narrowing is applied as the `docker build` cwd on the host. `.dockerignore`
+    // for a narrowed context is then applied by the docker CLI itself, from the file
+    // that actually sits in that context.
+    //
+    // Accepted cost: a batch with a narrowed context skips the destructive prune, so
+    // tracked-but-dockerignored bulk reaches this host temp dir (removed after the
+    // build) where it previously did not. Pruning "everything outside every context"
+    // would restore it, but only for batches where NO service builds from the root —
+    // and it cannot affect image CONTENT, since docker can never reach outside a
+    // context and the dockerode packer applies each context's own file.
     await transferLocalDirectory(
       contextDir,
       { kind: "executor", executor, path: remoteContextDir },
@@ -1237,18 +1328,57 @@ export class DockerRuntime implements RuntimeAdapter {
   }
 
   /**
+   * Is BuildKit usable on the remote host? Probed, never assumed: a plain `docker`
+   * CLI without the buildx plugin HARD-FAILS when BuildKit is requested explicitly
+   * ("BuildKit is enabled but the buildx component is missing or broken"), while an
+   * unadorned `docker build` on the same box falls back to the legacy builder and
+   * works — the same trap {@link buildImage} in system/managed-image.ts documents.
+   * So we ask first, and only then opt in.
+   *
+   * Memoized per adapter instance (one instance ≈ one target daemon), so a compose
+   * batch pays a single `docker buildx version` for N images.
+   */
+  private buildKitProbe: Promise<boolean> | null = null;
+
+  private async remoteBuildKitAvailable(): Promise<boolean> {
+    const executor = this.connectionOptions?.executor;
+    if (!executor) return false;
+
+    const probe = (this.buildKitProbe ??= executor
+      // A SENTINEL, not a pattern match on the version banner: a false positive here
+      // is FATAL (BuildKit requested without buildx hard-errors), so the answer has
+      // to come from the exit code and nothing else. A login shell that prints a
+      // banner, or a `docker` wrapper's help text, must not read as "buildx".
+      // `|| true` keeps a missing plugin off the error path — docker exits non-zero
+      // for an unknown subcommand and an SshExecutor rejects on that.
+      .exec("docker buildx version >/dev/null 2>&1 && echo OPENSHIP_BUILDKIT_OK || true")
+      .then((out) => out.split(/\r?\n/).some((line) => line.trim() === "OPENSHIP_BUILDKIT_OK"))
+      .catch(() => false));
+
+    const available = await probe;
+    // Only a POSITIVE answer is memoized. A transient SSH failure that answered
+    // "false" must not pin every later build on this adapter to the legacy builder —
+    // that is the probe-memo-poison shape this repo has been bitten by before.
+    if (!available) this.buildKitProbe = null;
+    return available;
+  }
+
+  /**
    * Run native `docker build` on the remote host against an already-transferred
-   * context dir. One image; `dockerfileName` selects which Dockerfile in the
-   * shared tree to use (so N services can build from one transferred context).
+   * context dir. One image; `dockerfileName` selects which Dockerfile to use (so N
+   * services can build from one transferred tree) and is relative to
+   * `remoteBuildDir` — the build CONTEXT, which for a compose service is its own
+   * `build:` directory inside that tree, not the tree root (#634).
    */
   private async buildImageOnRemote(
     config: BuildConfig,
-    remoteContextDir: string,
+    remoteBuildDir: string,
     dockerfileName: string,
     tag: string,
     log: BuildLogger,
-    signal?: AbortSignal,
+    opts?: { signal?: AbortSignal; requiresBuildKit?: boolean },
   ): Promise<void> {
+    const signal = opts?.signal;
     const executor = this.connectionOptions?.executor;
     if (!executor) throw new Error("SSH build path requires an executor on connectionOptions");
 
@@ -1269,7 +1399,36 @@ export class DockerRuntime implements RuntimeAdapter {
     const dockerfileFlag =
       dockerfileName && dockerfileName !== "Dockerfile" ? ` -f ${sq(dockerfileName)}` : "";
 
-    // `cd` into the context dir FIRST so docker resolves `-f` and the context
+    // BuildKit when the box actually has it: `RUN --mount=type=cache`, heredocs and
+    // the rest of the modern Dockerfile syntax only work under it, and the legacy
+    // builder fails those with a bare "the --mount option requires BuildKit".
+    // `--force-rm` is a legacy-builder concept (BuildKit keeps no intermediate
+    // containers to remove), so it goes when BuildKit is on.
+    const buildKit = await this.remoteBuildKitAvailable();
+    const builderEnv = buildKit ? "DOCKER_BUILDKIT=1 " : "";
+    // `--progress` is a buildx flag, NOT a docker-build flag: a CLI without the
+    // plugin rejects it outright with `unknown flag: --progress` and exit 125, before
+    // it ever looks at the context. `--force-rm` is the mirror image — a legacy-only
+    // concept (BuildKit keeps no intermediate containers to remove). So the flag set
+    // follows the builder; passing either unconditionally breaks one of the two.
+    const builderFlags = buildKit ? " --progress=plain" : " --force-rm";
+    if (buildKit) {
+      log.log("Builder: BuildKit (docker buildx detected on the host)");
+    } else if (opts?.requiresBuildKit) {
+      // Said BEFORE the build rather than after it fails: the legacy builder's own
+      // error names a flag, not a fix. Not fatal — the syntax sniff is a heuristic,
+      // and refusing to build on it would be worse than letting docker decide.
+      log.log(
+        "This Dockerfile needs BuildKit, but the build host's docker CLI has no buildx plugin. Install it (`docker-buildx-plugin`, or Docker's official packages) — the build below will use the legacy builder and is likely to fail.",
+        "warn",
+      );
+    } else {
+      log.log(
+        "Builder: legacy (docker buildx not available on the host) — BuildKit-only Dockerfile syntax such as `RUN --mount` will not work",
+      );
+    }
+
+    // `cd` into the CONTEXT dir FIRST so docker resolves `-f` and the context
     // `.` from the same place (BuildKit otherwise resolves `-f` against the SSH
     // user's home, not the context).
     // --progress=plain: over a non-TTY SSH pipe BuildKit's compact auto-progress
@@ -1277,9 +1436,9 @@ export class DockerRuntime implements RuntimeAdapter {
     // (an OOM-killed `bun install`, a tsup error, …), so a failed build surfaced only
     // as a bare "exited with code 1". Plain progress streams every line through.
     const buildCmd =
-      `cd ${sq(remoteContextDir)} && ` +
-      `docker build --progress=plain -t ${sq(tag)}${dockerfileFlag} ` +
-      `${labelArgs} ${buildArgs} --force-rm .`;
+      `cd ${sq(remoteBuildDir)} && ` +
+      `${builderEnv}docker build${builderFlags} -t ${sq(tag)}${dockerfileFlag} ` +
+      `${labelArgs} ${buildArgs} .`;
 
     log.log(`Running on remote: ${buildCmd}`);
     log.log("─── docker build output ───");
@@ -1425,23 +1584,87 @@ export class DockerRuntime implements RuntimeAdapter {
    * (clone-on-server). Mirrors resolveServiceDockerfile but probes the remote
    * tree with `test -f` instead of the local FS: a repository Dockerfile
    * candidate is used when present; otherwise a Dockerfile is generated locally
-   * (pure fn) and written to the remote tree. Returns the dockerfile path
-   * relative to `remoteContextDir`.
+   * (pure fn) and written to the remote tree.
+   *
+   * Returns the build CONTEXT dir on the host plus the Dockerfile path relative to
+   * it — the same pair {@link resolveServiceDockerfile} produces locally, because
+   * these two resolvers are one behaviour with two probes and a narrowed context
+   * learned by only one of them would leave #634 reproducible on this target.
    */
   private async resolveRemoteDockerfile(
     config: BuildConfig,
     remoteContextDir: string,
     generatedName: string,
     requireRepositoryDockerfile: boolean,
-  ): Promise<string> {
+    log?: BuildLogger,
+  ): Promise<{ remoteBuildDir: string; dockerfileName: string }> {
     const executor = this.connectionOptions?.executor;
     if (!executor) throw new Error("Clone-on-server requires an SSH executor on connectionOptions");
 
-    for (const candidate of resolveDockerfileCandidates(config.rootDirectory, config.dockerfilePath)) {
-      const out = await executor
-        .exec(`test -f ${sq(`${remoteContextDir}/${candidate}`)} && echo yes || true`)
+    const contextSubdir = dockerBuildContextDirectory(config);
+    const remoteBuildDir = contextSubdir ? `${remoteContextDir}/${contextSubdir}` : remoteContextDir;
+
+    if (contextSubdir) {
+      // The lexical `..` refusal happens in normalizeDockerRelativePath; this closes
+      // the symlink hole the same way the local resolver does, since `cd`-ing into a
+      // tracked `svc -> /etc` would hand host files to the build. `pwd -P` is the
+      // shell's own realpath, so one exec answers "exists AND stays inside".
+      const real = await executor
+        .exec(`cd ${sq(remoteBuildDir)} 2>/dev/null && pwd -P || true`)
+        .then((out) => out.trim())
         .catch(() => "");
-      if (out.trim() === "yes") return candidate;
+      const root = await executor
+        .exec(`cd ${sq(remoteContextDir)} && pwd -P`)
+        .then((out) => out.trim())
+        .catch(() => "");
+      if (!real) {
+        throw new Error(
+          `Build context "${contextSubdir}" is not a directory in the cloned source. Check the service's build path.`,
+        );
+      }
+      if (!root || (real !== root && !real.startsWith(`${root}/`))) {
+        throw new Error(`Build context "${contextSubdir}" resolves outside the cloned source.`);
+      }
+    }
+
+    const candidates = contextSubdir
+      ? resolveContextDockerfileCandidates(contextSubdir, config.dockerfilePath)
+      : resolveDockerfileCandidates(config.rootDirectory, config.dockerfilePath);
+
+    for (const candidate of candidates) {
+      const out = await executor
+        .exec(`test -f ${sq(`${remoteBuildDir}/${candidate}`)} && echo yes || true`)
+        .catch(() => "");
+      if (out.trim() === "yes") {
+        // Same non-silent fallback the local resolver makes: the context's plain
+        // `Dockerfile` is the LAST candidate, so landing on it after an explicit
+        // `dockerfile` was configured means we are building something other than what
+        // was asked for. Warned in both resolvers or the two diverge on diagnostics.
+        const explicit = normalizeDockerRelativePath(config.dockerfilePath);
+        if (
+          contextSubdir &&
+          explicit &&
+          candidate === "Dockerfile" &&
+          explicit !== "Dockerfile" &&
+          explicit !== `${contextSubdir}/Dockerfile`
+        ) {
+          log?.log(
+            `Configured Dockerfile "${config.dockerfilePath}" was not found in build context "${contextSubdir}" — using ${contextSubdir}/Dockerfile instead.`,
+            "warn",
+          );
+        }
+        return { remoteBuildDir, dockerfileName: candidate };
+      }
+    }
+
+    // A generated recipe COPYs from the source root, so a narrowed context can
+    // never satisfy it — refuse instead of writing a Dockerfile doomed to fail.
+    if (contextSubdir) {
+      throw new Error(
+        missingContextDockerfileMessage(contextSubdir, config.dockerfilePath, {
+          generatedRecipeRefused: !requireRepositoryDockerfile,
+        }),
+      );
     }
 
     if (requireRepositoryDockerfile) {
@@ -1453,7 +1676,7 @@ export class DockerRuntime implements RuntimeAdapter {
 
     // Generate one locally (pure function of config) and ship just the file.
     await executor.writeFile(`${remoteContextDir}/${generatedName}`, generateDockerfile(config));
-    return generatedName;
+    return { remoteBuildDir, dockerfileName: generatedName };
   }
 
   private async buildViaSshTarPipe(
@@ -1465,14 +1688,18 @@ export class DockerRuntime implements RuntimeAdapter {
   ): Promise<void> {
     const remoteContextDir = `/tmp/openship-build-${config.sessionId}`;
     try {
+      // The whole TREE is transferred (a narrowed context still needs its siblings
+      // present for a compose batch); only the `docker build` cwd narrows.
       await this.transferBuildContext(buildContext.contextDir, remoteContextDir, log);
       await this.buildImageOnRemote(
         config,
-        remoteContextDir,
+        buildContext.contextSubdir
+          ? `${remoteContextDir}/${buildContext.contextSubdir}`
+          : remoteContextDir,
         buildContext.dockerfileName,
         tag,
         log,
-        signal,
+        { signal, requiresBuildKit: buildContext.requiresBuildKit },
       );
     } finally {
       // Always clean up the remote context - even on failure. Don't await - if
@@ -1482,6 +1709,48 @@ export class DockerRuntime implements RuntimeAdapter {
         .catch(() => { /* best effort */ });
       await buildContext.cleanup();
     }
+  }
+
+  /**
+   * Pick the Engine-API builder for ONE dockerode build, for BOTH dockerode call
+   * sites (single image and compose batch) — they are the same decision and a
+   * builder learned by only one of them is the "two executors" trap all over again.
+   *
+   * The classic builder is kept as the DEFAULT deliberately. It is what every
+   * self-hosted local build has always used; switching wholesale would change layer
+   * caching for everyone and silently drop the build CPU/memory caps, which BuildKit
+   * ignores. So BuildKit is opted into only where the classic builder cannot work at
+   * all — a Dockerfile whose syntax it rejects (#634).
+   *
+   * Through the ENGINE API (`version=2`), not by shelling out to `docker build`,
+   * which is the first alternative that comes to mind and is not available: the API
+   * image ships `openssh-client rsync git` and no docker CLI (apps/api/Dockerfile),
+   * and the transport may be a TCP socket with no shell at the other end at all.
+   * Nothing needs the buildx plugin either — BuildKit lives in the daemon.
+   *
+   * Asymmetric with the remote CLI path on purpose: there, BuildKit is taken whenever
+   * buildx exists, because that command passes no --memory/--cpus (so there is no cap
+   * to lose) and on docker ≥23 the CLI already defaults to it — the prefix mostly
+   * buys the log line and the buildx-missing warning.
+   */
+  private selectDockerodeBuilder(
+    config: BuildConfig,
+    requiresBuildKit: boolean,
+    log: BuildLogger,
+  ): { options: { version?: "2" }; trace?: BuildKitTraceDecoder } {
+    if (!requiresBuildKit) return { options: {} };
+
+    log.log(
+      "Dockerfile uses BuildKit-only syntax (RUN --mount, a syntax directive or a heredoc) — building with BuildKit.",
+    );
+    if (Object.keys(dockerBuildResourceLimits(config.resources)).length > 0) {
+      log.log(
+        "Build CPU/memory limits are not enforced under BuildKit — this build runs uncapped.",
+        "warn",
+      );
+    }
+
+    return { options: { version: "2" }, trace: new BuildKitTraceDecoder() };
   }
 
   /**
@@ -1503,10 +1772,13 @@ export class DockerRuntime implements RuntimeAdapter {
     log.log(`Streaming build context to Docker daemon - image tag: ${tag}`);
 
     const { body, abortSignal, takeError } = packBuildContext(
-      buildContext.contextDir,
+      buildContext.buildContextDir,
       buildContext.contextEntries,
       cancelSignal,
+      buildContext.ignoreContextPath,
     );
+
+    const builder = this.selectDockerodeBuilder(config, buildContext.requiresBuildKit, log);
 
     try {
       const stream = await this.docker.buildImage(body, {
@@ -1522,11 +1794,12 @@ export class DockerRuntime implements RuntimeAdapter {
         // needs several GB). Opt-in only; see dockerBuildResourceLimits.
         ...dockerBuildResourceLimits(config.resources),
         forcerm: true,
+        ...builder.options,
         abortSignal,
       });
 
       log.log("Connected to Docker daemon. Build output follows:");
-      await this.streamDockerodeBuild(stream, log);
+      await this.streamDockerodeBuild(stream, log, builder.trace);
       log.log("Docker daemon finished streaming build output. Finalizing image...\n");
     } catch (err) {
       // A context-pack failure aborts the request, so the rejection here is the
@@ -1552,6 +1825,7 @@ export class DockerRuntime implements RuntimeAdapter {
   private async streamDockerodeBuild(
     stream: NodeJS.ReadableStream,
     log: BuildLogger,
+    trace?: BuildKitTraceDecoder,
   ): Promise<void> {
     let fatalBuildError: string | null = null;
 
@@ -1608,7 +1882,7 @@ export class DockerRuntime implements RuntimeAdapter {
         },
         (event) => {
           resetIdleTimer();
-          fatalBuildError ??= this.handleBuildEvent(event, log);
+          fatalBuildError ??= this.handleBuildEvent(event, log, trace);
         },
       );
     });
@@ -1690,20 +1964,16 @@ export class DockerRuntime implements RuntimeAdapter {
           await this.cloneSourceOnRemote(config, remoteContextDir, log);
           if (abort.signal.aborted) throw new BuildCancelledError();
           this.emitDockerStep(log, "clone", "completed", "Source cloned on the server");
-          const dockerfileName = await this.resolveRemoteDockerfile(
+          const { remoteBuildDir, dockerfileName } = await this.resolveRemoteDockerfile(
             config,
             remoteContextDir,
             "Dockerfile.openship",
             config.stack === "docker",
-          );
-          await this.buildImageOnRemote(
-            config,
-            remoteContextDir,
-            dockerfileName,
-            tag,
             log,
-            abort.signal,
           );
+          await this.buildImageOnRemote(config, remoteBuildDir, dockerfileName, tag, log, {
+            signal: abort.signal,
+          });
         } finally {
           sshExecutor.exec(`rm -rf ${sq(remoteContextDir)}`).catch(() => { /* best effort */ });
         }
@@ -1741,7 +2011,12 @@ export class DockerRuntime implements RuntimeAdapter {
         this.emitDockerStep(log, "clone", "completed", "Docker build context ready");
       }
 
-      if (buildContext.rootDirectory) {
+      if (buildContext.contextSubdir) {
+        // #634: when the context was the clone root but the Dockerfile lived under a
+        // subdir, nothing in the log said so — and a failing COPY looked like a
+        // missing file. Name the context whenever it is not the source root.
+        log.log(`Using Docker build context: ${buildContext.contextSubdir}`);
+      } else if (buildContext.rootDirectory) {
         log.log(`Using Docker build root: ${buildContext.rootDirectory}`);
       }
 
@@ -1845,6 +2120,7 @@ export class DockerRuntime implements RuntimeAdapter {
           await this.extractDocRootViaDaemon(tag, docRoot, hostOutDir);
         }
       }
+      await this.pruneBuildFilesFromDocRoot(config, hostOutDir, sshExecutor ?? null, log);
       log.log(`Static files ready at ${hostOutDir}\n`);
     } finally {
       // Files are on the host now; the builder image is dead weight. Best-effort —
@@ -1947,6 +2223,89 @@ export class DockerRuntime implements RuntimeAdapter {
    * expensive one: every extractor can succeed having copied nothing, which deploys
    * green and then 404s the entire site.
    */
+  /**
+   * Names that must never end up in a public doc-root, matched at its TOP LEVEL
+   * only.
+   *
+   * `.git` is the repository — serving it publishes full source history. The
+   * Dockerfiles and `.dockerignore` are OUR build inputs, and one of them is
+   * literally written into the tree by `resolveServiceDockerfile`.
+   */
+  private static readonly DOC_ROOT_EXCLUDED = [
+    ".dockerignore",
+    ".git",
+    "Dockerfile",
+    "Dockerfile.*",
+  ];
+
+  /**
+   * Remove build inputs from an extracted static doc-root, then re-assert the
+   * contract that it still holds something servable.
+   *
+   * Only runs when the doc-root IS the build context — `outputDirectory` empty or
+   * "." — which is the zero-build "just files, index.html at the root" project. A
+   * real output directory (`dist`, `build`) is written by the build and contains
+   * none of this, so the prune is a no-op there.
+   *
+   * Two distinct problems, one fix. The build context is pruned by `.dockerignore`
+   * and THEN the generated recipe is written into it, so for these projects the
+   * published site contained `.dockerignore` + `Dockerfile.openship…` — and any
+   * tracked `.git` — at their own public URLs. Worse, those files count as
+   * content: a repo with an allowlist `.dockerignore` (`*` + `!src`) extracted to
+   * a tree holding ONLY the two build files, which passed the non-empty check and
+   * deployed green as a site that 404s every request. Pruning first and
+   * re-checking after is what makes that check mean "there is something to serve".
+   */
+  private async pruneBuildFilesFromDocRoot(
+    config: BuildConfig,
+    hostOutDir: string,
+    sshExecutor: CommandExecutor | null,
+    log: BuildLogger,
+  ): Promise<void> {
+    if (staticBuilderOutputPath(config) !== builderContextRoot(config)) return;
+
+    if (sshExecutor) {
+      const globs = DockerRuntime.DOC_ROOT_EXCLUDED.map(
+        (name) => `${sq(hostOutDir)}/${name}`,
+      ).join(" ");
+      // Unquoted globs on purpose (the DIRECTORY is quoted): `Dockerfile.*` has to
+      // expand on the remote shell. A glob that matches nothing expands to itself,
+      // which `rm -rf` treats as an absent path — exit 0, nothing removed.
+      await sshExecutor.exec(`rm -rf ${globs}`).catch(() => { /* best effort */ });
+      log.log(`Excluded build files from the published output (${hostOutDir}).\n`);
+      const listing = (
+        await sshExecutor.exec(`ls -A ${sq(hostOutDir)} | head -1`).catch(() => "x")
+      ).trim();
+      this.assertDocRootServable(!listing, hostOutDir);
+      return;
+    }
+
+    const { readdir, rm } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const entries = await readdir(hostOutDir).catch(() => null);
+    // Unreadable is INCONCLUSIVE, never "empty" — a probe that cannot look must not
+    // fail a deploy (same rule as isEmptyDir).
+    if (entries === null) return;
+    const doomed = entries.filter((name) => isExcludedDocRootEntry(name));
+    for (const name of doomed) {
+      await rm(join(hostOutDir, name), { recursive: true, force: true }).catch(() => {});
+    }
+    if (doomed.length > 0) {
+      log.log(`Excluded build files from the published output: ${doomed.join(", ")}\n`);
+    }
+    this.assertDocRootServable(entries.length === doomed.length, hostOutDir);
+  }
+
+  /** Post-prune half of the doc-root contract: build inputs are not content. */
+  private assertDocRootServable(isEmpty: boolean, hostOutDir: string): void {
+    if (!isEmpty) return;
+    throw new Error(
+      `the static output at ${hostOutDir} contains only build files (Dockerfile / ` +
+        `.dockerignore) and nothing to serve — check the project's output directory ` +
+        `setting and its .dockerignore.`,
+    );
+  }
+
   private assertDocRootFilled(isEmpty: boolean, docRoot: string): void {
     if (!isEmpty) return;
     throw new Error(
@@ -2220,7 +2579,25 @@ export class DockerRuntime implements RuntimeAdapter {
         prepareLogger.step("clone", "completed", "Source cloned on the server");
       } else {
         prepareLogger.step("clone", "running", "Preparing shared build context...");
-        tree = await prepareSourceTree(source, { onLog: prepareLogger.callback });
+        tree = await prepareSourceTree(source, {
+          onLog: prepareLogger.callback,
+          // Any service building from its OWN `build:` directory makes the source
+          // root's `.dockerignore` the wrong file to prune this SHARED tree with —
+          // it would delete files the other contexts need. Those builds filter their
+          // own context instead; see SourceTree.dockerignorePruned.
+          //
+          // A malformed value throws here; `true` is the safe answer for it, because
+          // it only skips a destructive prune. Letting the throw out would fail the
+          // WHOLE batch, while per-spec resolution below reports it against the one
+          // service that owns it.
+          perServiceBuildContexts: specs.some((spec) => {
+            try {
+              return Boolean(dockerBuildContextDirectory(spec.config));
+            } catch {
+              return true;
+            }
+          }),
+        });
       }
 
       // Resolve/generate each service's Dockerfile INTO the shared tree, with a
@@ -2231,34 +2608,56 @@ export class DockerRuntime implements RuntimeAdapter {
           const requireRepo = spec.requireRepositoryDockerfile ?? spec.config.stack === "docker";
           try {
             if (cloneOnServer) {
-              const dockerfileName = await this.resolveRemoteDockerfile(
+              const { remoteBuildDir, dockerfileName } = await this.resolveRemoteDockerfile(
                 spec.config,
                 remoteContextDir,
                 generatedName,
                 requireRepo,
+                spec.logger,
               );
               return {
                 spec,
                 dockerfileName,
+                remoteBuildSubdir: dockerBuildContextDirectory(spec.config),
+                remoteBuildDir,
+                buildContextDir: null as string | null,
                 contextEntries: null as string[] | null,
+                ignoreContextPath: undefined as ((path: string) => boolean) | undefined,
+                // Only the dockerode branch consults it, and clone-on-server never
+                // reaches that branch (it is SSH by construction).
+                requiresBuildKit: false,
                 error: null as string | null,
               };
             }
             const resolved = await resolveServiceDockerfile(tree!.contextDir, spec.config, {
               requireRepositoryDockerfile: requireRepo,
               generatedName,
+              dockerignorePruned: tree!.dockerignorePruned,
+              onLog: spec.logger.callback,
             });
             return {
               spec,
               dockerfileName: resolved.dockerfileName,
+              remoteBuildSubdir: resolved.contextSubdir,
+              remoteBuildDir: resolved.contextSubdir
+                ? `${remoteContextDir}/${resolved.contextSubdir}`
+                : remoteContextDir,
+              buildContextDir: resolved.buildContextDir as string | null,
               contextEntries: resolved.contextEntries,
+              ignoreContextPath: resolved.ignoreContextPath,
+              requiresBuildKit: resolved.requiresBuildKit,
               error: null as string | null,
             };
           } catch (err) {
             return {
               spec,
               dockerfileName: null as string | null,
+              remoteBuildSubdir: "",
+              remoteBuildDir: remoteContextDir,
+              buildContextDir: null as string | null,
               contextEntries: null as string[] | null,
+              ignoreContextPath: undefined as ((path: string) => boolean) | undefined,
+              requiresBuildKit: false,
               error: safeErrorMessage(err),
             };
           }
@@ -2292,7 +2691,17 @@ export class DockerRuntime implements RuntimeAdapter {
       // service that's actually streaming. The expensive part (clone + transfer)
       // is already shared above; only the per-image build is serialized here.
       const results: Array<{ serviceName: string; result: BuildResult }> = [];
-      for (const { spec, dockerfileName, contextEntries, error } of resolvedList) {
+      for (const {
+        spec,
+        dockerfileName,
+        remoteBuildDir,
+        remoteBuildSubdir,
+        buildContextDir,
+        contextEntries,
+        ignoreContextPath,
+        requiresBuildKit,
+        error,
+      } of resolvedList) {
         const startedAt = Date.now();
         const tag = this.imageTag(spec.config.slug, spec.config.sessionId);
         const signal = abortControllers.get(spec.config.sessionId)?.signal;
@@ -2323,14 +2732,18 @@ export class DockerRuntime implements RuntimeAdapter {
         spec.onStart?.();
 
         try {
+          if (remoteBuildSubdir) {
+            spec.logger.log(`Using Docker build context: ${remoteBuildSubdir}\n`);
+          }
+
           if (isSsh) {
             await this.buildImageOnRemote(
               spec.config,
-              remoteContextDir,
+              remoteBuildDir,
               dockerfileName,
               tag,
               spec.logger,
-              signal,
+              { signal, requiresBuildKit },
             );
           } else {
             // Own the pack (error handler + abort) so a build-context read
@@ -2338,9 +2751,15 @@ export class DockerRuntime implements RuntimeAdapter {
             // packBuildContext (#448). tree.cleanup() only runs after the whole
             // loop (outer finally), so the context stays put while tar-fs walks.
             const { body, abortSignal, takeError } = packBuildContext(
-              tree!.contextDir,
+              buildContextDir ?? tree!.contextDir,
               contextEntries ?? [],
               signal,
+              ignoreContextPath,
+            );
+            const builder = this.selectDockerodeBuilder(
+              spec.config,
+              requiresBuildKit,
+              spec.logger,
             );
             try {
               const stream = await this.docker.buildImage(body, {
@@ -2353,9 +2772,10 @@ export class DockerRuntime implements RuntimeAdapter {
                 buildargs: { ...spec.config.envVars, NODE_ENV: "production" },
                 ...dockerBuildResourceLimits(spec.config.resources),
                 forcerm: true,
+                ...builder.options,
                 abortSignal,
               });
-              await this.streamDockerodeBuild(stream, spec.logger);
+              await this.streamDockerodeBuild(stream, spec.logger, builder.trace);
             } catch (err) {
               const contextErr = takeError();
               throw contextErr
@@ -2477,10 +2897,10 @@ export class DockerRuntime implements RuntimeAdapter {
     // `<sessionId>-<serviceId>`, which an exact-value filter would never match.
     const containers = await this.docker.listContainers({
       all: true,
-      filters: { label: ["openship.build"] },
+      filters: { label: [OPENSHIP_LABEL.build] },
     });
     for (const c of containers) {
-      const buildId = c.Labels?.["openship.build"];
+      const buildId = c.Labels?.[OPENSHIP_LABEL.build];
       if (!buildId || !cancelCovers(sessionId, buildId)) continue;
       try {
         await this.docker.getContainer(c.Id).remove({ force: true });
@@ -2506,10 +2926,18 @@ export class DockerRuntime implements RuntimeAdapter {
 
     // Environment variables. A worker (config.portless) listens on nothing, so
     // injecting PORT would be a lie the app might bind to — omit it there (#538-B).
+    const projectEnv = splitRuntimeEnv(config.envVars);
+    if (projectEnv.dropped.length > 0) {
+      log({
+        timestamp: new Date().toISOString(),
+        level: "warn",
+        message: droppedRuntimeEnvMessage(projectEnv.dropped),
+      });
+    }
     const env = [
       ...(config.portless ? [] : [`PORT=${config.port}`]),
       `NODE_ENV=${config.environment === "production" ? "production" : "development"}`,
-      ...Object.entries(config.envVars).map(([k, v]) => `${k}=${v}`),
+      ...projectEnv.entries.map(([k, v]) => `${k}=${v}`),
     ];
 
     // Start command - if provided, split into Cmd array
@@ -2661,6 +3089,16 @@ export class DockerRuntime implements RuntimeAdapter {
   }
 
   async removeImage(imageRef: string): Promise<void> {
+    // A path is not an image. Guarding at the verb — not only at the callers that
+    // classify — is what makes issue #640 unrepeatable: dockerode would happily
+    // issue `DELETE /images//opt/openship/static/...`, whose failure is not a 404
+    // and so is rethrown, failing a project teardown forever. Callers that can
+    // hold either shape must route a path to destroy() instead.
+    if (isArtifactPathRef(imageRef)) {
+      throw new Error(
+        `"${imageRef}" is a host directory, not an image reference — remove it with destroy().`,
+      );
+    }
     const image = this.docker.getImage(imageRef);
     try {
       await image.remove({ force: true });
@@ -2677,14 +3115,28 @@ export class DockerRuntime implements RuntimeAdapter {
     // this runtime produced via buildStaticToHost — not a container.
     // getContainer().remove() would 404-no-op and leak the dir, so rm it via the
     // same transport buildStaticToHost used (SSH exec, else local fs).
-    if (containerId.startsWith("/")) {
-      const executor = this.transport.kind === "ssh" ? this.connectionOptions?.executor : null;
-      if (executor) {
-        await executor.exec(`rm -rf ${sq(containerId)}`).catch(() => { /* best effort */ });
-      } else {
-        const { rm } = await import("node:fs/promises");
-        await rm(containerId, { recursive: true, force: true }).catch(() => { /* best effort */ });
+    //
+    // `removeManagedArtifact` owns the confinement AND the verification: it
+    // refuses a path outside the managed tree, and it THROWS when the directory
+    // survives the remove. Both were missing here, and the second one mattered
+    // most — the old `.catch(() => {})` made an artifact destroy incapable of
+    // failing, so teardown reported success over a directory still on disk.
+    if (isArtifactPathRef(containerId)) {
+      if (this.transport.kind === "ssh") {
+        const executor = this.connectionOptions?.executor;
+        // Falling through to node:fs on an SSH transport removed the path on the
+        // ORCHESTRATOR's filesystem — the wrong machine — and reported success.
+        // Every other ssh-only branch in this file throws for the same reason.
+        if (!executor) {
+          throw new Error(
+            `Cannot remove ${containerId}: the SSH transport has no command executor, and ` +
+              `removing it locally would delete the wrong machine's files.`,
+          );
+        }
+        await removeManagedArtifact(executor, containerId);
+        return;
       }
+      await removeManagedArtifact(null, containerId);
       return;
     }
     const container = this.docker.getContainer(containerId);
@@ -2731,8 +3183,8 @@ export class DockerRuntime implements RuntimeAdapter {
     return images.map((img) => ({
       id: img.Id,
       repoTags: (img.RepoTags ?? []).filter((t) => t && t !== "<none>:<none>"),
-      buildId: img.Labels?.["openship.build"],
-      deploymentId: img.Labels?.["openship.deployment"],
+      buildId: img.Labels?.[OPENSHIP_LABEL.build],
+      deploymentId: img.Labels?.[OPENSHIP_LABEL.deployment],
       size: img.Size ?? 0,
     }));
   }
@@ -2782,7 +3234,7 @@ export class DockerRuntime implements RuntimeAdapter {
     return containers.map((c) => ({
       containerId: c.Id,
       status: stateMap[(c.State ?? "").toLowerCase().trim()] ?? "stopped",
-      serviceName: c.Labels?.["openship.service"],
+      serviceName: c.Labels?.[OPENSHIP_LABEL.service],
     }));
   }
 
@@ -2815,22 +3267,32 @@ export class DockerRuntime implements RuntimeAdapter {
   }
 
   async purge(deployment: DeploymentRef): Promise<void> {
-    // Purge order: remove container first (best-effort), then image.
-    // Container removal silently no-ops if already gone — keeps purge
-    // idempotent across replays.
+    // Purge order: container first, then image — an image cannot be untagged
+    // while a container references it.
+    //
+    // Neither failure is swallowed. `destroy` and `removeImage` already absorb
+    // 404 / "no such container" internally, so replays stay idempotent and
+    // anything reaching here is a real failure (permission denied, daemon down,
+    // a dependent container). The caller reads a resolved purge as "the artifact
+    // is gone" and clears `artifact_retained_at`, so a catch-all here records a
+    // container or image still on the box as reclaimed — and it lies in the
+    // direction that loses data, since a row that still HAS its image can still
+    // be restored instantly.
+    //
+    // Both are attempted even when the first fails, so one stuck container does
+    // not strand the image too.
+    const failures: unknown[] = [];
     if (deployment.containerId) {
-      try {
-        await this.destroy(deployment.containerId);
-      } catch {
-        // already removed
-      }
+      await this.destroy(deployment.containerId).catch((err: unknown) => failures.push(err));
     }
     if (deployment.imageRef && ownsBuiltImage(deployment.imageRef)) {
-      try {
-        await this.removeImage(deployment.imageRef);
-      } catch {
-        // image already removed / not present locally
-      }
+      await this.removeImage(deployment.imageRef).catch((err: unknown) => failures.push(err));
+    }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) {
+      throw new Error(
+        failures.map((err) => (err instanceof Error ? err.message : String(err))).join("; "),
+      );
     }
   }
 
@@ -3232,7 +3694,7 @@ export class DockerRuntime implements RuntimeAdapter {
       ? Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000)
       : undefined;
 
-    const { ip, hostPort } = extractNetworkInfo(data);
+    const { ip, hostPort, hostPortByContainerPort } = extractNetworkInfo(data);
 
     let status: ContainerInfo["status"];
     if (data.State.Running) {
@@ -3249,6 +3711,7 @@ export class DockerRuntime implements RuntimeAdapter {
       status,
       ip,
       hostPort,
+      ...(hostPortByContainerPort ? { hostPortByContainerPort } : {}),
       uptimeSeconds: uptimeSeconds && uptimeSeconds > 0 ? uptimeSeconds : undefined,
     };
   }
@@ -3905,7 +4368,7 @@ export class DockerRuntime implements RuntimeAdapter {
     const ownNames = new Set<string>();
     const foreign = new Map<string, string>(); // volume name → other container name
     for (const c of containers) {
-      const owner = c.Labels?.["openship.project"];
+      const owner = c.Labels?.[OPENSHIP_LABEL.project];
       if (!owner) continue;
       for (const m of c.Mounts ?? []) {
         if (m.Type !== "volume" || !m.Name || !named.has(m.Name)) continue;
@@ -3968,7 +4431,7 @@ export class DockerRuntime implements RuntimeAdapter {
       );
       if (onNetwork) continue;
       if (this.cannotJoinNetworks(c)) continue;
-      const service = c.Labels?.["openship.service"];
+      const service = c.Labels?.[OPENSHIP_LABEL.service];
       try {
         await network.connect({
           Container: c.Id,
@@ -3996,7 +4459,11 @@ export class DockerRuntime implements RuntimeAdapter {
    * doesn't exist (source not deployed) is skipped and nothing here ever throws —
    * a link networking failure must never fail the consumer's deploy.
    */
-  async attachToExternalNetworks(projectId: string, networkNames: string[]): Promise<void> {
+  async attachToExternalNetworks(
+    projectId: string,
+    networkNames: string[],
+    extraContainerIds: string[] = [],
+  ): Promise<void> {
     if (networkNames.length === 0) return;
     let containers: Awaited<ReturnType<typeof this.docker.listContainers>>;
     try {
@@ -4006,6 +4473,37 @@ export class DockerRuntime implements RuntimeAdapter {
       });
     } catch {
       return;
+    }
+    /**
+     * The label filter alone is structurally blind to ADOPTED containers.
+     *
+     * A migration that reuses containers in place cannot relabel them — labels are
+     * immutable — so an adopted container keeps its ORIGINAL `openship.*`/compose labels
+     * and `openship.project=<id>` never matches it. Connect an app to a migrated project in
+     * INTERNAL mode and the alias (`db:5432`) was written into the consumer's env while the
+     * adopted container was never joined to the network: the connection simply failed to
+     * resolve at runtime, and the UI reported success.
+     *
+     * So the caller may name containers explicitly — the same identity chain the READ paths
+     * use (stored container id, not label) — and they are unioned in, de-duped by id.
+     */
+    if (extraContainerIds.length > 0) {
+      const seen = new Set(containers.map((c) => c.Id));
+      for (const id of extraContainerIds) {
+        if (seen.has(id)) continue;
+        try {
+          const info = await this.docker.getContainer(id).inspect();
+          containers.push({
+            Id: info.Id,
+            NetworkSettings: { Networks: info.NetworkSettings?.Networks ?? {} },
+            HostConfig: { NetworkMode: info.HostConfig?.NetworkMode },
+          } as unknown as (typeof containers)[number]);
+          seen.add(info.Id);
+        } catch {
+          // Gone / unreachable — nothing to join. Never throws: a link networking
+          // failure must not fail the consumer's deploy.
+        }
+      }
     }
     for (const name of networkNames) {
       const network = this.docker.getNetwork(name);
@@ -4078,11 +4576,24 @@ export class DockerRuntime implements RuntimeAdapter {
     // the route proxies to — otherwise a monorepo/compose backend (e.g. Express
     // `PORT || 5000`) binds a default that doesn't match its route → 502. Never
     // override a PORT the service already sets.
+    // Filtered on this site too, and not only for our own generated images: this
+    // path serves monorepo sub-app rows as well as compose rows, and a sub-app
+    // image IS one of ours with node_modules/.bin baked into ENV PATH. The cost is
+    // that a compose author who wrote `environment: PATH:` by hand no longer gets
+    // `docker compose up` semantics — hence the warning rather than silence.
+    const serviceEnv = splitRuntimeEnv(config.environment);
+    if (serviceEnv.dropped.length > 0) {
+      log({
+        timestamp: new Date().toISOString(),
+        level: "warn",
+        message: `[${config.serviceName}] ${droppedRuntimeEnvMessage(serviceEnv.dropped)}`,
+      });
+    }
     const env = [
       ...(config.publicPort && config.environment.PORT === undefined
         ? [`PORT=${config.publicPort}`]
         : []),
-      ...Object.entries(config.environment).map(([k, v]) => `${k}=${v}`),
+      ...serviceEnv.entries.map(([k, v]) => `${k}=${v}`),
     ];
 
     // Command (#332): argv Cmd, no implicit `sh -c` (that broke entrypoint+CMD
@@ -4205,7 +4716,7 @@ export class DockerRuntime implements RuntimeAdapter {
           deploymentId: config.deploymentId,
           projectId: config.projectId,
         }),
-        "openship.service": config.serviceName,
+        [OPENSHIP_LABEL.service]: config.serviceName,
       },
       ...(healthcheck && { Healthcheck: healthcheck }),
       ...stopConfig,
@@ -4247,7 +4758,7 @@ export class DockerRuntime implements RuntimeAdapter {
 
     // Get container IP on the project network
     const data = await container.inspect();
-    const { ip, hostPort } = extractNetworkInfo(data);
+    const { ip, hostPort, hostPortByContainerPort } = extractNetworkInfo(data);
 
     // Record the content-addressable digest actually running so the update
     // scanner can later detect a moved mutable tag. Best-effort: a locally-built
@@ -4265,6 +4776,7 @@ export class DockerRuntime implements RuntimeAdapter {
       status: "running",
       ip,
       hostPort,
+      ...(hostPortByContainerPort ? { hostPortByContainerPort } : {}),
       imageDigest,
     };
   }
@@ -4276,7 +4788,17 @@ export class DockerRuntime implements RuntimeAdapter {
    * RepoDigests) or any inspect error. Works local + SSH (plain inspect, no
    * followProgress). Never throws.
    */
-  private async resolveImageDigest(ref: string): Promise<string | undefined> {
+  /**
+   * PUBLIC because it is the only anchor the update scanner has.
+   *
+   * `resolveDeployedDrift` reads `service_deployment.image_digest` to tell a moved mutable
+   * tag (`:latest`, `:16`) from an unchanged one — a REF comparison can't, since the ref
+   * string is identical either way. A deploy records it here; an ADOPTED stack records
+   * nothing, and an adopted stack is image-mode by definition (registry images, no repo),
+   * so every migrated `postgres:16`/`redis:7` project was told "up to date" forever. The
+   * adopt paths need to read it for a container they did not create.
+   */
+  async resolveImageDigest(ref: string): Promise<string | undefined> {
     const info = await this.docker.getImage(ref).inspect();
     const repoDigests: string[] = (info as { RepoDigests?: string[] })?.RepoDigests ?? [];
     if (repoDigests.length === 0) return undefined;

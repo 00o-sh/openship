@@ -344,28 +344,7 @@
     "unlink": "إزالة الاتصال"
   },
   "gitInfo": {
-    "repository": "المستودع",
-    "autoDeploy": "النشر التلقائي",
-    "deploysOnPush": "ينشر عند كل دفع",
-    "manualOnly": "النشر اليدوي فقط",
-    "branchToDeploy": "الفرع المراد نشره",
-    "chooseBranch": "اختر الفرع الذي تريد النشر منه من مستودعك",
-    "save": "حفظ",
-    "cancel": "إلغاء",
-    "viewOnGithub": "عرض على GitHub",
-    "recentCommits": "الالتزامات الأخيرة",
-    "totalCommits": "{count} إجمالًا",
-    "noCommits": "لا توجد التزامات بعد",
-    "toast": {
-      "fetchBranchesFailed": "تعذّر جلب الفروع",
-      "errorTitle": "خطأ",
-      "branchUpdated": "تم تحديث الفرع بنجاح",
-      "updatedTitle": "تم التحديث",
-      "branchUpdateFailed": "تعذّر تحديث الفرع",
-      "autoDeployEnabled": "تم تفعيل النشر التلقائي",
-      "autoDeployDisabled": "تم تعطيل النشر التلقائي",
-      "autoDeployFailed": "تعذّر تحديث النشر التلقائي"
-    }
+    "autoDeploy": "النشر التلقائي"
   },
   "git": {
     "connectFirst": {
@@ -597,10 +576,6 @@
     "cannotUndo": "لا يمكن التراجع عن هذا الإجراء.",
     "aboutToPrefix": "أنت على وشك حذف ",
     "aboutToSuffix": ".",
-    "deleteAllAria": "حذف جميع البيئات",
-    "deleteAll": "حذف جميع البيئات",
-    "deleteAllOn": "يزيل تطبيق المشروع وكل بيئة فرعية تحته.",
-    "deleteAllOff": "يزيل هذه البيئة فقط. تبقى الفروع الأخرى.",
     "scanning": "جارٍ فحص الخدمات ووحدات التخزين المرفقة…",
     "wipeAria": "مسح بيانات الخدمة أيضًا",
     "wipeLabelOne": "مسح بيانات الخدمة أيضًا (وحدة تخزين واحدة، {count})",
@@ -615,9 +590,7 @@
     "typePrefix": "اكتب ",
     "typeSuffix": " للتأكيد.",
     "cancel": "إلغاء",
-    "confirmDeleteWipe": "حذف + مسح البيانات",
     "confirmDeleteEnvWipe": "حذف البيئة + مسح البيانات",
-    "confirmDelete": "حذف المشروع",
     "confirmDeleteEnv": "حذف البيئة",
     "linkedTitleOne": "مشروع واحد مرتبط بهذا التطبيق",
     "linkedTitleOther": "{count} مشاريع مرتبطة بهذا التطبيق",
@@ -809,6 +782,11 @@
     "records": {
       "failed": "تعذّر تحميل سجلات DNS لهذا النطاق.",
       "retry": "إعادة المحاولة"
+    },
+    "outputHint": {
+      "body": "لم يتم العثور على مخرجات بناء في {path} — تحقق من دليل المخرجات وأعد النشر.",
+      "noIndex": "توجد مخرجات في {path} لكن لا يوجد ملف index — ستُرجع الطلبات الخطأ 404. تحقق من دليل المخرجات.",
+      "notServed": "أجابت الحافة بالرمز HTTP {status} للمسار {path} — هذا المسار لا يقدّم أي محتوى. تحقق من دليل المخرجات ومن التوجيه."
     }
   }
 }

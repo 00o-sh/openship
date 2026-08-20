@@ -201,6 +201,8 @@
     "applyRestore": "復元を適用",
     "restoringData": "データを復元しています…",
     "restoringHint": "サービスを停止 → データ入れ替え → 再起動しています。このウィンドウを閉じないでください。",
+    "partialDataRunningNotice": "復元先には不完全なデータが残っており、サービスはその上で動作し続けています。サービスを停止してから、この復元（または新しい復元）を最後まで実行し直してください。",
+    "serviceDownNotice": "データは変更されていませんが、サービスは停止しています。準備ができたら起動してください。",
     "restoreComplete": "復元が完了しました。",
     "restoreStatus": "復元 {status}",
     "failed": "失敗",

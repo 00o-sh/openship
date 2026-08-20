@@ -28,6 +28,7 @@ import { cacheStore } from "../../lib/cache-store";
 import { ghFetch, ghFetchPublic, ghFetchSoft } from "./github.http";
 import { mapAccounts } from "./sources/mappers";
 import type { RequestContext } from "../../lib/request-context";
+import type { GitHubTokenSource } from "./github.token";
 import { resolveOrgOwner } from "../../lib/org-actor";
 import type {
   GitHubConnectionState,
@@ -565,6 +566,18 @@ export interface GitHubFetchOptions {
    * GHSA-hp2g-hw7g-f3vm did by accident.
    */
   authorizeAs?: "read";
+  /**
+   * Pin resolution to specific credential kinds, for an endpoint only ONE
+   * credential can satisfy. Orthogonal to `authorizeAs`: that is AUTHORITY
+   * ("may this caller?"), this is CAPABILITY ("can this credential at all?").
+   *
+   * Check-runs pass `["app-installation"]` because GitHub's Checks API rejects
+   * user tokens — and on self-hosted the chain hands back the operator's gh-CLI
+   * token FIRST, which silently 403s every check even when a working App
+   * installation sits one step later. Webhook writes deliberately DON'T pin: a
+   * PAT can administer hooks, and pinning would break self-hosts with no App.
+   */
+  credential?: GitHubTokenSource[];
   installationId?: number;
   params?: Record<string, unknown>;
   headers?: Record<string, string>;
@@ -582,8 +595,15 @@ export interface GitHubFetchOptions {
  *     bypass it here. getLocalGhToken self-guards to null in CLOUD_MODE, so on
  *     the SaaS this falls straight through to tokenFor (the App).
  *   - Everything else (writes: check-runs/webhooks, or no local gh) resolves
- *     via `tokenFor(ctx, "local", ...)` — PAT → App installation → OAuth.
- *     Check-runs MUST be the App, so writes never go gh-first.
+ *     via `tokenFor(ctx, "local", ...)`, whose ORDER IS PLATFORM-SPECIFIC —
+ *     saas: PAT → App → OAuth, but SELFHOSTED: gh-CLI → App → PAT → OAuth
+ *     (CHAINS in github.token.ts). So skipping the gh-first shortcut above does
+ *     NOT mean "not gh": on a self-hosted box gh-CLI is the chain's FIRST step,
+ *     and tokenFor returns the first token it resolves without ever retrying.
+ *     An endpoint only ONE credential can satisfy must therefore say so:
+ *     check-runs pass `credential: ["app-installation"]`, because GitHub's
+ *     Checks API rejects user tokens. Webhooks deliberately do not — a PAT can
+ *     administer hooks, and pinning them would break self-hosts with no App.
  *
  * Appends query params for GET requests, sends JSON body for others.
  */
@@ -615,6 +635,7 @@ export async function githubFetch<T = unknown>(opts: GitHubFetchOptions): Promis
     // GHSA-hp2g-hw7g-f3vm at the single funnel every mint passes through,
     // independent of whatever the route-level role check allowed.
     op: opts.authorizeAs ?? (method === "GET" ? "read" : "write"),
+    only: opts.credential,
   });
   const token = result?.token ?? null;
 

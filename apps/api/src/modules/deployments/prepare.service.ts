@@ -33,7 +33,7 @@ import {
 } from "../../lib/project-root-detector";
 import {
   parseDeploymentMetadata,
-  parseOpenshipConfigJson,
+  parseOpenshipConfig,
   METADATA_FILES,
   type ProjectType,
   type RoutingConfig,
@@ -248,6 +248,31 @@ export interface ProjectInfo {
    * the pipeline does when the project has no `readiness`.
    */
   readiness?: OpenshipReadiness;
+  /**
+   * What the root `openship.json` parse REFUSED, when it refused anything (#641).
+   * Advisory only: an invalid config has never failed a scan or a deploy, it just
+   * silently didn't apply — which IS the bug. Absent when the repo has no file or
+   * it parsed clean, so an unaffected repo's payload is unchanged.
+   */
+  configDiagnostics?: OpenshipConfigDiagnostics;
+}
+
+/**
+ * `errors` are fields the parse refused — or, for a syntax error / non-object
+ * root, the whole file. `warnings` are keys it didn't recognize and skipped.
+ * Two arrays rather than one list because they read differently: an unrecognized
+ * key is usually a typo or a newer Openship's field, a refused one a wrong type.
+ */
+export interface OpenshipConfigDiagnostics {
+  errors: string[];
+  warnings: string[];
+  /**
+   * The file was refused ENTIRELY (bad JSON, or a root that isn't an object), so
+   * nothing overlaid — as opposed to the usual case where the refused fields were
+   * skipped and the rest applied. A flag rather than prose in `errors[0]` so the
+   * two severities can be worded per locale instead of in English.
+   */
+  wholeFile?: true;
 }
 
 /** A `domains[]` entry normalized to the `CreateProjectBody.publicEndpoints` shape. */
@@ -273,16 +298,90 @@ function extractRootRouting(fileContents: Record<string, string>): RoutingConfig
   return undefined;
 }
 
+/** Per channel, so one malformed array can't turn a scan response into thousands
+ *  of strings. */
+const MAX_CONFIG_DIAGNOSTICS = 20;
+/** The longest real message is the ~330-char `framework` enum dump; past that a
+ *  message is a payload, not a diagnostic. */
+const MAX_CONFIG_DIAGNOSTIC_CHARS = 240;
+
 /**
- * Parse the repo-ROOT `openship.json` (case-insensitive) into a validated config.
- * The prepare pipeline overlays it leniently: validation `errors` are ignored
- * here (surfaced by `openship config validate`); only well-formed fields overlay.
- * Its build-shaping subset flows separately through the metadata parser fold.
+ * Reported WITHOUT the engine's own message on purpose. Both V8 and JSC quote the
+ * offending token back — JSC quotes it whole, unbounded — so forwarding it would
+ * ship raw `openship.json` bytes, an `env` secret included, out through the
+ * metadata-tier detect endpoint that exists to carry conclusions only (see
+ * test/modules/deployments/detect-no-content-leak.test.ts). `openship config
+ * validate` runs on the user's own machine and still prints the precise message.
  */
-function extractOpenshipConfig(fileContents: Record<string, string>): OpenshipConfig | undefined {
+const OPENSHIP_JSON_UNPARSEABLE =
+  "openship.json is not valid JSON — run `openship config validate` in the repo to see the " +
+  "parse error.";
+
+/**
+ * These strings quote the repo's own key names back (`Unknown field "x"`,
+ * `env.<KEY>: …`), and they now land in a server log line and a terminal — so an
+ * untrusted repo could forge log entries with a newline, or repaint a CLI line
+ * with `ESC[2K\r`. Strip C0/C1 and DEL, then bound the length, before anything
+ * downstream can be fooled by them. Applied to EVERY channel, not just an
+ * over-cap one, because the injection needs only a single message.
+ */
+function sanitizeDiagnostics(list: string[]): string[] {
+  const clean = list.map((msg) => {
+    // eslint-disable-next-line no-control-regex
+    const flat = msg.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim();
+    return flat.length > MAX_CONFIG_DIAGNOSTIC_CHARS
+      ? `${flat.slice(0, MAX_CONFIG_DIAGNOSTIC_CHARS - 1)}…`
+      : flat;
+  });
+  if (clean.length <= MAX_CONFIG_DIAGNOSTICS) return clean;
+  return [
+    ...clean.slice(0, MAX_CONFIG_DIAGNOSTICS),
+    `…and ${clean.length - MAX_CONFIG_DIAGNOSTICS} more`,
+  ];
+}
+
+interface ExtractedOpenshipConfig {
+  config?: OpenshipConfig;
+  diagnostics?: OpenshipConfigDiagnostics;
+}
+
+/**
+ * Parse the repo-ROOT `openship.json` (case-insensitive). The overlay stays
+ * LENIENT — a refused field is skipped, an unparseable file applies nothing, and
+ * neither ever fails the scan — but what was refused now comes BACK instead of
+ * being dropped (#641), so "my config did nothing" is answerable. The
+ * build-shaping subset still flows separately through the metadata parser fold.
+ *
+ * `JSON.parse` runs here rather than inside `parseOpenshipConfigJson` for two
+ * reasons: the syntax-error message stays ours (see above), and a whole-file
+ * failure becomes distinguishable from a field failure without matching a string.
+ */
+function extractOpenshipConfig(fileContents: Record<string, string>): ExtractedOpenshipConfig {
   const entry = Object.entries(fileContents).find(([name]) => name.toLowerCase() === "openship.json");
-  if (!entry?.[1]) return undefined;
-  return parseOpenshipConfigJson(entry[1]).config ?? undefined;
+  if (!entry?.[1]) return {};
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(entry[1]);
+  } catch {
+    return { diagnostics: { errors: [OPENSHIP_JSON_UNPARSEABLE], warnings: [], wholeFile: true } };
+  }
+
+  const { config, errors, warnings } = parseOpenshipConfig(raw);
+  // Only a non-object root nulls the config — every field-level failure still
+  // yields a partial config that overlays. So `!config` is the whole-file case,
+  // and the flag says so without the message having to.
+  if (!config) {
+    return { diagnostics: { errors: sanitizeDiagnostics(errors), warnings: [], wholeFile: true } };
+  }
+  if (errors.length === 0 && warnings.length === 0) return { config };
+  return {
+    config,
+    diagnostics: {
+      errors: sanitizeDiagnostics(errors),
+      warnings: sanitizeDiagnostics(warnings),
+    },
+  };
 }
 
 /**
@@ -500,6 +599,7 @@ export function projectInfoToScanResponse(result: ProjectInfo) {
     ...(result.publicEndpoints && { publicEndpoints: result.publicEndpoints }),
     ...(result.resources && { resources: result.resources }),
     ...(result.readiness && { readiness: result.readiness }),
+    ...(result.configDiagnostics && { configDiagnostics: result.configDiagnostics }),
     ...(result.rootEnv && Object.keys(result.rootEnv).length > 0 && { rootEnv: maskEnv(result.rootEnv) }),
     ...(result.routing && { routing: result.routing }),
     ...(result.monorepoWorkspace && { monorepoWorkspace: result.monorepoWorkspace }),
@@ -717,13 +817,26 @@ export async function resolveFromReader(
 ): Promise<ProjectInfo> {
   const rootSnapshot = await readProjectSnapshot(reader);
   const routing = extractRootRouting(rootSnapshot.fileContents ?? {});
-  const openshipConfig = extractOpenshipConfig(rootSnapshot.fileContents ?? {});
+  const openship = extractOpenshipConfig(rootSnapshot.fileContents ?? {});
+
+  // Also logged server-side, because the response field only reaches a caller
+  // that asked for a scan. A push-to-deploy asks for none: the pipeline runs off
+  // a frozen snapshot and only re-resolves here via reconcileComposeDrift, which
+  // returns early for anything that isn't a GitHub-source COMPOSE project. So a
+  // pushed single-app deploy still gets no signal at all — see #641's discussion
+  // of why replaying onto the BuildLogger would have to be stale or re-fetch.
+  if (openship.diagnostics) {
+    console.warn(
+      `[openship.json] ${repoMeta.full_name}: ` +
+        [...openship.diagnostics.errors, ...openship.diagnostics.warnings].join(" · "),
+    );
+  }
 
   // Configs SEED defaults; an explicit caller value — the user's own edit,
   // persisted on the project — wins over the repo-declared one. Resolved before
   // the root so a declared path can pre-empt detection; the overlay applied at
   // the end of this function is far too late to relocate the compose read.
-  const declaredComposePath = opts.composePath?.trim() || openshipConfig?.composePath?.trim();
+  const declaredComposePath = opts.composePath?.trim() || openship.config?.composePath?.trim();
   const root = declaredComposePath
     ? await resolveDeclaredRoot(reader, declaredComposePath)
     : await resolveDetectedRoot(reader, rootSnapshot);
@@ -750,7 +863,8 @@ export async function resolveFromReader(
     routing,
     { declaredCompose: !!root.declaredComposePath, env: opts.env },
   );
-  const overlaid = applyOpenshipOverlay(info, openshipConfig);
+  const overlaid = applyOpenshipOverlay(info, openship.config);
+  if (openship.diagnostics) overlaid.configDiagnostics = openship.diagnostics;
 
   if (root.declaredComposePath) {
     // The compose directory IS this project's root — it anchors every relative

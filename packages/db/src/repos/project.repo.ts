@@ -33,6 +33,18 @@ function envVarScope(projectId: string, environment?: string, serviceId?: string
   return conditions;
 }
 
+/**
+ * The server a project is actually deployed to: the DURABLE `project.server_id`
+ * binding, falling back to the active deployment's `meta.serverId` snapshot for
+ * legacy rows never backfilled. Shared by `countActiveByServer` and
+ * `listActiveByServer` so the "N projects" chip and the removal confirm's list
+ * can never disagree — a second copy of this coalesce is exactly how a modal
+ * ends up listing five workloads next to a card that says seven. Both queries
+ * join `deployment` on `project.active_deployment_id`, which is what makes the
+ * fallback readable at all.
+ */
+const boundServerId = sql<string>`coalesce(${project.serverId}, ${deployment.meta} ->> 'serverId')`;
+
 // ─── Repository ──────────────────────────────────────────────────────────────
 
 export function createProjectRepo(db: Database) {
@@ -526,10 +538,9 @@ export function createProjectRepo(db: Database) {
      * list (and the container-issues classifier's absent-edge alarm).
      */
     async countActiveByServer(organizationId: string): Promise<Record<string, number>> {
-      const boundServer = sql<string>`coalesce(${project.serverId}, ${deployment.meta} ->> 'serverId')`;
       const rows = await db
         .select({
-          serverId: boundServer,
+          serverId: boundServerId,
           count: sql<number>`count(*)::int`,
         })
         .from(project)
@@ -538,15 +549,49 @@ export function createProjectRepo(db: Database) {
           and(
             eq(project.organizationId, organizationId),
             isNull(project.deletedAt),
-            sql`coalesce(${project.serverId}, ${deployment.meta} ->> 'serverId') is not null`,
+            sql`${boundServerId} is not null`,
           ),
         )
-        .groupBy(boundServer);
+        .groupBy(boundServerId);
       const out: Record<string, number> = {};
       for (const r of rows) {
         if (r.serverId) out[r.serverId] = Number(r.count);
       }
       return out;
+    },
+
+    /**
+     * The same set `countActiveByServer` counts, for ONE server, itemised — what
+     * "Remove server" is about to take with it. Left-joins the group so an app
+     * install can be named by its collection, and carries `activeDeploymentId`
+     * rather than a resolved status: there is no batch latest-status helper, and
+     * `getProjectStatus` already derives live-vs-draft from that pointer alone.
+     */
+    async listActiveByServer(organizationId: string, serverId: string) {
+      return db
+        .select({
+          id: project.id,
+          name: project.name,
+          slug: project.slug,
+          environmentName: project.environmentName,
+          environmentSlug: project.environmentSlug,
+          groupId: project.groupId,
+          groupName: projectGroup.name,
+          isApp: project.isApp,
+          appTemplateId: project.appTemplateId,
+          activeDeploymentId: project.activeDeploymentId,
+        })
+        .from(project)
+        .innerJoin(deployment, eq(project.activeDeploymentId, deployment.id))
+        .leftJoin(projectGroup, eq(project.groupId, projectGroup.id))
+        .where(
+          and(
+            eq(project.organizationId, organizationId),
+            isNull(project.deletedAt),
+            sql`${boundServerId} = ${serverId}`,
+          ),
+        )
+        .orderBy(project.name, project.environmentSlug);
     },
 
     /**
@@ -752,20 +797,23 @@ export function createProjectRepo(db: Database) {
 
     /**
      * Env-var change metadata for a project+environment: each row's scope
-     * (serviceId, null = project-level / all services) and last-modified time.
-     * Used by smart redeploy to decide which services need an env-only
-     * refresh (updatedAt newer than the active deployment). Values are not
-     * returned (no decryption needed for a dirtiness check).
+     * (serviceId, null = project-level / all services), NAME, and last-modified
+     * time. Used by smart redeploy to decide which services need an env-only
+     * refresh (updatedAt newer than the active deployment), and by the service
+     * restart guard to name the drifted keys back to the operator.
+     *
+     * `key` is the variable's NAME, never its value — no decryption is involved,
+     * so this stays safe to surface in an API error body.
      */
     async listEnvVarChangeMeta(
       projectId: string,
       environment: string,
-    ): Promise<Array<{ serviceId: string | null; updatedAt: Date }>> {
+    ): Promise<Array<{ serviceId: string | null; key: string; updatedAt: Date }>> {
       const rows = await db.query.envVar.findMany({
         where: and(eq(envVar.projectId, projectId), eq(envVar.environment, environment)),
-        columns: { serviceId: true, updatedAt: true },
+        columns: { serviceId: true, key: true, updatedAt: true },
       });
-      return rows.map((r) => ({ serviceId: r.serviceId, updatedAt: r.updatedAt }));
+      return rows.map((r) => ({ serviceId: r.serviceId, key: r.key, updatedAt: r.updatedAt }));
     },
   };
 }

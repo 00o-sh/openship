@@ -787,6 +787,10 @@ export async function createCheckRun(
       // authorized to run. It is deploy-tier status reporting, not repo
       // administration, so a read grant is the right authority.
       authorizeAs: "read",
+      // ...but only the App CAN post it. Unpinned, the self-hosted chain returns
+      // the operator's gh-CLI token first and every check 403s — silently, even
+      // with a working installation one step later in the chain.
+      credential: ["app-installation"],
       params: {
         name: opts.name,
         head_sha: opts.headSha,
@@ -800,7 +804,20 @@ export async function createCheckRun(
       },
     });
     return { id: data.id, htmlUrl: data.html_url };
-  } catch {
+  } catch (err) {
+    // Best-effort, but never silent. "No checks appeared on my PR" was
+    // indistinguishable from "no checks were attempted": every caller swallows
+    // again with `.catch(() => {})`, and this function never throws, so the
+    // reason died here. The thrown error carries GitHub's own status + message.
+    //
+    // The App hint is appended because the pin above makes the no-credential
+    // case report the generic "connect your GitHub account" — misleading on a
+    // self-host that HAS a working gh CLI or PAT, since neither can ever post a
+    // check run. The App is the requirement, not a GitHub connection per se.
+    console.warn(
+      `[GitHub Checks] create failed for ${owner}/${repo} ${opts.name}@${opts.headSha.slice(0, 7)}: ${safeErrorMessage(err)} ` +
+        `(check runs require a GitHub App installation — a gh-CLI/PAT credential cannot post one)`,
+    );
     return null;
   }
 }
@@ -828,6 +845,8 @@ export async function updateCheckRun(
       method: "PATCH",
       // Same tier as createCheckRun — status reporting on a build already authorized.
       authorizeAs: "read",
+      // Same pin as createCheckRun — the Checks API is App-only.
+      credential: ["app-installation"],
       params: {
         status: opts.status,
         completed_at: new Date().toISOString(),
@@ -835,8 +854,11 @@ export async function updateCheckRun(
         ...(opts.output ? { output: opts.output } : {}),
       },
     });
-  } catch {
-    /* best-effort - don't fail the deployment if check update fails */
+  } catch (err) {
+    // Best-effort — never fails the deployment, never silent either (see create).
+    console.warn(
+      `[GitHub Checks] update failed for ${owner}/${repo} check ${checkRunId}: ${safeErrorMessage(err)}`,
+    );
   }
 }
 

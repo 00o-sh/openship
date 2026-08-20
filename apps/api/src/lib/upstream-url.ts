@@ -93,6 +93,7 @@ async function readLiveHostPort(
   runtime: LiveUpstreamRuntime,
   containerId: string,
   strategy: RouteStrategy,
+  containerPort: number,
 ): Promise<{ known: boolean; hostPort?: number }> {
   // container-ip never dials a host port, and a bare workload owns
   // `127.0.0.1:<appPort>` outright — neither has a publish to read.
@@ -102,6 +103,33 @@ async function readLiveHostPort(
     const info = await runtime.getContainerInfo(containerId);
     // A `missing` container answers too: it is gone, so it publishes nothing and
     // a stored port must not resurrect it.
+    //
+    // PER-PORT when the runtime can say. `info.hostPort` is whichever binding the
+    // daemon listed first, so for a container publishing several ports it is the WRONG
+    // number for all but one of them: a route for the second port was dialed at the
+    // first port's publish and quietly served a different app.
+    const byPort = info.hostPortByContainerPort;
+    if (byPort) {
+      const published = byPort[containerPort];
+      if (published) return { known: true, hostPort: published };
+      // `containerPort` is what the CALLER believes it is, and a project-level route
+      // carries whichever side of the mapping the operator typed (project-route's
+      // primary-container fallback passes it straight through). When the number is a
+      // host port on this very container, `127.0.0.1:<it>` is exact — not a borrowed
+      // sibling — and skipping to the container IP would dial a port nothing there
+      // listens on. Keys win over values so a container mapping 3000→8080 alongside
+      // 8080→34100 still resolves 8080 to its own publish.
+      if (Object.values(byPort).includes(containerPort)) {
+        return { known: true, hostPort: containerPort };
+      }
+      // Neither side matches: the port genuinely isn't published. "known, none" is
+      // what makes the caller fall through to the container IP instead of borrowing a
+      // sibling's port. NOT widened to "the map has one entry, so use it" — a map
+      // lists only PUBLISHED ports, so a lone entry says nothing about whether the
+      // container also listens on this one unexposed (minio publishing 9001 and not
+      // 9000 is exactly that shape).
+      return { known: true };
+    }
     return { known: true, hostPort: info.hostPort };
   } catch {
     return { known: false };
@@ -127,7 +155,7 @@ export async function resolveLiveUpstreamUrl(args: {
   stored?: StoredUpstream;
 }): Promise<string | null> {
   const { strategy, runtime, containerId, containerPort, stored } = args;
-  const live = await readLiveHostPort(runtime, containerId, strategy);
+  const live = await readLiveHostPort(runtime, containerId, strategy, containerPort);
   const hostPort = live.known ? live.hostPort : (stored?.hostPort ?? undefined);
   const url = await resolveUpstreamUrl({
     strategy,

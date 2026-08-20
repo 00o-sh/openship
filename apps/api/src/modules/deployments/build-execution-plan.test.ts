@@ -1,5 +1,12 @@
+import { readFileSync } from "node:fs";
+
 import { describe, it, expect } from "vitest";
-import { resolveBuildRuntimeModes, resolveDeployRouting } from "./build-execution-plan";
+
+import {
+  resolveBuildRuntimeModes,
+  resolveDeployRouting,
+  reusedReleaseRouting,
+} from "./build-execution-plan";
 
 /**
  * Locks the behavior-equivalence tables the pipeline restructure relied on. Each
@@ -163,5 +170,71 @@ describe("resolveDeployRouting (post-resolve, keyed off runtime.name)", () => {
     expect(
       resolveDeployRouting({ workload: "static", runtimeName: "bare", outputDirectory: "dist" }),
     ).toEqual({ buildMode: "static-bare", deployMode: "static-file-serve", staticServeOutputDir: "dist" });
+  });
+});
+
+/**
+ * A reused release's doc-root offset must come from the release, not from today's
+ * runtime resolution. Wiring is pinned alongside the behaviour on purpose: the
+ * correction is a no-op unless the pipeline feeds it the REUSE branch and passes
+ * the corrected routing to the deploy phase, and neither is visible from a unit
+ * test of the function.
+ */
+describe("reusedReleaseRouting (a release that already exists)", () => {
+  const staticBare = resolveDeployRouting({
+    workload: "static",
+    runtimeName: "bare",
+    outputDirectory: "dist",
+  });
+  const staticSandbox = resolveDeployRouting({
+    workload: "static",
+    runtimeName: "docker",
+    outputDirectory: "dist",
+  });
+
+  it("keeps a sandbox-built release's release-root doc-root when the runtime now resolves bare", () => {
+    // "" is the frozen answer and must survive: re-derived it would be "dist",
+    // which the promote aborts on with a build-config error for a restore that
+    // ran no build.
+    expect(reusedReleaseRouting(staticBare, "").staticServeOutputDir).toBe("");
+  });
+
+  it("keeps a bare-built release's output dir when the runtime now resolves docker", () => {
+    // Re-derived this would be "", publishing the promoted source tree as the
+    // site and reporting success.
+    expect(reusedReleaseRouting(staticSandbox, "dist").staticServeOutputDir).toBe("dist");
+  });
+
+  it("leaves buildMode and deployMode alone — it corrects one field", () => {
+    expect(reusedReleaseRouting(staticSandbox, "dist")).toEqual({
+      ...staticSandbox,
+      staticServeOutputDir: "dist",
+    });
+  });
+
+  it("falls back to the derived answer for a release predating the field", () => {
+    expect(reusedReleaseRouting(staticBare, undefined)).toBe(staticBare);
+  });
+
+  it("never touches a non-static deploy", () => {
+    for (const routing of [
+      resolveDeployRouting({ workload: "web", runtimeName: "docker", outputDirectory: "dist" }),
+      resolveDeployRouting({ workload: "worker", runtimeName: "docker", outputDirectory: "dist" }),
+      resolveDeployRouting({ workload: "static", runtimeName: "cloud", outputDirectory: "dist" }),
+    ]) {
+      expect(reusedReleaseRouting(routing, "dist")).toBe(routing);
+    }
+  });
+
+  it("is wired to the REUSE branch, and its answer is what the deploy phase gets", () => {
+    const src = readFileSync(new URL("./build-pipeline.ts", import.meta.url), "utf8");
+    // Gated on the reuse actually happening: a pin whose artifact is gone rebuilds
+    // from source, and then the BUILD's answer is the correct one.
+    expect(src).toMatch(
+      /const servedRouting = reusedArtifact\s*\?\s*reusedReleaseRouting\(deployRouting, snapshot\.staticServeOutputDir\)\s*:\s*deployRouting;/,
+    );
+    // The deploy phase reads `deployRouting` off `phase`; handing it the
+    // uncorrected object is exactly how this would silently stop working.
+    expect(src).toMatch(/deployRouting: servedRouting,/);
   });
 });

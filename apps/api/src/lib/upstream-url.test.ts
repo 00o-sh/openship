@@ -234,3 +234,109 @@ describe("resolveLiveUpstreamUrl", () => {
     ).resolves.toBe("http://127.0.0.1:4000");
   });
 });
+
+/**
+ * A container publishing SEVERAL ports has one binding per port, and
+ * `ContainerInfo.hostPort` is whichever the daemon listed first. Reading that scalar
+ * for a specific container port dialed the wrong app: minio's console route resolved
+ * to the S3 port's publish, the vhost came up green, and the domain served the other
+ * service. `hostPortByContainerPort` is the per-port answer; these pin that it is
+ * preferred, and that "this port isn't published" is honoured rather than papered
+ * over with a sibling's number.
+ */
+describe("resolveLiveUpstreamUrl — multi-port containers", () => {
+  const multiPortRuntime = (map: Record<number, number>, scalar?: number) => ({
+    name: "docker" as const,
+    supports: (cap: string) => cap === "containerIp" || cap === "containerInfo",
+    getContainerInfo: vi.fn(async () => ({
+      containerId: "c1",
+      status: "running",
+      ip: "172.19.0.9",
+      hostPort: scalar,
+      hostPortByContainerPort: map,
+    }) as never),
+    getContainerIp: vi.fn(async () => "172.19.0.9"),
+  });
+
+  it("dials the publish belonging to THIS container port, not the first binding", async () => {
+    const url = await resolveLiveUpstreamUrl({
+      strategy: "loopback-port",
+      runtime: multiPortRuntime({ 9000: 34100, 9001: 34101 }, 34100),
+      containerId: "c1",
+      containerPort: 9001,
+    });
+    expect(url).toBe("http://127.0.0.1:34101");
+  });
+
+  it("falls back to the container IP when THIS port is not published", async () => {
+    // The map exists and has no 9000, so 9000 genuinely isn't published. Borrowing
+    // 9001's publish here is what served the wrong app.
+    const url = await resolveLiveUpstreamUrl({
+      strategy: "loopback-port",
+      runtime: multiPortRuntime({ 9001: 34101 }, 34101),
+      containerId: "c1",
+      containerPort: 9000,
+    });
+    expect(url).toBe("http://172.19.0.9:9000");
+  });
+
+  it("does not resurrect a stored port for an unpublished port", async () => {
+    // #506: the live read ANSWERED (map present, no entry) — that is "publishes
+    // nothing", not "couldn't ask", so the stored port must not come back.
+    const url = await resolveLiveUpstreamUrl({
+      strategy: "loopback-port",
+      runtime: multiPortRuntime({ 9001: 34101 }),
+      containerId: "c1",
+      containerPort: 9000,
+      stored: { ip: "172.19.0.9", hostPort: 34100 },
+    });
+    expect(url).toBe("http://172.19.0.9:9000");
+  });
+
+  it("dials a port the caller named by its PUBLISHED side", async () => {
+    // A project-level route carries whichever side of `8080:3000` the operator typed,
+    // and project-route's primary-container fallback passes it through unresolved. 8080
+    // is a host port on this container, so it is the exact dial — not a borrowed one.
+    const url = await resolveLiveUpstreamUrl({
+      strategy: "loopback-port",
+      runtime: multiPortRuntime({ 3000: 8080 }, 8080),
+      containerId: "c1",
+      containerPort: 8080,
+    });
+    expect(url).toBe("http://127.0.0.1:8080");
+  });
+
+  it("prefers the container-port key over a colliding published value", async () => {
+    // 8080 is both a container port (→34100) and 3000's publish. The container side
+    // wins, so the route dials what the app inside 8080 is reachable at.
+    const url = await resolveLiveUpstreamUrl({
+      strategy: "loopback-port",
+      runtime: multiPortRuntime({ 3000: 8080, 8080: 34100 }, 8080),
+      containerId: "c1",
+      containerPort: 8080,
+    });
+    expect(url).toBe("http://127.0.0.1:34100");
+  });
+
+  it("still reads the scalar from a runtime that reports no map", async () => {
+    const legacy = {
+      name: "docker" as const,
+      supports: (cap: string) => cap === "containerIp" || cap === "containerInfo",
+      getContainerInfo: vi.fn(async () => ({
+        containerId: "c1",
+        status: "running",
+        ip: "172.19.0.9",
+        hostPort: 4000,
+      }) as never),
+      getContainerIp: vi.fn(async () => "172.19.0.9"),
+    };
+    expect(
+      await resolveLiveUpstreamUrl({
+        strategy: "loopback-port",
+        runtime: legacy,
+        containerId: "c1",
+        containerPort: 3001,
+      }),
+    ).toBe("http://127.0.0.1:4000");
+  });
+});

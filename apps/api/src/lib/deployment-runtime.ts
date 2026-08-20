@@ -182,6 +182,22 @@ export interface OutputCheckResult {
   hasIndex: boolean;
   /** False = probe inconclusive (runtime can't exec / errored) — no advisory. */
   checked: boolean;
+  /**
+   * Status the EDGE answered for a real request to this route. Absent = no HTTP
+   * signal (nothing to ask as, no curl, nothing accepted the connection).
+   *
+   * The filesystem fields say the bytes are reachable from where the edge looks;
+   * this says the edge actually serves them — the one check that catches
+   * unreadable file modes and a vhost that was never written.
+   */
+  status?: number;
+  /**
+   * The edge answered and it was not a failure (2xx/3xx, or 401/403 where a policy
+   * answered a route that DID resolve). ABSENT = no signal — readers must test
+   * `served === false`, never `!served`, or every pre-existing record with no HTTP
+   * half reads as broken.
+   */
+  served?: boolean;
   skippedReason?: "no-exec" | "no-output-dir";
 }
 

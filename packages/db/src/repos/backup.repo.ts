@@ -8,7 +8,7 @@
  *   restore      — restore history (sibling of run)
  */
 
-import { and, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lt, notInArray, or, sql } from "drizzle-orm";
 import type { Database } from "../client";
 import { backupDestination, backupPolicy, backupRestore, backupRun } from "../schema";
 import { detailOf } from "./storable-detail";
@@ -100,9 +100,29 @@ async function persistTransition(
   status: string,
   core: Record<string, unknown>,
   patch: Record<string, unknown> | undefined,
-  write: (values: Record<string, unknown>) => Promise<unknown>,
+  /**
+   * `guarded` is true ONLY for the status write.
+   *
+   * The terminal guard must not cover the payload writes below. The core write flips the
+   * row to `succeeded`, so a guard applied to every write would then reject the very next
+   * one — silently dropping `manifestKey`, `artifacts`, `bytesTransferred` on success and
+   * `errorMessage` on failure. Caught by the payload-matrix E2E: a run reported
+   * `succeeded` with `manifest_key` still null.
+   */
+  write: (values: Record<string, unknown>, guarded: boolean) => Promise<unknown>,
 ): Promise<void> {
-  await write(core);
+  const core_result = await write(core, true);
+  // An empty `returning()` means the guarded WHERE matched nothing: the row is already
+  // terminal and this transition lost the race. Logged, never swallowed — the write being
+  // dropped is exactly the information someone debugging a disagreeing run needs, and the
+  // payload writes below are pointless once the core one did not land.
+  if (Array.isArray(core_result) && core_result.length === 0) {
+    console.warn(
+      `[db] ${label} ${id}: refused transition to "${status}" — the row is already in a ` +
+        `terminal state. Whoever finished it first owns the verdict; this write was dropped.`,
+    );
+    return;
+  }
   if (!patch) return;
   // `status` never rides the payload — the core write above owns it.
   const rest: Record<string, unknown> = {};
@@ -113,7 +133,7 @@ async function persistTransition(
   if (keys.length === 0) return;
 
   try {
-    await write(rest);
+    await write(rest, false);
     return;
   } catch (err) {
     console.error(
@@ -123,13 +143,13 @@ async function persistTransition(
 
   for (const key of keys) {
     try {
-      await write({ [key]: rest[key] });
+      await write({ [key]: rest[key] }, false);
       continue;
     } catch (err) {
       const detail = detailOf(err);
       if (typeof rest[key] === "string") {
         try {
-          await write({ [key]: `[unstorable: ${detail}]` });
+          await write({ [key]: `[unstorable: ${detail}]` }, false);
           continue;
         } catch {
           // fall through to the log below
@@ -570,16 +590,39 @@ export function createBackupRunRepo(db: Database) {
         status,
         { status, lastEventAt: now, ...(finishing ? { finishedAt: now } : {}) },
         patch as Record<string, unknown> | undefined,
-        (values) =>
+        (values, guarded) =>
           db
             .update(backupRun)
             .set(values as Partial<NewBackupRun>)
-            .where(eq(backupRun.id, id)),
+            // A terminal status is FINAL, and the guard is atomic rather than a
+            // read-then-check because the writers genuinely race: the stale-heartbeat
+            // sweep's ceiling can stamp `server_error` on a legitimately long upload
+            // while `execute()` is still running, and the unguarded write then let
+            // `succeeded` land on top of it — a run the system had already decided had
+            // failed becoming a green restore point. One owner per verdict: whoever
+            // reaches terminal first.
+            .where(
+              guarded
+                ? and(eq(backupRun.id, id), notInArray(backupRun.status, TERMINAL))
+                : eq(backupRun.id, id),
+            )
+            .returning(),
       );
     },
 
-    /** Mark every in-flight run as server_error. Called at boot to
-     *  reconcile after a crash. */
+    /**
+     * Mark every RUNNING run as server_error. Called at boot to reconcile after a
+     * crash: a run that was mid-execution has no worker any more, and its in-process
+     * state died with the process, so it cannot be resumed.
+     *
+     * `queued` is excluded, because a queued row lost nothing when the process died —
+     * it had not started. Both runners recover it: the in-process one calls
+     * `requeueOrphanedRuns()` at boot and polls `listQueued()` every 30s, and BullMQ
+     * holds the job in Redis. Terminalizing it here destroyed durable work and, since
+     * the write is terminal and `transition()` guards terminal states, did so
+     * permanently — an API restart during a backup window meant those backups never
+     * ran and reported a crash that had not touched them.
+     */
     async sweepStaleRuns(reason: string): Promise<number> {
       const result = await db
         .update(backupRun)
@@ -589,7 +632,15 @@ export function createBackupRunRepo(db: Database) {
           lastEventAt: new Date(),
           errorMessage: reason,
         })
-        .where(and(inArray(backupRun.status, IN_FLIGHT_RUN_STATUSES), isNull(backupRun.finishedAt)))
+        .where(
+          and(
+            inArray(
+              backupRun.status,
+              IN_FLIGHT_RUN_STATUSES.filter((s) => s !== "queued"),
+            ),
+            isNull(backupRun.finishedAt),
+          ),
+        )
         .returning();
       return result.length;
     },
@@ -597,10 +648,27 @@ export function createBackupRunRepo(db: Database) {
     /**
      * Fail in-flight runs whose `lastEventAt` heartbeat has gone stale. Unlike
      * `sweepStaleRuns` (boot-only, marks everything in-flight), this is selective:
-     *   - queued rows nobody picked up within `queuedCutoff`
      *   - preparing/snapshotting/verifying with no transition within `idleCutoff`
      *     (brief hops between states — a stall there is genuinely stuck)
      *   - any in-flight row past the absolute `ceilingCutoff`
+     *
+     * `queued` is deliberately NOT swept on the idle window, and this is the whole
+     * point of the state. `lastEventAt` is stamped once at row creation and bumped
+     * only by `transition()`, so while a run WAITS for a worker slot the column does
+     * not move — meaning an idle window applied to `queued` measures QUEUE DEPTH, not
+     * health. Run concurrency is 2, so a project-level policy fanning out across a
+     * handful of services, or a set of policies sharing one cron minute, puts ordinary
+     * runs past any such window while they are still perfectly claimable.
+     *
+     * Sweeping them was unrecoverable, not merely early: the write is TERMINAL, the
+     * guard in `transition()` then refuses every later write, and `execute()` bails on
+     * any row that is no longer `queued`. So the nightly backups quietly stopped
+     * happening and reported a timeout that had not occurred.
+     *
+     * A queued row also does not NEED this: it is never orphaned. The in-process
+     * runner re-lists `listQueued()` every 30s (and at boot), and the BullMQ queue is
+     * durable in Redis. The 6h `ceilingCutoff` still applies as the genuine backstop —
+     * a row that has sat queued that long is a real anomaly, not a busy queue.
      *
      * `uploading` is deliberately NOT idle-swept. A single-artifact dump
      * (pg_dump/mysqldump/mongodump) streams the whole payload through one
@@ -615,12 +683,11 @@ export function createBackupRunRepo(db: Database) {
      * only backstops `uploading` via the 6h `ceilingCutoff`.
      */
     async sweepRunsWithStaleHeartbeat(params: {
-      queuedCutoff: Date;
       idleCutoff: Date;
       ceilingCutoff: Date;
       reason: string;
     }): Promise<number> {
-      const { queuedCutoff, idleCutoff, ceilingCutoff, reason } = params;
+      const { idleCutoff, ceilingCutoff, reason } = params;
       const result = await db
         .update(backupRun)
         .set({
@@ -634,7 +701,6 @@ export function createBackupRunRepo(db: Database) {
             inArray(backupRun.status, IN_FLIGHT_RUN_STATUSES),
             isNull(backupRun.finishedAt),
             or(
-              and(eq(backupRun.status, "queued"), lt(backupRun.lastEventAt, queuedCutoff)),
               and(
                 inArray(backupRun.status, ["preparing", "snapshotting", "verifying"]),
                 lt(backupRun.lastEventAt, idleCutoff),
@@ -660,12 +726,24 @@ export function createBackupRunRepo(db: Database) {
     },
 
     /**
-     * Runs holding a `custom_command` artifact with no `restoreCommand` — i.e.
-     * an artifact that cannot be put back (D5). Filtered in SQL so an instance
+     * Runs holding a `custom_command` artifact whose `restoreCommand` is unusable —
+     * i.e. an artifact that cannot be put back (D5). Filtered in SQL so an instance
      * with years of history doesn't page every row in to find a handful, and
      * matched on the ARTIFACT rather than the policy so runs whose policy was
      * since deleted still surface (those are unrecoverable, and the operator
      * needs to hear about them before they need the restore).
+     *
+     * Two shapes, because there are two ways the command went missing. EMPTY is the
+     * original D5 defect (the orchestrator hand-picked payload keys and dropped it).
+     * A `***` is the second: the recorded metadata was run through the build-log
+     * credential scrubber, so a command carrying a DSN was stored with its userinfo
+     * redacted — present, plausible, and guaranteed to fail authentication. New runs
+     * no longer go through that path; this finds the ones already captured.
+     *
+     * The `***` match is deliberately BROAD (any occurrence) because this is only a
+     * candidate list — the caller re-checks each entry against the narrow
+     * `isRedactedCommand` shape before touching anything, so an operator's own `***`
+     * costs one skipped row rather than a rewritten command.
      */
     async listCustomCommandMissingRestoreCommand(limit = 1000): Promise<BackupRun[]> {
       return db.query.backupRun.findMany({
@@ -675,7 +753,10 @@ export function createBackupRunRepo(db: Database) {
           sql`exists (
             select 1 from jsonb_array_elements(${backupRun.artifacts}) as entry
             where entry->>'payloadKind' = 'custom_command'
-              and coalesce(entry->'metadata'->>'restoreCommand', '') = ''
+              and (
+                coalesce(entry->'metadata'->>'restoreCommand', '') = ''
+                or entry->'metadata'->>'restoreCommand' like '%***%'
+              )
           )`,
         ),
         orderBy: (t, { asc }) => [asc(t.startedAt)],
@@ -756,6 +837,30 @@ export function createBackupRestoreRepo(db: Database) {
     },
 
     /**
+     * Give a restore row a confirmation token IF it has none, and report the token
+     * that is actually in force.
+     *
+     * A null token there means apply can NEVER succeed: the compare demands an exact
+     * match against the stored value and the route rejects an empty one before it gets
+     * that far, so the row is prepared and unappliable. The update is conditional on
+     * the column still being null, so a concurrent prepare cannot swap the token out
+     * from under a client already holding one — hence the read-back for the losing
+     * caller, which needs the winner's value, not its own.
+     */
+    async adoptConfirmationToken(id: string, token: string): Promise<string | null> {
+      const [row] = await db
+        .update(backupRestore)
+        .set({ confirmationToken: token })
+        .where(and(eq(backupRestore.id, id), isNull(backupRestore.confirmationToken)))
+        .returning();
+      if (row) return row.confirmationToken;
+      const current = await db.query.backupRestore.findFirst({
+        where: eq(backupRestore.id, id),
+      });
+      return current?.confirmationToken ?? null;
+    },
+
+    /**
      * Record a cancel request without transitioning — the running phase honors
      * it at its next checkpoint. Returns the updated row so the caller can read
      * back the FIRST press time, which `coalesce` preserves: a second press is
@@ -793,11 +898,20 @@ export function createBackupRestoreRepo(db: Database) {
           ...(status === "cancelled" ? { cancelledAt: now } : {}),
         },
         patch as Record<string, unknown> | undefined,
-        (values) =>
+        (values, guarded) =>
           db
             .update(backupRestore)
             .set(values as Partial<NewBackupRestore>)
-            .where(eq(backupRestore.id, id)),
+            // Same rule as backup_run above. This table is where it was first observed:
+            // "the operator watched a cancel undo itself" (restore.orchestrator.ts) was
+            // patched with a read-then-check in the ORCHESTRATOR, leaving the repo write
+            // unguarded — so the race stayed reachable from any other writer.
+            .where(
+              guarded
+                ? and(eq(backupRestore.id, id), notInArray(backupRestore.status, TERMINAL))
+                : eq(backupRestore.id, id),
+            )
+            .returning(),
       );
     },
 

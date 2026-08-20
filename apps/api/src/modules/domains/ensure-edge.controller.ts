@@ -4,7 +4,8 @@
  * the exact engine (`ensureEdge` → `ensureEdgeClear` → `runEdgeTakeover`) and the
  * generic prompt transport, so the SAME consent modal appears — but WITHOUT a
  * container redeploy: it installs/owns the edge on the project's server, then
- * re-applies the project's routes reload-free via `applyProjectRouting`.
+ * re-applies the project's routes reload-free via `reapplyProjectLiveRoutes`
+ * (the per-domain surface) + `applyProjectRouting` (the composite/fan-out overlay).
  *
  * Used by the Domains tab (first route / "set up edge") instead of forcing a
  * full deploy — which matters for migrated attach-live stacks whose containers
@@ -35,6 +36,7 @@ import { pinnedEdgeImage, withPinnedEdgeImage } from "../../lib/edge-image";
 import { deliverManagedImage } from "../../lib/deliver-managed-image";
 import { resolveAcmeProviderOptions } from "../../lib/acme-config";
 import { applyProjectRouting } from "./routing-apply.service";
+import { reapplyProjectLiveRoutes } from "./project-route.service";
 import {
   createEdgeConsentSession,
   getEdgeConsentSession,
@@ -269,6 +271,25 @@ export async function ensureEdgeStream(c: Context) {
           });
         });
       })().catch(() => {});
+      // BOTH appliers, in this order — the same pairing (and the same reason)
+      // `retryProjectRouting` documents. `reapplyProjectLiveRoutes` is the PER-DOMAIN
+      // surface: a project-level domain row's port target or a static app's doc root.
+      // `applyProjectRouting` only emits the vercel composite and the migration
+      // path-fan-out, so on its own it registered NOTHING for the shape this flow
+      // exists to serve — a migrated attach-live stack with one project-level domain —
+      // while this session still logged "routes are live" (#618).
+      //
+      // `managedEdgeSyncedByCaller`: this flow is about the LOCAL edge, and the
+      // Domains tab reaches it immediately after a save whose own background task is
+      // still running its `syncProjectManagedEdge`. Letting this re-apply sync the
+      // *.opsh.io hostnames too would race that: two challenges for one target, the
+      // second resetting the first's token. Not syncing here also keeps the flow's
+      // pre-existing behaviour — it never touched the managed edge.
+      await reapplyProjectLiveRoutes(resolved.project, [], {
+        managedEdgeSyncedByCaller: true,
+      }).catch((e) =>
+        appendEdgeLog(session.id, `Route apply warning: ${safeErrorMessage(e)}`, "warn"),
+      );
       await applyProjectRouting(id).catch((e) =>
         appendEdgeLog(session.id, `Route apply warning: ${safeErrorMessage(e)}`, "warn"),
       );

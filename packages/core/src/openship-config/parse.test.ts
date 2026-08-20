@@ -108,6 +108,25 @@ describe("parseOpenshipConfig", () => {
     expect(parseOpenshipConfig("x").errors[0]).toMatch(/must be a JSON object/);
   });
 
+  // #641 read this the other way round — that one bad enum nulls the config and
+  // discards its valid siblings. It doesn't, and the reporting fix's severity
+  // split (whole-file vs field) depends on which of the two actually happens.
+  it("keeps the valid fields when one field fails validation", () => {
+    const { config, errors } = parseOpenshipConfig({ framework: "nextjs ", port: 8080 });
+    expect(config).not.toBeNull();
+    expect(config?.port).toBe(8080);
+    expect(config?.framework).toBeUndefined();
+    expect(errors.some((e) => e.startsWith("framework:"))).toBe(true);
+  });
+
+  it("nulls the config ONLY for a syntax error or a non-object root", () => {
+    expect(parseOpenshipConfigJson("{ not json").config).toBeNull();
+    expect(parseOpenshipConfigJson("null").config).toBeNull();
+    expect(parseOpenshipConfigJson("[]").config).toBeNull();
+    // An object root always yields a config, however many fields it refused.
+    expect(parseOpenshipConfigJson('{"framework":"coldfusion"}').config).toEqual({});
+  });
+
   // The examples printed in the docs/skill must validate cleanly, or the docs
   // are lying. Keep these in sync with reference/openship-json.mdx.
   it("accepts every documented example with no errors", () => {

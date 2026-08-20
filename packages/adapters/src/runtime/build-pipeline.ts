@@ -12,7 +12,7 @@
  */
 
 import type { BuildConfig, BuildStep, LogEntry, LogCallback } from "../types";
-import { safeErrorMessage, packageManagerEnsureCommand } from "@repo/core";
+import { safeErrorMessage, packageManagerEnsureCommand, nodeBinPathExport } from "@repo/core";
 import { sq, injectGitToken, assembleGitClone } from "./git-clone";
 import { materializeGitSsh, shellGitSshWriter, type GitSshMaterial } from "./git-ssh-material";
 
@@ -339,15 +339,12 @@ export async function runBuildPipeline(
 
     // Put the project's locally-installed CLIs on PATH so a build/install command
     // that invokes a dependency binary directly — e.g. a vercel.json
-    // `buildCommand: "vite build"`, or `tsc` / `next` / `astro` — resolves it,
-    // mirroring how Vercel / Netlify / npm-scripts prepend `node_modules/.bin`.
+    // `buildCommand: "vite build"`, or `tsc` / `next` / `astro` — resolves it.
     // Both the build dir and the repo root are added (monorepos hoist deps up).
-    // Scoped to JS package managers: Go/Rust/Python/etc. have no `node_modules`,
-    // so the prefix would only add non-existent dirs to PATH.
-    const JS_PACKAGE_MANAGERS = new Set(["npm", "yarn", "pnpm", "bun"]);
-    const binPathExport = JS_PACKAGE_MANAGERS.has(config.packageManager)
-      ? `export PATH=${sq(`${buildDir}/node_modules/.bin`)}:${sq(`${env.projectDir}/node_modules/.bin`)}:"$PATH"`
-      : "";
+    // Shared with the Dockerfile generator, which needs the same PATH for the
+    // same reason — deriving it twice is how the two surfaces drifted apart and
+    // left the docker build strategy failing at exit 127 (openship#623).
+    const binPathExport = nodeBinPathExport(config.packageManager, [buildDir, env.projectDir]);
 
     const inDir = (cmd: string) => {
       const full = `cd ${sq(buildDir)} && ${cmd}`;

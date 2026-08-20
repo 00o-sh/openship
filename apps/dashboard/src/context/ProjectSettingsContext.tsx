@@ -89,6 +89,17 @@ interface BasicProjectData {
   cloudWorkspaceId?: string | null;
   deletedAt?: string | null;
   packageManager?: string;
+  /**
+   * Push auto-deploy, straight from the `auto_deploy` column — the same field
+   * the push webhook handler gates on. Typed here (not left to the index
+   * signature) because the Overview reads it: the Source tab's `gitData` mirror
+   * is only fetched when that tab mounts, which is why Overview used to show
+   * "off" for projects whose pushes were deploying. `webhookActive` is the
+   * server-derived companion: whether GitHub has a delivery path at all.
+   */
+  autoDeploy?: boolean;
+  webhookActive?: boolean;
+  webhookStrategy?: "app" | "domain" | "repo" | "none" | null;
   /** How many recent versions retain their build artifact for rollback (snapshot strategy). null = instance default. */
   rollbackWindow?: number | null;
   [key: string]: any;
@@ -388,6 +399,16 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
       initialProjectData || { id: "", slug: "", name: "", description: "", framework: "" },
     );
     setEnvironments([]);
+    // gitData too: it is fetched ONCE per GitSettings mount, so without this the
+    // previous project's repo, branch, commits and auto-deploy state stayed on
+    // screen under project B's name until B's Source tab fetch landed.
+    setGitData({
+      repository: null,
+      branch: "",
+      recentCommits: [],
+      isLoading: false,
+      error: null,
+    });
   }, [id, initialProjectData]);
 
   // 404 cold-load: the project was deleted (other tab, force flow, direct

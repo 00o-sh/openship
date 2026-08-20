@@ -473,9 +473,14 @@ export async function getProjectDrift(
  * Apply the available update to a project (app / git / release / self-app). Runs
  * a redeploy with the `update` trigger — which force-pulls image tags and
  * recreates every image service, and (for release/git projects) rolls forward
- * to the latest version/commit — after firing a pre-deploy backup. The existing
- * rollback-orchestrator auto-archive gives one-click revert. Returns the new
- * deployment id so the UI can follow build progress.
+ * to the latest version/commit. The existing rollback-orchestrator auto-archive
+ * gives one-click revert. Returns the new deployment id so the UI can follow
+ * build progress.
+ *
+ * It no longer asks for a pre-deploy backup: every deploy fires the project's
+ * `trigger_on_pre_deploy` policies once from the shared funnel (see
+ * backups/triggers/pre-deploy.ts), so the opt-in this path used to pass enqueued
+ * a SECOND run per policy for the same cutover.
  *
  * Deliberately does not touch `update_status`: the upstream hasn't moved, and the
  * nudge stops the moment the deployment row exists, because `latestInProgress` is
@@ -491,6 +496,5 @@ export async function applyProjectUpdate(ctx: RequestContext, projectId: string)
   }
   return redeployBuildSession(ctx, project.activeDeploymentId, {
     trigger: "update",
-    preDeployBackup: true,
   });
 }

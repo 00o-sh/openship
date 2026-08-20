@@ -42,12 +42,12 @@ import type {
   ResourceConfig,
 } from "@repo/adapters";
 import { resolveCloudResourceConfig } from "./cloud-resources";
+import { resolveEnvDirtyServiceIds } from "./env-drift";
 import type { TBuildAccessBody } from "./deployment.schema";
 import { platform } from "../../lib/controller-helpers";
 import { encrypt } from "../../lib/encryption";
 import { getCommitByRef, getLatestCommit, getRepository } from "../github/github.service";
 import { assertGitHubRepoAccess } from "../github/github-access";
-import { firePreDeployBackups } from "../backups/triggers/pre-deploy";
 import { resolveSmartRoute } from "./smart-route";
 import { snapshotNeedsGitSource, withoutPinnedArtifacts } from "./pinned-artifacts";
 import { deploymentWorkload, projectToClass, snapshotToClass } from "./deployment-class";
@@ -291,6 +291,18 @@ export interface DeploymentConfigSnapshot {
    * port advisory — so it doesn't re-nag after a refresh.
    */
   portCheckSkipped?: (number | string)[];
+  /**
+   * Where this release SERVES its static files from, relative to its release
+   * root. Written by the deploy pipeline; documented on `DeploymentMeta`, which
+   * is the same `deployment.meta` blob viewed from the read side.
+   *
+   * Declared here because the snapshot view READS it back: a rollback that
+   * reuses this release's pinned directory must serve the doc-root the files
+   * were actually extracted into, which cannot be recomputed (a self-hosted
+   * static builds in a Docker sandbox but persists `runtimeMode: "bare"`). See
+   * `reusedReleaseRouting`.
+   */
+  staticServeOutputDir?: string;
   previousActiveDeploymentId?: string;
   /**
    * Shape of this row's `envVars` capture. `"flat-v1"` = one unscoped
@@ -309,6 +321,18 @@ export interface DeploymentConfigSnapshot {
    * with `status='skipped'` so the fan-out has a complete record.
    */
   targetServiceIds?: string[];
+  /**
+   * `targetServiceIds` is an EXCLUSIVE scope, not just a build subset: a service outside
+   * it is never deployed, never failed and never reaped.
+   *
+   * Without it, an untargeted service is only spared if the deploy can CARRY it forward —
+   * which reads `project.activeDeploymentId`, so a project with no previous release cannot
+   * carry anything and the "spared" service is deployed normally. A migration reusing
+   * already-running containers in place needs the stronger guarantee: it has no previous
+   * deployment at that moment, and deploying one of those rows would put a SECOND
+   * container on the original's bare volumes.
+   */
+  strictServiceScope?: boolean;
   /**
    * Subset of `targetServiceIds` to REFRESH — recreate the container with
    * fresh env but WITHOUT rebuilding the image (env-only change, code
@@ -779,45 +803,6 @@ export async function checkNoActiveBuild(projectId: string) {
   }
 }
 
-/**
- * Which enabled services have an env var (project-level or service-scoped)
- * modified since the active deployment went live — i.e. need an env-only
- * refresh. A project-level change (serviceId null) affects EVERY service.
- * Returns null when there's no active deployment/anchor to compare against
- * (first deploy → forceAll handles it). Values are never read, only
- * updatedAt, so no decryption is involved.
- */
-async function resolveEnvDirtyServiceIds(
-  project: Project,
-  environment: string,
-): Promise<Set<string> | null> {
-  if (!project.activeDeploymentId) return null;
-  const active = await repos.deployment.findById(project.activeDeploymentId).catch(() => null);
-  // Anchor on the active deployment's createdAt: any env var touched after it
-  // started is (conservatively) treated as needing a refresh. Biases safe —
-  // once redeployed, the new active's createdAt post-dates the change, so it
-  // won't keep re-refreshing.
-  const anchor = active?.createdAt ?? null;
-  if (!anchor) return null;
-
-  const [meta, services] = await Promise.all([
-    repos.project.listEnvVarChangeMeta(project.id, environment).catch(() => []),
-    repos.service.listByProject(project.id).catch(() => []),
-  ]);
-  const enabledIds = services.filter((s) => s.enabled).map((s) => s.id);
-
-  // A project-level (unscoped) env change touches every service.
-  if (meta.some((m) => m.serviceId === null && m.updatedAt > anchor)) {
-    return new Set(enabledIds);
-  }
-  const perService = new Set(
-    meta
-      .filter((m) => m.serviceId !== null && m.updatedAt > anchor)
-      .map((m) => m.serviceId as string),
-  );
-  return new Set(enabledIds.filter((id) => perService.has(id)));
-}
-
 export async function createQueuedDeployment(opts: {
   projectId: string;
   /** Org that owns this deployment. Pass project.organizationId — the
@@ -843,6 +828,19 @@ export async function createQueuedDeployment(opts: {
   serviceIds?: string[];
   /** Subset of serviceIds to recreate WITHOUT rebuilding (env-only refresh). */
   refreshServiceIds?: string[];
+  /**
+   * Treat `serviceIds` as an EXCLUSIVE scope: a service outside it is never deployed,
+   * never failed, and never reaped — not merely "carried forward if we can".
+   *
+   * The distinction is load-bearing. Carry-forward has exactly one source,
+   * `previousByServiceId` off `project.activeDeploymentId`, so a project with NO previous
+   * deployment cannot carry anything: an untargeted service that is enabled and has an
+   * image falls straight through to a normal deploy. That is how a migration's
+   * adopt-in-place reuse set got a SECOND container on the still-running originals' bare
+   * volumes. Set this whenever the untargeted services must be untouchable regardless of
+   * whether a previous release exists.
+   */
+  strictServiceScope?: boolean;
   /** Changed-file paths traced for this version (file/root tracing). */
   changedPaths?: string[] | null;
   changedPathsTruncated?: boolean;
@@ -855,6 +853,10 @@ export async function createQueuedDeployment(opts: {
   }
   if (opts.refreshServiceIds && opts.refreshServiceIds.length > 0) {
     meta = { ...meta, refreshServiceIds: opts.refreshServiceIds };
+  }
+  // Only meaningful WITH a scope — on its own it would describe an exclusion of nothing.
+  if (opts.strictServiceScope && opts.serviceIds && opts.serviceIds.length > 0) {
+    meta = { ...meta, strictServiceScope: true };
   }
 
   // Plan entitlements, checked BEFORE the row exists so an out-of-allowance org
@@ -986,7 +988,17 @@ function defaultFreeEndpoint(project: {
     : { domain: project.slug, domainType: "free", targetPath: "/" };
 }
 
-export async function requestBuildAccess(ctx: RequestContext, input: BuildAccessInput) {
+export async function requestBuildAccess(
+  ctx: RequestContext,
+  input: BuildAccessInput,
+  /**
+   * INTERNAL-only options — deliberately a second argument rather than fields on
+   * `BuildAccessInput`, which is the wire body. `strictServiceScope` decides whether a
+   * service OUTSIDE the requested scope may be touched, so a client that could set it
+   * could scope any project's deploy exclusively; only server-side callers get to say it.
+   */
+  internal?: { strictServiceScope?: boolean },
+) {
   const {
     projectId,
     branch,
@@ -1353,6 +1365,7 @@ export async function requestBuildAccess(ctx: RequestContext, input: BuildAccess
     // stateful services (DBs/caches) on an unrelated change.
     serviceIds,
     refreshServiceIds,
+    strictServiceScope: internal?.strictServiceScope,
   });
 
   // Store env vars on project as "latest defaults"
@@ -1490,7 +1503,7 @@ export async function cancelBuildSession(
 export async function redeployBuildSession(
   ctx: RequestContext,
   deploymentId: string,
-  opts?: { useExistingCommit?: boolean; trigger?: string; preDeployBackup?: boolean },
+  opts?: { useExistingCommit?: boolean; trigger?: string },
 ) {
   const { dep: oldDep, project } = await loadDeployment(deploymentId);
   // The Openship control plane updates itself via the CLI — never a redeploy.
@@ -1618,17 +1631,6 @@ export async function redeployBuildSession(
     project,
     branch,
   );
-
-  // "update" wants a snapshot of the OLD state before the (destructive) tag
-  // roll-forward — the safety net for stateful apps (n8n/Ghost/Convex volumes).
-  // Redeploy deliberately doesn't (rollback preserves the prior artifact), so
-  // this is gated on the caller opting in.
-  if (opts?.preDeployBackup) {
-    await firePreDeployBackups({
-      projectId: project.id,
-      organizationId: project.organizationId,
-    }).catch(() => {});
-  }
 
   const dep = await createQueuedDeployment({
     projectId: project.id,

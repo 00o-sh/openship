@@ -201,6 +201,8 @@
     "applyRestore": "Wiederherstellung anwenden",
     "restoringData": "Daten werden wiederhergestellt…",
     "restoringHint": "Der Service stoppt → Daten werden ausgetauscht → Neustart. Schließe dieses Fenster nicht.",
+    "partialDataRunningNotice": "Das Wiederherstellungsziel enthält unvollständige Daten und der Dienst läuft weiterhin darauf. Stoppen Sie den Dienst und führen Sie diese Wiederherstellung (oder eine neuere) vollständig erneut aus.",
+    "serviceDownNotice": "Ihre Daten wurden nicht verändert, aber der Dienst läuft nicht. Starten Sie ihn, wenn Sie bereit sind.",
     "restoreComplete": "Wiederherstellung abgeschlossen.",
     "restoreStatus": "Wiederherstellung {status}",
     "failed": "fehlgeschlagen",

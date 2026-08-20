@@ -201,6 +201,8 @@
     "applyRestore": "Aplicar restauración",
     "restoringData": "Restaurando datos…",
     "restoringHint": "El servicio se está deteniendo → intercambio de datos → reiniciando. No cierres esta ventana.",
+    "partialDataRunningNotice": "El destino de la restauración contiene datos parciales y el servicio sigue ejecutándose sobre ellos. Detenga el servicio y vuelva a ejecutar esta restauración (o una más reciente) hasta el final.",
+    "serviceDownNotice": "Sus datos no se modificaron, pero el servicio no está en ejecución. Inícielo cuando esté listo.",
     "restoreComplete": "Restauración completada.",
     "restoreStatus": "Restauración {status}",
     "failed": "fallida",

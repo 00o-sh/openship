@@ -40,6 +40,7 @@ import {
 } from "./project-cleanup.service";
 import { removeProjectFromServerManifests } from "../../lib/openship-manifest-sync";
 import { cancelBuildSession } from "../deployments/build.service";
+import { restoreOrchestrator } from "../backups/restore.orchestrator";
 import { deleteWebhook as deleteGitHubWebhook } from "../github/github.service";
 import type { RequestContext } from "../../lib/request-context";
 import { env } from "../../config";
@@ -342,7 +343,7 @@ export async function teardownProject(
     // "active work" would tear down containers/images the user was promised
     // stay on the server.
     if (opts.force) {
-      await stepCancelInFlight(projectId, push, recordOnly);
+      await stepCancelInFlight(ctx, projectId, push, recordOnly);
     } else {
       push({ step: "cancel_in_flight", status: "skipped", details: "force=false" });
     }
@@ -511,6 +512,7 @@ async function stepUnlinkConsumers(
 }
 
 async function stepCancelInFlight(
+  ctx: RequestContext,
   projectId: string,
   push: (s: TeardownStep) => void,
   keepProvisioned: boolean,
@@ -550,13 +552,24 @@ async function stepCancelInFlight(
     }
   }
 
+  // Restores go through the orchestrator, not a bare status flip. `cancel` fires the
+  // in-process AbortController, so the extract STOPS WRITING before the runtime cleanup
+  // below starts destroying the volumes underneath it; a flip alone left the two racing,
+  // and the FSM row said `cancelled` while tar kept unpacking. It also sets the durable
+  // flag, which is what covers an apply running on another node, and it never throws for
+  // a row that finished between the listing and here.
+  //
+  // An `applying` restore comes back still `applying` on purpose — the orchestrator gives
+  // it a cooperative window. The quiesce poll below IS that window; whatever has not
+  // answered by then gets forced.
+  const unfinishedRestores: string[] = [];
   for (const restoreId of before.activeBackupRestoreIds) {
     try {
-      await repos.backupRestore.transition(restoreId, "cancelled", {
-        errorMessage: "Cancelled by project deletion (force=true)",
-      });
+      const outcome = await restoreOrchestrator.cancel(ctx, restoreId);
+      if (outcome.status !== "cancelled") unfinishedRestores.push(restoreId);
     } catch (err) {
       cancelErrors.push(`backup_restore ${restoreId}: ${safeErrorMessage(err)}`);
+      unfinishedRestores.push(restoreId);
     }
   }
 
@@ -573,11 +586,27 @@ async function stepCancelInFlight(
   }
 
   if (last.blocking) {
+    // Force any restore that never answered: the teardown barrels on from here and
+    // destroys the target either way, so a row left in `applying` would outlive the
+    // volumes it claims to be writing. The forced path records `partialWrite` /
+    // `serviceLeftStopped`, which is the honest reading after a window that expired.
+    for (const restoreId of unfinishedRestores) {
+      await restoreOrchestrator
+        .cancel(ctx, restoreId, { force: true })
+        .catch((err) =>
+          cancelErrors.push(`backup_restore ${restoreId} (force): ${safeErrorMessage(err)}`),
+        );
+    }
     push({
       step: "cancel_in_flight",
       status: "failed",
       details: last.summary,
-      error: `Timed out waiting for quiescence after ${QUIESCE_TIMEOUT_MS}ms`,
+      error:
+        `Timed out waiting for quiescence after ${QUIESCE_TIMEOUT_MS}ms` +
+        (unfinishedRestores.length > 0
+          ? `; force-cancelled ${unfinishedRestores.length} restore(s)`
+          : "") +
+        (cancelErrors.length > 0 ? `; ${cancelErrors.join("; ")}` : ""),
     });
     return;
   }

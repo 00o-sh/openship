@@ -135,6 +135,9 @@ r.public(
 r.get("/servers", { tag: "server:list" }, serversCtrl.listServers);
 r.get("/servers/:id", { tag: "server:read" }, serversCtrl.getServer);
 r.get("/servers/:id/reachability", { tag: "server:read" }, serversCtrl.probeReachability);
+// Read-only blast-radius snapshot for the removal confirm: which projects and apps
+// this box currently runs, and which server-scoped records go with it.
+r.get("/servers/:id/deletion-preview", { tag: "server:read" }, serversCtrl.serverDeletionPreview);
 // Create has no :id in the URL — org scope comes from the request and the
 // row is created in the active org. collection:true keeps the permission
 // middleware from demanding a (nonexistent) :id param.

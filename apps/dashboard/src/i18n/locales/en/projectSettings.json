@@ -509,28 +509,7 @@
     "unlink": "Remove connection"
   },
   "gitInfo": {
-    "repository": "Repository",
-    "autoDeploy": "Auto-deploy",
-    "deploysOnPush": "Deploys on every push",
-    "manualOnly": "Manual deploys only",
-    "branchToDeploy": "Branch to Deploy",
-    "chooseBranch": "Choose which branch to deploy from your repository",
-    "save": "Save",
-    "cancel": "Cancel",
-    "viewOnGithub": "View on GitHub",
-    "recentCommits": "Recent Commits",
-    "totalCommits": "{count} total",
-    "noCommits": "No commits yet",
-    "toast": {
-      "fetchBranchesFailed": "Failed to fetch branches",
-      "errorTitle": "Error",
-      "branchUpdated": "Branch updated successfully",
-      "updatedTitle": "Updated",
-      "branchUpdateFailed": "Failed to update branch",
-      "autoDeployEnabled": "Auto-deploy enabled",
-      "autoDeployDisabled": "Auto-deploy disabled",
-      "autoDeployFailed": "Failed to update auto-deploy"
-    }
+    "autoDeploy": "Auto-deploy"
   },
   "git": {
     "connectFirst": {
@@ -762,10 +741,6 @@
     "cannotUndo": "This action cannot be undone.",
     "aboutToPrefix": "You are about to delete ",
     "aboutToSuffix": ".",
-    "deleteAllAria": "Delete all environments",
-    "deleteAll": "Delete all environments",
-    "deleteAllOn": "Removes the project app and every branch environment under it.",
-    "deleteAllOff": "Removes only this environment. Other branches stay.",
     "scanning": "Scanning attached services and volumes…",
     "wipeAria": "Also wipe service data",
     "wipeLabelOne": "Also wipe service data ({count} volume)",
@@ -780,9 +755,7 @@
     "typePrefix": "Type ",
     "typeSuffix": " to confirm.",
     "cancel": "Cancel",
-    "confirmDeleteWipe": "Delete + wipe data",
     "confirmDeleteEnvWipe": "Delete environment + wipe data",
-    "confirmDelete": "Delete project",
     "confirmDeleteEnv": "Delete environment",
     "recordOnlyLabel": "Remove from Openship only",
     "recordOnlyDesc": "Keeps the app and its data running on your server — only the Openship record is removed. You can re-import it later.",
@@ -904,7 +877,9 @@
       "bodyService": "Service \"{service}\": nothing responded on port {port} — requests may 502 until it listens there."
     },
     "outputHint": {
-      "body": "No build output found at {path} — check your Output Directory and redeploy."
+      "body": "No build output found at {path} — check your Output Directory and redeploy.",
+      "noIndex": "Output exists at {path} but there is no index file — requests will 404. Check your Output Directory.",
+      "notServed": "The edge answered HTTP {status} for {path} — this path is not serving. Check your Output Directory and the route."
     },
     "overview": {
       "primary": "Primary",

@@ -9,6 +9,7 @@ import {
   Tag,
   Loader2,
   FilePlus2,
+  RefreshCw,
   Trash2,
 } from "lucide-react";
 
@@ -28,6 +29,7 @@ import { isSchemaAppTemplate } from "@/components/app-settings/AppSettingsForm";
 import { ServicesTab } from "../components/ServicesTab";
 import { ProjectSidebar, ProjectMobileTabs } from "../components/ProjectSidebar";
 import { DraftProjectView } from "../components/DraftProjectView";
+import { environmentErrorMessage, environmentWizardHref } from "../components/environment-next";
 import { getProjectStatus } from "@/utils/project-status";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { useProjectInfo, PROJECT_INFO_NOT_FOUND } from "@/hooks/useProjectEndpoints";
@@ -139,6 +141,13 @@ const EnvironmentSwitcher = () => {
     setLoadingBranches(false);
   }, [closeMenus, isOpen]);
 
+  // Clears the loaded-for marker instead of fetching here: the effect below owns
+  // the one branch load, so refresh and first-open can never drift apart.
+  const refreshBranches = useCallback(() => {
+    if (loadingBranches) return;
+    setBranchesLoadedForProject(null);
+  }, [loadingBranches]);
+
   const openBranchCreator = useCallback(() => {
     if (isAdding) {
       closeMenus();
@@ -238,10 +247,12 @@ const EnvironmentSwitcher = () => {
       });
       if (created?.id) {
         closeMenus();
-        router.push(`/projects/${created.id}/${activeTab}`);
+        // Straight into the wizard: a brand-new environment has nothing deployed,
+        // so the project page would only offer to finish what this click started.
+        router.push(environmentWizardHref(created));
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : t.projects.env.failedCreateEnvironment;
+      const message = environmentErrorMessage(error, t.projects.env.failedCreateEnvironment);
       showToast(message, "error", t.projects.env.toastEnvironmentTitle);
     } finally {
       setIsCreating(false);
@@ -266,10 +277,10 @@ const EnvironmentSwitcher = () => {
       });
       if (created?.id) {
         closeMenus();
-        router.push(`/projects/${created.id}/${activeTab}`);
+        router.push(environmentWizardHref(created));
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : t.projects.env.failedCreateEnvironment;
+      const message = environmentErrorMessage(error, t.projects.env.failedCreateEnvironment);
       showToast(message, "error", t.projects.env.toastEnvironmentTitle);
     } finally {
       setIsCreating(false);
@@ -323,6 +334,11 @@ const EnvironmentSwitcher = () => {
           <div className="max-h-[320px] overflow-y-auto p-1">
             {options.map((env) => {
               const active = env.id === projectData.id;
+              // An environment that has never deployed. Derived with the app's ONE
+              // status function rather than a local `!activeDeploymentId` check, so
+              // "draft" means the same thing here as everywhere else — the
+              // environment summary already carries the two fields it reads.
+              const isDraft = getProjectStatus(env) === "draft";
 
               return (
                 <button
@@ -332,7 +348,14 @@ const EnvironmentSwitcher = () => {
                   className="flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-start transition-colors hover:bg-muted/50"
                 >
                   <span className="min-w-0">
-                    <span className="block truncate text-sm font-medium text-foreground">{env.name}</span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="truncate text-sm font-medium text-foreground">{env.name}</span>
+                      {isDraft && (
+                        <span className="shrink-0 rounded-full border border-border bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                          {t.projects.status.draft}
+                        </span>
+                      )}
+                    </span>
                     {env.isApp ? (
                       env.version ? (
                         <span className="mt-0.5 flex items-center gap-1 text-xs text-muted-foreground">
@@ -361,14 +384,26 @@ const EnvironmentSwitcher = () => {
           style={{ backgroundColor: "var(--th-card-bg-solid, var(--card))" }}
         >
           <div className="space-y-2">
-            <input
-              value={branchQuery}
-              onChange={(event) => setBranchQuery(event.target.value)}
-              placeholder={t.projects.env.searchBranches}
-              className="w-full rounded-lg border border-border/50 bg-background px-3 py-2 text-sm outline-none transition-colors focus:border-primary/40"
-            />
+            <div className="flex items-stretch gap-2">
+              <input
+                value={branchQuery}
+                onChange={(event) => setBranchQuery(event.target.value)}
+                placeholder={t.projects.env.searchBranches}
+                className="min-w-0 flex-1 rounded-lg border border-border/50 bg-background px-3 py-2 text-sm outline-none transition-colors focus:border-primary/40"
+              />
+              <button
+                type="button"
+                onClick={refreshBranches}
+                disabled={loadingBranches}
+                className="inline-flex w-9 shrink-0 items-center justify-center rounded-lg border border-border/50 bg-background text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
+                aria-label={t.projects.env.refreshBranches}
+                title={t.projects.env.refreshBranches}
+              >
+                <RefreshCw className={`size-4 ${loadingBranches ? "animate-spin" : ""}`} />
+              </button>
+            </div>
             <div className="max-h-[280px] overflow-y-auto">
-              {loadingBranches ? (
+              {loadingBranches && branches.length === 0 ? (
                 <div className="flex h-24 items-center justify-center text-muted-foreground">
                   <Loader2 className="size-4 animate-spin" />
                 </div>
@@ -475,6 +510,9 @@ const ProjectSettingsContent = () => {
     activeTab,
     tabs,
     id,
+    // Read to tell the delete toast the truth: teardown drops THIS environment and
+    // only retires the app row when it was the last one.
+    environments,
   } = useProjectSettings();
   // Project shell waits for project info specifically (not analytics).
   // Analytics is per-card now; the page-level gate is about whether we
@@ -509,11 +547,10 @@ const ProjectSettingsContent = () => {
   }, [id, isDeleting, router, showToast, t.projects.delete.alreadyDeleted]);
 
   const handleDeleteProject = async (
-    deleteApp = true,
     wipeVolumes = false,
     // Record-only (soft) delete — kept ahead of force/forceOrphan so the delete
-    // modal's (deleteApp, wipeVolumes, recordOnly) call maps positionally, and
-    // so it survives the force/forceOrphan retries below.
+    // modal's (wipeVolumes, recordOnly) call maps positionally, and so it survives
+    // the force/forceOrphan retries below.
     recordOnly = false,
     force = false,
     forceOrphan = false,
@@ -523,7 +560,6 @@ const ProjectSettingsContent = () => {
 
     try {
       const response = await projectsApi.delete(projectData.id, {
-        deleteApp,
         wipeVolumes,
         recordOnly,
         force,
@@ -545,8 +581,16 @@ const ProjectSettingsContent = () => {
             t.projects.delete.orphanCleanupTitle,
           );
         } else {
+          // Which sentence is true depends on what the server actually does:
+          // teardown drops THIS environment and soft-deletes the app row only once
+          // its last environment is gone. Reading it off the environment list is
+          // therefore accurate, where the old `deleteApp` flag was a promise nothing
+          // implemented.
+          const wasLastEnvironment = (environments?.length ?? 1) <= 1;
           showToast(
-            deleteApp ? t.projects.delete.successProject : t.projects.delete.successEnvironment,
+            wasLastEnvironment
+              ? t.projects.delete.successProject
+              : t.projects.delete.successEnvironment,
             "success",
           );
         }
@@ -615,7 +659,7 @@ const ProjectSettingsContent = () => {
         if (body.code === "PROJECT_HAS_ACTIVE_WORK") {
           if (!force) {
             showToast(t.projects.delete.cancellingActiveWork, "success", t.projects.delete.cleaningUpTitle);
-            void handleDeleteProject(deleteApp, wipeVolumes, recordOnly, true, forceOrphan);
+            void handleDeleteProject(wipeVolumes, recordOnly, true, forceOrphan);
             return;
           }
           showToast(
@@ -677,7 +721,7 @@ const ProjectSettingsContent = () => {
                     type="button"
                     onClick={() => {
                       hideModal(modalId);
-                      void handleDeleteProject(deleteApp, wipeVolumes, recordOnly, force, true);
+                      void handleDeleteProject(wipeVolumes, recordOnly, force, true);
                     }}
                     className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-danger-solid px-4 text-sm font-medium text-white transition-colors hover:bg-danger-solid/90"
                   >

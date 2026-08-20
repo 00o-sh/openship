@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
+// Imported at MODULE scope, not inside the `it()`. `deployment-lifecycle` pulls in a
+// large graph, and loading it inside a test spent the test's own 20s budget on the
+// import: under CI load the whole file failed with "Test timed out in 20000ms" while
+// passing in ~6s alone. Module-scope imports are resolved before any test's clock starts.
+import { routeIssuesWarning } from "./deployment-lifecycle";
 
 /**
  * A WARNING is not a DECISION.
@@ -37,8 +42,7 @@ describe("the server announces a held decision on the live event", () => {
 });
 
 describe("routeIssuesWarning is advisory only", () => {
-  it("describes TLS-pending domains as routed, not as failures", async () => {
-    const { routeIssuesWarning } = await import("./deployment-lifecycle");
+  it("describes TLS-pending domains as routed, not as failures", () => {
     const msg = routeIssuesWarning([], ["api.example.com", "app.example.com"]);
     expect(msg).toContain("routed but have no HTTPS certificate yet");
     // The remedy is DNS + Verify, never "some services failed".
@@ -48,8 +52,6 @@ describe("routeIssuesWarning is advisory only", () => {
 
   it("says nothing at all when there is nothing to say", () => {
     // An empty warning must not become a truthy signal anywhere downstream.
-    return import("./deployment-lifecycle").then(({ routeIssuesWarning }) => {
-      expect(routeIssuesWarning([], [])).toBe("");
-    });
+    expect(routeIssuesWarning([], [])).toBe("");
   });
 });

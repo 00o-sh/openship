@@ -47,6 +47,13 @@ function infoWithSecrets() {
     productionPaths: ["dist"],
     port: 3000,
     rootEnv: { DATABASE_URL: SENTINELS.rootEnv, PUBLIC_NAME: "fine" },
+    // #641: what the openship.json parse refused. These are field paths and enum
+    // lists, never file values — but the whole payload is scanned above, so a
+    // future change that started quoting the file back would fail here.
+    configDiagnostics: {
+      errors: ["framework: must be one of: nextjs, vite, static"],
+      warnings: ['Unknown field "buildComand" (ignored)'],
+    },
     services: [
       {
         name: "api",
@@ -106,6 +113,16 @@ describe("detect cannot leak file content through env values", () => {
     // Service NAMES and images are config, not content — the wizard needs them.
     const services = out.services as Array<{ name: string; image?: string }>;
     expect(services.map((s) => s.name)).toEqual(["api", "db"]);
+  });
+
+  it("echoes configDiagnostics so a refused openship.json field is visible (#641)", () => {
+    // The counterpart of the scan above: this field has to survive masking, or
+    // #641 is not fixed — a silently-ignored config stays silently ignored.
+    const out = projectInfoToScanResponse(infoWithSecrets()) as {
+      configDiagnostics?: { errors: string[]; warnings: string[] };
+    };
+    expect(out.configDiagnostics?.errors[0]).toContain("framework:");
+    expect(out.configDiagnostics?.warnings[0]).toContain("buildComand");
   });
 
   it("keeps env KEYS while dropping their values", () => {

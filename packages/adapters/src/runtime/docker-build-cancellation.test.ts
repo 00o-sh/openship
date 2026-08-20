@@ -18,8 +18,13 @@ vi.mock("./docker-build-context", async (importOriginal) => {
     ...actual,
     createDockerBuildContext: vi.fn(async () => ({
       contextDir: fakeBuildContext.current!.contextDir,
+      // Root context: the build context IS the tree, so both paths coincide and
+      // there is no per-context `.dockerignore` filter to apply.
+      buildContextDir: fakeBuildContext.current!.contextDir,
+      contextSubdir: "",
       contextEntries: ["Dockerfile"],
       dockerfileName: "Dockerfile",
+      rootDirectory: "",
       usesRepositoryDockerfile: true,
       cleanup: fakeBuildContext.current!.cleanup,
     })),
@@ -66,7 +71,10 @@ describe("DockerRuntime build cancellation", () => {
         listContainers: vi.fn(async () => []),
       },
       cloneSourceOnRemote,
-      resolveRemoteDockerfile: vi.fn(async () => "Dockerfile"),
+      resolveRemoteDockerfile: vi.fn(async (_config: BuildConfig, remoteContextDir: string) => ({
+        remoteBuildDir: remoteContextDir,
+        dockerfileName: "Dockerfile",
+      })),
       verifyImageBuilt,
       ...extra,
     });

@@ -486,22 +486,48 @@ const syncCmd = stackCommand("sync")
 // ─── start / stop / restart ──────────────────────────────────────────────────
 
 function containerActionCommand(action: "start" | "stop" | "restart"): Command {
-  return stackCommand(action)
-    .description(`${action[0].toUpperCase()}${action.slice(1)} a service's container`)
-    .argument("<service>", "Service name or id")
-    .action(async (service: string, opts) => {
-      requireAuth();
-      try {
-        const projectId = await resolveProject(opts.project);
-        const svc = await resolveService(projectId, service);
-        await apiRequest(`/projects/${projectId}/services/${svc.id}/${action}`, {
-          method: "POST",
-        });
-        ok(`  ${action}ed "${svc.name}".`);
-      } catch (e) {
-        fail(e);
+  const cmd = stackCommand(action)
+    .description(
+      action === "restart"
+        ? "Bounce a service's container (does NOT apply changed env — use `deploy --refresh` for that)"
+        : `${action[0].toUpperCase()}${action.slice(1)} a service's container`,
+    )
+    .argument("<service>", "Service name or id");
+  if (action === "restart") {
+    cmd.option("--force", "Bounce even with pending env changes (they will NOT be applied)");
+  }
+  return cmd.action(async (service: string, opts) => {
+    requireAuth();
+    // Hoisted so the catch below can name the resolved ids in its guidance —
+    // the whole point of the refusal is that it tells you the command to run.
+    let serviceId = "";
+    try {
+      const projectId = await resolveProject(opts.project);
+      const svc = await resolveService(projectId, service);
+      serviceId = svc.id;
+      const query = action === "restart" && opts.force ? "?force=true" : "";
+      await apiRequest(`/projects/${projectId}/services/${svc.id}/${action}${query}`, {
+        method: "POST",
+      });
+      ok(`  ${action}ed "${svc.name}".`);
+    } catch (e) {
+      // The API refuses a restart that would silently drop pending env changes.
+      // Print the drifted keys and the command that DOES apply them, rather than
+      // leaving the operator to re-read a one-line error (GH-615).
+      const body = e instanceof ApiError ? (e.body as Record<string, unknown> | null) : null;
+      if (body?.code === "SERVICE_CONFIG_STALE") {
+        const keys = Array.isArray(body.staleEnvKeys) ? (body.staleEnvKeys as string[]) : [];
+        err(`  Restart refused: "${body.serviceName ?? service}" has pending environment changes.`);
+        if (keys.length > 0) info(`  Pending: ${keys.join(", ")}`);
+        info(
+          `  Apply them:  openship deploy --refresh --service-ids ${serviceId} -p ${opts.project}`,
+        );
+        info(`  Bounce anyway (changes NOT applied):  add --force`);
+        process.exit(1);
       }
-    });
+      fail(e);
+    }
+  });
 }
 
 // ─── containers ──────────────────────────────────────────────────────────────

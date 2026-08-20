@@ -61,6 +61,7 @@
     "switchAria": "Cambiar de entorno",
     "addBranchAria": "Agregar rama",
     "searchBranches": "Buscar ramas",
+    "refreshBranches": "Actualizar ramas",
     "noBranches": "No se encontraron ramas",
     "environmentName": "Nombre del entorno",
     "branchLabel": "Etiqueta de la rama",

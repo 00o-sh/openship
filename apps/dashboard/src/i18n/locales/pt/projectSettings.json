@@ -337,28 +337,7 @@
     "close": "Fechar"
   },
   "gitInfo": {
-    "repository": "Repositório",
-    "autoDeploy": "Implementação automática",
-    "deploysOnPush": "Implementa a cada push",
-    "manualOnly": "Apenas implementações manuais",
-    "branchToDeploy": "Ramo a implementar",
-    "chooseBranch": "Escolha qual ramo do seu repositório implementar",
-    "save": "Guardar",
-    "cancel": "Cancelar",
-    "viewOnGithub": "Ver no GitHub",
-    "recentCommits": "Commits recentes",
-    "totalCommits": "{count} no total",
-    "noCommits": "Ainda não há commits",
-    "toast": {
-      "fetchBranchesFailed": "Falha ao obter os ramos",
-      "errorTitle": "Erro",
-      "branchUpdated": "Ramo atualizado com sucesso",
-      "updatedTitle": "Atualizado",
-      "branchUpdateFailed": "Falha ao atualizar o ramo",
-      "autoDeployEnabled": "Implementação automática ativada",
-      "autoDeployDisabled": "Implementação automática desativada",
-      "autoDeployFailed": "Falha ao atualizar a implementação automática"
-    }
+    "autoDeploy": "Implementação automática"
   },
   "git": {
     "connectFirst": {
@@ -590,10 +569,6 @@
     "cannotUndo": "Esta ação não pode ser anulada.",
     "aboutToPrefix": "Está prestes a eliminar ",
     "aboutToSuffix": ".",
-    "deleteAllAria": "Eliminar todos os ambientes",
-    "deleteAll": "Eliminar todos os ambientes",
-    "deleteAllOn": "Remove a aplicação do projeto e todos os ambientes de ramo por baixo dela.",
-    "deleteAllOff": "Remove apenas este ambiente. Os outros ramos permanecem.",
     "scanning": "A analisar os serviços e volumes associados…",
     "wipeAria": "Também apagar os dados dos serviços",
     "wipeLabelOne": "Também apagar os dados dos serviços ({count} volume)",
@@ -608,9 +583,7 @@
     "typePrefix": "Escreva ",
     "typeSuffix": " para confirmar.",
     "cancel": "Cancelar",
-    "confirmDeleteWipe": "Eliminar + apagar dados",
     "confirmDeleteEnvWipe": "Eliminar ambiente + apagar dados",
-    "confirmDelete": "Eliminar projeto",
     "confirmDeleteEnv": "Eliminar ambiente",
     "linkedTitleOne": "{count} projeto está conectado a este app",
     "linkedTitleOther": "{count} projetos estão conectados a este app",
@@ -802,6 +775,11 @@
     "records": {
       "failed": "Não foi possível carregar os registros DNS deste domínio.",
       "retry": "Tentar novamente"
+    },
+    "outputHint": {
+      "body": "Nenhuma saída de compilação encontrada em {path} — verifique seu diretório de saída e implante novamente.",
+      "noIndex": "Existe saída em {path}, mas não há arquivo index — as solicitações retornarão 404. Verifique seu diretório de saída.",
+      "notServed": "O proxy respondeu HTTP {status} para {path} — este caminho não está sendo servido. Verifique seu diretório de saída e a rota."
     }
   }
 }

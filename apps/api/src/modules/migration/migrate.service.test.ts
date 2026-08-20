@@ -30,6 +30,38 @@ describe("buildAdoptedServiceRows — adoption never host-publishes an adopted p
     expect(rows[0]?.ports ?? []).toEqual([]);
   });
 
+  it("records an expose-only port as exposedPort, so the service is still routable", () => {
+    // Stripping leaves `ports: []` (a bare spec is a publish instruction — keeping it
+    // would bind a random loopback port). `exposedPort` records what the container
+    // LISTENS on without publishing anything, which is what both the Domains tab's
+    // findServiceByPort and the project-level route resolver match on (#618).
+    const { rows } = buildAdoptedServiceRows([svc({ name: "postgres", ports: ["5432"] })], new Set(["postgres"]));
+    expect(rows[0]?.ports ?? []).toEqual([]);
+    expect(rows[0]?.exposedPort).toBe("5432");
+  });
+
+  it("records the first port for a multi-EXPOSE image and publishes none of them", () => {
+    // mysql EXPOSEs 3306 + 33060, neither published. Keeping both in `ports` would
+    // publish two random loopback ports; recording one exposedPort publishes nothing.
+    const { rows } = buildAdoptedServiceRows(
+      [svc({ name: "mysql", ports: ["3306", "33060"] })],
+      new Set(["mysql"]),
+    );
+    expect(rows[0]?.ports ?? []).toEqual([]);
+    expect(rows[0]?.exposedPort).toBe("3306");
+  });
+
+  it("leaves exposedPort unset when `ports` already records the container port", () => {
+    // A pinned publish keeps its container side, so there is nothing missing to record —
+    // and writing exposedPort here would overwrite an operator's own value on a re-import.
+    const { rows } = buildAdoptedServiceRows(
+      [svc({ name: "web", ports: ["8080:3000"] })],
+      new Set(["web"]),
+    );
+    expect(rows[0]?.ports).toEqual(["3000"]);
+    expect(rows[0]?.exposedPort).toBeUndefined();
+  });
+
   it("strips a pinned host mapping to the container port only — the #388 collision fix", () => {
     // A discovered "5432:5432" (e.g. carried over from a Coolify migration) would
     // bind host 5432 at deploy and collide with whatever already holds it —
@@ -232,5 +264,47 @@ describe("buildAdoptedServiceRows — two same-named picks stay distinct (#584 c
     });
     expect(rows[0]!.environment).toMatchObject({ WHICH: "legacy" });
     expect(renames["c-b"]).toBe("postgres");
+  });
+});
+
+/**
+ * `renames` is keyed by service IDENTITY so two same-named picks can't overwrite each
+ * other. That makes it unusable for a caller holding only a NAME — and the orchestrator's
+ * `remapKeys` was exactly that caller: every lookup missed, the key passed through
+ * unrenamed, and `publishRoutes` then looked the row up by the DISCOVERED name and
+ * silently dropped a renamed service's route. `rowNameByDiscovered` is the name-keyed
+ * accessor those callers need.
+ */
+describe("buildAdoptedServiceRows — rename maps are keyed for their callers", () => {
+  it("exposes a NAME-keyed map alongside the identity-keyed one", () => {
+    const { renames, rowNameByDiscovered } = buildAdoptedServiceRows(
+      [svc({ name: "web", containerId: "abc123" })],
+      new Set(["web"]),
+      undefined,
+      { web: "frontend" },
+    );
+    // Identity-keyed: a bare-name lookup misses, which is the trap.
+    expect(renames["web"]).toBeUndefined();
+    // Name-keyed: what a caller with only "web" needs.
+    expect(rowNameByDiscovered["web"]).toBe("frontend");
+  });
+
+  it("maps an unrenamed service to its own name", () => {
+    const { rowNameByDiscovered } = buildAdoptedServiceRows(
+      [svc({ name: "postgres", containerId: "def456" })],
+      new Set(["postgres"]),
+    );
+    expect(rowNameByDiscovered["postgres"]).toBe("postgres");
+  });
+
+  it("keeps the FIRST of two same-named picks, matching the row de-duplication", () => {
+    // The second becomes `web-2`; a name-keyed map can only hold one, and it must be the
+    // one `dependsOn` remapping already resolves to.
+    const { rowNameByDiscovered, rows } = buildAdoptedServiceRows(
+      [svc({ name: "web", containerId: "a" }), svc({ name: "web", containerId: "b" })],
+      new Set(["web"]),
+    );
+    expect(rows.map((r) => r.name)).toEqual(["web", "web-2"]);
+    expect(rowNameByDiscovered["web"]).toBe("web");
   });
 });

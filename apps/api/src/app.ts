@@ -58,6 +58,7 @@ import { reconcileAllSchedules } from "./modules/backups/triggers/cron";
 import { reconcileJobs } from "./modules/jobs/job.service";
 import { scheduleBillingAnniversary } from "./modules/billing/billing-anniversary.cron";
 import { ensureOblienWebhook } from "./lib/openship-cloud";
+import { ensureOblienDefaultQuota } from "./modules/billing/billing-oblien-quota";
 import { backfillWebhookSecrets } from "./modules/github/github.service";
 import { backupOrchestrator } from "./modules/backups/backup.orchestrator";
 import { getJobRunner } from "./lib/job-runner";
@@ -412,6 +413,14 @@ if (env.CLOUD_MODE) {
   // never calls our receiver.
   void ensureOblienWebhook().catch((err) =>
     console.warn("[boot] ensureOblienWebhook failed:", err),
+  );
+
+  // Account-wide default credit ceiling, auto-applied by Oblien to any namespace
+  // created without an explicit setQuota. Backstop only — the spend path asserts
+  // the real ceiling — but it makes the free tier, not "unlimited", the failure
+  // mode of a forgotten quota push. Self-gating on CLOUD_MODE.
+  void ensureOblienDefaultQuota().catch((err) =>
+    console.warn("[boot] ensureOblienDefaultQuota failed:", err),
   );
 
   // Drain orgs that have no Oblien namespace recorded. Every org predates
