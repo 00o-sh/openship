@@ -400,6 +400,14 @@ export const AUDIT_EVENTS: Record<string, AuditEventDef> = {
     label: "Server removed",
     tone: "danger",
   },
+  "server.removal.rejected": {
+    category: "servers",
+    action: "tried to remove the server",
+    label: "Server removal refused",
+    tone: "warning",
+    description:
+      "A removal was refused because a workload could not be torn down, or was destroyed but left a resource behind for cleanup. The server row was kept so those resources can still be reclaimed.",
+  },
   "server.exec": {
     category: "servers",
     action: "ran a command on the server",
