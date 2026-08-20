@@ -88,7 +88,13 @@ export const service = pgTable("service", {
   name: text("name").notNull(),
   /** Docker image (e.g. "postgres:16", "redis:7-alpine") - null if service is built from source */
   image: text("image"),
-  /** Build context path relative to repo root (e.g. ".", "./services/api") - null if using a pre-built image */
+  /**
+   * Docker build CONTEXT for this service (e.g. ".", "./services/api") - null if using
+   * a pre-built image. Stored exactly as the compose file authored it, so it is
+   * relative to the COMPOSE FILE's directory, not to the repo root: a file in
+   * `deploy/docker-compose/` may say `../../api`. The deploy resolves it against the
+   * project's compose directory (see resolveComposeBuildContext).
+   */
   build: text("build"),
   /** Dockerfile path relative to build context - null to use default "Dockerfile" */
   dockerfile: text("dockerfile"),

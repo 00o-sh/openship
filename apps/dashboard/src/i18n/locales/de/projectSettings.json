@@ -344,28 +344,7 @@
     "unlink": "Verbindung entfernen"
   },
   "gitInfo": {
-    "repository": "Repository",
-    "autoDeploy": "Auto-Deploy",
-    "deploysOnPush": "Deployt bei jedem Push",
-    "manualOnly": "Nur manuelle Deployments",
-    "branchToDeploy": "Zu deployender Branch",
-    "chooseBranch": "Wählen Sie, aus welchem Branch Ihres Repositorys deployt werden soll",
-    "save": "Speichern",
-    "cancel": "Abbrechen",
-    "viewOnGithub": "Auf GitHub ansehen",
-    "recentCommits": "Letzte Commits",
-    "totalCommits": "{count} insgesamt",
-    "noCommits": "Noch keine Commits",
-    "toast": {
-      "fetchBranchesFailed": "Abrufen der Branches fehlgeschlagen",
-      "errorTitle": "Fehler",
-      "branchUpdated": "Branch erfolgreich aktualisiert",
-      "updatedTitle": "Aktualisiert",
-      "branchUpdateFailed": "Aktualisieren des Branches fehlgeschlagen",
-      "autoDeployEnabled": "Auto-Deploy aktiviert",
-      "autoDeployDisabled": "Auto-Deploy deaktiviert",
-      "autoDeployFailed": "Aktualisieren von Auto-Deploy fehlgeschlagen"
-    }
+    "autoDeploy": "Auto-Deploy"
   },
   "git": {
     "connectFirst": {
@@ -597,10 +576,6 @@
     "cannotUndo": "Diese Aktion kann nicht rückgängig gemacht werden.",
     "aboutToPrefix": "Sie sind dabei, ",
     "aboutToSuffix": " zu löschen.",
-    "deleteAllAria": "Alle Umgebungen löschen",
-    "deleteAll": "Alle Umgebungen löschen",
-    "deleteAllOn": "Entfernt die Projekt-App und jede darunterliegende Branch-Umgebung.",
-    "deleteAllOff": "Entfernt nur diese Umgebung. Andere Branches bleiben erhalten.",
     "scanning": "Angehängte Dienste und Volumes werden gescannt…",
     "wipeAria": "Auch Dienstdaten löschen",
     "wipeLabelOne": "Auch Dienstdaten löschen ({count} Volume)",
@@ -615,9 +590,7 @@
     "typePrefix": "Geben Sie ",
     "typeSuffix": " zur Bestätigung ein.",
     "cancel": "Abbrechen",
-    "confirmDeleteWipe": "Löschen + Daten entfernen",
     "confirmDeleteEnvWipe": "Umgebung löschen + Daten entfernen",
-    "confirmDelete": "Projekt löschen",
     "confirmDeleteEnv": "Umgebung löschen",
     "linkedTitleOne": "{count} Projekt ist mit dieser App verbunden",
     "linkedTitleOther": "{count} Projekte sind mit dieser App verbunden",
@@ -809,6 +782,11 @@
     "records": {
       "failed": "Die DNS-Einträge für diese Domain konnten nicht geladen werden.",
       "retry": "Erneut versuchen"
+    },
+    "outputHint": {
+      "body": "Keine Build-Ausgabe unter {path} gefunden — prüfen Sie Ihr Ausgabeverzeichnis und deployen Sie erneut.",
+      "noIndex": "Unter {path} liegt eine Ausgabe, aber keine Index-Datei — Anfragen liefern 404. Prüfen Sie Ihr Ausgabeverzeichnis.",
+      "notServed": "Der Edge-Proxy antwortete mit HTTP {status} für {path} — dieser Pfad wird nicht ausgeliefert. Prüfen Sie Ihr Ausgabeverzeichnis und die Route."
     }
   }
 }

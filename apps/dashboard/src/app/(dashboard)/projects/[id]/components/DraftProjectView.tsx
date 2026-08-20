@@ -49,8 +49,8 @@ import { useI18n, interpolate } from "@/components/i18n-provider";
 import type { Dictionary } from "@/i18n";
 
 interface DraftProjectViewProps {
-  /** Deletes the project. Page passes its handleDeleteProject (defaults:
-   *  deleteApp=true, wipeVolumes=false, force=false — correct for a draft
+  /** Deletes this environment. Page passes its handleDeleteProject (defaults:
+   *  wipeVolumes=false, force=false — correct for a draft
    *  with nothing provisioned). */
   onDeleteProject: () => void | Promise<void>;
 }

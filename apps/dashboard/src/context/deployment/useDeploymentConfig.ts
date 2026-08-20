@@ -766,6 +766,10 @@ export function useDeploymentConfig() {
         readiness: projectId
           ? (project?.readiness ?? undefined)
           : (response.readiness ?? undefined),
+        // Deliberately NOT projectId-gated like readiness/framework: this is what
+        // the scan just observed in the repo, not a value the operator owns, so a
+        // config edit on an existing project must show the file's CURRENT state.
+        configDiagnostics: response.configDiagnostics ?? undefined,
         modeSnapshots: undefined,
         // For an EXISTING project (projectId set — config edit or redeploy)
         // prefer the SAVED framework so a fresh re-detection can't silently
@@ -1087,6 +1091,9 @@ export function useDeploymentConfig() {
             productionPaths: scan.productionPaths,
             port: scan.port,
             services: scan.services,
+            // The upload scan reads the tarball's openship.json too, so a refused
+            // field has to reach the wizard from here as well (#641).
+            configDiagnostics: scan.configDiagnostics,
           } as unknown as PrepareProjectResponse;
         }
 

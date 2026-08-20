@@ -135,6 +135,9 @@ vi.mock("@repo/db", () => ({
         activeDeploymentId: null,
       }),
       listEnvVars: async () => [],
+      // serviceHandleFor reads env through the SCOPED map (project-level and
+      // service-scoped, per environment) rather than every row in the project.
+      getEnvMap: async () => ({}),
     },
     service: {
       findById: async () => ({
@@ -247,6 +250,7 @@ vi.mock("../../../src/modules/backup-destinations/hydrate-server", () => ({
 }));
 vi.mock("../../../src/modules/services/service-container", () => ({
   liveContainerIdForService: async () => null,
+  liveContainerForService: async () => ({ containerId: null, running: null }),
 }));
 
 import { RestoreOrchestrator } from "../../../src/modules/backups/restore.orchestrator";

@@ -61,6 +61,7 @@
     "switchAria": "تبديل البيئة",
     "addBranchAria": "إضافة فرع",
     "searchBranches": "ابحث في الفروع",
+    "refreshBranches": "تحديث الفروع",
     "noBranches": "لم يتم العثور على فروع",
     "environmentName": "اسم البيئة",
     "branchLabel": "تسمية الفرع",

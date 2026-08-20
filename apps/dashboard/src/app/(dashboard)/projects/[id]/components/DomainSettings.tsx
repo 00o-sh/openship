@@ -63,6 +63,19 @@ interface DnsRecord {
 
 type DomainTone = "success" | "warning" | "danger" | "neutral";
 
+/**
+ * Which static-404 a routed path is hitting. Three distinct diagnoses with three
+ * distinct fixes, so they cannot share one message:
+ *   missing    — nothing at the served path (wrong Output Directory, empty build)
+ *   noIndex    — the directory is there but holds no index file
+ *   notServed  — the edge answered 404/5xx for a real request to this route
+ */
+type OutputHint = {
+  path: string;
+  kind: "missing" | "noIndex" | "notServed";
+  status?: number;
+};
+
 interface DomainSummaryItem {
   /** Unique key for React iteration — endpoint id OR hostname when no endpoint. */
   id: string;
@@ -1042,11 +1055,28 @@ export const DomainSettings = () => {
     setPendingDomainAction(null);
   }, [pendingDomainAction, domainsData.isLoading, projectRuntimePort, setPendingDomainAction]);
 
-  // Match a "no output found" check to a static card by routed path.
-  const outputHintFor = (targetPath?: string): { path: string } | null => {
+  /**
+   * Match a static-output finding to a card by routed path, and say WHICH failure
+   * it is.
+   *
+   * This used to test only `!c.found`, so the two most common static 404s rendered
+   * nothing at all: a doc-root that exists with no index file (computed as
+   * `hasIndex`, warned about in the build log, then dropped here), and a path the
+   * edge answers with a 404/5xx.
+   *
+   * Precedence mirrors the server's `outputFindingIsBroken`: an edge that PROVES it
+   * serves overrides a missing index.html, because `cleanUrls` resolves `/about`
+   * from `about.html` with no index anywhere. An absent `served` (every record
+   * written before the HTTP half existed) falls back to the filesystem rule.
+   */
+  const outputHintFor = (targetPath?: string): OutputHint | null => {
     if (!targetPath) return null;
-    const match = outputChecks.find((c) => c.checked && !c.found && c.path === targetPath);
-    return match ? { path: match.path } : null;
+    const c = outputChecks.find((x) => x.checked && x.path === targetPath);
+    if (!c) return null;
+    if (!c.found) return { path: c.path, kind: "missing" };
+    if (c.served === false) return { path: c.path, kind: "notServed", status: c.status };
+    if (!c.hasIndex && c.served !== true) return { path: c.path, kind: "noIndex" };
+    return null;
   };
 
   const handleRenewDomainSsl = async (hostname: string) => {
@@ -2694,8 +2724,8 @@ function DomainOverviewCard({
   autoOpenRecords?: boolean;
   /** Live port-reachability advisory ("nothing responded on port X"). */
   portHint?: { port: number; serviceName?: string } | null;
-  /** Live static-output advisory ("no build output found at this path"). */
-  outputHint?: { path: string } | null;
+  /** Live static-output advisory — which of the three static-404 shapes this is. */
+  outputHint?: OutputHint | null;
 }) {
   const { t } = useI18n();
   const d = t.projectSettings.domains;
@@ -2861,7 +2891,16 @@ function DomainOverviewCard({
         {outputHint ? (
           <div className="flex items-start gap-2 rounded-xl border border-warning-border bg-warning-bg/40 px-3 py-2.5 text-[12px] text-warning">
             <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-            <span>{interpolate(d.outputHint.body, { path: outputHint.path })}</span>
+            <span>
+              {outputHint.kind === "notServed"
+                ? interpolate(d.outputHint.notServed, {
+                    path: outputHint.path,
+                    status: String(outputHint.status ?? ""),
+                  })
+                : outputHint.kind === "noIndex"
+                  ? interpolate(d.outputHint.noIndex, { path: outputHint.path })
+                  : interpolate(d.outputHint.body, { path: outputHint.path })}
+            </span>
           </div>
         ) : null}
 

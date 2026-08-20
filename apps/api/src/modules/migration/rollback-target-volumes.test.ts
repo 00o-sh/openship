@@ -205,8 +205,15 @@ describe("an unused volume carrying this project's own namespace is reused, not 
   });
 
   it("applies on the relay path too, so transfer mode can't decide whether you get stuck", () => {
-    const relay = src.slice(src.indexOf("const relayOurPrefix"));
-    expect(relay.slice(0, 900)).toContain("name.startsWith(relayOurPrefix)");
-    expect(relay.slice(0, 900)).toContain("name.length > relayOurPrefix.length");
+    // Bounded by the loop's own END, not by a character count — a window sized in
+    // characters silently stops covering the block the moment anything is added to it,
+    // which is exactly what a contract test must not do.
+    const from = src.indexOf("const relayOurPrefix");
+    const to = src.indexOf("conflicts.push(", from);
+    expect(from, "relay conflict block not found").toBeGreaterThan(-1);
+    expect(to, "relay conflict block end not found").toBeGreaterThan(from);
+    const relay = src.slice(from, to);
+    expect(relay).toContain("name.startsWith(relayOurPrefix)");
+    expect(relay).toContain("name.length > relayOurPrefix.length");
   });
 });

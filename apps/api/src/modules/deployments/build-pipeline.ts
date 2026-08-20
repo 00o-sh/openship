@@ -55,6 +55,7 @@ import { sshManager } from "../../lib/ssh-manager";
 import {
   resolveBuildRuntimeModes,
   resolveDeployRouting,
+  reusedReleaseRouting,
   type DeployRouting,
 } from "./build-execution-plan";
 import { attachLinkedNetworks } from "./attach-linked-networks";
@@ -89,7 +90,12 @@ import { onFailure, onSuccess, onCancelled, reportPipelineError, setDeploymentSt
 import { auditPorts } from "./port-audit.service";
 import { verifyDeployedContainers } from "./stability-audit.service";
 import { resolveReadinessGate, runReadinessGate, type ResolvedReadinessGate } from "./readiness-gate";
-import { auditStaticOutput, staticOutputTargets } from "./output-audit.service";
+import {
+  auditStaticOutput,
+  describeOutputFinding,
+  outputFindingIsBroken,
+  staticOutputTargets,
+} from "./output-audit.service";
 import { createBuildConfig } from "./build-config";
 import { pinnedAppImage, pinnedStaticDir, snapshotNeedsGitSource } from "./pinned-artifacts";
 import { snapshotToClass } from "./deployment-class";
@@ -441,7 +447,6 @@ export async function finalizeComposeDeploy(opts: {
           dep,
           serviceDeploymentId: sd.id,
           serviceName: sd.serviceName,
-          phase: "complete",
           conclusion,
           output: {
             title: `${sd.serviceName} ${conclusion}`,
@@ -875,13 +880,21 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
       return relay;
     };
 
-    // Pre-deploy backups — fire for ALL deploy modes (single-app, static-edge,
-    // AND compose) before any teardown, so a destructive cutover never runs
-    // without a backup. Previously this lived in executeServerDeploy only, so
-    // the compose path (which tears down old containers in deployComposeServices)
-    // ran with NO backup. Best-effort + policy-gated: we await only the enqueue
-    // (durably queued before destruction), never the run — a failing/slow backup
-    // must not block the deploy.
+    // Pre-deploy backups — the project's ONLY call site, deliberately here:
+    // outside the mode branch so single-app, static-edge AND compose deploys are
+    // covered, and outside the entry points so the button, a webhook push, a CLI
+    // deploy, an app update and a rollback rebuild all reach it through
+    // kickoffBuild. Both halves of that were bugs: it once lived in
+    // executeServerDeploy only (the compose path, which tears down old containers
+    // in deployComposeServices, ran with NO backup) and it once had a second call
+    // in redeployBuildSession behind an opt-in only the app-update path passed
+    // (which enqueued a duplicate run per policy for the same cutover). Adding
+    // another call anywhere in this path duplicates runs, it does not add safety.
+    //
+    // Best-effort + policy-gated: we await only the enqueue (durably queued
+    // before anything is destroyed), never the run — a failing or slow backup
+    // must not block the deploy. See triggers/pre-deploy.ts for why "before the
+    // build" is what gives the run time to finish before the cutover.
     try {
       const preBackup = await firePreDeployBackups({
         projectId: project.id,
@@ -1002,17 +1015,37 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
     // A restore ships the retained artifact PINNED, so there's nothing to build,
     // clone or relay a credential for (see reuseRetainedArtifact). A pin is a
     // hint, never a guarantee — if the artifact is gone we build from source.
-    const buildResult =
-      (await reuseRetainedArtifact({
-        snapshot,
-        runtime,
-        buildSessionId,
-        targetExecutor,
-        staticExecutor,
-        logger,
-      })) ??
-      (await buildFromSource());
-    provisioned.imageRef = buildResult.imageRef;
+    const reusedArtifact = await reuseRetainedArtifact({
+      snapshot,
+      runtime,
+      buildSessionId,
+      targetExecutor,
+      staticExecutor,
+      logger,
+    });
+    const buildResult = reusedArtifact ?? (await buildFromSource());
+
+    // ONLY an artifact this deploy PRODUCED goes on the cleanup list. `provisioned`
+    // exists so onFailure/onCancelled can reclaim a half-built image or build dir,
+    // and a REUSED artifact is not one: it is the target release's own retained
+    // artifact, which this deploy is restoring, not making. Recording it here meant
+    // a rollback that failed for any transient reason — the health gate, a route
+    // apply, a dropped SSH — destroyed the release it was restoring. For a static
+    // release that is an `rm -rf` of `releases/<depId>`, so the retryable rollback
+    // came back as ARTIFACT_GONE and a release with no commit became permanently
+    // un-restorable; for a server app it is `removeImage` on the retained tag. A
+    // PIN is meant to be exempt from reclamation, and reclaiming it on the way to
+    // reporting a FAILED deploy is the one moment nothing else will notice.
+    if (!reusedArtifact) provisioned.imageRef = buildResult.imageRef;
+
+    // A reused STATIC release is a directory whose doc-root offset was decided when
+    // its files were extracted, so it is read back from that release instead of
+    // re-derived from today's runtime resolution — see `reusedReleaseRouting`.
+    // `deployRouting` above stays the BUILD's answer: the pin is a hint, and when
+    // the artifact is gone we build from source and that answer is the correct one.
+    const servedRouting = reusedArtifact
+      ? reusedReleaseRouting(deployRouting, snapshot.staticServeOutputDir)
+      : deployRouting;
 
     if (buildResult.status === "cancelled") {
       await onCancelled(ctx, buildResult.durationMs);
@@ -1057,7 +1090,7 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
       envMap,
       prodResources,
       logger,
-      deployRouting,
+      deployRouting: servedRouting,
       transports,
     };
 
@@ -1518,16 +1551,13 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
             logger,
           );
           // `checked:false` is "we couldn't look", not "it's broken" — an
-          // inconclusive probe must never veto a deploy.
-          const broken = findings.filter((f) => f.checked && (!f.found || !f.hasIndex));
+          // inconclusive probe must never veto a deploy. The full precedence
+          // (including "the edge proved it serves, so a missing index.html is not a
+          // failure") lives in outputFindingIsBroken, shared with the advisory fold
+          // below and the dashboard hint so all three agree.
+          const broken = findings.filter(outputFindingIsBroken);
           if (broken.length === 0) return null;
-          return broken
-            .map((f) =>
-              f.found
-                ? `${f.path}: no servable index at ${f.servedPath ?? "the routed path"} — this path will 404.`
-                : `${f.path}: nothing at ${f.servedPath ?? "the routed path"} — this path will 404.`,
-            )
-            .join("\n");
+          return broken.map(describeOutputFinding).join("\n");
         },
         // Probed through the routing provider, so a remote server answers too.
         readinessWorksRemotely: true,
@@ -1709,6 +1739,9 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
     // (e.g. Next.js standalone → `node server.js` instead of `next start`).
     startCommand: buildResult.startCommand ?? snapshot.startCommand,
     stack: snapshot.framework,
+    // Lets the runtime put the project's `node_modules/.bin` on PATH before the
+    // start command runs — `next start` is a dependency binary, not a system one.
+    packageManager: snapshot.packageManager,
     envVars: envMap,
     resources: prodResources,
     restartPolicy: serve.restartPolicy,
@@ -2070,6 +2103,33 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
   // into `deployWarning`, because any deployWarning makes the project read
   // `routingUnsynced` and offer "Retry routing" — the wrong fix to suggest for an
   // app that didn't answer on its port.
+  // Make the always-on output verdict VISIBLE. Until this, the one deploy shape
+  // whose only failure mode is a 404 recorded its finding into meta and told
+  // nobody: the opt-in readiness gate is off by default, nothing read
+  // `meta.outputCheck`, and a static site with an empty doc-root — or a doc-root
+  // the edge cannot actually serve — reported fully green.
+  //
+  // Reuses the exact `deployWarning` + `edgeUnsynced` pair the routing/TLS blocks
+  // above set, so the project's "Action Required" state, the Domains-tab dot and
+  // the Retry-routing affordance all light up with no new meta key, no new
+  // pending-action kind and no new dismissal surface — and the next clean deploy
+  // clears it. Deliberately a WARNING, never a failure: the files are one setting
+  // away from correct, so reverting a deploy over it helps nobody.
+  //
+  // Placed after the other writers ON PURPOSE — the postSync branch above ASSIGNS
+  // deployWarning rather than appending, so folding this in earlier would let a
+  // free-domain sync warning silently drop it.
+  const outputBroken = outputCheck.filter(outputFindingIsBroken);
+  if (outputBroken.length > 0) {
+    const outputWarning =
+      `Static output: ${outputBroken.map(describeOutputFinding).join(" ")} ` +
+      `Check the Output Directory and redeploy.`;
+    metaPatch.deployWarning = metaPatch.deployWarning
+      ? `${String(metaPatch.deployWarning)} · ${outputWarning}`
+      : outputWarning;
+    metaPatch.edgeUnsynced = true;
+  }
+
   if (readinessWarnings.length > 0) {
     metaPatch.readinessWarning = readinessWarnings.join(" · ");
   }

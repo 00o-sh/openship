@@ -14,7 +14,7 @@
  */
 
 import type { ManualCert, RouteConfig, SslResult } from "../types";
-import type { OutputProbeResult } from "../system/output-exists";
+import type { OutputProbeResult, StaticProbeOptions } from "../system/output-exists";
 
 // ─── Routing ─────────────────────────────────────────────────────────────────
 
@@ -49,9 +49,16 @@ export interface RoutingProvider {
    * 404s. Only the provider knows which executor sees what nginx sees, so the
    * probe belongs here rather than in a caller guessing at edge topology.
    *
-   * Advisory: implementations never throw — `checked:false` means "no signal".
+   * `opts.hostname` opts into the HTTP half — one real request through the edge
+   * for that host and path. Same vantage-point argument, taken one step further:
+   * the filesystem check proves the bytes are reachable, an actual request proves
+   * they are SERVED (readable modes, a vhost that exists, a root the container can
+   * see). Omit it and the probe stays filesystem-only.
+   *
+   * Advisory: implementations never throw — `checked:false` means "no signal", and
+   * an absent `served` likewise.
    */
-  probeStaticRoot?(servedPath: string): Promise<OutputProbeResult>;
+  probeStaticRoot?(servedPath: string, opts?: StaticProbeOptions): Promise<OutputProbeResult>;
 
   /**
    * Serve edge-target challenge tokens for `host`, so Openship Cloud's shared edge

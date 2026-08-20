@@ -161,6 +161,23 @@ export interface BuildConfig {
   productionPaths?: string[];
   /** Root directory within the repo for monorepo builds. */
   rootDirectory?: string;
+  /**
+   * The docker build CONTEXT, relative to the source root — compose `build:`
+   * semantics. When set, the builder runs with THIS directory as the context, and
+   * `dockerfilePath` plus `.dockerignore` resolve INSIDE it: a service Dockerfile's
+   * `COPY requirements.txt` means the file next to it (#634).
+   *
+   * Deliberately NOT the same field as `rootDirectory`, which means "the subdir the
+   * app lives in" WITHIN a whole-repo context — a monorepo Dockerfile that COPYs the
+   * workspace-root lockfile depends on that root context, so widening `rootDirectory`
+   * into a context would break it. Set only where the user actually declared a
+   * context: a compose service's `build`.
+   *
+   * Only honoured for builds that use a REPOSITORY Dockerfile. A generated recipe
+   * (see docker-build-plan) COPYs from the source root, so a narrowed context can
+   * never satisfy it — that combination is refused rather than silently built.
+   */
+  buildContextDirectory?: string;
   /** Explicit Dockerfile path relative to the build root/context. */
   dockerfilePath?: string;
   /** Preloaded Dockerfile contents, used when the caller already read the file from the source provider. */
@@ -284,6 +301,20 @@ export interface DeployConfig {
   startCommand?: string;
   /** Detected framework / stack (e.g. "nextjs", "express") */
   stack?: string;
+  /**
+   * Package manager the build used (npm | yarn | pnpm | bun). Carried onto the
+   * DEPLOY config, not just the build config, because a start command names a
+   * dependency binary as often as a build command does (`next start`,
+   * `gatsby serve`) and the runtime has to put `node_modules/.bin` on PATH for
+   * it — see nodeBinPathExport.
+   *
+   * Optional because not every DeployConfig producer sets it (adopt and the
+   * static edge path have no start command to resolve). Do NOT read it as "node
+   * or not": the project column defaults to "npm", so a Go or PHP project
+   * usually carries "npm" here too. nodeBinPathExport is what decides, off the
+   * package manager's own semantics.
+   */
+  packageManager?: string;
   /** Environment variables injected at runtime */
   envVars: Record<string, string>;
   /** Resources allocated for the production container */
@@ -420,8 +451,21 @@ export interface ContainerInfo {
   status: ContainerStatus;
   /** Container IP on the internal network */
   ip?: string;
-  /** Mapped port on host (if applicable) */
+  /** Mapped port on host (if applicable). The FIRST binding the daemon reports —
+   *  arbitrary for a container publishing several ports, which is why anything
+   *  choosing a proxy target for a SPECIFIC container port must read
+   *  `hostPortByContainerPort` instead. */
   hostPort?: number;
+  /**
+   * Every published binding, keyed by CONTAINER port → host port.
+   *
+   * `hostPort` alone cannot answer "what is container port N published on": it is
+   * whichever binding the daemon happened to list first, so a route for the second
+   * port of a multi-port container was dialed at the first port's publish — a vhost
+   * that reaches a different app on the same box. Undefined when the runtime has no
+   * port mapping to report (bare, cloud) or could not be asked.
+   */
+  hostPortByContainerPort?: Record<number, number>;
   /** Uptime in seconds */
   uptimeSeconds?: number;
   /** Current resource consumption */

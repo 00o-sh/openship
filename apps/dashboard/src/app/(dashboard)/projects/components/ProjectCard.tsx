@@ -114,7 +114,7 @@ const ProjectCard: React.FC<Props> = ({ project, preferAppLogo, updateAvailable,
           onClick: async () => {
             hideModal(id);
             try {
-              await projectsApi.delete(project.id, { deleteApp: true });
+              await projectsApi.delete(project.id, {});
               showToast(t.projects.delete.successProject, "success");
               onChanged?.();
             } catch (e) {

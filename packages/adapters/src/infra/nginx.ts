@@ -40,7 +40,12 @@ import { sq } from "../system/local-shell";
 import type { RootChecked } from "../system/privilege";
 import { edgeDownExplanation } from "../system/edge-exec-error";
 import { BOOTSTRAP_CERT_SEGMENT, validateCertFor } from "../system/proxy/cert-material";
-import { probeStaticOutput, type OutputProbeResult } from "../system/output-exists";
+import {
+  probeStaticOutput,
+  type OutputProbeResult,
+  type StaticProbeOptions,
+} from "../system/output-exists";
+import { probeHostedHttp } from "../system/reachability";
 
 /**
  * POSIX joining, deliberately shadowing node:path's platform default.
@@ -1535,8 +1540,28 @@ export class NginxProvider implements RoutingProvider, SslProvider {
    *
    * Advisory: never throws.
    */
-  async probeStaticRoot(servedPath: string): Promise<OutputProbeResult> {
-    if (this.executor) return probeStaticOutput(this.executor, servedPath);
+  async probeStaticRoot(
+    servedPath: string,
+    opts?: StaticProbeOptions,
+  ): Promise<OutputProbeResult> {
+    if (this.executor) return probeStaticOutput(this.executor, servedPath, opts);
+
+    const fs = await this.probeStaticRootViaFs(servedPath);
+    // Bare-local edge: this process's filesystem IS the edge's, and its loopback is
+    // the edge's loopback. The port lives here rather than at the caller because
+    // it is the port `registerRoute` renders `listen` for — one provider, one
+    // answer, so an alt-port edge is a single change.
+    if (!opts?.hostname) return fs;
+    const http = await probeHostedHttp({
+      hostname: opts.hostname,
+      path: opts.requestPath ?? "/",
+      port: opts.edgePort ?? 80,
+      timeoutMs: (opts.timeoutSeconds ?? 3) * 1000,
+    });
+    return http ? { ...fs, status: http.status, served: http.served } : fs;
+  }
+
+  private async probeStaticRootViaFs(servedPath: string): Promise<OutputProbeResult> {
     const found = await this._exists(servedPath);
     if (!found) return { found: false, hasIndex: false, checked: true };
     // A file IS its own index; a directory needs index.html to serve at that path.

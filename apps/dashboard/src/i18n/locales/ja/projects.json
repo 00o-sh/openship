@@ -61,6 +61,7 @@
     "switchAria": "環境を切り替える",
     "addBranchAria": "ブランチを追加",
     "searchBranches": "ブランチを検索",
+    "refreshBranches": "ブランチを更新",
     "noBranches": "ブランチが見つかりません",
     "environmentName": "環境名",
     "branchLabel": "ブランチラベル",

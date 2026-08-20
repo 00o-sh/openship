@@ -29,7 +29,11 @@ import {
 import { cloudClient } from "../../lib/cloud/client";
 import { isCloudConnectedForOrg } from "../../lib/cloud/session";
 import { runCloudPreflight, type CloudPreflightData } from "../../lib/cloud-preflight";
-import { isStaticService, type DeployableService } from "../../lib/deployable-service";
+import {
+  isStaticService,
+  resolveSubAppRecipe,
+  type DeployableService,
+} from "../../lib/deployable-service";
 import { isFullyPinned, snapshotNeedsGitSource } from "./pinned-artifacts";
 import { snapshotToClass } from "./deployment-class";
 import { relayConfigEligible, resolveClonePlan } from "./clone-plan";
@@ -923,18 +927,23 @@ function checkConfig(snapshot: DeploymentConfigSnapshot, opts?: PreflightOptions
       // Requiring them here would block every Dockerfile-based monorepo
       // sub-app (e.g. a Railway-style per-service-Dockerfile repo).
       if (svc.framework === "docker") continue;
-      const installFallback = svc.installCommand ?? snapshot.installCommand;
-      const buildFallback = svc.buildCommand ?? snapshot.buildCommand;
-      const startFallback = svc.startCommand ?? snapshot.startCommand;
+      // One resolver for the row-vs-snapshot fallback, shared with the buildable
+      // selector — a monorepo row legitimately inherits its commands from the
+      // project, so asking the RAW row is how preflight and the builder disagree.
+      const resolved = resolveSubAppRecipe(svc, snapshot);
+      const installFallback = resolved.installCommand;
+      const buildFallback = resolved.buildCommand;
+      const startFallback = resolved.startCommand;
       // A static sub-app is served as FILES — on self-hosted straight off the host
-      // by the edge, on cloud by a generated nginx image. Either way it needs a
-      // build (to produce the output dir) and NO start command.
-      if (isStaticService(svc)) {
-        if (!buildFallback) {
-          subAppFailures.push(`sub-app "${svc.name}" missing build command`);
-        }
-        continue;
-      }
+      // by the edge, on cloud by a generated nginx image. Either way it needs NO
+      // start command, and it needs no BUILD either: the extract-only recipe is a
+      // valid Dockerfile with an empty build step, so a sub-app that is already
+      // just files (hand-written HTML/CSS, a committed `dist`) is deployable as-is.
+      // Requiring one here refused the deploy outright for exactly the shape the
+      // single-app path explicitly allows ("a static workload needs neither a start
+      // command nor a port"), so the same folder deployed as a project and was
+      // rejected as a sub-app.
+      if (isStaticService(resolved)) continue;
       // hasBuild/hasServer aren't per-service today - fall back to the
       // project-level booleans on the snapshot. Conservative: if either
       // the project says it has a build OR has a server, the sub-app must

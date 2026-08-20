@@ -33,6 +33,7 @@ import {
 import { reconcileProjectRoutes } from "../../lib/route-apply.service";
 import { compileProjectRoutingFields } from "../../lib/project-routing-fields";
 import { resolveServicePort } from "../../lib/deployable-service";
+import { isArtifactRef } from "../../lib/container-ref";
 import { buildServiceRouteDomain } from "../../lib/routing-domains";
 import {
   buildCompositeRegistration,
@@ -116,10 +117,29 @@ export async function applyProjectRouting(projectId: string): Promise<void> {
       return buildUpstreamUrl({ strategy: routeStrategy, ip: row?.ip, hostPort: row?.hostPort, containerPort: port });
     };
 
+    /**
+     * A compose static sub-app is served from a host DIRECTORY, and that directory
+     * is the whole handle: it owns no container, no port and no upstream. The deploy
+     * path reads it from the release it just promoted; here it comes off the active
+     * deployment's `service_deployment.image_ref`, which is where that promote wrote
+     * it (a leading-slash path in a column that otherwise holds image tags — the
+     * `isArtifactRef` rule).
+     *
+     * Without this the frontend resolved to no upstream, `buildCompositeRegistration`
+     * returned null, and a live routing save emitted NOTHING for the flagship
+     * monorepo shape while reporting success — the vhost could only be produced by a
+     * full deploy, so the Retry-routing button could not repair a lost route.
+     */
+    const resolveStaticRoot = (serviceId: string) => {
+      const ref = rowByService.get(serviceId)?.imageRef;
+      return isArtifactRef(ref) ? ref!.trim() : null;
+    };
+
     const composite = buildCompositeRegistration({
       services: defs,
       routingConfig: project.routingConfig,
       resolveTargetUrl,
+      resolveStaticRoot,
       resolveDomain: (serviceId) => {
         const def = defs.find((s) => s.id === serviceId);
         const domain = def
@@ -135,6 +155,32 @@ export async function applyProjectRouting(projectId: string): Promise<void> {
           : null;
       },
     });
+
+    // A composite the builder REFUSED is the one outcome this function used to hide:
+    // it returned null for a missing upstream, static root or domain, `registers`
+    // came out empty, and the caller (a routing save, or the Retry-routing button)
+    // reported success having written no vhost. Name the missing input instead — the
+    // operator's route is not live and the log is where they look.
+    //
+    // Logged, not thrown: a paused project legitimately has no live upstream, and
+    // throwing would turn that into an "Action Required" warning on a stack nobody
+    // asked to be running.
+    if (!composite) {
+      const plan = planCompositeRoute(defs, { rewrites: project.routingConfig?.rewrites });
+      if (plan) {
+        const missing = [
+          !resolveStaticRoot(plan.frontendServiceId) && !resolveTargetUrl(plan.frontendServiceId)
+            ? "the frontend has neither a static root nor a live upstream"
+            : null,
+          !resolveTargetUrl(plan.backendServiceId) ? "the backend has no live upstream" : null,
+        ].filter(Boolean);
+        console.warn(
+          `[routing-apply] ${project.slug}: composite vhost not emitted — ` +
+            `${missing.length ? missing.join("; ") : "no routable domain for the frontend"}. ` +
+            `Redeploy to rebuild it.`,
+        );
+      }
+    }
 
     // Re-emit any migration path-fan-out domains from live upstreams (a domain
     // whose paths route to different services) — persisted so it survives here.

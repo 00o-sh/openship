@@ -20,6 +20,7 @@ import { useToast } from "@/context/ToastContext";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import { formatDate } from "@/utils/date";
 import { projectsApi } from "@/lib/api";
+import { invalidateProjectCaches } from "@/hooks/useProjectEndpoints";
 import { getApiErrorMessage } from "@/lib/api/client";
 import { Modal } from "@/components/ui/Modal";
 import { RepositoryList } from "../../../library/components/RepositoryList";
@@ -45,8 +46,14 @@ export const GitSettings = () => {
     setTogglingAuto(true);
     try {
       const res = await projectsApi.setAutoDeploy(id, !gitData.autoDeployEnabled);
-      if (res.success) await refreshGit();
-      else showToast(res.error || t.projectSettings.git.toast.autoDeployFailed, "error");
+      if (res.success) {
+        await refreshGit();
+        // The Overview renders this state from /info, so refreshing only the
+        // Source tab's slice would leave it showing the pre-toggle value.
+        invalidateProjectCaches(id);
+      } else {
+        showToast(res.error || t.projectSettings.git.toast.autoDeployFailed, "error");
+      }
     } catch (err) {
       showToast(getApiErrorMessage(err, t.projectSettings.git.toast.autoDeployFailed), "error");
     } finally {
@@ -156,6 +163,9 @@ export const GitSettings = () => {
           showToast(interpolate(t.projectSettings.git.toast.linked, { repo: `${ownerLogin}/${repo.name}` }), "success");
           setShowPicker(false);
           await refreshGit();
+          // Linking also sets the repo + autoDeploy on the project row itself,
+          // which the Overview reads from /info — same reason as the toggle above.
+          invalidateProjectCaches(id);
         } else if (result.install_url) {
           showToast(result.error || t.projectSettings.git.toast.appNotInstalled, "error");
           setShowPicker(false);

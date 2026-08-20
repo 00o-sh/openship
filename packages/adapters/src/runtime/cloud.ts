@@ -59,10 +59,13 @@ import {
   sq,
   type BuildEnvironment,
 } from "./build-pipeline";
-import { CloudComposeSupport, type CloudBuiltArtifact } from "./cloud/compose";
+import { CloudComposeSupport, resolveCloudWorkloadCmd, type CloudBuiltArtifact } from "./cloud/compose";
+import { splitRuntimeEnv, droppedRuntimeEnvMessage } from "./runtime-env";
 import { createDockerBuildContext } from "./docker-build-context";
 import {
+  dockerBuildContextDirectory,
   normalizeDockerRelativePath,
+  resolveContextDockerfileCandidates,
   resolveDockerfileCandidates,
   resolveWithinDirectory,
 } from "./docker-paths";
@@ -72,7 +75,7 @@ import { prepareStackOutput, resolveProjectDir, resolveStaticOutputPath } from "
 import { checkGit } from "../system/checks";
 import { installGit } from "../system/installer";
 import { isRuntimeNotFoundError } from "../system/errors";
-import { STACKS, TRANSFER_EXCLUDES, buildOutputTransferExcludes, SYSTEM, safeErrorMessage, missingOutputDirectoryMessage, packageManagerEnsureCommand, type StackId, type StackDefinition, type ComposeAdvanced } from "@repo/core";
+import { STACKS, TRANSFER_EXCLUDES, buildOutputTransferExcludes, SYSTEM, safeErrorMessage, missingOutputDirectoryMessage, packageManagerEnsureCommand, nodeBinPathExport, type StackId, type StackDefinition, type ComposeAdvanced } from "@repo/core";
 
 type CloudWorkspaceRuntime = Awaited<ReturnType<WorkspaceHandle["runtime"]>>;
 const DOCKERFILE_SOURCE_IMAGE = "node:22";
@@ -309,6 +312,20 @@ type DockerfileBuildSource =
       dockerfile: string;
       cleanup(): Promise<void>;
     };
+
+/**
+ * The source-root-relative directory the cloud workspace should use as the
+ * Dockerfile build context.
+ *
+ * Cloud has always read `rootDirectory` as the context, which is why compose
+ * services already built with the right one here while the self-hosted docker path
+ * built the clone root (#634). Prefer the EXPLICIT `buildContextDirectory` now that
+ * it exists so the two targets can never drift apart, and keep `rootDirectory` as
+ * the fallback for every producer that predates it.
+ */
+function cloudBuildContextPath(config: BuildConfig): string {
+  return dockerBuildContextDirectory(config) || normalizeDockerRelativePath(config.rootDirectory);
+}
 
 // ─── CloudRuntime ────────────────────────────────────────────────────────────
 
@@ -942,7 +959,7 @@ export class CloudRuntime implements MultiServiceRuntimeAdapter {
       logger.log("Using Dockerfile content from source metadata.\n");
       return {
         kind: "remote",
-        contextRelativePath: normalizeDockerRelativePath(config.rootDirectory),
+        contextRelativePath: cloudBuildContextPath(config),
         dockerfile: config.dockerfileContent,
         cleanup: async () => {},
       };
@@ -969,10 +986,17 @@ export class CloudRuntime implements MultiServiceRuntimeAdapter {
     // root of the tarball we ship to the cloud workspace, so a `..` here reads
     // and exfiltrates arbitrary host files (GHSA-443m-7g52-94w8). The
     // normalizers reject `..` upstream; this is the backstop at the sink.
-    const dockerfilePath = resolveWithinDirectory(context.contextDir, context.dockerfileName);
+    // `dockerfileName` is relative to the resolved BUILD context, which is the tree
+    // root unless the config narrowed it (a compose service's `build:`).
+    const dockerfilePath = resolveWithinDirectory(
+      context.buildContextDir,
+      context.dockerfileName,
+    );
     const dockerfile = await readFile(dockerfilePath, "utf-8");
 
-    const contextRoot = resolveWithinDirectory(context.contextDir, context.rootDirectory);
+    const contextRoot = context.contextSubdir
+      ? context.buildContextDir
+      : resolveWithinDirectory(context.contextDir, context.rootDirectory);
 
     return {
       kind: "local",
@@ -986,7 +1010,16 @@ export class CloudRuntime implements MultiServiceRuntimeAdapter {
     config: BuildConfig,
     logger: BuildLogger,
   ): Promise<DockerfileBuildSource> {
-    const candidates = resolveDockerfileCandidates(config.rootDirectory, config.dockerfilePath);
+    // Candidates are SOURCE-ROOT-relative here: this probe cats the file out of a
+    // fresh checkout at `sourceDir`, while the context ships separately as
+    // `contextRelativePath`. A narrowed context still resolves its Dockerfile the
+    // compose way — inside the context, never falling back to the repo root's.
+    const contextSubdir = dockerBuildContextDirectory(config);
+    const candidates = contextSubdir
+      ? resolveContextDockerfileCandidates(contextSubdir, config.dockerfilePath).map(
+          (candidate) => `${contextSubdir}/${candidate}`,
+        )
+      : resolveDockerfileCandidates(config.rootDirectory, config.dockerfilePath);
     const sourceLabel = config.commitSha
       ? `${config.branch}@${config.commitSha.slice(0, 7)}`
       : config.branch;
@@ -1054,7 +1087,7 @@ export class CloudRuntime implements MultiServiceRuntimeAdapter {
           sourceWorkspaceId = undefined;
           return {
             kind: "remote",
-            contextRelativePath: normalizeDockerRelativePath(config.rootDirectory),
+            contextRelativePath: cloudBuildContextPath(config),
             dockerfile,
             cleanup: async () => {
               await this.ws(workspaceId)
@@ -1292,6 +1325,25 @@ export class CloudRuntime implements MultiServiceRuntimeAdapter {
     const prepareContextCommands = contextRelativePath
       ? [
           `echo "Copying Dockerfile context ${contextRelativePath}..."`,
+          // `cp -a` FOLLOWS a symlinked source directory, so a repo that tracks
+          // `svc -> /` and declares `build: ./svc` would copy the workspace's root
+          // filesystem into its own build context. The lexical `..` refusal above
+          // cannot see that; only a resolved path can. Same class as
+          // GHSA-443m-7g52-94w8, reachable through the build context rather than
+          // rootDirectory, and asserted here for the same reason the docker paths
+          // assert it: at the sink.
+          // `pwd -P` rather than `readlink -f`: it is a POSIX shell builtin, so it
+          // exists in every workspace image, and it answers both questions at once —
+          // the `cd` fails when the context is not a directory, and the resolved path
+          // reveals a symlink that left the checkout.
+          // BOTH sides resolved, and an unresolvable either side is fatal: an empty
+          // `__root` would turn the prefix test into `"/"*`, which every absolute path
+          // matches — a containment check that passes vacuously is worse than none.
+          // `|| __x=""` keeps `set -e` from killing the script before the message.
+          `__root="$(cd ${sq(repoRoot)} && pwd -P)" || __root=""`,
+          `__ctx="$(cd ${sq(contextSource)} 2>/dev/null && pwd -P)" || __ctx=""`,
+          `if [ -z "$__root" ] || [ -z "$__ctx" ]; then echo "Build context ${contextRelativePath} is not a directory in this repository." >&2; exit 1; fi`,
+          `case "$__ctx/" in "$__root/"*) ;; *) echo "Build context ${contextRelativePath} resolves outside this repository." >&2; exit 1 ;; esac`,
           `mkdir -p ${sq(contextRoot)}`,
           `cp -a ${sq(`${contextSource}/.`)} ${sq(contextRoot)}/`,
         ]
@@ -1726,9 +1778,17 @@ fi`;
 
     // 4. Create a workload for the application process
     const startCommand = builtArtifact?.runtime.startCommand || config.startCommand || "npm start";
+    const projectEnv = splitRuntimeEnv(config.envVars);
+    if (projectEnv.dropped.length > 0) {
+      onLog?.({
+        timestamp: new Date().toISOString(),
+        level: "warn",
+        message: droppedRuntimeEnvMessage(projectEnv.dropped),
+      });
+    }
     const envArray = toEnvArray({
       ...(builtArtifact?.runtime.env ?? {}),
-      ...config.envVars,
+      ...Object.fromEntries(projectEnv.entries),
     });
 
     const restartPolicy =
@@ -1736,10 +1796,36 @@ fi`;
         ? ("never" as const)
         : ((config.restartPolicy ?? "always") as "always" | "on-failure" | "never");
 
+    // Through the shared builder rather than a hand-rolled `sh -c`: it already
+    // shell-quotes workDir (this call site did not) and it is the one place the
+    // `node_modules/.bin` prelude has to live, so the compose path and this one
+    // cannot drift. Without the prelude a buildpack `next start` exits 127 here
+    // the same way it did on the bare target (openship#623).
+    //
+    // Roots are `[workDir, "/app"]`, not `[workDir]`: a stack with
+    // productionPaths runs from /app/production while node_modules stays at /app.
+    //
+    // Gated on the BUILDPACK arm only. `builtArtifacts` is populated solely by
+    // buildDockerfileWorkspace, so a truthy builtArtifact means the user's own
+    // repository Dockerfile produced this image and both workDir and startCommand
+    // came out of it — that image owns its PATH, exactly the reason
+    // resolveCloudWorkloadCmd skips the prelude for a compose service's argv.
+    // Prepending ours there would shadow its binaries for no benefit.
+    //
+    // Non-null: the builder returns undefined only for an empty start command,
+    // and `startCommand` above has a `|| "npm start"` fallback.
+    const workloadCmd = resolveCloudWorkloadCmd({
+      startCommand,
+      workdir: workDir,
+      binPathExport: builtArtifact
+        ? ""
+        : nodeBinPathExport(config.packageManager, [workDir, "/app"]),
+    })!;
+
     try {
       await ws.workloads.create({
         name: "app",
-        cmd: ["sh", "-c", `cd ${workDir} && ${startCommand}`],
+        cmd: workloadCmd,
         working_dir: workDir,
         env: [...envArray, `PORT=${config.port}`],
         restart_policy: restartPolicy,
@@ -2130,18 +2216,15 @@ fi`;
   }
 
   async purge(deployment: DeploymentRef): Promise<void> {
-    // Page deployment — delete the page record.
+    // The workspace (or page) deletion PROPAGATES. `prune` reads a resolved purge
+    // as "the artifact is gone" and clears `artifact_retained_at`, and for cloud
+    // the artifact is a billed workspace slot — swallowing the failure records a
+    // workspace we are still paying for as reclaimed, and nothing looks at that
+    // release again. `destroy` already treats already-gone on Oblien as success
+    // (`isRuntimeNotFoundError`), so replays stay idempotent without a catch-all.
     if (deployment.containerId?.startsWith(PAGE_CONTAINER_PREFIX)) {
-      const slug = deployment.containerId.slice(5);
-      try {
-        if (this.adminProxy?.deletePage) {
-          await this.adminProxy.deletePage(slug);
-        } else {
-          await this.client.pages.delete(slug);
-        }
-      } catch {
-        // already destroyed
-      }
+      // Same delete `destroy` performs, with the 404 gate it already owns.
+      await this.destroy(deployment.containerId);
       return;
     }
 
@@ -2150,6 +2233,12 @@ fi`;
     // Drop archives AND their underlying files explicitly. Without
     // `delete_files: true` the archive blobs would linger and keep
     // billing storage even after the workspace is gone.
+    //
+    // Deliberately still warn-only, unlike the delete below: a workspace that
+    // never archived has nothing to delete, and Oblien's response shape for that
+    // case is not one we can distinguish from a real failure here — so making it
+    // fatal would break every cloud purge to report a leak that may not exist.
+    // The workspace delete below is what reclaims the expensive half.
     try {
       await this.ws(deployment.containerId).snapshots.deleteAllArchives({
         delete_files: true,
@@ -2161,11 +2250,7 @@ fi`;
       );
     }
 
-    try {
-      await this.destroy(deployment.containerId);
-    } catch {
-      // already destroyed
-    }
+    await this.destroy(deployment.containerId);
   }
 
   // ── Observability ──────────────────────────────────────────────────────

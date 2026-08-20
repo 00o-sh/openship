@@ -37,11 +37,14 @@ export {
   DUMP_FORMAT_VERSION,
   PkCollisionError,
   ENCRYPTED_COLUMNS,
+  EXCLUDED_TABLES,
+  topoOrderedTables,
   stripEncryptedInPlace,
   type DatabaseDump,
   type DumpOptions,
   type RestoreOptions,
   type SubgraphScope,
+  type TableSpec,
 } from "./dump";
 
 // ─── Repositories (all DB access goes through here) ──────────────────────────

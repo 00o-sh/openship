@@ -303,6 +303,7 @@ export const endpoints = {
     servers: "system/servers",
     server: (id: string) => `system/servers/${id}`,
     serverReachability: (id: string) => `system/servers/${id}/reachability`,
+    serverDeletionPreview: (id: string) => `system/servers/${id}/deletion-preview`,
     serverRateLimit: (id: string) => `system/servers/${id}/rate-limit`,
     serverPortsScan: (id: string) => `system/servers/${id}/ports/scan`,
     // Native-module versioning + migration (OpenResty, …)

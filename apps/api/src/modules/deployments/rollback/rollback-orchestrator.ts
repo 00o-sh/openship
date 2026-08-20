@@ -40,6 +40,7 @@
 import { repos, type Deployment, type Project } from "@repo/db";
 import { DockerRuntime, type DeploymentRef, type ResourceConfig } from "@repo/adapters";
 import { AppError, safeErrorMessage } from "@repo/core";
+import { isArtifactRef } from "../../../lib/container-ref";
 import { resolveDeploymentRuntime } from "../../../lib/deployment-runtime";
 import { resolveRollbackWindow } from "../release-retention";
 import {
@@ -558,6 +559,31 @@ export async function prune(projectId: string): Promise<{ purged: number }> {
             imageRef: ref.imageRef && keep.has(ref.imageRef) ? null : ref.imageRef,
           });
         }
+        // `purge` works off the DEPLOYMENT ref, which for a compose release is the
+        // "compose" sentinel — so a compose static sub-app's release DIRECTORY is
+        // invisible to it and nothing beyond the rollback window ever reclaimed
+        // one. Per-service artifacts are reclaimed here, under the same keep set,
+        // so a directory a retained release still serves is never removed.
+        // (`--link-dest` means these releases mostly share inodes, but each one
+        // still holds every changed file.)
+        const serviceRows = await repos.service.listByDeployment(dep.id).catch(() => []);
+        // Collected, not swallowed: one service whose directory refuses to go must
+        // not stop the siblings from being reclaimed, but it must also not let this
+        // row record itself as reclaimed. `setArtifactRetainedAt(null)` below is the
+        // claim "nothing of this release is on disk any more", and for a compose
+        // static release these directories ARE the release.
+        let serviceFailure: unknown = null;
+        for (const row of serviceRows) {
+          if (!isArtifactRef(row.imageRef) || keep.has(row.imageRef!)) continue;
+          await runtime.destroy(row.imageRef!).catch((err: unknown) => {
+            console.error(
+              `[rollback-orchestrator] Failed to purge static output ${row.imageRef}:`,
+              err,
+            );
+            serviceFailure ??= err;
+          });
+        }
+        if (serviceFailure) throw serviceFailure;
       } finally {
         await runtime.dispose?.();
       }

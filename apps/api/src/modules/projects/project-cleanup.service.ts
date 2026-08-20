@@ -22,6 +22,7 @@ import {
   type DeploymentMeta,
 } from "../../lib/deployment-runtime";
 import { resolveOrgCloudUserId } from "../../lib/cloud/transport";
+import { isArtifactRef } from "../../lib/container-ref";
 import { computeCleanupKeepSet } from "./cleanup-keep-set";
 import { buildServiceRouteDomain } from "../../lib/routing-domains";
 import { releaseManagedHostnames } from "../../lib/managed-edge-proxy";
@@ -161,6 +162,21 @@ export async function collectProjectManifest(
   const pushContainer = (containerId: string, runtime: RuntimeAdapter, labelPrefix: string) => {
     if (seenContainers.has(containerId)) return;
     seenContainers.add(containerId);
+    // A static deploy's containerId IS its release directory. Both branches of
+    // destroyResourceOnce call runtime.destroy, so this reclassification is
+    // behaviour-preserving — but it makes the manifest TYPE match the thing, which
+    // the force-orphan `resourceType` column and the deletion-preview copy both
+    // read. A directory recorded as a "container" is an orphan row the GC then
+    // hands to the container resolver.
+    if (isArtifactRef(containerId)) {
+      resources.push({
+        type: "artifact",
+        ref: containerId,
+        label: `${labelPrefix} files ${containerId}`,
+        runtime,
+      });
+      return;
+    }
     resources.push({
       type: "container",
       ref: containerId,
@@ -178,6 +194,10 @@ export async function collectProjectManifest(
     labelPrefix: string,
   ) => {
     if (!wipeVolumes || !(runtime instanceof DockerRuntime)) return;
+    // A release directory cannot have mounts. Inspecting it is guaranteed to fail
+    // and costs the full INSPECT_TIMEOUT_MS on a Docker-over-SSH bridge, which is
+    // the deletion-preview request hanging for nothing.
+    if (isArtifactRef(containerId)) return;
     const names = await withTimeout(
       runtime.inspectNamedVolumes(containerId),
       INSPECT_TIMEOUT_MS,
@@ -198,6 +218,38 @@ export async function collectProjectManifest(
   // ── Deployment containers + images + service containers ────────────
   const { rows: allDeps } = await repos.deployment.listByProject(project.id, { perPage: 1000 });
   const seenImages = new Set<string>();
+
+  /**
+   * An `image_ref` column can hold EITHER a Docker tag or a host DIRECTORY — a
+   * static service's build output is a path (see isArtifactRef). Classifying by
+   * the runtime class alone sent the path to `removeImage`, which cannot delete a
+   * directory and whose failure is not a 404, so it was rethrown and blocked the
+   * whole project deletion forever (issue #640). Classify by the REF's shape.
+   *
+   * The artifact branch is also the only producer of `type: "artifact"` for a
+   * compose static sub-app: those rows carry no containerId, so `pushContainer`
+   * never runs for them and this is the single entry their doc-root ever gets.
+   */
+  const pushImageOrArtifact = (ref: string, runtime: RuntimeAdapter, tagLabel: string) => {
+    if (seenImages.has(ref)) return;
+    seenImages.add(ref);
+    if (isArtifactRef(ref)) {
+      resources.push({
+        type: "artifact",
+        ref,
+        label: `static output ${ref}`,
+        runtime,
+      });
+      return;
+    }
+    // Only Docker holds images. Bare has no removeImage at all, so a tag reaching
+    // here on a bare runtime is a no-op we should say out loud rather than drop.
+    if (!(runtime instanceof DockerRuntime)) {
+      console.warn(`[cleanup] skipping image ${ref}: ${runtime.name} runtime cannot remove images`);
+      return;
+    }
+    resources.push({ type: "image", ref, label: tagLabel, runtime });
+  };
 
   for (const dep of allDeps) {
     // Fast-fail: if this deployment targets a server that's UNREACHABLE right
@@ -275,18 +327,14 @@ export async function collectProjectManifest(
         await pushVolumesForContainer(sd.containerId, runtime, "service");
         pushContainer(sd.containerId, runtime, "service container");
       }
-      // Per-service compose/monorepo images (openship/<slug>-<svc>:bld_…-svc_…).
-      // These are the REAL images for a multi-service deployment — dep.imageRef
-      // is only the "compose" sentinel — so without this they leak on project
-      // deletion. Deduped via the shared seenImages set. Docker only.
-      if (sd.imageRef && !seenImages.has(sd.imageRef) && runtime instanceof DockerRuntime) {
-        seenImages.add(sd.imageRef);
-        resources.push({
-          type: "image",
-          ref: sd.imageRef,
-          label: `service image ${sd.imageRef.slice(0, 24)}`,
-          runtime,
-        });
+      // Per-service compose/monorepo images (openship/<slug>-<svc>:bld_…-svc_…)
+      // OR, for a static sub-app, its doc-root DIRECTORY. These are the REAL
+      // artifacts of a multi-service deployment — dep.imageRef is only the
+      // "compose" sentinel — so without this they leak on project deletion.
+      // A static sub-app has no containerId, so this is the ONLY entry its
+      // doc-root ever gets.
+      if (sd.imageRef) {
+        pushImageOrArtifact(sd.imageRef, runtime, `service image ${sd.imageRef.slice(0, 24)}`);
       }
     }
 
@@ -296,20 +344,10 @@ export async function collectProjectManifest(
       pushContainer(dep.containerId, runtime, "deployment container");
     }
 
-    // Docker images (deduplicated)
-    if (dep.imageRef && !seenImages.has(dep.imageRef) && runtime instanceof DockerRuntime) {
-      seenImages.add(dep.imageRef);
-      resources.push({
-        type: "image",
-        ref: dep.imageRef,
-        label: `image ${dep.imageRef.slice(0, 24)}`,
-        runtime,
-      });
-    }
-
-    // Bare runtime artifacts (release dirs stored as containerId paths)
-    if (dep.containerId?.includes("/") && !(runtime instanceof DockerRuntime)) {
-      // Already tracked as "container" above - bare destroy() handles path removal
+    // The deployment's own image tag, or (single-app static) its extracted
+    // build directory. Deduplicated across the manifest.
+    if (dep.imageRef) {
+      pushImageOrArtifact(dep.imageRef, runtime, `image ${dep.imageRef.slice(0, 24)}`);
     }
   }
 
@@ -741,28 +779,42 @@ export async function collectDeploymentManifest(
 
   for (const containerId of containerIds) {
     if (skip("container", containerId)) continue;
-    resources.push({
-      type: "container",
-      ref: containerId,
-      label: `container ${containerId.slice(0, 12)}`,
-      runtime,
-    });
+    // A static deploy's containerId is its release DIRECTORY (see isArtifactRef).
+    // Same destroy verb either way; the type is what the orphan row and the
+    // preview copy read.
+    resources.push(
+      isArtifactRef(containerId)
+        ? { type: "artifact", ref: containerId, label: `files ${containerId}`, runtime }
+        : { type: "container", ref: containerId, label: `container ${containerId.slice(0, 12)}`, runtime },
+    );
   }
 
-  // Images - main deployment imageRef + per-service imageRef. Only Docker
-  // images need explicit removal (bare runtime artifacts are tied to the
-  // container destroy path). Deduplicated across the manifest.
-  if (runtime instanceof DockerRuntime) {
-    const seenImages = new Set<string>();
-    const pushImage = (ref: string | null | undefined, label: string) => {
-      if (!ref || seenImages.has(ref)) return;
-      seenImages.add(ref);
+  // The deployment's image tag + each service's — or, for a static unit, the
+  // host DIRECTORY those same columns hold. Hoisted out of the old
+  // `runtime instanceof DockerRuntime` wrapper: that gate silently dropped a
+  // static release directory on a bare runtime, and it is not the right question
+  // for a path in the first place (issue #640).
+  //
+  // The keep-set consult is preserved for BOTH shapes, and it matters more for a
+  // path: computeCleanupKeepSet already puts every live/retained `imageRef` —
+  // directories included — into keep.images, which is what stops a
+  // single-deployment teardown from rm -rf'ing the doc-root the edge is serving.
+  {
+    const seenRefs = new Set<string>();
+    const pushImageOrArtifact = (ref: string | null | undefined, tagLabel: string) => {
+      if (!ref || seenRefs.has(ref)) return;
+      seenRefs.add(ref);
       if (skip("image", ref)) return;
-      resources.push({ type: "image", ref, label, runtime });
+      if (isArtifactRef(ref)) {
+        resources.push({ type: "artifact", ref, label: `static output ${ref}`, runtime });
+        return;
+      }
+      if (!(runtime instanceof DockerRuntime)) return;
+      resources.push({ type: "image", ref, label: tagLabel, runtime });
     };
-    pushImage(dep.imageRef, `image ${(dep.imageRef ?? "").slice(0, 24)}`);
+    pushImageOrArtifact(dep.imageRef, `image ${(dep.imageRef ?? "").slice(0, 24)}`);
     for (const sd of serviceRows) {
-      pushImage(sd.imageRef, `service image ${(sd.imageRef ?? "").slice(0, 24)}`);
+      pushImageOrArtifact(sd.imageRef, `service image ${(sd.imageRef ?? "").slice(0, 24)}`);
     }
   }
 

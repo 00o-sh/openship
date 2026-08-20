@@ -42,7 +42,7 @@ import { ProjectMigrationHistory } from "@/components/migration/ProjectMigration
 import { ServerMigrationWizard } from "@/components/migration/ServerMigrationWizard";
 
 interface Props {
-  onDeleteProject: (deleteApp?: boolean, wipeVolumes?: boolean, recordOnly?: boolean) => void;
+  onDeleteProject: (wipeVolumes?: boolean, recordOnly?: boolean) => void;
 }
 
 const ICON_TONES = {

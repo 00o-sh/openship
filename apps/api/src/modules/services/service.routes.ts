@@ -173,7 +173,14 @@ r.post(
 /* ─── Per-service container actions ─────────────────────────────────────── */
 r.post("/:serviceId/start", { tag: "project:service:write", mcp: { description: "Start this service's container." } }, cloudProjectProxy, ctrl.startContainer);
 r.post("/:serviceId/stop", { tag: "project:service:write", mcp: { description: "Stop this service's container." } }, cloudProjectProxy, ctrl.stopContainer);
-r.post("/:serviceId/restart", { tag: "project:service:write", mcp: { description: "Restart this service's container." } }, cloudProjectProxy, ctrl.restartContainer);
+/* `restart` is a BOUNCE, not a config apply — a container's environment is fixed
+ * when it is created. With pending env changes it answers 409 SERVICE_CONFIG_STALE
+ * naming the drifted keys instead of silently re-running the old config (GH-615);
+ * `?force=true` bounces anyway. Declaring a `body`/`query` schema here would be
+ * wrong twice over: `RouteSpec` has no `query` field, and a `body` schema makes
+ * secureRouter mount tbValidator("json"), which 400s the CLI's bodyless POST
+ * (its api-client always sets Content-Type: application/json). */
+r.post("/:serviceId/restart", { tag: "project:service:write", mcp: { description: "Restart (bounce) this service's container. Does NOT apply changed env/config — it answers 409 SERVICE_CONFIG_STALE when env changed since the running container was created. To APPLY config, trigger a refresh deploy: POST /api/deployments {refresh:true, serviceIds:[serviceId]}. Pass ?force=true to bounce despite pending changes." } }, cloudProjectProxy, ctrl.restartContainer);
 
 /* ─── Service environment variables ─────────────────────────────────────── */
 r.get(

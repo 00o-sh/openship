@@ -13,6 +13,7 @@ import {
   type RuntimeAdapter,
 } from "@repo/adapters";
 import { scopedVolumeName, type CommandExecutor } from "@repo/adapters";
+import { isArtifactRef } from "../../lib/container-ref";
 import { execInContainer } from "../../lib/agent-exec";
 import { encrypt, decrypt } from "../../lib/encryption";
 import { ENV_MASK, hasMaskedValue, maskDriftChanges, maskServiceEnv, mergeServiceEnv, unmaskEnv } from "../../lib/secret-env";
@@ -40,6 +41,7 @@ import { parseVolumeSpec, type VolumeKind } from "./volume-spec";
 import { sq } from "../migration/direct-transfer";
 import { bounded, duBytes, volumeBytes } from "../migration/migration-size";
 import { deployComposeServices } from "../deployments/compose/deploy.service";
+import { ServiceConfigStaleError, resolveStaleEnvKeysForService } from "../deployments/env-drift";
 import { deploymentWorkload } from "../deployments/deployment-class";
 import { hasSourceBuildRecipe } from "../../lib/deployable-service";
 import { deriveProjectRouteState } from "../domains/project-route.service";
@@ -1056,12 +1058,24 @@ export async function deleteService(
             await platform.runtime.destroy(containerId).catch((err: unknown) => {
               console.error(`[SERVICE] Failed to destroy service container ${containerId}:`, err);
             });
-            // Reclaim this service's built image NOW — the FK cascade in
+            // Reclaim this service's built artifact NOW — the FK cascade in
             // repos.service.remove() below erases the imageRef record, so a later
-            // teardown could never enumerate it. Guarded to `openship/…` build tags:
-            // a base/third-party image (postgres:16-alpine, redis:7-alpine) is PULLED,
-            // shared, and must never be removed. Best-effort; images:gc is the backstop.
-            if (
+            // teardown could never enumerate it. Best-effort; images:gc is the backstop.
+            //
+            // Two shapes, and the `openship/` tag guard answers for only one: a
+            // STATIC sub-app's imageRef is a host DIRECTORY (`/opt/openship/static/…`),
+            // which fails that prefix test, so deleting a static service used to leak
+            // its doc-root with nothing left in the DB to find it by (issue #640's
+            // third door). The tag guard stays for the image case: a base/third-party
+            // image (postgres:16-alpine, redis:7-alpine) is PULLED, shared, and must
+            // never be removed.
+            if (isArtifactRef(serviceDeployment.imageRef)) {
+              await platform.runtime
+                .destroy(serviceDeployment.imageRef!)
+                .catch((err: unknown) => {
+                  console.error(`[SERVICE] Failed to remove static output for ${svc.name}:`, err);
+                });
+            } else if (
               serviceDeployment.imageRef?.startsWith("openship/") &&
               platform.runtime instanceof DockerRuntime
             ) {
@@ -1901,12 +1915,68 @@ export async function stopServiceContainer(
   }
 }
 
+/**
+ * Bounce a service's container — `docker restart`, nothing more.
+ *
+ * It deliberately does NOT apply configuration: a container's environment is
+ * fixed when it is CREATED, so a restart re-runs whatever env the running
+ * container was built with. The old failure mode (GH-615) was that this endpoint
+ * answered `{success:true}` to an operator who had just changed an env var and
+ * expected the restart to pick it up — a silent no-op is the worst possible
+ * answer, because nothing tells you to go do the thing that actually works.
+ *
+ * So a restart with pending env changes REFUSES (409 `SERVICE_CONFIG_STALE`) and
+ * names both the drifted keys and the refresh deploy that applies them. Recreating
+ * the container from here instead would make a cheap bounce silently destroy and
+ * replace the container (downtime, new private IP) — and the platform already has
+ * the surgical path for that, `POST /deployments {refresh:true, serviceIds:[id]}`,
+ * which the dashboard's env editor has always used.
+ *
+ * `force` skips the guard: a crash-looping container still has to be bounceable
+ * without first applying an unrelated config change.
+ */
 export async function restartServiceContainer(
   ctx: RequestContext,
   projectId: string,
   serviceId: string,
+  opts?: { force?: boolean },
 ) {
   await assertNotControlPlaneById(projectId);
+
+  // Checked BEFORE resolving a container: this is DB-only, so the honest answer
+  // costs no transport — resolving first would allocate an SSH bridge only to
+  // abandon it on the throw path.
+  if (!opts?.force) {
+    const project = await repos.project.findById(projectId);
+    assertResourceInOrg(project, "Project", ctx.organizationId, projectId);
+    const dep = project.activeDeploymentId
+      ? await repos.deployment.findById(project.activeDeploymentId).catch(() => null)
+      : null;
+    const service = (await repos.service.listByProject(projectId)).find((s) => s.id === serviceId);
+    if (dep && service) {
+      const staleEnvKeys = await resolveStaleEnvKeysForService(
+        project,
+        dep.environment,
+        serviceId,
+      );
+      if (staleEnvKeys.length > 0) {
+        // Channel-neutral on purpose: this message is rendered in a dashboard
+        // toast, a CLI stderr line, and an MCP tool result. It names both routes
+        // to the fix and leaves the channel-specific phrasing (the exact CLI
+        // command) to the CLI, which has the structured fields to build it.
+        throw new ServiceConfigStaleError(
+          `"${service.name}" has ${staleEnvKeys.length} pending environment change(s) that a restart cannot apply — ` +
+            `a container's environment is fixed when it is created. Re-apply them with a refresh deploy ` +
+            `(dashboard: Redeploy → Refresh env; API: POST /api/deployments ` +
+            `{"projectId":"${projectId}","refresh":true,"serviceIds":["${serviceId}"]}). ` +
+            `Restart with force=true to bounce the container anyway, leaving the changes unapplied.`,
+          staleEnvKeys,
+          service.name,
+        );
+      }
+    }
+  }
+
   const { runtime, containerId, row } = await resolveServiceContainer(
     ctx,
     projectId,

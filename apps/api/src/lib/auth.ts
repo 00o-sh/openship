@@ -415,7 +415,35 @@ export const auth = betterAuth({
         // types are not enabled, so they fall through and send nothing.
         if (type === "email-verification") {
           const tmpl = verifyOtpEmailTemplate(otp, { expiresMinutes: 10 });
-          if (!(await sendMail({ to: email, ...tmpl }))) {
+          const delivered = await sendMail({ to: email, ...tmpl });
+
+          // DEV ESCAPE HATCH, `local-saas` ONLY.
+          //
+          // That target is a localhost-only SaaS used for development
+          // (`OPENSHIP_TARGET=local-saas`, ports 4100/3100) and it normally has no
+          // mail transport at all. Because CLOUD_MODE is true there,
+          // `requireEmailVerification` is forced on — so without this, signup on a
+          // dev machine is a dead end: the account is created, no session is issued,
+          // and the code needed to finish is inside an email nothing can send.
+          //
+          // Printing an auth credential to a log is only acceptable because of how
+          // narrow the gate is: `runtimeTargetId` comes from OPENSHIP_TARGET, an
+          // explicit operator choice validated against a fixed table (an unknown
+          // value throws at boot), and the `cloud-saas` row — production — cannot
+          // reach this branch. It is NOT gated on NODE_ENV, which flips by accident.
+          if (runtimeTargetId === "local-saas") {
+            console.warn(
+              `\n[dev:local-saas] email verification code for ${email}: ${otp}\n` +
+                `  (expires in 10 min. Logged because this target has no mail transport; ` +
+                `never happens on cloud-saas.)\n`,
+            );
+            // Deliberately does NOT throw on a delivery failure here, unlike every
+            // other target. The code above is the delivery channel on this target, so
+            // failing the request would make the account uncreatable.
+            return;
+          }
+
+          if (!delivered) {
             throw new APIError("SERVICE_UNAVAILABLE", {
               message:
                 "Could not send the verification code — this instance has no working " +

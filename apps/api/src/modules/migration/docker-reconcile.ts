@@ -19,7 +19,7 @@ import type {
   DockerVolumeInfo,
   ProxyKind,
 } from "@repo/adapters";
-import { classifyProxy } from "@repo/adapters";
+import { classifyProxy, isBuildHelperMarkers, OPENSHIP_LABEL } from "@repo/adapters";
 import type { ComposeHealthcheck, ProxySettings } from "@repo/core";
 import type { ComposeService } from "../../lib/compose-parser";
 import type { ManifestProjectEntry } from "../../lib/openship-manifest";
@@ -726,7 +726,11 @@ export function reconcileStack(opts: {
  * real (locally-built) app containers.
  */
 export const isBuildHelper = (labels: Record<string, string>) =>
-  !!labels["openship.build"] && !labels["openship.deployment"] && !labels["openship.service"];
+  isBuildHelperMarkers({
+    build: labels[OPENSHIP_LABEL.build],
+    deployment: labels[OPENSHIP_LABEL.deployment],
+    service: labels[OPENSHIP_LABEL.service],
+  });
 
 /**
  * Reconstruct OPENSHIP-owned projects from their live containers + the server's

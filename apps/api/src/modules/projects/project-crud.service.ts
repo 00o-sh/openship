@@ -51,9 +51,8 @@ import {
 } from "../github/github.service";
 import { getInstallationIdByOrg, getInstallUrl } from "../github/github.auth";
 import { domainWebhookUrl } from "../../lib/public-url";
-import { ensureSharedWebhook } from "./project-git-webhook";
+import { ensureSharedWebhook, findSharedWebhookId } from "./project-git-webhook";
 import {
-  deriveEnvironmentPublicEndpoints,
   deriveNextProjectRouteState,
   listProjectRouteRows,
   persistProjectRouteState,
@@ -1751,17 +1750,28 @@ export async function createProjectEnvironment(
     autoDeploy: base.autoDeploy,
   });
 
-  const baseRouteState = await resolveProjectRouteState(base);
-  const environmentEndpoints = deriveEnvironmentPublicEndpoints(
-    baseRouteState.publicEndpoints,
-    projectSlug,
-  );
-  // Every environment mints its OWN free subdomain, so this path could walk an
-  // org past its allowance one environment at a time — it had neither the Cloud
-  // gate nor the quota check the project create/update paths have.
-  await assertFreeEndpointsAllowed(organizationId, environmentEndpoints);
-  await persistProjectRouteState(created.id, environmentEndpoints);
-
+  // NOTHING runs between the create above and this return, and that is the point.
+  //
+  // This used to derive a free subdomain for the new environment and then call
+  // `assertFreeEndpointsAllowed` — AFTER `repos.project.create` had already
+  // committed. On a Cloud-disconnected instance that gate throws, so the request
+  // answered 400 while leaving a real environment row behind: the retry then hit
+  // the `existing` check above ("already exists"), and a reload showed a
+  // switchable, half-built environment with no routing. One failed click produced
+  // three separate symptoms.
+  //
+  // `createProject` states the rule this violated, a few hundred lines up: gate
+  // "BEFORE any group/project row is written … so a rejected create leaves nothing
+  // behind". It also exempts exactly this case — "the auto-derived default is
+  // deliberately NOT gated: that path must keep working on a self-hosted
+  // instance" — which the old code ignored, refusing the operator over a domain
+  // they never asked for.
+  //
+  // So an environment is now born with no endpoints, and routing arrives where it
+  // arrives for every other workload: `build.service.ts` mints
+  // `defaultFreeEndpoint(project)` on deploy and pushes it through
+  // `syncProjectRouteState`, on the path that actually carries the Cloud and quota
+  // gates. Deferring it makes the failure unreachable rather than handled.
   return environmentSummary(created);
 }
 
@@ -2162,6 +2172,66 @@ export async function getGitInfo(projectId: string, organizationId: string) {
     defaultRollbackStrategy: p.defaultRollbackStrategy,
     deployTarget,
   };
+}
+
+/**
+ * The delivery state of push auto-deploy for one project, from its stored
+ * columns alone (no GitHub round trip).
+ *
+ * ONE resolver, because two surfaces answer "is auto-deploy wired up?": the
+ * Source tab (`GET /:id/git`) and the project payload the Overview reads
+ * (`GET /:id/info`). The Overview used to read the Source tab's slice, which is
+ * only fetched when that tab mounts — so a project whose pushes really did
+ * deploy rendered "auto-deploy off" on every cold load. Deriving it twice is how
+ * the two would start disagreeing again.
+ *
+ * `webhookActive` is about the DELIVERY PATH, not the flag: `autoDeploy` alone
+ * governs whether a received push deploys (webhook-push.ts filters on that
+ * column), while this answers whether GitHub has somewhere to deliver it.
+ */
+export type ProjectWebhookState = {
+  strategy: Awaited<ReturnType<typeof resolveWebhookStrategy>>;
+  webhookActive: boolean;
+  installationInstalled: boolean;
+  sharedWebhookId: number | null;
+};
+
+export async function resolveProjectWebhookState(
+  organizationId: string,
+  project: {
+    gitOwner?: string | null;
+    gitRepo?: string | null;
+    webhookId?: number | null;
+    webhookDomain?: string | null;
+    autoDeploy?: boolean | null;
+    deployTarget?: string | null;
+  },
+): Promise<ProjectWebhookState> {
+  const strategy = await resolveWebhookStrategy(project);
+
+  // The App is installed per (org, owner), and only a cloud project's pushes are
+  // delivered through it — regardless of whether this box is the SaaS or a local
+  // instance connected to it.
+  let installationInstalled = false;
+  if (project.deployTarget === "cloud" && project.gitOwner) {
+    installationInstalled = !!(await getInstallationIdByOrg(organizationId, project.gitOwner));
+  }
+
+  // A webhook belongs to (owner, repo), so a sibling project in the org may own
+  // the row that carries its id.
+  let sharedWebhookId = project.webhookId ?? null;
+  if (!sharedWebhookId && project.gitOwner && project.gitRepo) {
+    sharedWebhookId = await findSharedWebhookId(organizationId, project.gitOwner, project.gitRepo);
+  }
+
+  const webhookActive =
+    strategy === "app"
+      ? installationInstalled
+      : strategy === "none"
+        ? false
+        : !!(project.autoDeploy && sharedWebhookId);
+
+  return { strategy, webhookActive, installationInstalled, sharedWebhookId };
 }
 
 export async function setBranch(

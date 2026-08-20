@@ -125,6 +125,18 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
   const refreshIds = (snapshot as { refreshServiceIds?: string[] }).refreshServiceIds;
   const refreshServiceIds =
     !dep.forceAll && refreshIds && refreshIds.length > 0 ? new Set(refreshIds) : undefined;
+  /**
+   * EXCLUSIVE scope: never deploy, fail or reap a service outside `targetServiceIds`.
+   *
+   * `targetServiceIds` alone only means "build/recreate these and carry the rest forward",
+   * and carrying requires a previous deployment to carry FROM. A caller whose untargeted
+   * services must be untouchable even with no previous release (a migration reusing
+   * already-running containers in place) sets this on the snapshot.
+   */
+  const strictScope =
+    !dep.forceAll &&
+    !!targetServiceIds &&
+    Boolean((snapshot as { strictServiceScope?: boolean }).strictServiceScope);
 
   const composeBuild = await buildComposeImages({
     project,
@@ -184,6 +196,7 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
     usesManagedRouting,
     serverId: snapshot.serverId,
     targetServiceIds,
+    strictScope,
     routeOptions: project.webhookDomain
       ? {
           webhookDomain: project.webhookDomain,
@@ -217,9 +230,19 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
     return;
   }
 
+  // Which services actually got deployed — everything else's build artifact is
+  // unused and gets reclaimed below.
+  //
+  // `staticRoot` is part of the test, not a nicety: a self-hosted static sub-app
+  // is served from disk by the edge, so it deliberately carries a staticRoot
+  // INSTEAD of a containerId (see MultiServiceDeployResult.services). Reading
+  // "no containerId" as "not deployed" put its doc-root — which is the SAME path
+  // the vhost was just pointed at — into the unused list, so every SUCCESSFUL
+  // compose deploy `rm -rf`'d the static site it had just published, reported
+  // ready, and then 404'd every request.
   const deployedServiceIds = new Set(
     composeResult.services
-      .filter((service) => service.containerId)
+      .filter((service) => service.containerId || service.staticRoot)
       .map((service) => service.serviceId),
   );
   for (const [serviceId, imageRef] of composeBuild.builtImageRefs) {

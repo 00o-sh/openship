@@ -337,28 +337,7 @@
     "close": "关闭"
   },
   "gitInfo": {
-    "repository": "仓库",
-    "autoDeploy": "自动部署",
-    "deploysOnPush": "每次推送时部署",
-    "manualOnly": "仅手动部署",
-    "branchToDeploy": "要部署的分支",
-    "chooseBranch": "选择从你的仓库中部署哪个分支",
-    "save": "保存",
-    "cancel": "取消",
-    "viewOnGithub": "在 GitHub 上查看",
-    "recentCommits": "最近的提交",
-    "totalCommits": "共 {count} 个",
-    "noCommits": "还没有提交",
-    "toast": {
-      "fetchBranchesFailed": "获取分支失败",
-      "errorTitle": "错误",
-      "branchUpdated": "分支更新成功",
-      "updatedTitle": "已更新",
-      "branchUpdateFailed": "更新分支失败",
-      "autoDeployEnabled": "已启用自动部署",
-      "autoDeployDisabled": "已禁用自动部署",
-      "autoDeployFailed": "更新自动部署失败"
-    }
+    "autoDeploy": "自动部署"
   },
   "git": {
     "connectFirst": {
@@ -590,10 +569,6 @@
     "cannotUndo": "此操作无法撤销。",
     "aboutToPrefix": "你即将删除 ",
     "aboutToSuffix": "。",
-    "deleteAllAria": "删除所有环境",
-    "deleteAll": "删除所有环境",
-    "deleteAllOn": "移除项目应用及其下的每个分支环境。",
-    "deleteAllOff": "仅移除此环境。其他分支将保留。",
     "scanning": "正在扫描已附加的服务和卷…",
     "wipeAria": "同时清除服务数据",
     "wipeLabelOne": "同时清除服务数据（{count} 个卷）",
@@ -608,9 +583,7 @@
     "typePrefix": "输入 ",
     "typeSuffix": " 以确认。",
     "cancel": "取消",
-    "confirmDeleteWipe": "删除 + 清除数据",
     "confirmDeleteEnvWipe": "删除环境 + 清除数据",
-    "confirmDelete": "删除项目",
     "confirmDeleteEnv": "删除环境",
     "linkedTitleOne": "{count} 个项目连接到此应用",
     "linkedTitleOther": "{count} 个项目连接到此应用",
@@ -802,6 +775,11 @@
     "records": {
       "failed": "无法加载此域名的 DNS 记录。",
       "retry": "重试"
+    },
+    "outputHint": {
+      "body": "在 {path} 未找到构建输出 — 请检查输出目录并重新部署。",
+      "noIndex": "{path} 存在输出，但没有 index 文件 — 请求将返回 404。请检查输出目录。",
+      "notServed": "边缘代理对 {path} 返回了 HTTP {status} — 此路径未提供服务。请检查输出目录和路由。"
     }
   }
 }

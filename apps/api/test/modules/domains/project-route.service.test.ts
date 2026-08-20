@@ -1,19 +1,33 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { listByProject, findDeployment, resolveRuntime, reconcile, syncManagedEdge, deregisterManagedEdge } =
-  vi.hoisted(() => ({
-    listByProject: vi.fn(),
-    findDeployment: vi.fn(),
-    resolveRuntime: vi.fn(),
-    reconcile: vi.fn(),
-    syncManagedEdge: vi.fn(),
-    deregisterManagedEdge: vi.fn(),
-  }));
+const {
+  listByProject,
+  findDeployment,
+  resolveRuntime,
+  reconcile,
+  syncManagedEdge,
+  deregisterManagedEdge,
+  listServicesByProject,
+  listServicesByDeployment,
+} = vi.hoisted(() => ({
+  listByProject: vi.fn(),
+  findDeployment: vi.fn(),
+  resolveRuntime: vi.fn(),
+  reconcile: vi.fn(),
+  syncManagedEdge: vi.fn(),
+  deregisterManagedEdge: vi.fn(),
+  listServicesByProject: vi.fn(),
+  listServicesByDeployment: vi.fn(),
+}));
 
 vi.mock("@repo/db", () => ({
   repos: {
     domain: { listByProject },
     deployment: { findById: findDeployment },
+    // A multi-service release resolves a project-level route's upstream from the
+    // SERVICE that owns its port, so the re-apply reads both service tables.
+    // Default: no services → the single-app (deployment.containerId) path.
+    service: { listByProject: listServicesByProject, listByDeployment: listServicesByDeployment },
   },
 }));
 
@@ -53,6 +67,14 @@ import {
   reapplyProjectLiveRoutes,
   shouldRefuseLoopbackRoute,
 } from "../../../src/modules/domains/project-route.service";
+
+// Default for every suite below: the project has NO services, so a project-level
+// route resolves against `deployment.containerId` (the single-app path). The
+// multi-service suite overrides these.
+beforeEach(() => {
+  listServicesByDeployment.mockReset().mockResolvedValue([]);
+  listServicesByProject.mockReset().mockResolvedValue([]);
+});
 
 describe("shouldRefuseLoopbackRoute", () => {
   it("refuses a tenant project's public route to the dashboard port on loopback", () => {
@@ -498,5 +520,275 @@ describe("deriveNextProjectRouteState custom-hostname gate", () => {
         nextPublicEndpoints: [{ customDomain: "127.0.0.1", domainType: "custom", port: 3000 }],
       }),
     ).toThrow(/"127.0.0.1" is not a valid custom domain/);
+  });
+});
+
+/**
+ * Issue #618: a project MIGRATED into Openship (adopted in place) verified its
+ * domain, took a certificate — and never got a vhost. Both re-attach paths store
+ * the COMPOSE_SENTINEL in `deployment.container_id` (migrate.service.ts →
+ * reattachRuntime / attachLiveRuntime), and this re-apply treated that as "there is
+ * no upstream to point a project-level route at": it applied `removes` and returned,
+ * so `sites-enabled` stayed empty while the domain read Verified + SSL Active.
+ *
+ * A multi-service release resolves the route through the SERVICE that owns its port
+ * instead. The port is what the operator sets in the Domains tab ("Mapped to"), and
+ * it has to beat the primary-container guess — the service list is dependency-
+ * ordered, so the guess resolves to the DATABASE (#498).
+ */
+describe("reapplyProjectLiveRoutes multi-service project-level routes (issue #618)", () => {
+  const project = {
+    id: "proj-dependabot",
+    slug: "dependabot",
+    port: null,
+    cloudWorkspaceId: null,
+    activeDeploymentId: "dep-1",
+    organizationId: "org-1",
+    webhookDomain: null,
+    routeStrategy: null,
+    hasServer: true,
+    outputDirectory: null,
+  };
+
+  /**
+   * The adopted stack from the issue: postgres FIRST (adoption records services in
+   * discovery order, and a `find`-the-first-container guess lands there), and every
+   * service `exposed: false` — adoption leaves them unexposed on purpose and points
+   * the operator at the project's Domains tab instead (migrate.service.ts), which is
+   * precisely the affordance that had no writer.
+   */
+  const services = [
+    { id: "svc-postgres", name: "postgres", enabled: true, exposed: false, ports: ["5432"] },
+    { id: "svc-web", name: "web", enabled: true, exposed: false, ports: ["3000"] },
+    { id: "svc-worker", name: "worker", enabled: true, exposed: false, ports: [] },
+  ];
+
+  const liveRows = [
+    { serviceId: "svc-postgres", containerId: "c-postgres", ip: "10.0.0.3", hostPort: null },
+    { serviceId: "svc-web", containerId: "c-web", ip: "10.0.0.2", hostPort: 3000 },
+    { serviceId: "svc-worker", containerId: "c-worker", ip: "10.0.0.4", hostPort: null },
+  ];
+
+  const projectDomain = (targetPort: number | null) => ({
+    id: "dom-1",
+    hostname: "app.example.com",
+    isPrimary: true,
+    serviceId: null,
+    targetPort,
+    targetPath: null,
+    domainType: "custom",
+    verified: true,
+  });
+
+  /** container-ip makes the resolved containerPort visible in the asserted URL. */
+  const containerIpRuntime = {
+    name: "docker",
+    supports: (feature: string) => feature === "containerIp",
+    getContainerIp: async (id: string) =>
+      ({ "c-web": "10.0.0.2", "c-postgres": "10.0.0.3", "c-worker": "10.0.0.4" })[id] ?? null,
+  };
+
+  beforeEach(() => {
+    reconcile.mockReset().mockResolvedValue(undefined);
+    resolveRuntime.mockReset();
+    findDeployment.mockReset();
+    listByProject.mockReset();
+    syncManagedEdge.mockReset().mockResolvedValue({ failures: [] });
+    deregisterManagedEdge.mockReset().mockResolvedValue({ failures: [] });
+
+    // The adopted deployment: the sentinel, NOT a container id.
+    findDeployment.mockResolvedValue({
+      id: "dep-1",
+      containerId: "compose",
+      meta: { deployTarget: "server", serverId: "srv-1", runtimeMode: "docker", adopt: true },
+      organizationId: "org-1",
+    });
+    listServicesByProject.mockResolvedValue(services);
+    listServicesByDeployment.mockResolvedValue(liveRows);
+    // No containerInfo support → the live host-port read is "couldn't ask", so the
+    // stored row's port is used (the #506 rule) instead of being invented.
+    resolveRuntime.mockResolvedValue({
+      routing: { provider: "docker" },
+      runtime: { name: "docker", supports: () => false },
+      effectiveTarget: "server",
+      serverId: "srv-1",
+    });
+  });
+
+  it("registers the domain against the service that owns its port instead of skipping it", async () => {
+    listByProject.mockResolvedValue([projectDomain(3000)]);
+
+    await reapplyProjectLiveRoutes(project, []);
+
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(reconcile.mock.calls[0][1].registers).toEqual([
+      { hostname: "app.example.com", isCustomDomain: true, targetUrl: "http://127.0.0.1:3000" },
+    ]);
+  });
+
+  it("picks the port's owner, not the dependency-ordered first service", async () => {
+    listByProject.mockResolvedValue([projectDomain(3000)]);
+    resolveRuntime.mockResolvedValue({
+      routing: { provider: "docker" },
+      runtime: containerIpRuntime,
+      effectiveTarget: "server",
+      serverId: "srv-1",
+    });
+
+    await reapplyProjectLiveRoutes({ ...project, routeStrategy: "container-ip" }, []);
+
+    // 10.0.0.2 is web. postgres (10.0.0.3) is first in the list and would have won
+    // a `find`-the-first-container guess.
+    expect(reconcile.mock.calls[0][1].registers).toEqual([
+      { hostname: "app.example.com", isCustomDomain: true, targetUrl: "http://10.0.0.2:3000" },
+    ]);
+  });
+
+  it("matches a route pointed at the PUBLISHED port and still dials the container port", async () => {
+    listByProject.mockResolvedValue([projectDomain(8080)]);
+    listServicesByProject.mockResolvedValue([
+      services[0],
+      { id: "svc-web", name: "web", enabled: true, exposed: false, ports: ["8080:3000"] },
+    ]);
+    resolveRuntime.mockResolvedValue({
+      routing: { provider: "docker" },
+      runtime: containerIpRuntime,
+      effectiveTarget: "server",
+      serverId: "srv-1",
+    });
+
+    await reapplyProjectLiveRoutes({ ...project, routeStrategy: "container-ip" }, []);
+
+    // The operator named 8080 (the host half). Inside the container the app listens
+    // on 3000 — dialing 10.0.0.2:8080 would hit nothing.
+    expect(reconcile.mock.calls[0][1].registers).toEqual([
+      { hostname: "app.example.com", isCustomDomain: true, targetUrl: "http://10.0.0.2:3000" },
+    ]);
+  });
+
+  it("skips a route whose port no service declares rather than guessing a service", async () => {
+    // 9999 is declared nowhere and this release has no primary container to fall back
+    // on. Answering "the first service" would proxy the operator's public domain at
+    // postgres — the failure the sentinel guard was added to stop. Skip it and log
+    // which ports ARE on offer instead.
+    listByProject.mockResolvedValue([projectDomain(9999)]);
+    resolveRuntime.mockResolvedValue({
+      routing: { provider: "docker" },
+      runtime: containerIpRuntime,
+      effectiveTarget: "server",
+      serverId: "srv-1",
+    });
+
+    await reapplyProjectLiveRoutes({ ...project, routeStrategy: "container-ip" }, []);
+
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(reconcile.mock.calls[0][1].registers ?? []).toEqual([]);
+  });
+
+  it("falls back to the release's own primary container for an unmatched port", async () => {
+    // Same unmatched port, but this compose release DID come up with a primary
+    // container. That is what resolved the route before this change, so it still does.
+    listByProject.mockResolvedValue([projectDomain(9999)]);
+    findDeployment.mockResolvedValue({
+      id: "dep-1",
+      containerId: "c-web",
+      meta: { deployTarget: "server", serverId: "srv-1", runtimeMode: "docker" },
+      organizationId: "org-1",
+    });
+    resolveRuntime.mockResolvedValue({
+      routing: { provider: "docker" },
+      runtime: containerIpRuntime,
+      effectiveTarget: "server",
+      serverId: "srv-1",
+    });
+
+    await reapplyProjectLiveRoutes({ ...project, routeStrategy: "container-ip" }, []);
+
+    expect(reconcile.mock.calls[0][1].registers).toEqual([
+      { hostname: "app.example.com", isCustomDomain: true, targetUrl: "http://10.0.0.2:9999" },
+    ]);
+  });
+
+  it("dials the owner's PUBLISHED host port under the default loopback-port strategy", async () => {
+    // Discriminating fixture: the publish (32770) differs from the container port
+    // (3000), so the asserted URL can only come from the row's host port. The suite's
+    // faithful #618 fixture has them equal, which cannot tell the two apart.
+    listByProject.mockResolvedValue([projectDomain(3000)]);
+    listServicesByDeployment.mockResolvedValue([
+      { serviceId: "svc-postgres", containerId: "c-postgres", ip: "10.0.0.3", hostPort: 5432 },
+      { serviceId: "svc-web", containerId: "c-web", ip: "10.0.0.2", hostPort: 32770 },
+    ]);
+
+    await reapplyProjectLiveRoutes(project, []);
+
+    expect(reconcile.mock.calls[0][1].registers).toEqual([
+      { hostname: "app.example.com", isCustomDomain: true, targetUrl: "http://127.0.0.1:32770" },
+    ]);
+  });
+
+  it("prefers the port's owner over the release's own primary container", async () => {
+    // This release HAS a real primary container — and it is the WRONG one for the
+    // route's port. HEAD resolved project-level routes through it unconditionally, so
+    // this is the case that fails if the service resolution is removed.
+    listByProject.mockResolvedValue([projectDomain(3000)]);
+    findDeployment.mockResolvedValue({
+      id: "dep-1",
+      containerId: "c-postgres",
+      meta: { deployTarget: "server", serverId: "srv-1", runtimeMode: "docker" },
+      organizationId: "org-1",
+    });
+    resolveRuntime.mockResolvedValue({
+      routing: { provider: "docker" },
+      runtime: containerIpRuntime,
+      effectiveTarget: "server",
+      serverId: "srv-1",
+    });
+
+    await reapplyProjectLiveRoutes({ ...project, routeStrategy: "container-ip" }, []);
+
+    // web (10.0.0.2), not the primary container postgres (10.0.0.3).
+    expect(reconcile.mock.calls[0][1].registers).toEqual([
+      { hostname: "app.example.com", isCustomDomain: true, targetUrl: "http://10.0.0.2:3000" },
+    ]);
+  });
+
+  it("still skips registration when no service has a container to route to", async () => {
+    listByProject.mockResolvedValue([projectDomain(3000)]);
+    listServicesByDeployment.mockResolvedValue([
+      { serviceId: "svc-web", containerId: null, ip: null, hostPort: null },
+    ]);
+
+    await reapplyProjectLiveRoutes(project, []);
+
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(reconcile.mock.calls[0][1].registers ?? []).toEqual([]);
+  });
+
+  it("leaves a single-app release on the deployment's own container", async () => {
+    listByProject.mockResolvedValue([projectDomain(3000)]);
+    listServicesByDeployment.mockResolvedValue([]);
+    listServicesByProject.mockResolvedValue([]);
+    findDeployment.mockResolvedValue({
+      id: "dep-1",
+      containerId: "c-single",
+      meta: { runtimeMode: "docker" },
+      organizationId: "org-1",
+    });
+    resolveRuntime.mockResolvedValue({
+      routing: { provider: "docker" },
+      runtime: {
+        name: "docker",
+        supports: (feature: string) => feature === "containerIp",
+        getContainerIp: async (id: string) => (id === "c-single" ? "10.0.0.9" : null),
+      },
+      effectiveTarget: "server",
+      serverId: "srv-1",
+    });
+
+    await reapplyProjectLiveRoutes({ ...project, routeStrategy: "container-ip" }, []);
+
+    expect(reconcile.mock.calls[0][1].registers).toEqual([
+      { hostname: "app.example.com", isCustomDomain: true, targetUrl: "http://10.0.0.9:3000" },
+    ]);
   });
 });

@@ -180,3 +180,162 @@ describe("applyProjectRouting — upstream resolution", () => {
     expect(emittedRegister().targetUrl).toBe("http://172.19.0.2:3001");
   });
 });
+
+/**
+ * The live re-apply has to be able to produce the SAME vhost the deploy produces,
+ * for the flagship monorepo shape: one static frontend served from a host directory
+ * plus one server backend proxied at a prefix. It could not — the frontend has no
+ * container and no port, so its upstream resolved to null, `buildCompositeRegistration`
+ * refused, and a routing save (or the Retry-routing button) wrote nothing and said
+ * nothing. The directory is on the active deployment's `service_deployment.image_ref`;
+ * these tests pin that it is read, and that a composite we still cannot build is
+ * reported rather than swallowed.
+ */
+describe("applyProjectRouting — static frontend composite", () => {
+  const web = {
+    id: "svc_web",
+    projectId: "proj_1",
+    name: "web",
+    kind: "monorepo",
+    framework: "vite",
+    startCommand: null,
+    enabled: true,
+    // Exposed WITH a port, like a real static sub-app row: the port is what earns it
+    // a hostname. It just has nothing listening on it — no container, so no live
+    // upstream — which is exactly why the release directory has to back `/`.
+    exposed: true,
+    exposedPort: "4173",
+    ports: [],
+    domain: null,
+    customDomain: "app.example.com",
+    domainType: "custom",
+    publicEndpoints: null,
+  };
+  const api = {
+    id: "svc_api",
+    projectId: "proj_1",
+    name: "api",
+    kind: "monorepo",
+    framework: "express",
+    startCommand: "npm start",
+    enabled: true,
+    exposed: true,
+    exposedPort: "3000",
+    ports: [],
+    domain: null,
+    customDomain: null,
+    domainType: null,
+    publicEndpoints: null,
+  };
+  const RELEASE_DIR = "/opt/openship/static/releases/dep_1-web";
+
+  /** The static frontend owns no container — only the promoted release directory. */
+  function rows(webImageRef: string | null) {
+    serviceRepo.listByDeployment.mockResolvedValue([
+      {
+        id: "sd_web",
+        serviceId: "svc_web",
+        deploymentId: "dep_1",
+        containerId: null,
+        imageRef: webImageRef,
+        ip: null,
+        hostPort: null,
+      },
+      {
+        id: "sd_api",
+        serviceId: "svc_api",
+        deploymentId: "dep_1",
+        containerId: "container_api",
+        imageRef: "openship/api:bld_1",
+        ip: "172.19.0.5",
+        hostPort: null,
+      },
+    ]);
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // No fan-out routes: the only register that may appear is the composite.
+    projectRepo.findById.mockResolvedValue({ ...project(), compositeRoutes: [] });
+    deploymentRepo.findById.mockResolvedValue({
+      id: "dep_1",
+      organizationId: "org_1",
+      meta: { deployTarget: "local", runtimeMode: "docker" },
+    });
+    serviceRepo.listByProject.mockResolvedValue([web, api]);
+    rows(RELEASE_DIR);
+    runtimeReturning({ info: {}, ip: "172.19.0.5" });
+    usesManagedRouting.mockReturnValue(false);
+    reconcileProjectRoutes.mockResolvedValue(undefined);
+  });
+
+  it("serves the frontend from its release directory and proxies the backend", async () => {
+    await applyProjectRouting("proj_1");
+
+    const register = emittedRegister();
+    expect(register).toMatchObject({
+      hostname: "app.example.com",
+      staticRoot: RELEASE_DIR,
+      proxyLocations: [{ pathPrefix: "/api/", targetUrl: "http://172.19.0.5:3000" }],
+    });
+    // Files at `/` OR an upstream at `/`, never both — an undefined targetUrl reaching
+    // the edge is `Invalid proxy target: undefined`.
+    expect(register.targetUrl).toBeUndefined();
+  });
+
+  it("ignores an image tag in the same column", async () => {
+    // `image_ref` is polymorphic: a containerized service's tag lives there too, and
+    // handing `openship/web:bld_1` to nginx as a `root` would emit a broken vhost.
+    rows("openship/web:bld_1");
+
+    await applyProjectRouting("proj_1");
+
+    expect(reconcileProjectRoutes).not.toHaveBeenCalled();
+  });
+
+  it("says why when the composite still cannot be built", async () => {
+    rows(null);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await applyProjectRouting("proj_1");
+
+    expect(reconcileProjectRoutes).not.toHaveBeenCalled();
+    expect(warn.mock.calls.flat().join(" ")).toMatch(
+      /composite vhost not emitted.*frontend has neither a static root nor a live upstream/,
+    );
+    warn.mockRestore();
+  });
+
+  it("reports the backend, not the frontend, when only the backend is down", async () => {
+    serviceRepo.listByDeployment.mockResolvedValue([
+      {
+        id: "sd_web",
+        serviceId: "svc_web",
+        deploymentId: "dep_1",
+        containerId: null,
+        imageRef: RELEASE_DIR,
+        ip: null,
+        hostPort: null,
+      },
+      {
+        id: "sd_api",
+        serviceId: "svc_api",
+        deploymentId: "dep_1",
+        containerId: "container_api",
+        imageRef: "openship/api:bld_1",
+        ip: null,
+        hostPort: null,
+      },
+    ]);
+    runtimeReturning({ ip: null });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await applyProjectRouting("proj_1");
+
+    expect(reconcileProjectRoutes).not.toHaveBeenCalled();
+    const logged = warn.mock.calls.flat().join(" ");
+    expect(logged).toMatch(/backend has no live upstream/);
+    expect(logged).not.toMatch(/frontend has neither/);
+    warn.mockRestore();
+  });
+});

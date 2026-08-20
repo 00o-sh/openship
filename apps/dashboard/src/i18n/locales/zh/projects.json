@@ -61,6 +61,7 @@
     "switchAria": "切换环境",
     "addBranchAria": "添加分支",
     "searchBranches": "搜索分支",
+    "refreshBranches": "刷新分支",
     "noBranches": "未找到分支",
     "environmentName": "环境名称",
     "branchLabel": "分支标签",

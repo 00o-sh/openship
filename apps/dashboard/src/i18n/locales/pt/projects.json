@@ -61,6 +61,7 @@
     "switchAria": "Mudar de ambiente",
     "addBranchAria": "Adicionar ramo",
     "searchBranches": "Pesquisar ramos",
+    "refreshBranches": "Atualizar ramos",
     "noBranches": "Nenhum ramo encontrado",
     "environmentName": "Nome do ambiente",
     "branchLabel": "Etiqueta do ramo",

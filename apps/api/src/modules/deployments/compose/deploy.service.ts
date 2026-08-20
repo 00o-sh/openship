@@ -31,12 +31,21 @@ import {
 import { getTemplateForOrg } from "../../apps/catalog-source";
 import { attachLinkedNetworks } from "../attach-linked-networks";
 import {
+  auditStaticOutput,
+  describeOutputFinding,
+  outputFindingIsBroken,
+  staticOutputTargets,
+} from "../output-audit.service";
+import {
+  BareRuntime,
   BuildLogger,
   DockerRuntime,
+  STATIC_RELEASE_BASE,
   allocateHostPort,
   rootOrDegrade,
   resolveEnvironment,
   runDeployPipeline,
+  sharedMountExecutor,
   type CommandExecutor,
   type DeployConfig,
   type DeployEnvironment,
@@ -62,6 +71,7 @@ import {
 } from "./app-config-host";
 import {
   auditRoutedDomainTls,
+  buildProjectRouteDomains,
   buildServiceRouteDomains,
   createTrackedSslProvider,
   ensureRouteDomainRecord,
@@ -93,6 +103,11 @@ import {
   hostChannelDeployNotice,
   type PortCheckResult,
 } from "../../../lib/deployment-runtime";
+import {
+  buildProjectServiceUpstream,
+  describeCandidatePorts,
+} from "../../../lib/project-service-upstream";
+import { resolveRouteRedirect } from "../../../lib/domain-redirect";
 import { isRealContainerRef } from "../../../lib/container-ref";
 import { resolveServicePort } from "./domain-helpers";
 import { mergeServiceDeployEnv } from "./service-env-layers";
@@ -145,7 +160,18 @@ export interface ComposeDeployResult {
     containerId?: string;
     status: string;
     ip?: string;
+    /** The ONE host port `service_deployment` persists — the pinned/primary one. */
     hostPort?: number;
+    /**
+     * Every published binding, keyed by CONTAINER port → host port.
+     *
+     * The scalar above cannot answer "what is port N published on" for a container
+     * publishing several: it is the pinned PRIMARY, so a project-level route on any
+     * other port was dialed at the primary's publish and reached a different app.
+     * `service_deployment` holds one number, so this lives on the in-memory result
+     * and is re-read live by the routing paths that run later.
+     */
+    hostPortByContainerPort?: Record<number, number>;
     error?: string;
     /** Kept running exactly as-is: nothing built, created, or port-probed. */
     carried?: true;
@@ -876,15 +902,28 @@ export async function deployComposeServices(
     const systemLog = (entry: { message: string; level: "info" | "warn" | "error" }) => {
       logger.log(`${entry.message}\n`, entry.level);
     };
-    const plannedRoutes = enabled.flatMap((svc) =>
-      buildServiceRouteDomains({
+    const plannedRoutes = [
+      ...enabled.flatMap((svc) =>
+        buildServiceRouteDomains({
+          project,
+          service: svc,
+          runtimeName: runtime.name,
+          usesManagedRouting: opts.usesManagedRouting ?? false,
+          domainByHostname,
+        }),
+      ),
+      // PROJECT-LEVEL rows count too. They are registered (and certed) further down,
+      // and adoption leaves every service UNEXPOSED on purpose — so the exact shape
+      // that needs a project-level route is the one where `buildServiceRouteDomains`
+      // returns [] for everything, leaving this preflight to skip the edge and certbot
+      // and the registration below to run against a box that has neither.
+      ...buildProjectRouteDomains({
         project,
-        service: svc,
+        projectDomains: [...domainByHostname.values()],
         runtimeName: runtime.name,
         usesManagedRouting: opts.usesManagedRouting ?? false,
-        domainByHostname,
       }),
-    );
+    ];
 
     await opts.system.ensureFeature("deploy", systemLog);
     // Routing/SSL toolchain is best-effort — domains are optional, so failing to
@@ -1569,9 +1608,90 @@ export async function deployComposeServices(
         serviceId: svc.id,
         status: "deploying",
       });
-      logger.log(`Serving static files for "${svc.name}" from ${image}\n`, "info", {
+
+      // Promote the extract out of its `.builds/<session>-<svc>` staging dir into
+      // a stable release dir, exactly as the single-app static path does. Two
+      // reasons this is not optional:
+      //   • It is the only HARD output gate a static deploy has (the release root
+      //     must exist and be non-empty). Registering a vhost straight at the
+      //     staging dir skipped it, so an extract that produced nothing deployed
+      //     green and 404'd every request.
+      //   • It gives the doc-root an owner. A per-build-session directory is
+      //     nobody's release: superseded copies accumulated forever and the
+      //     deployment-scoped cleanup had nothing stable to reclaim.
+      // Keyed `<deploymentId>-<serviceId>` so each static sub-app owns its own
+      // release under one compose deployment.
+      let staticRoot: string;
+      try {
+        const staticExecutor = await sharedMountExecutor({
+          localHost: Boolean(opts?.localHost),
+          executor: opts?.executor ?? null,
+        });
+        const previousStatic = previousByServiceId.get(svc.id);
+        staticRoot = await new BareRuntime({
+          workDir: STATIC_RELEASE_BASE,
+          executor: staticExecutor ?? undefined,
+        }).promoteStaticRelease({
+          artifactPath: image,
+          releaseId: `${dep.id}-${svc.id}`,
+          // Only pass a predecessor when it really was a promoted release path —
+          // an older row's imageRef may still be a staging dir, and rsync's
+          // --link-dest against a directory that no longer exists just loses the
+          // dedup, but against the WRONG one would hard-link stale files in.
+          previousReleaseId:
+            previousStatic?.deploymentId && previousStatic.serviceId
+              ? `${previousStatic.deploymentId}-${previousStatic.serviceId}`
+              : undefined,
+          // The Docker sandbox already extracted the doc-root's CONTENTS, so the
+          // release root IS the doc root (same contract as moveStaticBuildToHost).
+          outputDirectory: "",
+        });
+      } catch (err) {
+        // The promote's validation is a real gate: the release root does not exist,
+        // or exists and is empty. Both mean every request to this sub-app would
+        // 404, so this service FAILS rather than deploying green — the same shape
+        // as a build failure above, and `markServiceDeploymentFailed` upserts
+        // because a scoped deploy may have pre-created this row (#585).
+        const detail = safeErrorMessage(err);
+        logger.log(`Static output for "${svc.name}" is not servable: ${detail}\n`, "error", {
+          serviceName: svc.name,
+        });
+        sessionManager.broadcastServiceStatus(dep.id, {
+          serviceName: svc.name,
+          serviceId: svc.id,
+          status: "failed",
+          error: detail,
+        });
+        await repos.service.markServiceDeploymentFailed({
+          deploymentId: dep.id,
+          serviceId: svc.id,
+          serviceName: svc.name,
+          imageRef: image,
+          errorMessage: detail,
+        });
+        results.push({
+          serviceId: svc.id,
+          serviceName: svc.name,
+          status: "failed",
+          error: detail,
+        });
+        unavailableServiceNames.add(svc.name);
+        continue;
+      }
+
+      logger.log(`Serving static files for "${svc.name}" from ${staticRoot}\n`, "info", {
         serviceName: svc.name,
       });
+
+      // Endpoints whose vhost this deploy actually WROTE, captured for the output
+      // audit below. Only registered routes go in: a host skipped as a duplicate
+      // isn't ours to audit, and one whose registration failed is already reported —
+      // auditing it too would report the same problem twice, in different words.
+      const staticAuditRoutes: Array<{
+        targetPath?: string | null;
+        hostname?: string;
+        isPrimary?: boolean;
+      }> = [];
 
       // Per-service routes point at the DIRECTORY. Best-effort, matching the rest
       // of routing: a registration failure never fails the deploy.
@@ -1590,7 +1710,7 @@ export async function deployComposeServices(
           try {
             await routeContext.routing.registerRoute({
               domain: route.hostname,
-              staticRoot: image,
+              staticRoot,
               tls: true,
               terminatesTlsLocally: hostTerminatesTlsLocally(
                 route.hostname,
@@ -1612,8 +1732,13 @@ export async function deployComposeServices(
             continue;
           }
           // Past the register: this route really is on the edge, so the TLS audit
-          // may ask about it.
+          // and the output audit may both ask about it.
           registeredRoutes.push(route);
+          staticAuditRoutes.push({
+            targetPath: route.targetPath ?? "/",
+            hostname: route.hostname,
+            isPrimary: route.isPrimary,
+          });
 
           // SSL parity with a PROXIED service. A proxied route goes through
           // `registerResolvedRoutes`, which owns the `provisionSsl` step; this
@@ -1648,18 +1773,45 @@ export async function deployComposeServices(
       // means an untargeted static sub-app ALWAYS arrives here and a plain insert violated
       // UNIQUE(deploymentId, serviceId), throwing out of this function to kill the whole
       // deploy on its own bookkeeping (#585).
+      // The route-aware output audit — the one check a compose static sub-app never
+      // had. The promote above proves the release root is non-empty; this proves
+      // each ROUTED path actually serves, from the edge's own vantage point and
+      // (when a hostname is routed) with a real HTTP request. Advisory, exactly as
+      // on the single-app path: `composeRouteWarnings` already flows into
+      // `routeWarnings` → `deployWarning` + `edgeUnsynced`, so a finding surfaces as
+      // "Action Required" with no new meta key, and never fails the deploy.
+      if (routeContext?.routing) {
+        const findings = await auditStaticOutput(
+          // No runtime fallback: `runtime` here is the compose DockerRuntime and a
+          // static sub-app owns no container, so `inContainerExecutor` has nothing
+          // to enter. The edge is the only vantage point that exists for these
+          // files, and an absent one correctly yields "no signal".
+          { routing: routeContext.routing, containerId: null },
+          staticOutputTargets(staticRoot, staticAuditRoutes),
+          logger,
+        );
+        for (const finding of findings.filter(outputFindingIsBroken)) {
+          composeRouteWarnings.push(`${svc.name} ${describeOutputFinding(finding)}`);
+        }
+      }
+
+      // `imageRef` is the PROMOTED release dir, not the staging dir the builder
+      // wrote. It is the only handle anything downstream has on this sub-app's
+      // files: project teardown classifies it as an artifact and removes it
+      // (issue #640), and the per-deployment cleanup reclaims it — under keep-set
+      // protection — when this release is superseded and pruned.
       await repos.service.upsertServiceDeployment({
         deploymentId: dep.id,
         serviceId: svc.id,
         serviceName: svc.name,
         status: "success",
-        imageRef: image,
+        imageRef: staticRoot,
       });
       results.push({
         serviceId: svc.id,
         serviceName: svc.name,
         status: "running",
-        staticRoot: image,
+        staticRoot,
       });
       successful += 1;
       sessionManager.broadcastServiceStatus(dep.id, {
@@ -2102,6 +2254,16 @@ export async function deployComposeServices(
         status: result.status,
         ip: result.ip,
         hostPort: persistedHostPort ?? undefined,
+        // The per-port map the runtime reported, UNIONED with the pins this pass
+        // published — the pins are what the vhosts dial, and they are the answer for
+        // any port docker had not bound yet when it was inspected.
+        ...(() => {
+          const byPort: Record<number, number> = {
+            ...(serviceResult?.hostPortByContainerPort ?? {}),
+            ...Object.fromEntries(pinnedHostPortByContainerPort),
+          };
+          return Object.keys(byPort).length ? { hostPortByContainerPort: byPort } : {};
+        })(),
       });
       // Now resolvable as a namespace provider for the services after it. Set only
       // on success: a dependent must never be pointed at a container that failed.
@@ -2717,6 +2879,159 @@ export async function deployComposeServices(
   // routable port, which meant containerizing an nginx image purely to satisfy the
   // "every target is a URL" assumption.
   if (routeContext?.routing && runtime.name !== "cloud") {
+    // Its OWN try: the composite's catch below reports "Single-domain composition
+    // skipped", which would be a wrong account of a project-level failure.
+    try {
+      /**
+       * PROJECT-LEVEL domain rows (`domains.service_id IS NULL`) — the project's own
+       * hostnames, as opposed to a service's.
+       *
+       * Planned by `buildProjectRouteDomains`, the SAME planner the single-app deploy
+       * uses, so the two cannot drift on tls / verified gating / SSL. It was simply
+       * unreachable from here: this pipeline returns before `executeServerDeploy`, so
+       * for a compose release these rows were planned by NOTHING on deploy and only the
+       * live re-apply ever wrote their vhost. That asymmetry is #618's whole class — a
+       * route that works after a domain save and vanishes from the deploy's account of
+       * itself — and it is why the fix could not stop at the live path.
+       *
+       * Registered BEFORE the composite and the fan-out below: `registerRoute` is
+       * last-writer-wins per hostname, and both of those compile a richer,
+       * topology-aware config for the hostnames they own.
+       */
+      const projectDomainRows = [...routeContext.domainByHostname.values()];
+      const projectLevelRoutes = buildProjectRouteDomains({
+        project,
+        projectDomains: projectDomainRows,
+        runtimeName: runtime.name,
+        usesManagedRouting: routeContext.usesManagedRouting,
+      });
+      const projectUpstreamRows = new Map(
+        results.map((r) => [
+          r.serviceId,
+          {
+            serviceId: r.serviceId,
+            containerId: r.containerId,
+            ip: r.ip,
+            hostPort: r.hostPort,
+            // The per-port picture this pass observed + pinned. With it a route on a
+            // service's SECOND port dials that port's own publish; without it the
+            // resolver refuses to attribute the scalar and falls back to the container
+            // IP rather than reaching a sibling app.
+            ...(r.hostPortByContainerPort
+              ? { hostPortByContainerPort: r.hostPortByContainerPort }
+              : {}),
+          },
+        ]),
+      );
+      // A redirect only goes live when its target is a hostname this project actually
+      // routes — the same gate, and the same hostname set, the live re-apply applies.
+      const projectLevelHostnames = projectLevelRoutes.map((r) => r.hostname);
+      for (const route of projectLevelRoutes) {
+        const routeKey = route.hostname.toLowerCase();
+        // A hostname a SERVICE already registered this pass is that service's, not the
+        // project's — never overwrite the more specific answer with a broader one.
+        if (seenRouteDomains.has(routeKey) || route.targetPort === undefined) continue;
+        // Built from THIS deploy's results, not a fresh daemon read: the containers were
+        // just created and their publishing is what is about to be persisted. The port's
+        // owning service is picked by the resolver the live re-apply shares.
+        const resolved = buildProjectServiceUpstream({
+          strategy: resolveRouteStrategy(project.routeStrategy),
+          port: route.targetPort,
+          services: enabled,
+          rowByService: projectUpstreamRows,
+          domainRows: projectDomainRows,
+        });
+        if (!resolved) {
+          // A SCOPED pass (per-service Start / add) holds results only for what it
+          // touched, so it may never have seen the service that owns this hostname — it
+          // is not the authority on that route and says nothing about it either way.
+          if (opts?.targetServiceIds || opts?.strictScope) continue;
+          logger.log(
+            `Domain ${route.hostname} not routed — no service offers port ${route.targetPort} ` +
+              `(${describeCandidatePorts({ services: enabled, rowByService: projectUpstreamRows })}).\n`,
+            "warn",
+          );
+          composeRouteWarnings.push(
+            `${route.hostname}: no service offers port ${route.targetPort}`,
+          );
+          continue;
+        }
+        // A canonical redirect (the `www` sibling "Include www" mints) is served INSTEAD
+        // of the app. Omitting it is not "leaving it alone": `registerRoute` replaces the
+        // whole vhost, so a redeploy would have converted every redirect host into a
+        // second copy of the app — and silently, since the row still reads Live.
+        const redirectHost = resolveRouteRedirect(
+          {
+            hostname: route.hostname,
+            redirectTo: route.redirectTo,
+            redirectStatus: route.redirectStatus,
+          },
+          projectLevelHostnames,
+        );
+        seenRouteDomains.add(routeKey);
+        try {
+          await routeContext.routing.registerRoute({
+            domain: route.hostname,
+            targetUrl: resolved.url,
+            tls: route.tls,
+            terminatesTlsLocally: hostTerminatesTlsLocally(
+              route.hostname,
+              routeContext.domainByHostname.get(routeKey),
+            ),
+            ...routingFields,
+            ...(redirectHost ? { redirectHost } : {}),
+            ...(routeContext.proxy ? { proxy: routeContext.proxy } : {}),
+          });
+        } catch (err) {
+          composeRouteWarnings.push(
+            `${route.hostname}: ${err instanceof Error ? err.message : "route registration failed"}`,
+          );
+          // No vhost → nothing for ACME to answer the challenge on, so a cert attempt
+          // here would burn a guaranteed-failed Let's Encrypt issuance.
+          continue;
+        }
+        logger.log(
+          `Routed ${route.hostname} → service "${resolved.owner.serviceName}" at ${resolved.url} ` +
+            `(port ${route.targetPort}, matched by ${resolved.owner.via}).\n`,
+        );
+        registeredRoutes.push(route);
+        // A free *.opsh.io hostname resolves ONLY through Openship Cloud's edge, so the
+        // local vhost above is half of it — the same pairing the per-service loop does
+        // for its own free routes. Without this the project's free URL would have a
+        // working origin and no route pointing at it.
+        if (routeContext.usesManagedRouting && route.isCloud && route.managedSubdomain) {
+          await ensureManagedEdgeProxy(routeContext.organizationId, route.managedSubdomain, {
+            serverId: routeContext.serverId,
+          }).catch((edgeErr) => {
+            logger.log(
+              `Warning: could not sync managed edge proxy for ${route.hostname}: ` +
+                `${safeErrorMessage(edgeErr)}. The app is live; this only affects that free URL.\n`,
+              "warn",
+            );
+          });
+        }
+        // Same contract as every other route here: the HTTP vhost is already on disk and
+        // is what answers the challenge, so a failed cert is a follow-up the tracked
+        // provider records as Action Required — never a failed deploy.
+        if (route.provisionSsl) {
+          await routeContext.trackedSsl.provisionCert(route.hostname).catch((err) => {
+            logger.log(
+              `SSL provisioning failed for ${route.hostname} (route is up on HTTP, retry from ` +
+                `the Domains tab): ${safeErrorMessage(err)}\n`,
+              "warn",
+            );
+          });
+        }
+      }
+    } catch (err) {
+      // Best-effort like every routing step: the project's own domains are optional and
+      // a failure here never fails a deploy (see domains-never-fail-deploy).
+      logger.log(
+        `Project domain routing skipped: ${err instanceof Error ? err.message : "error"}.\n`,
+        "warn",
+      );
+    }
+
     try {
       // Reusable routing core (shared with the routing API): resolve each
       // service's live upstream from this deploy's results.

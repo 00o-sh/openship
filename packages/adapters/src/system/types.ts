@@ -176,6 +176,19 @@ export interface EdgeOccupant {
   systemdDescription?: string;
   isDocker?: boolean;
   containerName?: string;
+  /**
+   * The container that actually holds the port, when one was resolved — including a
+   * HOST-NETWORKED one, which publishes nothing and so has no `containerName` from the
+   * publish filter. Carried so a takeover stops the container rather than SIGKILLing a
+   * process inside it.
+   */
+  containerId?: string;
+  /**
+   * The listener is a container runtime's port FORWARDER (docker-proxy and friends).
+   * Neither its pid nor the unit its cgroup names is the port's owner, so a takeover
+   * that cannot resolve the container must refuse rather than act on either.
+   */
+  dockerPublished?: boolean;
   proxy?: ProxyKind;
   /** true when this is our own OpenResty (never counted as a conflict) */
   managedByOpenship: boolean;

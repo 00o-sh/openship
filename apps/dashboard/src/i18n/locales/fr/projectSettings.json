@@ -344,28 +344,7 @@
     "unlink": "Supprimer la connexion"
   },
   "gitInfo": {
-    "repository": "Dépôt",
-    "autoDeploy": "Déploiement automatique",
-    "deploysOnPush": "Déploie à chaque push",
-    "manualOnly": "Déploiements manuels uniquement",
-    "branchToDeploy": "Branche à déployer",
-    "chooseBranch": "Choisissez la branche de votre dépôt à déployer",
-    "save": "Enregistrer",
-    "cancel": "Annuler",
-    "viewOnGithub": "Voir sur GitHub",
-    "recentCommits": "Commits récents",
-    "totalCommits": "{count} au total",
-    "noCommits": "Aucun commit pour le moment",
-    "toast": {
-      "fetchBranchesFailed": "Échec de la récupération des branches",
-      "errorTitle": "Erreur",
-      "branchUpdated": "Branche mise à jour avec succès",
-      "updatedTitle": "Mis à jour",
-      "branchUpdateFailed": "Échec de la mise à jour de la branche",
-      "autoDeployEnabled": "Déploiement automatique activé",
-      "autoDeployDisabled": "Déploiement automatique désactivé",
-      "autoDeployFailed": "Échec de la mise à jour du déploiement automatique"
-    }
+    "autoDeploy": "Déploiement automatique"
   },
   "git": {
     "connectFirst": {
@@ -597,10 +576,6 @@
     "cannotUndo": "Cette action est irréversible.",
     "aboutToPrefix": "Vous êtes sur le point de supprimer ",
     "aboutToSuffix": ".",
-    "deleteAllAria": "Supprimer tous les environnements",
-    "deleteAll": "Supprimer tous les environnements",
-    "deleteAllOn": "Supprime l'application du projet et tous les environnements de branche sous celle-ci.",
-    "deleteAllOff": "Supprime uniquement cet environnement. Les autres branches restent.",
     "scanning": "Analyse des services et volumes attachés…",
     "wipeAria": "Effacer également les données des services",
     "wipeLabelOne": "Effacer également les données des services ({count} volume)",
@@ -615,9 +590,7 @@
     "typePrefix": "Saisissez ",
     "typeSuffix": " pour confirmer.",
     "cancel": "Annuler",
-    "confirmDeleteWipe": "Supprimer + effacer les données",
     "confirmDeleteEnvWipe": "Supprimer l'environnement + effacer les données",
-    "confirmDelete": "Supprimer le projet",
     "confirmDeleteEnv": "Supprimer l'environnement",
     "linkedTitleOne": "{count} projet est connecté à cette app",
     "linkedTitleOther": "{count} projets sont connectés à cette app",
@@ -822,7 +795,9 @@
       "bodyService": "Service « {service} » : aucune réponse sur le port {port} — les requêtes peuvent renvoyer une erreur 502 tant qu'il n'écoute pas dessus."
     },
     "outputHint": {
-      "body": "Aucune sortie de compilation trouvée à {path} — vérifiez votre répertoire de sortie et redéployez."
+      "body": "Aucune sortie de compilation trouvée à {path} — vérifiez votre répertoire de sortie et redéployez.",
+      "noIndex": "Une sortie existe à {path} mais il n'y a aucun fichier index — les requêtes renverront une erreur 404. Vérifiez votre répertoire de sortie.",
+      "notServed": "Le proxy a répondu HTTP {status} pour {path} — ce chemin n'est pas servi. Vérifiez votre répertoire de sortie et la route."
     },
     "certUpload": {
       "title": "Importer un certificat",
