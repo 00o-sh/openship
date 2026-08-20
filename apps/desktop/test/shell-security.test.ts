@@ -178,6 +178,14 @@ describe("main process navigation containment", () => {
     expect(updateWindow).toMatch(/\.on\(\s*["']will-navigate["']/);
     expect(updateWindow).toMatch(/\.on\(\s*["']will-redirect["']/);
   });
+
+  it("renders advisory copy in the update window before raw release notes", () => {
+    expect(updateWindow).toContain("info.announcement?.title");
+    expect(updateWindow).toContain("info.announcement?.message");
+    expect(updateWindow.indexOf("info.announcement?.message")).toBeLessThan(
+      updateWindow.indexOf("info.notes"),
+    );
+  });
 });
 
 describe("credential surface is off the bridge", () => {

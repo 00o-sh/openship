@@ -16,10 +16,16 @@ function buildHtml(info: UpdateInfo): string {
   // `</script` regardless of JS string context, so unescaped notes containing
   // `</script>` would break out into markup in a window that carries the full
   // preload bridge.
-  const payload = JSON.stringify({ version: info.version, notes: info.notes }).replace(
-    /</g,
-    "\\u003c",
-  );
+  const title = info.announcement?.title || "Update available";
+  const message =
+    info.announcement?.message ||
+    (info.notes || "").trim() ||
+    "A new version is available.";
+  const payload = JSON.stringify({
+    version: info.version,
+    title,
+    message,
+  }).replace(/</g, "\\u003c");
   // Colors mirror the dashboard theme tokens (apps/dashboard styles/theme.css)
   // and follow the OS light/dark setting via prefers-color-scheme, so the modal
   // reads as part of the app rather than a stock system dialog.
@@ -54,7 +60,7 @@ function buildHtml(info: UpdateInfo): string {
     .go:hover{opacity:.9}
     button:disabled{opacity:.5;cursor:default}
   </style></head><body><div class="wrap">
-    <h1 id="title">Update available</h1>
+    <h1 id="title"></h1>
     <p class="sub" id="sub"></p>
     <pre id="notes"></pre>
     <p class="status" id="status">Downloading…</p>
@@ -65,10 +71,10 @@ function buildHtml(info: UpdateInfo): string {
   </div><script>
     const INFO = ${payload};
     const u = window.desktop && window.desktop.updates;
+    document.getElementById("title").textContent = INFO.title;
     document.getElementById("sub").textContent =
       "Openship " + INFO.version + " is ready to install.";
-    document.getElementById("notes").textContent = (INFO.notes || "").trim() ||
-      "A new version is available.";
+    document.getElementById("notes").textContent = INFO.message;
     const status = document.getElementById("status");
     const actions = document.getElementById("actions");
     document.getElementById("later").onclick = () => u && u.dismiss();
