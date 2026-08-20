@@ -324,11 +324,12 @@ describe("a volume restore never destroys the target before it can write", () =>
     // amount of reading the string proves that.
     const script = (await helperScript("zstd")).replace(/\/mnt/g, "$TARGET");
     const target = mkdtempSync(join(tmpdir(), "openship-restore-"));
+    const bin = mkdtempSync(join(tmpdir(), "openship-restore-bin-"));
     writeFileSync(join(target, "precious.txt"), "PRECIOUS");
 
     const res = spawnSync("/bin/sh", ["-c", script], {
       input: Buffer.from("not-a-real-archive"),
-      env: { PATH: "/usr/bin:/bin", TARGET: target },
+      env: { PATH: bin, TARGET: target },
     });
 
     expect(res.status).not.toBe(0);
