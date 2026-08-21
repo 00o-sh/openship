@@ -83,6 +83,9 @@ export const APP_LOGO: Record<
   // The control plane self-registered as an app (CLI self-deploy) — Openship's
   // own brand mark, a full-bleed square icon.
   openship: { src: "/apple-touch-icon.png", fill: true },
+  // MindWire's own monochrome mark is vendored so the catalog works offline and
+  // the brand stays legible on both dashboard themes.
+  mindwire: { src: "/app-logos/mindwire.svg", fill: true },
 };
 
 /**
