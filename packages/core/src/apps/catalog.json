@@ -2046,6 +2046,7 @@
     {
       "available": true,
       "verified": true,
+      "minEngine": "0.6.6",
       "id": "minio",
       "name": "MinIO",
       "description": "S3-compatible object storage with a web console — point any S3 client (aws-cli, SDKs) at it, or bind a bucket straight into another project's uploads.",
@@ -2540,6 +2541,7 @@
     {
       "available": true,
       "verified": false,
+      "minEngine": "0.6.6",
       "minResources": {
         "memoryMb": 4096,
         "cpuCores": 2
@@ -2719,6 +2721,7 @@
     {
       "available": true,
       "verified": false,
+      "minEngine": "0.6.6",
       "minResources": {
         "memoryMb": 16384,
         "cpuCores": 4
@@ -3497,6 +3500,7 @@
     {
       "available": true,
       "verified": false,
+      "minEngine": "0.6.6",
       "id": "redis",
       "name": "Valkey (Redis)",
       "description": "In-memory data store for caching, sessions, rate limits, and queues — Valkey, the open-source Redis fork. Drop-in Redis-compatible: point any redis client at it. Ships with RedisInsight, a browser UI that arrives already connected to this instance.",
@@ -3975,6 +3979,7 @@
     {
       "available": true,
       "verified": false,
+      "minEngine": "0.6.6",
       "id": "clickhouse",
       "name": "ClickHouse",
       "description": "The columnar SQL database for analytics — billions of rows scanned per second. Ships with the CH-UI console, so you get a SQL editor, schema browser and dashboards the moment it installs: sign in with the ClickHouse user and password below, no extra setup.",
