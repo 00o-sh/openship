@@ -17,7 +17,13 @@ import { sq, injectGitToken, assembleGitClone } from "./git-clone";
 import { materializeGitSsh, shellGitSshWriter, type GitSshMaterial } from "./git-ssh-material";
 
 // Re-exported for the docker adapters that import these from here.
-export { sq, injectGitToken, toGitHubSshUrl, assembleGitClone } from "./git-clone";
+export {
+  sq,
+  injectGitToken,
+  gitCredentialPair,
+  toGitHubSshUrl,
+  assembleGitClone,
+} from "./git-clone";
 
 // ─── BuildLogger - single source of truth for step + log events ─────────────
 

@@ -43,7 +43,11 @@ export const MAX_TOTAL_CHARS = 4_000_000;
  * Credentials embedded in a URL's userinfo. The shape that matters is the one
  * `injectGitToken` builds for a private clone:
  *
- *   https://x-access-token:<installation-token>@github.com/owner/repo.git
+ *   https://<user-token>:x-oauth-basic@github.com/owner/repo.git   (PAT / OAuth)
+ *   https://x-access-token:<installation-token>@github.com/owner/repo.git   (App)
+ *
+ * Both are matched by userinfo position, not by which slot holds the secret, so a
+ * change to the credential pair cannot quietly stop the redaction from firing.
  *
  * That URL is interpolated into a shell command whose git output is streamed into
  * the persisted build log, so without this the token lands in `build_session.logs`
