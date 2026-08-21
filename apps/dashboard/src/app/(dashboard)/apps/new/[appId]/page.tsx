@@ -276,6 +276,11 @@ export default function AppInstallPage() {
   // from the API) is fetched so a repo-fresh app opens + installs without a redeploy.
   const bundledTemplate = useMemo(() => getAppTemplate(appId), [appId]);
   const [template, setTemplate] = useState(bundledTemplate);
+  // A repo-fresh template is absent from the dashboard bundle by definition.
+  // Do not treat that initial `undefined` as a 404: wait for the runtime-catalog
+  // request before redirecting. Without this guard, a newly published catalog
+  // app flashes the route and immediately returns to the catalog.
+  const [templateResolved, setTemplateResolved] = useState(Boolean(bundledTemplate));
   // The org's existing not-yet-deployed draft of this app, if any. The catalog
   // tiles link here WITHOUT ?projectId, so without this the wizard had no idea a
   // draft existed — it showed template defaults while Install landed on the draft.
@@ -286,6 +291,7 @@ export default function AppInstallPage() {
   } | null>(null);
   useEffect(() => {
     setTemplate(bundledTemplate);
+    setTemplateResolved(Boolean(bundledTemplate));
     let cancelled = false;
     appsApi
       .template(appId)
@@ -295,7 +301,10 @@ export default function AppInstallPage() {
         setOpenDraft(r?.draft ?? null);
       })
       .catch(() => {
-        /* keep the bundled template */
+        /* Keep a bundled fallback if the runtime catalog is temporarily unavailable. */
+      })
+      .finally(() => {
+        if (!cancelled) setTemplateResolved(true);
       });
     return () => {
       cancelled = true;
@@ -477,10 +486,11 @@ export default function AppInstallPage() {
 
   // Unknown / non-installable / flow apps don't belong here.
   useEffect(() => {
+    if (!templateResolved) return;
     if (!template || template.kind === "flow" || !template.available) {
       router.replace("/apps/new");
     }
-  }, [template, appId, router]);
+  }, [templateResolved, template, appId, router]);
 
   // ── Draft re-entry: show what's persisted, not the template defaults ───────
   /** The project label the installer will build free hostnames from — its slug,
