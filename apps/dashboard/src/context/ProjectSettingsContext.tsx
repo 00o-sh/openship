@@ -18,6 +18,7 @@ import { projectsApi, servicesApi, type Service } from "@/lib/api";
 import { PROJECT_INFO_NOT_FOUND, useProjectInfo } from "@/hooks/useProjectEndpoints";
 import type { ActiveMigration } from "@/utils/project-status";
 import { dedupeServerLogs } from "./server-log-dedup";
+import { beginServicesFetch, failServicesFetch } from "./services-fetch-state";
 
 interface ProjectDomain {
   domain: string;
@@ -730,11 +731,14 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
     null,
   );
   const servicesRequestIdRef = useRef(0);
+  /** Which project the list in `servicesData` belongs to. null = holds nothing. */
+  const servicesLoadedIdRef = useRef<string | null>(null);
 
   const refreshServices = useCallback(async () => {
     if (!id || id === "undefined") {
       servicesRequestIdRef.current += 1;
       servicesRequestRef.current = null;
+      servicesLoadedIdRef.current = null;
       setServicesData({ services: [], isLoading: false, error: null });
       return [];
     }
@@ -748,28 +752,30 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
 
     let promise!: Promise<Service[]>;
     promise = (async () => {
-      setServicesData((prev) => ({ ...prev, isLoading: true, error: null }));
+      const loadedId = servicesLoadedIdRef.current;
+      setServicesData((prev) => beginServicesFetch(prev, loadedId, id));
+
+      const fail = () => {
+        if (servicesRequestIdRef.current !== requestId) return;
+        setServicesData((prev) => failServicesFetch(prev, loadedId, id));
+        if (loadedId !== id) servicesLoadedIdRef.current = null;
+      };
 
       try {
         const response = await servicesApi.list(id);
-        const services = response.success ? (response.services ?? []) : [];
+        if (!response.success) {
+          fail();
+          return [];
+        }
+        const services = response.services ?? [];
         if (servicesRequestIdRef.current === requestId) {
-          setServicesData({
-            services,
-            isLoading: false,
-            error: response.success ? null : "Failed to load services",
-          });
+          servicesLoadedIdRef.current = id;
+          setServicesData({ services, isLoading: false, error: null });
         }
         return services;
       } catch (error) {
         console.error("Failed to fetch project services:", error);
-        if (servicesRequestIdRef.current === requestId) {
-          setServicesData({
-            services: [],
-            isLoading: false,
-            error: "Failed to load services",
-          });
-        }
+        fail();
         return [];
       } finally {
         if (servicesRequestRef.current?.promise === promise) {
