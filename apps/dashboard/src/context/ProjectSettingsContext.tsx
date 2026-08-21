@@ -748,7 +748,14 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
 
     let promise!: Promise<Service[]>;
     promise = (async () => {
-      setServicesData((prev) => ({ ...prev, isLoading: true, error: null }));
+      // Stale-while-revalidate: report loading only when there is nothing on
+      // screen to keep. Flipping isLoading on every refetch collapsed the
+      // services tab into its skeleton on every action (#666).
+      setServicesData((prev) => ({
+        ...prev,
+        isLoading: prev.services.length === 0,
+        error: null,
+      }));
 
       try {
         const response = await servicesApi.list(id);
@@ -764,11 +771,14 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
       } catch (error) {
         console.error("Failed to fetch project services:", error);
         if (servicesRequestIdRef.current === requestId) {
-          setServicesData({
-            services: [],
+          // Keep the previous list on a failed refetch — wiping it blanked
+          // the tab on transient errors. A first-load failure still surfaces
+          // the error state because there was nothing to keep.
+          setServicesData((prev) => ({
+            ...prev,
             isLoading: false,
             error: "Failed to load services",
-          });
+          }));
         }
         return [];
       } finally {

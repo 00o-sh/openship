@@ -59,7 +59,12 @@ export const ServicesTab = () => {
     () => sortServicesByPublicFirst(servicesData.services),
     [servicesData.services],
   );
-  const loading = servicesData.isLoading || containersLoading;
+  // Skeleton only when there is nothing to show. containersLoading flips on
+  // every refetch (and every remount of this tab), so OR-ing it raw flashed
+  // the full-tab skeleton on every action and tab switch (#666) — rows render
+  // fine without container data (status falls back per service).
+  const loading =
+    servicesData.isLoading || (containersLoading && services.length === 0);
   const projectSlugBase = projectData.slug || projectData.name || "project";
   const selectedId = slug?.[1] ?? null;
   const hasProjectId = Boolean(id && id !== "undefined");
