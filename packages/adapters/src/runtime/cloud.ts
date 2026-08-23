@@ -62,6 +62,7 @@ import {
 import { CloudComposeSupport, resolveCloudWorkloadCmd, type CloudBuiltArtifact } from "./cloud/compose";
 import { splitRuntimeEnv, droppedRuntimeEnvMessage } from "./runtime-env";
 import { createDockerBuildContext } from "./docker-build-context";
+import { resolveDockerBuildArgs } from "./docker-build-args";
 import {
   dockerBuildContextDirectory,
   normalizeDockerRelativePath,
@@ -325,6 +326,17 @@ type DockerfileBuildSource =
  */
 function cloudBuildContextPath(config: BuildConfig): string {
   return dockerBuildContextDirectory(config) || normalizeDockerRelativePath(config.rootDirectory);
+}
+
+/** Compile a cloud Dockerfile with the exact same effective build arguments as
+ * Docker socket/TCP/SSH builds. Exported as a pure seam for regression tests. */
+export function compileCloudDockerfilePlan(
+  source: string,
+  config: Pick<BuildConfig, "envVars" | "buildArgs">,
+): WorkspaceBuildPlan {
+  return compileDockerfileToWorkspacePlan(source, {
+    buildArgs: resolveDockerBuildArgs(config),
+  });
 }
 
 // ─── CloudRuntime ────────────────────────────────────────────────────────────
@@ -872,7 +884,7 @@ export class CloudRuntime implements MultiServiceRuntimeAdapter {
     try {
       log.log("Build strategy: Dockerfile plan (build in Oblien workspaces)\n");
       source = await this.resolveDockerfileBuildSource(config, log);
-      const plan = compileDockerfileToWorkspacePlan(source.dockerfile);
+      const plan = compileCloudDockerfilePlan(source.dockerfile, config);
 
       const blocking = plan.diagnostics.filter(
         (item) => item.severity === "error" || item.severity === "unsupported",

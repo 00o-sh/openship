@@ -1,7 +1,7 @@
 import { eq, and, isNull, isNotNull, inArray, desc, sql, type SQL } from "drizzle-orm";
 import { generateId } from "@repo/core";
 import type { Database } from "../client";
-import { project, projectGroup, envVar, deployment, service } from "../schema";
+import { project, projectGroup, envVar, deployment, service, serviceDeployment } from "../schema";
 import { member } from "../schema/organization";
 // Cloning a project writes its group and service rows in the same transaction, so this repo
 // needs both insert types. Imported from their own repos (where they are already declared)
@@ -15,6 +15,14 @@ export type Project = typeof project.$inferSelect;
 export type NewProject = typeof project.$inferInsert;
 export type EnvVar = typeof envVar.$inferSelect;
 export type NewEnvVar = typeof envVar.$inferInsert;
+
+/** A loopback host-port claim owned by an active project or compose service. */
+export interface PinnedHostPort {
+  projectId: string;
+  /** Null identifies a single-service project's `project.host_port`. */
+  serviceId: string | null;
+  port: number;
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -236,6 +244,58 @@ export function createProjectRepo(db: Database) {
         .where(and(eq(project.organizationId, organizationId), isNull(project.deletedAt)));
 
       return { rows, total: Number(total), page, perPage };
+    },
+
+    /**
+     * Every active loopback host-port claim on one physical deploy target.
+     *
+     * Live socket scans cannot see a stopped/crashed container. This query is
+     * the durable half of allocation: it reads both single-project pins and
+     * compose service pins from ACTIVE releases, without paginating the org or
+     * reserving ports that belong to a different server. `null` means the local
+     * host; legacy projects fall back to their active deployment's meta.serverId
+     * through the same `boundServerId` expression used by the server inventory.
+     */
+    async listActivePinnedHostPorts(
+      organizationId: string,
+      serverId: string | null,
+    ): Promise<PinnedHostPort[]> {
+      const target = serverId ? eq(boundServerId, serverId) : isNull(boundServerId);
+      const activeProject = and(
+        eq(project.organizationId, organizationId),
+        isNull(project.deletedAt),
+        target,
+      );
+
+      const [projectPins, servicePins] = await Promise.all([
+        db
+          .select({
+            projectId: project.id,
+            port: project.hostPort,
+          })
+          .from(project)
+          .innerJoin(deployment, eq(project.activeDeploymentId, deployment.id))
+          .where(and(activeProject, isNotNull(project.hostPort))),
+        db
+          .select({
+            projectId: project.id,
+            serviceId: serviceDeployment.serviceId,
+            port: serviceDeployment.hostPort,
+          })
+          .from(project)
+          .innerJoin(deployment, eq(project.activeDeploymentId, deployment.id))
+          .innerJoin(serviceDeployment, eq(serviceDeployment.deploymentId, deployment.id))
+          .where(and(activeProject, isNotNull(serviceDeployment.hostPort))),
+      ]);
+
+      return [
+        ...projectPins.flatMap(({ projectId, port }) =>
+          typeof port === "number" && port > 0 ? [{ projectId, serviceId: null, port }] : [],
+        ),
+        ...servicePins.flatMap(({ projectId, serviceId, port }) =>
+          typeof port === "number" && port > 0 ? [{ projectId, serviceId, port }] : [],
+        ),
+      ];
     },
 
     /**

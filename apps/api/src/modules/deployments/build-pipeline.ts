@@ -88,6 +88,7 @@ import { buildBackgroundContext } from "../../lib/request-context";
 import * as sessionManager from "./session-manager";
 import { onFailure, onSuccess, onCancelled, reportPipelineError, setDeploymentStatus, routeIssuesWarning, type LifecycleContext } from "./deployment-lifecycle";
 import { auditPorts } from "./port-audit.service";
+import { listTargetPinnedHostPorts, pinnedHostPortsToAvoid } from "./pinned-host-ports";
 import { verifyDeployedContainers } from "./stability-audit.service";
 import { resolveReadinessGate, runReadinessGate, type ResolvedReadinessGate } from "./readiness-gate";
 import {
@@ -97,7 +98,12 @@ import {
   staticOutputTargets,
 } from "./output-audit.service";
 import { createBuildConfig } from "./build-config";
-import { pinnedAppImage, pinnedStaticDir, snapshotNeedsGitSource } from "./pinned-artifacts";
+import {
+  pinnedAppImage,
+  pinnedStaticDir,
+  refreshAppDeploymentId,
+  snapshotNeedsGitSource,
+} from "./pinned-artifacts";
 import { snapshotToClass } from "./deployment-class";
 import { shouldRetainArtifact } from "./rollback/restore-plan";
 import { resolveClonePlan } from "./clone-plan";
@@ -319,9 +325,10 @@ async function archivePreviousDeployment(
  *     host filesystem. The deploy step promotes those files again, exactly as it
  *     promotes a freshly-extracted build.
  *
- * Returns null when nothing is pinned or the artifact has since been reclaimed,
- * which is the caller's signal to build from source. A pin is a hint, never a
- * promise — retention may have run between planning a restore and executing it.
+ * Ordinary rollback pins return null when their artifact has been reclaimed,
+ * which lets the caller rebuild from source. A refresh marker is stricter: Apply
+ * explicitly promises no rebuild, so a missing active artifact throws and tells
+ * the user to Redeploy instead of silently shipping different code.
  */
 async function reuseRetainedArtifact(opts: {
   snapshot: DeploymentConfigSnapshot;
@@ -360,6 +367,31 @@ async function reuseRetainedArtifact(opts: {
       ?.exists(staticDir)
       .catch(() => false);
     return exists ? reuse(staticDir) : gone(staticDir);
+  }
+
+  const refreshFrom = refreshAppDeploymentId(snapshot);
+  if (refreshFrom) {
+    if (runtime instanceof BareRuntime) {
+      const release = await runtime.retainedReleaseArtifact(refreshFrom);
+      if (release) return reuse(release);
+      throw new Error(
+        `Cannot refresh without rebuilding: the active release ${refreshFrom} is no longer retained. Use Redeploy instead.`,
+      );
+    }
+
+    if (!(runtime instanceof DockerRuntime)) {
+      throw new Error(
+        `Apply without rebuilding is not supported by the ${runtime.name} runtime. Use Redeploy instead.`,
+      );
+    }
+
+    const image = pinnedAppImage(snapshot);
+    if (!image || !(await runtime.imageExistsLocally(image).catch(() => false))) {
+      throw new Error(
+        "Cannot refresh without rebuilding because the active container image is unavailable. Use Redeploy instead.",
+      );
+    }
+    return reuse(image);
   }
 
   const image = pinnedAppImage(snapshot);
@@ -723,8 +755,9 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
       isDesktop: plat.target === "desktop",
       forwardGitCredentials: snapshot.forwardGitCredentials,
       repoIsGithub: !!project.gitOwner,
+      dockerTransport: runtime instanceof DockerRuntime ? runtime.transport.kind : undefined,
     });
-    const cloneOnServer = clonePlan.runsOnServer;
+    const cloneOnTarget = clonePlan.cloneRunsOnTarget;
     // The relay needs a real SSH reverse tunnel — `reverseForward` exists on every
     // SSH executor and is absent only on a LocalExecutor (relay.ts). This is the
     // TRUE capability gate (not the server's SSH auth method); combined with the
@@ -763,18 +796,18 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
           projectId: project.id,
           owner: project.gitOwner ?? undefined,
           repo: project.gitRepo ?? undefined,
-          buildStrategy: clonePlan.cloneBuildStrategy,
+          buildStrategy: clonePlan.cloneCredentialPurpose,
           // Only meaningful for an on-server clone — lets a per-server GitHub auth
           // config (device token / PAT / SSH key) win for that server.
-          serverId: clonePlan.runsOnServer ? resolved.serverId : null,
+          serverId: clonePlan.cloneRunsOnTarget ? resolved.serverId : null,
           allowRelayFallback,
           // Docker clone-on-server can degrade to an api-host clone, so resolve
           // gracefully (a LOCAL fallback credential, flagged apiHostFallback) instead
           // of hard-failing at token resolution after the server is provisioned.
-          allowApiHostFallback: clonePlan.dockerClonesOnServer,
+          allowApiHostFallback: clonePlan.dockerClonesOnTarget,
           // Lets the chain ask the target server whether it already reaches this
           // repo on its own — only consulted for a clone that runs THERE.
-          serverExecutor: clonePlan.runsOnServer ? targetExecutor : null,
+          serverExecutor: clonePlan.cloneRunsOnTarget ? targetExecutor : null,
           repoUrl: snapshot.repoUrl,
           onLog: (message) => logger.log(message),
         })
@@ -791,9 +824,9 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
     // The rule itself lives with the credential type (`cloneOnServerAvailable`), so a capability
     // check shown in the picker and the decision made here can never disagree.
     const cloneCredentialAvailable = cloneOnServerAvailable(gitCred).available;
-    const effectiveCloneOnServer =
-      cloneOnServer && (runtime.name === "bare" || cloneCredentialAvailable);
-    if (cloneOnServer && runtime.name !== "bare" && !cloneCredentialAvailable) {
+    const effectiveCloneOnTarget =
+      cloneOnTarget && (runtime.name === "bare" || cloneCredentialAvailable);
+    if (cloneOnTarget && runtime.name !== "bare" && !cloneCredentialAvailable) {
       logger.log(
         "Clone-on-server was requested, but nothing can authenticate the clone on the build host — " +
           "the server has no GitHub identity of its own, no App/PAT token is available, and no git " +
@@ -803,7 +836,7 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
           "add a per-project clone token.",
         "warn",
       );
-    } else if (effectiveCloneOnServer && gitCred.relay) {
+    } else if (effectiveCloneOnTarget && gitCred.relay) {
       logger.log(
         "Cloning on the build host via your forwarded git identity — the credential is used for this build only and never persisted on the server.",
       );
@@ -839,14 +872,14 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
     // orchestrator transferring the context. The credential arrives either via
     // the relay (gitCredentialHelperPath, set once the relay is open) or the
     // short-lived token already on buildConfig.gitToken.
-    buildConfig.cloneOnServer = effectiveCloneOnServer;
+    buildConfig.cloneOnServer = effectiveCloneOnTarget;
     // Per-server SSH clone credential (ssh-server-key / ssh-deploy-key mode).
     // Consumed by the adapter clone step (git@github.com + GIT_SSH_COMMAND).
     if (gitCred.ssh) buildConfig.gitSsh = gitCred.ssh;
     // The server authenticates with its own credentials. Gated on the clone
     // actually running there: on the api-host path this names an identity that
     // isn't ours to use, and the adapter would find no credential at all.
-    if (gitCred.ambient && effectiveCloneOnServer) buildConfig.gitAmbient = gitCred.ambient;
+    if (gitCred.ambient && effectiveCloneOnTarget) buildConfig.gitAmbient = gitCred.ambient;
 
     // Desktop git-credential relay opener, shared by the single-app and compose
     // paths. Opens the reverse tunnel + remote helper (nothing persisted on the
@@ -954,8 +987,8 @@ async function executeBuildAndDeploy(project: Project, dep: Deployment, buildSes
           gitToken: gitCred.token,
           gitCredentialHelperPath: composeRelay?.scriptPath,
           gitSsh: gitCred.ssh,
-          gitAmbient: effectiveCloneOnServer ? gitCred.ambient : undefined,
-          cloneOnServer: effectiveCloneOnServer,
+          gitAmbient: effectiveCloneOnTarget ? gitCred.ambient : undefined,
+          cloneOnServer: effectiveCloneOnTarget,
         });
       } finally {
         if (composeRelay) await composeRelay.close().catch(() => {});
@@ -1679,14 +1712,9 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
       // containers may not be listening right now, so the live scan alone
       // wouldn't see them and two projects could collide on the same loopback
       // port (ensurePortAvailable is only the deploy-time backstop).
-      const avoid = (
-        await repos.project
-          .listByOrganization(project.organizationId, { perPage: 1000 })
-          .then((r) => r.rows)
-          .catch(() => [] as { id: string; hostPort: number | null }[])
-      )
-        .filter((p) => p.id !== project.id && typeof p.hostPort === "number")
-        .map((p) => p.hostPort as number);
+      const avoid = pinnedHostPortsToAvoid(
+        await listTargetPinnedHostPorts(project.organizationId, phase.serverId),
+      );
       // The deploy's own executor when it has one; otherwise the POOLED host
       // channel — never a bare `createHostExecutor()`, which builds a fresh
       // SSH connection per call and leaked one sshd session each time (#291).
@@ -1830,10 +1858,10 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
       )
     : [];
 
-  // Persist a domain record for each planned route. Track the ones we
-  // CREATE here (vs pre-existing rows) so they can be rolled back if the
-  // deploy fails — otherwise a failed deploy leaves orphan domain rows
-  // that resurface as routes on the next deploy.
+  // Persist a domain record for each planned route. Track only generated rows
+  // this call authoritatively created so they can be rolled back if the deploy
+  // fails. Custom domains are durable user configuration, not deployment
+  // artifacts: a failed redeploy must never detach them from the project.
   const createdDomainIds: string[] = [];
   const domainClaimWarnings: string[] = [];
   // Only domains we could CLAIM get routed. A hostname owned by another project
@@ -1843,20 +1871,21 @@ async function executeServerDeploy(phase: DeployPhaseInputs): Promise<void> {
   const routableDomains: typeof plannedDomains = [];
   for (const route of plannedDomains) {
     try {
-      const created = await ensureRouteDomainRecord({
+      const ensured = await ensureRouteDomainRecord({
         projectId: project.id,
         route,
         domainByHostname,
       });
-      if (created && !projectDomains.some((d) => d.id === created.id)) {
-        createdDomainIds.push(created.id);
+      const domainRecord = ensured.domain;
+      if (ensured.created && domainRecord && domainRecord.domainType !== "custom") {
+        createdDomainIds.push(domainRecord.id);
         logger.log(`Created domain record for "${route.hostname}".\n`);
       }
       // Same ordering hole the compose path has: the plan above was built from the
       // rows read BEFORE this loop, so a hostname minted right here was planned
       // with no row and came out `provisionSsl: false` — see
       // withEnsuredDomainRecord. Re-resolve against the row that exists now.
-      routableDomains.push(withEnsuredDomainRecord(route, created));
+      routableDomains.push(withEnsuredDomainRecord(route, domainRecord));
     } catch (err) {
       const message = safeErrorMessage(err);
       logger.log(`Skipping domain "${route.hostname}" (not routed — ${message}).\n`, "warn");

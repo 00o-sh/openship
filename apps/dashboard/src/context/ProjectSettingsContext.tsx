@@ -15,9 +15,18 @@ import { useRouter } from "next/navigation";
 import { useI18n } from "@/components/i18n-provider";
 import { usePlatform } from "@/context/PlatformContext";
 import { projectsApi, servicesApi, type Service } from "@/lib/api";
-import { PROJECT_INFO_NOT_FOUND, useProjectInfo } from "@/hooks/useProjectEndpoints";
+import {
+  invalidateProjectCachesFor,
+  PROJECT_INFO_NOT_FOUND,
+  useProjectInfo,
+} from "@/hooks/useProjectEndpoints";
 import type { ActiveMigration } from "@/utils/project-status";
 import { dedupeServerLogs } from "./server-log-dedup";
+import {
+  projectEnvironmentIds,
+  reconcileCreatedProjectEnvironment,
+  removeProjectEnvironment,
+} from "./project-environments";
 
 interface ProjectDomain {
   domain: string;
@@ -266,6 +275,8 @@ interface ProjectSettingsContextType {
     gitBranch?: string;
     sourceMode?: "branch" | "manual";
   }) => Promise<ProjectEnvironment | null>;
+  /** Apply a confirmed server-side deletion to the shared list and caches. */
+  removeEnvironment: (environmentId: string) => void;
   domain: string;
   /** The canonical access URL — server-computed, correct for service-scoped-only
    *  projects and target-aware for the localhost fallback. What display surfaces
@@ -782,12 +793,13 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
     return promise;
   }, [id]);
 
-  const refreshEnvironments = useCallback(async () => {
-    if (!id) return;
+  const fetchEnvironments = useCallback(async (): Promise<ProjectEnvironment[]> => {
+    if (!id) return [];
     const response = await projectsApi.getEnvironments(id);
-    if (response.success) {
-      setEnvironments(response.data || []);
+    if (!response.success) {
+      throw new Error("Failed to refresh environments");
     }
+    return (response.data || []) as ProjectEnvironment[];
   }, [id]);
 
   const createEnvironment = useCallback(
@@ -803,10 +815,30 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
       if (!response.success || !response.data) {
         throw new Error(response.error || "Failed to create environment");
       }
-      await refreshEnvironments();
-      return response.data as ProjectEnvironment;
+      const created = response.data as ProjectEnvironment;
+      await reconcileCreatedProjectEnvironment({
+        currentId: id,
+        environments,
+        created,
+        refresh: fetchEnvironments,
+        commit: setEnvironments,
+        invalidate: invalidateProjectCachesFor,
+        onRefreshError: (error) =>
+          console.warn("Failed to reconcile project environments after create", error),
+      });
+
+      return created;
     },
-    [id, refreshEnvironments],
+    [environments, fetchEnvironments, id],
+  );
+
+  const removeEnvironment = useCallback(
+    (environmentId: string) => {
+      const remaining = removeProjectEnvironment(environments, environmentId);
+      setEnvironments(remaining);
+      invalidateProjectCachesFor(projectEnvironmentIds(environmentId, environments));
+    },
+    [environments],
   );
 
   // Terminal Logs Management
@@ -1017,6 +1049,7 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
       id,
       environments,
       createEnvironment,
+      removeEnvironment,
       domain,
       access,
       selectedDomain,
@@ -1057,6 +1090,7 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
       id,
       environments,
       createEnvironment,
+      removeEnvironment,
       domain,
       access,
       selectedDomain,

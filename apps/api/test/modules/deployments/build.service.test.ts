@@ -6,6 +6,7 @@ const {
   getForwardGitToServer,
   kickoffBuild,
   repos,
+  resolveProjectInfo,
   resolveProjectRouteState,
   resolveServicePipelineMode,
   resolveSmartRoute,
@@ -21,10 +22,12 @@ const {
     project: {
       findById: vi.fn(),
       getEnvMap: vi.fn(),
+      listEnvVarChangeMeta: vi.fn(),
       update: vi.fn(),
     },
     deployment: {
       findById: vi.fn(),
+      findInProgressByCommit: vi.fn(),
       listByProject: vi.fn(),
       getLatestSuccessfulForBranch: vi.fn(),
       create: vi.fn(),
@@ -34,9 +37,14 @@ const {
     },
     service: {
       listByProject: vi.fn(),
+      reconcileFromCompose: vi.fn(),
       syncFromCompose: vi.fn(),
     },
+    serviceDeployment: {
+      latestByProject: vi.fn(),
+    },
   },
+  resolveProjectInfo: vi.fn(),
   resolveProjectRouteState: vi.fn(),
   resolveServicePipelineMode: vi.fn(),
   resolveSmartRoute: vi.fn(),
@@ -54,6 +62,10 @@ vi.mock("@repo/db", async (importOriginal) => ({
 
 vi.mock("../../../src/modules/deployments/preflight", () => ({
   runPreflightChecks,
+}));
+
+vi.mock("../../../src/modules/deployments/prepare.service", () => ({
+  resolveProjectInfo,
 }));
 
 vi.mock("../../../src/modules/deployments/build-pipeline", () => ({
@@ -87,6 +99,7 @@ vi.mock("../../../src/modules/deployments/smart-route", () => ({
 }));
 
 import {
+  redeployBuildSession,
   requestBuildAccess,
   resolveSnapshotTarget,
   triggerDeployment,
@@ -96,6 +109,7 @@ import {
   newFolderSessionId,
   putFolderSession,
 } from "../../../src/modules/projects/folder/session-store";
+import { ComposeConfigurationError } from "../../../src/modules/deployments/compose-configuration-error";
 
 const ctx = { userId: "user-1", organizationId: "org-1" } as any;
 
@@ -143,6 +157,8 @@ const composeServices = [
     image: undefined,
     build: ".",
     dockerfile: "Dockerfile",
+    buildArgs: { APP_PACKAGE: "@myorg/web" },
+    advanced: { buildArgTemplateKeys: [] },
     ports: ["3000:3000"],
     dependsOn: [],
     environment: {},
@@ -262,9 +278,13 @@ describe("triggerDeployment", () => {
 
     repos.project.findById.mockResolvedValue(baseProject());
     repos.project.getEnvMap.mockResolvedValue({});
+    repos.project.listEnvVarChangeMeta.mockResolvedValue([]);
     // Only read by the best-effort compose-drift reconcile (git projects).
     repos.service.listByProject.mockResolvedValue([]);
+    repos.service.reconcileFromCompose.mockResolvedValue({ driftedNames: [] });
+    repos.serviceDeployment.latestByProject.mockResolvedValue(new Map());
     repos.deployment.listByProject.mockResolvedValue({ rows: [] });
+    repos.deployment.findInProgressByCommit.mockResolvedValue(null);
     repos.deployment.getLatestSuccessfulForBranch.mockResolvedValue(null);
     repos.deployment.create.mockResolvedValue({ id: "dep-1", projectId: "project-1" });
     repos.deployment.createBuildSession.mockResolvedValue(undefined);
@@ -278,6 +298,7 @@ describe("triggerDeployment", () => {
       primarySlug: undefined,
       publicEndpoints: [],
     });
+    resolveProjectInfo.mockResolvedValue({ services: composeServices });
     resolveServicePipelineMode.mockResolvedValue({
       useServicePipeline: true,
       servicePreflightServices: composeServices,
@@ -311,6 +332,192 @@ describe("triggerDeployment", () => {
         composeServices,
       }),
     );
+  });
+
+  it("bootstraps a declared composePath even when the first webhook changed another file (#689)", async () => {
+    const commitSha = "1eeaf7692a19ee6e7ecb64b9d1a5c3ee7c0ac2f5";
+    let storedRows: Record<string, unknown>[] = [];
+    repos.service.listByProject.mockImplementation(async () => storedRows);
+    repos.service.reconcileFromCompose.mockImplementation(async (_projectId, parsed) => {
+      storedRows = parsed.map((service: Record<string, unknown>, index: number) => ({
+        ...service,
+        id: `svc-${index}`,
+        projectId: "project-1",
+        kind: "compose",
+        enabled: true,
+        exposed: service.exposed ?? false,
+      }));
+      return { services: storedRows, driftedNames: [] };
+    });
+    const actualPipeline = await vi.importActual<
+      typeof import("../../../src/modules/deployments/build-pipeline")
+    >("../../../src/modules/deployments/build-pipeline");
+    resolveServicePipelineMode.mockImplementationOnce(actualPipeline.resolveServicePipelineMode);
+    repos.project.findById.mockResolvedValue(
+      baseProject({
+        framework: "docker",
+        composePath: "deploy/stack.yml",
+        gitProvider: "github",
+        gitUrl: "https://github.com/acme/app.git",
+        gitOwner: "acme",
+        gitRepo: "app",
+        localPath: null,
+      }),
+    );
+
+    await triggerDeployment(ctx, {
+      projectId: "project-1",
+      branch: "main",
+      commitSha,
+      trigger: "webhook",
+      changedPaths: ["apps/api/src/index.ts"],
+    });
+
+    expect(resolveProjectInfo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "github",
+        owner: "acme",
+        repo: "app",
+        branch: "main",
+        composePath: "deploy/stack.yml",
+      }),
+    );
+    expect(repos.service.reconcileFromCompose).toHaveBeenCalledWith(
+      "project-1",
+      composeServices,
+    );
+    expect(runPreflightChecks).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        multiService: true,
+        composeServices: expect.arrayContaining([
+          expect.objectContaining({ name: "web", build: ".", dockerfile: "Dockerfile" }),
+        ]),
+      }),
+    );
+    expect(repos.deployment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        meta: expect.objectContaining({
+          serviceDeploymentMode: "services",
+          composeServices: expect.arrayContaining([
+            expect.objectContaining({ name: "web", build: ".", dockerfile: "Dockerfile" }),
+          ]),
+        }),
+      }),
+    );
+    expect(syncProjectRouteState).not.toHaveBeenCalled();
+    expect(kickoffBuild).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "project-1" }),
+      expect.objectContaining({ id: "dep-1" }),
+    );
+  });
+
+  it("backfills pre-buildArgs compose baselines on a code-only webhook (#689)", async () => {
+    repos.project.findById.mockResolvedValue(
+      baseProject({
+        composePath: "deploy/stack.yml",
+        gitProvider: "github",
+        gitUrl: "https://github.com/acme/app.git",
+        gitOwner: "acme",
+        gitRepo: "app",
+        localPath: null,
+      }),
+    );
+    repos.service.listByProject.mockResolvedValue([
+      {
+        ...composeServices[0],
+        projectId: "project-1",
+        // A real baseline written before #689 has no `buildArgs` key at all.
+        importedSpec: { image: null, build: ".", dockerfile: "Dockerfile" },
+      },
+    ]);
+
+    await triggerDeployment(ctx, {
+      projectId: "project-1",
+      branch: "main",
+      commitSha: "1eeaf7692a19ee6e7ecb64b9d1a5c3ee7c0ac2f5",
+      trigger: "webhook",
+      changedPaths: ["apps/api/src/index.ts"],
+    });
+
+    expect(resolveProjectInfo).toHaveBeenCalledOnce();
+    expect(repos.service.reconcileFromCompose).toHaveBeenCalledWith(
+      "project-1",
+      composeServices,
+    );
+  });
+
+  it("keeps the code-only webhook fast path after the compose baseline is current", async () => {
+    repos.project.findById.mockResolvedValue(
+      baseProject({
+        composePath: "deploy/stack.yml",
+        gitProvider: "github",
+        gitUrl: "https://github.com/acme/app.git",
+        gitOwner: "acme",
+        gitRepo: "app",
+        localPath: null,
+      }),
+    );
+    repos.service.listByProject.mockResolvedValue([
+      {
+        ...composeServices[0],
+        projectId: "project-1",
+        importedSpec: { buildArgs: { APP_PACKAGE: "@myorg/web" } },
+      },
+    ]);
+
+    await triggerDeployment(ctx, {
+      projectId: "project-1",
+      branch: "main",
+      commitSha: "1eeaf7692a19ee6e7ecb64b9d1a5c3ee7c0ac2f5",
+      trigger: "webhook",
+      changedPaths: ["apps/api/src/index.ts"],
+    });
+
+    expect(resolveProjectInfo).not.toHaveBeenCalled();
+    expect(repos.service.reconcileFromCompose).not.toHaveBeenCalled();
+  });
+
+  it("refuses an existing-project redeploy when changed Compose config is unsafe", async () => {
+    repos.project.findById.mockResolvedValue(
+      baseProject({
+        composePath: "deploy/stack.yml",
+        gitProvider: "github",
+        gitUrl: "https://github.com/acme/app.git",
+        gitOwner: "acme",
+        gitRepo: "app",
+        localPath: null,
+      }),
+    );
+    repos.service.listByProject.mockResolvedValue([
+      {
+        ...composeServices[0],
+        projectId: "project-1",
+        importedSpec: { buildArgs: { APP_PACKAGE: "@myorg/web" } },
+      },
+    ]);
+    resolveProjectInfo.mockRejectedValueOnce(
+      new ComposeConfigurationError(
+        "The Docker Compose file declares options Openship can't deploy faithfully: build.target",
+      ),
+    );
+
+    await expect(
+      triggerDeployment(ctx, {
+        projectId: "project-1",
+        branch: "main",
+        commitSha: "1eeaf7692a19ee6e7ecb64b9d1a5c3ee7c0ac2f5",
+        trigger: "webhook",
+        changedPaths: ["deploy/stack.yml"],
+      }),
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining("build.target"),
+    });
+
+    expect(repos.service.reconcileFromCompose).not.toHaveBeenCalled();
+    expect(repos.deployment.create).not.toHaveBeenCalled();
+    expect(kickoffBuild).not.toHaveBeenCalled();
   });
 
   /**
@@ -391,6 +598,169 @@ describe("triggerDeployment", () => {
         multiService: true,
         composeServices,
       }),
+    );
+  });
+
+  it("refreshes a single app from its active artifact with zero service rows (#674)", async () => {
+    repos.project.findById.mockResolvedValue(
+      baseProject({
+        activeDeploymentId: "dep-live",
+        framework: "nextjs",
+        gitProvider: "github",
+        gitUrl: "https://github.com/acme/app.git",
+        gitOwner: "acme",
+        gitRepo: "app",
+        localPath: null,
+      }),
+    );
+    repos.deployment.findById.mockResolvedValue({
+      id: "dep-live",
+      imageRef: "openship/app:bld_live",
+      commitSha: "abc123",
+      commitMessage: "live commit",
+      createdAt: new Date("2026-08-23T00:00:00Z"),
+    });
+    repos.service.listByProject.mockResolvedValue([]);
+    resolveServicePipelineMode.mockResolvedValue({
+      useServicePipeline: false,
+      servicePreflightServices: [],
+      useSingleAppPipeline: true,
+    });
+
+    await triggerDeployment(ctx, {
+      projectId: "project-1",
+      environment: "production",
+      refresh: true,
+    });
+
+    expect(repos.deployment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        commitSha: "abc123",
+        forceAll: false,
+        meta: expect.objectContaining({
+          refreshAppDeploymentId: "dep-live",
+          handoverAppImage: "openship/app:bld_live",
+        }),
+      }),
+    );
+    const meta = repos.deployment.create.mock.calls.at(-1)?.[0]?.meta;
+    expect(meta.targetServiceIds).toBeUndefined();
+    expect(meta.refreshServiceIds).toBeUndefined();
+  });
+
+  it("returns an actionable 409 for a services project with nothing enabled", async () => {
+    repos.project.findById.mockResolvedValue(baseProject({ activeDeploymentId: "dep-live" }));
+    repos.deployment.findById.mockResolvedValue({
+      id: "dep-live",
+      createdAt: new Date("2026-08-23T00:00:00Z"),
+    });
+    repos.service.listByProject.mockResolvedValue([]);
+
+    await expect(
+      triggerDeployment(ctx, { projectId: "project-1", refresh: true }),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    expect(repos.deployment.create).not.toHaveBeenCalled();
+  });
+
+  it("returns an actionable 409 when there is no active deployment to refresh", async () => {
+    repos.project.findById.mockResolvedValue(
+      baseProject({
+        framework: "nextjs",
+        activeDeploymentId: null,
+      }),
+    );
+    resolveServicePipelineMode.mockResolvedValue({
+      useServicePipeline: false,
+      servicePreflightServices: [],
+      useSingleAppPipeline: true,
+    });
+
+    await expect(
+      triggerDeployment(ctx, { projectId: "project-1", refresh: true }),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    expect(repos.deployment.create).not.toHaveBeenCalled();
+  });
+
+  it("returns an actionable 409 for a static single-app project", async () => {
+    repos.project.findById.mockResolvedValue(
+      baseProject({
+        framework: "nextjs",
+        activeDeploymentId: "dep-live",
+        productionMode: "static",
+        hasServer: false,
+      }),
+    );
+    repos.deployment.findById.mockResolvedValue({
+      id: "dep-live",
+      createdAt: new Date("2026-08-23T00:00:00Z"),
+    });
+    resolveServicePipelineMode.mockResolvedValue({
+      useServicePipeline: false,
+      servicePreflightServices: [],
+      useSingleAppPipeline: true,
+    });
+
+    await expect(
+      triggerDeployment(ctx, { projectId: "project-1", refresh: true }),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    expect(repos.deployment.create).not.toHaveBeenCalled();
+  });
+
+  it("returns an actionable 409 for a cloud single-app project", async () => {
+    repos.project.findById.mockResolvedValue(
+      baseProject({
+        framework: "nextjs",
+        activeDeploymentId: "dep-live",
+        cloudWorkspaceId: "ws-live",
+      }),
+    );
+    repos.deployment.findById.mockResolvedValue({
+      id: "dep-live",
+      imageRef: "ws-live",
+      createdAt: new Date("2026-08-23T00:00:00Z"),
+    });
+    resolveServicePipelineMode.mockResolvedValue({
+      useServicePipeline: false,
+      servicePreflightServices: [],
+      useSingleAppPipeline: true,
+    });
+
+    await expect(
+      triggerDeployment(ctx, { projectId: "project-1", refresh: true }),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    expect(repos.deployment.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("redeployBuildSession environment snapshot", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const project = baseProject({ activeDeploymentId: "dep-old" });
+    repos.deployment.findById.mockResolvedValue({
+      id: "dep-old", projectId: project.id, organizationId: project.organizationId,
+      branch: "main", environment: "production", framework: "docker-compose",
+      commitSha: "old-sha", commitMessage: "old commit",
+      envVars: { FROM_OLD_RELEASE: "stale" }, meta: baseSnapshot(),
+    });
+    repos.project.findById.mockResolvedValue(project);
+    repos.project.getEnvMap.mockResolvedValue({ MANUAL_ENV: "keep-me" });
+    repos.service.listByProject.mockResolvedValue([]);
+    repos.deployment.listByProject.mockResolvedValue({ rows: [] });
+    repos.deployment.getLatestSuccessfulForBranch.mockResolvedValue(null);
+    repos.deployment.create.mockResolvedValue({ id: "dep-new", projectId: project.id });
+    repos.deployment.createBuildSession.mockResolvedValue(undefined);
+    repos.deployment.supersedeReconciling.mockResolvedValue(undefined);
+    repos.deployment.supersedePendingDecisions.mockResolvedValue(undefined);
+    assertGitHubRepoAccess.mockResolvedValue(undefined);
+    resolveStrategy.mockResolvedValue("local");
+    kickoffBuild.mockResolvedValue("session-new");
+  });
+
+  it("uses current project env and keeps service scopes out of the flat snapshot", async () => {
+    await redeployBuildSession(ctx, "dep-old");
+    expect(repos.project.getEnvMap).toHaveBeenCalledWith("project-1", "production", null);
+    expect(repos.deployment.create).toHaveBeenCalledWith(
+      expect.objectContaining({ envVars: { MANUAL_ENV: "keep-me" } }),
     );
   });
 });
@@ -592,6 +962,45 @@ describe("requestBuildAccess — folder-upload compose services", () => {
     expect(resolveServicePipelineMode).toHaveBeenCalledWith(
       expect.objectContaining({ id: "project-1" }),
       expect.objectContaining({ serviceDeploymentMode: "single" }),
+    );
+  });
+
+  it("does not parse or materialize compose for an explicit single-app deploy (#689)", async () => {
+    const actualPipeline = await vi.importActual<
+      typeof import("../../../src/modules/deployments/build-pipeline")
+    >("../../../src/modules/deployments/build-pipeline");
+    resolveServicePipelineMode.mockImplementationOnce(actualPipeline.resolveServicePipelineMode);
+    repos.project.findById.mockResolvedValue(
+      baseProject({
+        framework: "docker",
+        composePath: "deploy/stack.yml",
+        gitProvider: "github",
+        gitUrl: "https://github.com/acme/app.git",
+        gitOwner: "acme",
+        gitRepo: "app",
+        localPath: null,
+      }),
+    );
+
+    await requestBuildAccess(ctx, {
+      projectId: "project-1",
+      serviceDeploymentMode: "single",
+    });
+
+    expect(resolveProjectInfo).not.toHaveBeenCalled();
+    expect(repos.service.reconcileFromCompose).not.toHaveBeenCalled();
+    expect(repos.service.syncFromCompose).not.toHaveBeenCalled();
+    expect(runPreflightChecks).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ multiService: false, composeServices: [] }),
+    );
+    const meta = repos.deployment.create.mock.calls.at(-1)?.[0]?.meta;
+    expect(meta.serviceDeploymentMode).toBe("single");
+    expect(meta.composeServices).toBeUndefined();
+    expect(syncProjectRouteState).toHaveBeenCalled();
+    expect(kickoffBuild).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "project-1" }),
+      expect.objectContaining({ id: "dep-1" }),
     );
   });
 

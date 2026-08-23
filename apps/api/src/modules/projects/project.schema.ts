@@ -170,6 +170,9 @@ const ComposeServiceSchema = Type.Object({
   image: Type.Optional(Type.String({ maxLength: 500 })),
   build: Type.Optional(Type.String({ maxLength: 500 })),
   dockerfile: Type.Optional(Type.String({ maxLength: 500 })),
+  buildArgs: Type.Optional(
+    Type.Record(Type.String(), Type.Union([Type.String(), Type.Null()])),
+  ),
   ports: Type.Optional(Type.Array(Type.String({ maxLength: 100 }), { maxItems: 50 })),
   dependsOn: Type.Optional(Type.Array(Type.String({ maxLength: 100 }), { maxItems: 50 })),
   environment: Type.Optional(Type.Record(Type.String(), Type.String())),
@@ -178,6 +181,16 @@ const ComposeServiceSchema = Type.Object({
   // #332: structured argv passed through from folder/scan (compose Cmd, no `sh -c`).
   commandArgv: Type.Optional(Type.Array(Type.String({ maxLength: 2000 }), { maxItems: 100 })),
   restart: Type.Optional(Type.String({ maxLength: 50 })),
+  advanced: Type.Optional(
+    Type.Object(
+      {},
+      {
+        additionalProperties: true,
+        description:
+          "Extended compose block (including names-only build-arg template provenance).",
+      },
+    ),
+  ),
   exposed: Type.Optional(Type.Boolean()),
   exposedPort: Type.Optional(Type.String({ maxLength: 100 })),
   domain: Type.Optional(Type.String({ maxLength: 63 })),

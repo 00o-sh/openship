@@ -61,6 +61,13 @@ export const UploadCertBody = Type.Object({
 /** POST /preview — side-effect-free DNS-records preview for a hostname. */
 export const PreviewDomainBody = Type.Object({
   hostname: Type.String({ minLength: 1, maxLength: 253, description: "Hostname to preview DNS records for." }),
+  serverId: Type.Optional(
+    Type.String({
+      minLength: 1,
+      maxLength: 128,
+      description: "Selected self-hosted deployment target whose public host should populate A records.",
+    }),
+  ),
   includeWww: Type.Optional(
     Type.Boolean({
       description:

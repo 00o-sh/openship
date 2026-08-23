@@ -111,4 +111,20 @@ describe("a reused artifact is not on the failure reclaim list", () => {
     expect(assignments).toHaveLength(1);
     expect(src).toMatch(/if \(!reusedArtifact\) provisioned\.imageRef = buildResult\.imageRef;/);
   });
+
+  it("a refresh fails closed when its active artifact is gone", () => {
+    const src = readFileSync(
+      resolve(import.meta.dirname, "../../../src/modules/deployments/build-pipeline.ts"),
+      "utf8",
+    );
+    const refreshStart = src.indexOf("const refreshFrom = refreshAppDeploymentId(snapshot)");
+    const ordinaryPinStart = src.indexOf("const image = pinnedAppImage(snapshot)", refreshStart + 1);
+    const refreshBranch = src.slice(refreshStart, ordinaryPinStart);
+
+    expect(refreshStart).toBeGreaterThan(-1);
+    expect(ordinaryPinStart).toBeGreaterThan(refreshStart);
+    expect(refreshBranch).toContain("Cannot refresh without rebuilding");
+    expect(refreshBranch).toContain("Use Redeploy instead");
+    expect(refreshBranch).not.toContain("return gone(");
+  });
 });

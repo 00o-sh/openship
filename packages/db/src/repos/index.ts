@@ -27,6 +27,7 @@ export {
   type NewProject,
   type EnvVar,
   type NewEnvVar,
+  type PinnedHostPort,
 } from "./project.repo";
 export {
   createDeploymentRepo,

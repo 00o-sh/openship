@@ -265,6 +265,36 @@ async function resolveOrgServer(
   throw new Error("Deployment target is a server, but this deployment has no server ID. Redeploy and select a server explicitly.");
 }
 
+async function resolveServerTargetTopology(
+  serverId: string | undefined,
+  organizationId: string | undefined,
+): Promise<{ server: OrgServer; isLocal: boolean }> {
+  const server = await resolveOrgServer(serverId, organizationId);
+  return { server, isLocal: await isLocalHostRow(server) };
+}
+
+/**
+ * Read-only transport topology for preflight. It uses the same org-scoped
+ * server selection and local-host predicate as runtime construction, without
+ * acquiring an SSH/host executor merely to answer where Docker source can run.
+ */
+export async function resolvePlannedTargetTopology(
+  target: DeployTarget,
+  serverId: string | undefined,
+  organizationId: string | undefined,
+): Promise<{
+  serverId: string | null;
+  dockerTransport: "socket" | "ssh" | undefined;
+}> {
+  if (target === "local") return { serverId: null, dockerTransport: "socket" };
+  if (target !== "server") return { serverId: null, dockerTransport: undefined };
+  const { server, isLocal } = await resolveServerTargetTopology(serverId, organizationId);
+  return {
+    serverId: server.id,
+    dockerTransport: isLocal ? "socket" : "ssh",
+  };
+}
+
 /**
  * THE authority for "given the host platform + this deployment's snapshot,
  * where does it actually land?". Returns a concrete DeployTarget
@@ -671,7 +701,7 @@ export async function resolveServerExecutor(
   isLocal: boolean;
   ssh: SshConfig | null;
 }> {
-  const server = await resolveOrgServer(serverId, organizationId);
+  const { server, isLocal } = await resolveServerTargetTopology(serverId, organizationId);
   const conn = {
     host: server.sshHost || "127.0.0.1",
     port: server.sshPort ?? 22,
@@ -683,7 +713,7 @@ export async function resolveServerExecutor(
   // to them hits the API's own loopback (no sshd) — the "Can't reach 127.0.0.1"
   // failure. Org-gated (isLocalHostRow) so a teammate's org can't mint a host-root
   // target from a loopback row.
-  if (await isLocalHostRow(server)) {
+  if (isLocal) {
     // Self-heal the persisted flag so EVERY `server.isLocal` consumer (edge,
     // domains, tunnels, the servers list) agrees — not just this resolver.
     // One-time, idempotent, best-effort; never blocks or fails the deploy.
@@ -981,6 +1011,7 @@ export async function withDeploymentPlatform<T>(
     runtime: RuntimeAdapter;
     routing: Platform["routing"];
     ssl: Platform["ssl"];
+    executor: Platform["executor"];
     effectiveTarget: DeployTarget;
     serverId: string | null;
   }) => Promise<T>,
@@ -993,6 +1024,7 @@ export async function withDeploymentPlatform<T>(
       runtime: resolved.platform.runtime,
       routing: resolved.platform.routing,
       ssl: resolved.platform.ssl,
+      executor: resolved.platform.executor,
       effectiveTarget: resolved.effectiveTarget,
       serverId: resolved.serverId,
     });

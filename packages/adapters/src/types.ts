@@ -216,6 +216,9 @@ export interface BuildConfig {
   staticOutDir?: string;
   /** Environment variables injected at build time */
   envVars: Record<string, string>;
+  /** Explicit image-build arguments. Kept separate from runtime/container env;
+   * compose services sharing one Dockerfile may carry different values. */
+  buildArgs?: Record<string, string>;
   /** Resources allocated for the build container */
   resources: ResourceConfig;
   /** Ephemeral token for cloning private repos - never persisted */

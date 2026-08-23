@@ -735,7 +735,13 @@ async function persistComposeServices(
     });
   }
 
-  await repos.service.syncFromCompose(projectId, services);
+  // The ensure contract requires the FULL freshly scanned compose service list
+  // (and already removes rows missing from it), so it is authoritative about
+  // compose-owned fields too. In particular, omitting `buildArgs` after removing
+  // the whole `args:` key must clear stale values rather than replay them.
+  await repos.service.syncFromCompose(projectId, services, {
+    composeAuthoritative: true,
+  });
 }
 
 async function createProductionProject(
@@ -2365,4 +2371,3 @@ export async function getLatestDeploymentSession(
       : null,
   };
 }
-

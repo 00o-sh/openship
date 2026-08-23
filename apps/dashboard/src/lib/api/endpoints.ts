@@ -355,6 +355,9 @@ export const endpoints = {
       switchBack: "system/migration/switch-back",
     },
     dataTransfer: {
+      preview: "system/data-transfer/preview",
+      directSession: "system/data-transfer/direct/session",
+      directSend: "system/data-transfer/direct/send",
       export: "system/data-transfer/export",
       import: "system/data-transfer/import",
     },

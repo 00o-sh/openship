@@ -113,8 +113,17 @@ export type {
   StartTunnelResult,
   SwitchBackResult,
 } from "./migration";
-export { dataTransferApi } from "./data-transfer";
-export type { DataTransferFile, ImportMode, ImportResult } from "./data-transfer";
+export { dataTransferApi, inspectDirectTransferCode } from "./data-transfer";
+export type {
+  DataTransferFile,
+  DirectCodeInfo,
+  DirectReceiveSession,
+  DirectTransferResult,
+  ExportHistoryCategory,
+  ExportPreview,
+  ImportMode,
+  ImportResult,
+} from "./data-transfer";
 export { permissionsApi, RESOURCE_TYPE_LABELS, resourceTypeLabel } from "./permissions";
 export type {
   Permission,

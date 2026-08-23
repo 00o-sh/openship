@@ -24,7 +24,7 @@
  * NOT a backup tool. Use the existing backup module for that.
  */
 
-import { sql, eq, inArray, getTableColumns } from "drizzle-orm";
+import { sql, eq, inArray, count, getTableColumns } from "drizzle-orm";
 import { getTableConfig, type PgTable } from "drizzle-orm/pg-core";
 import { db, getDriver } from "./client";
 import * as schema from "./schema";
@@ -60,6 +60,12 @@ export interface DumpOptions {
    * `assertDumpSelfContained` reject those columns outright.
    */
   stripInstanceRefs?: boolean;
+  /**
+   * Skip selected catalogue tables at query time. Intended for trusted,
+   * dependency-aware callers such as the instance export history filter; an
+   * arbitrary caller must not remove FK parents while retaining their children.
+   */
+  excludeTables?: readonly string[];
 }
 
 /**
@@ -822,6 +828,7 @@ export async function dumpSubgraph(
   opts: DumpOptions = {},
 ): Promise<DatabaseDump> {
   const tables: DatabaseDump["tables"] = {};
+  const excludedTables = new Set(opts.excludeTables ?? []);
 
   // FK-resolution state — built as we walk parents, consumed by children.
   const idSets: Record<string, Set<string>> = {
@@ -838,6 +845,7 @@ export async function dumpSubgraph(
   };
 
   for (const spec of TABLES) {
+    if (excludedTables.has(spec.sqlName)) continue;
     const resolver = pickResolver(spec, scope);
     if (!resolver) {
       // Table not in this subgraph.
@@ -919,6 +927,22 @@ export async function dumpSubgraph(
     tables,
     ...(strippedEncryptedFields ? { strippedEncryptedFields } : {}),
   };
+}
+
+/**
+ * Lightweight row-count preview for an instance export. Unlike dumpSubgraph,
+ * this never materializes row payloads or decrypts anything.
+ */
+export async function countInstanceSubgraphTables(): Promise<Record<string, number>> {
+  const entries = await Promise.all(
+    TABLES.filter((spec) => spec.scopes.some((scope) => scope.in === "instance")).map(
+      async (spec) => {
+        const [row] = await db.select({ value: count() }).from(spec.table);
+        return [spec.sqlName, Number(row?.value ?? 0)] as const;
+      },
+    ),
+  );
+  return Object.fromEntries(entries);
 }
 
 function pickResolver(spec: TableSpec, scope: SubgraphScope): ScopeResolver | null {

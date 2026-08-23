@@ -83,6 +83,12 @@ beforeEach(() => {
 });
 
 describe("resolveDeploymentRuntimeForRead — reaches the deploy's host, without the platform", () => {
+  it("plans the concrete transport and server id for an implicit single-server target", async () => {
+    await expect(
+      mod.resolvePlannedTargetTopology("server", undefined, "org1"),
+    ).resolves.toEqual({ serverId: "only-server", dockerTransport: "ssh" });
+  });
+
   it("server target → the pinned server's docker, never the local socket", async () => {
     await read({ deployTarget: "server", serverId: "srv-9" });
     expect(sshHosts()).toEqual(["host-of-srv-9"]);

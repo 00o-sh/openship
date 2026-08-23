@@ -68,8 +68,10 @@ describe("the deploy routes the carried port through the allocator", () => {
     expect(block).not.toMatch(/if \(carried\) \{\s*hostPort = carried;/);
   });
 
-  it("still avoids ports this same deploy already handed out", () => {
-    expect(block).toContain("avoid: usedHostPorts");
+  it("still avoids durable host claims and ports this same deploy already handed out", () => {
+    expect(block).toContain("pinnedHostPortsToAvoid");
+    expect(block).toContain("allocatedHostPorts");
+    expect(block).toContain("avoid,");
   });
 
   it("says so when it had to move a carried port", () => {

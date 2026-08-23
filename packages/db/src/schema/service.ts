@@ -23,6 +23,7 @@ export type ComposeServiceSpec = {
   image?: string | null;
   build?: string | null;
   dockerfile?: string | null;
+  buildArgs?: Record<string, string | null>;
   ports?: string[];
   dependsOn?: string[];
   environment?: Record<string, string>;
@@ -98,6 +99,9 @@ export const service = pgTable("service", {
   build: text("build"),
   /** Dockerfile path relative to build context - null to use default "Dockerfile" */
   dockerfile: text("dockerfile"),
+  /** Per-service compose `build.args`. A dedicated column keeps build-time
+   * configuration distinct from the container's runtime environment. */
+  buildArgs: jsonb("build_args").$type<Record<string, string | null>>().notNull().default({}),
 
   /* ── Networking ─────────────────────────────────────────────────────── */
   /** JSON array of port mappings (e.g. ["8080:3000", "5432"]) */

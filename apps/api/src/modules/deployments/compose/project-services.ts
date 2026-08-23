@@ -16,7 +16,14 @@ import { getProjectType, type ComposeAdvanced, type StackId } from "@repo/core";
 import { serviceKind, type DeployableService } from "../../../lib/deployable-service";
 export { serviceKind } from "../../../lib/deployable-service";
 
-export function isMultiServiceProject(project: Pick<Project, "framework">): boolean {
+export function isMultiServiceProject(
+  project: Pick<Project, "framework"> & { composePath?: string | null },
+): boolean {
+  // A declared compose file is authoritative project shape, even for a legacy
+  // row whose framework still says plain "docker" and has no service rows yet.
+  // This is also the bootstrap signal reconcileComposeDrift uses to create the
+  // first rows; without it composePath only affected scanning, not deployment.
+  if (project.composePath?.trim()) return true;
   const framework = project.framework as StackId | undefined;
   if (!framework) return false;
 
@@ -63,6 +70,7 @@ export function projectServicesToDeployableServices(
     image: s.image ?? undefined,
     build: s.build ?? undefined,
     dockerfile: s.dockerfile ?? undefined,
+    buildArgs: (s.buildArgs as Record<string, string | null> | null) ?? undefined,
     ports: (s.ports as string[] | null) ?? [],
     dependsOn: (s.dependsOn as string[] | null) ?? [],
     environment: (s.environment as Record<string, string> | null) ?? {},
@@ -150,4 +158,3 @@ export async function shouldUseProjectServicePipeline(
   // Fallback for compose projects that don't have synced service rows.
   return isMultiServiceProject(project);
 }
-

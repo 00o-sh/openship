@@ -106,6 +106,7 @@ const synthServiceFromRepo = (c: ComposeRepoService): DiscoveredService => ({
   image: c.image,
   build: c.build,
   dockerfile: c.dockerfile,
+  buildArgs: c.buildArgs,
   ports: c.ports ?? [],
   env: c.environment ?? {},
   volumes: [],

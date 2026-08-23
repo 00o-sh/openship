@@ -30,6 +30,7 @@ export {
 // ─── Dump / restore (team-mode migration + project transfer) ─────────────────
 export {
   dumpSubgraph,
+  countInstanceSubgraphTables,
   restoreSubgraph,
   deleteProjectSubgraph,
   dumpDatabase,
@@ -85,6 +86,7 @@ export {
   type NewProject,
   type EnvVar,
   type NewEnvVar,
+  type PinnedHostPort,
   type Deployment,
   type NewDeployment,
   type BuildSession,

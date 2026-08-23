@@ -220,13 +220,13 @@ export async function persistProjectRouteState(
   projectId: string,
   publicEndpoints: StoredPublicEndpoint[],
   projectDomains?: Domain[],
-  opts?: { preserveVerifiedCustom?: boolean },
+  opts?: { preserveCustomDomains?: boolean },
 ): Promise<void> {
   await syncProjectPublicRoutes({
     projectId,
     endpoints: publicEndpoints,
     currentDomains: projectDomains,
-    preserveVerifiedCustom: opts?.preserveVerifiedCustom,
+    preserveCustomDomains: opts?.preserveCustomDomains,
   });
 }
 
@@ -238,11 +238,10 @@ export async function syncProjectRouteState(
     slug?: string | null;
     customDomain?: string | null;
     /**
-     * Deploy-only: never destroy a verified custom domain during this sync (see
-     * syncProjectPublicRoutes). Left unset by the Domains editor so explicit
-     * removals still apply.
+     * Deploy-only: never destroy custom-domain configuration during this sync.
+     * Left unset by the Domains editor so explicit removals still apply.
      */
-    preserveVerifiedCustom?: boolean;
+    preserveCustomDomains?: boolean;
   },
 ): Promise<ProjectRouteState> {
   const projectDomains = input.projectDomains ?? await listProjectRouteRows(project.id);
@@ -252,7 +251,7 @@ export async function syncProjectRouteState(
   });
 
   await persistProjectRouteState(project.id, nextState.publicEndpoints, projectDomains, {
-    preserveVerifiedCustom: input.preserveVerifiedCustom,
+    preserveCustomDomains: input.preserveCustomDomains,
   });
   const refreshedDomains = await listProjectRouteRows(project.id);
   return deriveProjectRouteState(project, { projectDomains: refreshedDomains });

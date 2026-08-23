@@ -669,6 +669,20 @@ export const AUDIT_EVENTS: Record<string, AuditEventDef> = {
     tone: "warning",
     description: "A full database dump left this instance.",
   },
+  "instance.data.receive_code_created": {
+    category: "security",
+    action: "created a direct data-transfer receive code",
+    label: "Data-transfer receive code created",
+    tone: "warning",
+    description: "A short-lived code was created to receive instance data directly.",
+  },
+  "instance.data.sent": {
+    category: "security",
+    action: "sent instance data to another instance",
+    label: "Instance data sent",
+    tone: "warning",
+    description: "Selected instance data was transferred directly to another instance.",
+  },
   "instance.data.imported": {
     category: "security",
     action: "imported instance data",

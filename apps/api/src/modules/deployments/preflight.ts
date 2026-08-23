@@ -15,6 +15,7 @@ import type { DeploymentConfigSnapshot } from "./build.service";
 import { platform } from "../../lib/controller-helpers";
 import {
   resolveEffectiveTarget,
+  resolvePlannedTargetTopology,
   usesManagedRouting as usesManagedRoutingFor,
 } from "../../lib/deployment-runtime";
 import {
@@ -1492,13 +1493,39 @@ export async function runPreflightChecks(
   // demands, and the deploy-time clone goes anonymous (clone-auth.ts).
   const ghRepo = parseGithubOwnerRepo(snapshot.repoUrl, opts?.gitOwner, opts?.gitRepo);
   const repoIsPublic = ghRepo ? await isPublicRepo(ghRepo.owner, ghRepo.repo) : false;
+  const needsGitCredentialPlan =
+    !repoIsPublic &&
+    !!opts?.gitOwner &&
+    snapshotNeedsGitSource(snapshot, opts?.composeServices);
+  const runtimeMode = snapshot.runtimeMode ?? "docker";
+  const plannedTarget = needsGitCredentialPlan
+    ? await resolvePlannedTargetTopology(
+        effectiveTarget,
+        snapshot.serverId,
+        snapshot.organizationId,
+      )
+    : null;
+  const clonePlan = resolveClonePlan({
+    effectiveTarget,
+    serverId: plannedTarget?.serverId ?? snapshot.serverId,
+    runtimeIsBare: runtimeMode === "bare",
+    cloneStrategy: snapshot.cloneStrategy,
+    buildStrategy: effectiveBuildStrategy,
+    isDesktop: plat.target === "desktop",
+    forwardGitCredentials: snapshot.forwardGitCredentials,
+    repoIsGithub: !!opts?.gitOwner,
+    dockerTransport:
+      runtimeMode === "docker" ? plannedTarget?.dockerTransport : undefined,
+  });
 
-  // GitHub App installation check — only relevant when the repo is cloned on a
-  // REMOTE build worker (server build). A LOCAL build ("Build on this machine")
-  // clones on the API host using local credentials (gh CLI / OAuth), so the
-  // cloud App installation is irrelevant — skip it. This mirrors the
-  // remote-clone-token check below, which already passes for local builds.
-  if (!repoIsPublic && getGitHubAuthMode() === "app" && effectiveBuildStrategy !== "local") {
+  // Installation auth is relevant only beyond the API-host credential boundary.
+  // In particular, a server-row deployment over a local Docker socket still
+  // acquires source in the API container and must not be treated as remote.
+  if (
+    needsGitCredentialPlan &&
+    getGitHubAuthMode() === "app" &&
+    clonePlan.cloneCredentialPurpose === "server"
+  ) {
     checks.push(
       await checkGitHubAppInstallation(githubCtx, opts?.gitOwner),
     );
@@ -1511,17 +1538,15 @@ export async function runPreflightChecks(
   // the API host), and cloud builds clone inside the workspace. So the two
   // credential checks below apply only to bare + server; otherwise the clone is
   // local and these checks would wrongly demand a remote/App/cloud credential.
-  const runtimeMode = snapshot.runtimeMode ?? "docker";
   const clonesOnRemote =
-    !repoIsPublic &&
+    needsGitCredentialPlan &&
     runtimeMode === "bare" &&
     // Only a WEB workload can build on a bare remote worker: static apps build
     // in a Docker sandbox and workers build in Docker (both clone on the
     // orchestrator), so neither ever needs a remote clone credential even when
     // runtimeMode is "bare" (#538-B).
     snapshotToClass(snapshot).workload === "web" &&
-    effectiveTarget === "server" &&
-    effectiveBuildStrategy !== "local";
+    clonePlan.cloneRunsOnTarget;
 
   if (clonesOnRemote) {
     // Remote-build credential check. For App-scoped modes (app / cloud-app):
@@ -1561,20 +1586,7 @@ export async function runPreflightChecks(
   // is already covered by the hard-fail clonesOnRemote checks above.
   // Same clone decision the build pipeline uses (resolveClonePlan) — so this
   // credential check verifies exactly the clone the pipeline will perform.
-  const dockerClonesOnServer = resolveClonePlan({
-    effectiveTarget,
-    serverId: snapshot.serverId,
-    runtimeIsBare: runtimeMode === "bare",
-    cloneStrategy: snapshot.cloneStrategy,
-    buildStrategy: effectiveBuildStrategy,
-    isDesktop: plat.target === "desktop",
-    forwardGitCredentials: snapshot.forwardGitCredentials,
-    // GitHub projects carry a parsed gitOwner; docker acquires the source
-    // tarball on the server for them. Same structured signal the pipeline uses
-    // (`!!project.gitOwner`) so the two decisions can't drift.
-    repoIsGithub: !!opts?.gitOwner,
-  }).dockerClonesOnServer;
-  if (dockerClonesOnServer) {
+  if (needsGitCredentialPlan && clonePlan.dockerClonesOnTarget) {
     checks.push(
       await checkCloneOnServerCredential(
         githubCtx,

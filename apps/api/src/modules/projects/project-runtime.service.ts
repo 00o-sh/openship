@@ -3,7 +3,7 @@
  */
 
 import { repos } from "@repo/db";
-import { AppError, NotFoundError, ValidationError } from "@repo/core";
+import { AppError, NotFoundError, ValidationError, safeErrorMessage } from "@repo/core";
 import { checkEdge, edgeProxy } from "@repo/adapters";
 import type { LogEntry, ImportedSite, RuntimeAdapter } from "@repo/adapters";
 import {
@@ -15,6 +15,7 @@ import {
 import { isAbsent, isAlreadyInState } from "../../lib/remote-state";
 import { assertNotControlPlane, assertResourceInOrg } from "../../lib/controller-helpers";
 import { syncManagedEdgeRoutes, edgeUnsyncedWarning } from "../../lib/managed-edge-proxy";
+import { reconcileServerEdge } from "../../lib/edge-reconcile";
 import { resolveManagedHostname } from "../../lib/routing-domains";
 import { sshManager } from "../../lib/ssh-manager";
 import { applyProjectRouting } from "../domains/routing-apply.service";
@@ -297,13 +298,16 @@ async function startOne(runtime: RuntimeAdapter, containerId: string): Promise<v
  *   1. Re-point the active deployment at the DURABLE server binding
  *      (`project.serverId`) — a snapshot missing `meta.serverId` is what let
  *      routing resolve to "local".
- *   2. Restore any verified custom domain whose port was nulled, reading the port
+ *   2. Reconcile and health-check the target server's edge before issuing any
+ *      route read/write. A missing or stopped edge is revived; an unrecoverable
+ *      edge returns immediately with an actionable warning.
+ *   3. Restore any verified custom domain whose port was nulled, reading the port
  *      from what the edge is ACTUALLY serving. Safe-only: no live upstream ⇒ the
  *      row is left unchanged (a genuinely domain-less project stays "Local").
- *   3. Re-apply the project's LIVE routes (custom + free) reload-free.
- *   4. Reconcile managed `*.opsh.io` edge routes and clear the "Action Required"
+ *   4. Re-apply the project's LIVE routes (custom + free) reload-free.
+ *   5. Reconcile managed `*.opsh.io` edge routes and clear the "Action Required"
  *      warning — only on full success.
- *   5. Verify the edge is SERVING what steps 1-4 wrote, so a box whose edge never
+ *   6. Verify the edge is SERVING what steps 1-5 wrote, so a box whose edge never
  *      bound :80 can't answer this action with "Live" (see `edgeServingWarning`).
  *
  * Best-effort throughout; returns the failure instead of throwing so the UI can
@@ -326,6 +330,17 @@ export async function retryProjectRouting(
   await repairDeploymentServerBinding(p, dep).catch(() => {});
 
   const serverId = p.serverId ?? (dep?.meta as { serverId?: string } | null)?.serverId ?? undefined;
+
+  // Route application reaches into openship-edge. Reconcile it BEFORE any route
+  // read/write so a stopped or missing container is revived rather than leaving
+  // docker exec/config reload calls to sit until the request timeout (#693).
+  const edgeRecoveryWarning = await recoverProjectEdge(p, dep);
+  if (edgeRecoveryWarning) {
+    const fresh = p.activeDeploymentId ? await repos.deployment.findById(p.activeDeploymentId) : null;
+    await markRoutingWarning(fresh, edgeRecoveryWarning).catch(() => {});
+    return { ok: false, warning: edgeRecoveryWarning };
+  }
+
   await restoreCustomPortsFromEdge(p, serverId).catch(() => {});
 
   // Live re-apply is best-effort, but its failure must NOT clear the warning.
@@ -376,6 +391,41 @@ export async function retryProjectRouting(
     return { ok: false, warning: edgeWarning };
   }
   return { ok: true };
+}
+
+/**
+ * Ensure the edge serving this project's domains exists and is healthy before
+ * retry touches its vhosts. Uses deployment-platform resolution so the same
+ * repair works for this host and for an SSH target server.
+ */
+async function recoverProjectEdge(
+  project: NonNullable<Awaited<ReturnType<typeof repos.project.findById>>>,
+  dep: Awaited<ReturnType<typeof repos.deployment.findById>> | null,
+): Promise<string | null> {
+  if (!dep) return null;
+  const domains = await repos.domain.listByProject(project.id).catch(() => []);
+  if (domains.length === 0) return null;
+
+  try {
+    return await withDeploymentPlatform(dep, async ({ executor, effectiveTarget }) => {
+      if (effectiveTarget === "cloud") return null;
+      if (!executor) {
+        return "Couldn't retry routing because the deployment target has no host executor.";
+      }
+
+      const recovery = await reconcileServerEdge(executor, { onLog: () => {} });
+      if (recovery.error) {
+        return `Couldn't restore the edge before retrying routing: ${recovery.error}`;
+      }
+
+      const status = await checkEdge(executor);
+      return status.healthy
+        ? null
+        : `Couldn't restore the edge before retrying routing: ${status.message}`;
+    });
+  } catch (err) {
+    return `Couldn't restore the edge before retrying routing: ${safeErrorMessage(err)}`;
+  }
 }
 
 /**
@@ -548,5 +598,3 @@ async function markRoutingWarning(
   meta.deployWarning = warning;
   await repos.deployment.updateStatus(dep.id, dep.status, { meta });
 }
-
-

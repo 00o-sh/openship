@@ -91,6 +91,7 @@ import * as sessionManager from "../session-manager";
 import { isStaticService, parseServicePort, serviceAliasExtras } from "../../../lib/deployable-service";
 import { computeKeepSet } from "../image-gc";
 import { auditPorts } from "../port-audit.service";
+import { listTargetPinnedHostPorts, pinnedHostPortsToAvoid } from "../pinned-host-ports";
 import {
   recordUnstableServices,
   verifyDeployedContainers,
@@ -726,12 +727,13 @@ async function prepareServiceRoutes(opts: {
     const domainKey = route.hostname.toLowerCase();
     const beforeRecord = routeContext.domainByHostname.get(domainKey);
     try {
-      const domainRecord = await ensureRouteDomainRecord({
+      const ensureResult = await ensureRouteDomainRecord({
         projectId: project.id,
         route,
         domainByHostname: routeContext.domainByHostname,
       });
-      if (!beforeRecord && domainRecord) {
+      const domainRecord = ensureResult.domain;
+      if (ensureResult.created && domainRecord) {
         logger.log(`Created domain record for "${route.hostname}".\n`, "info", {
           serviceName: service.name,
         });
@@ -957,7 +959,9 @@ export async function deployComposeServices(
     }
   }
 
-  const projectEnvMap = await repos.project.getEnvMap(project.id, dep.environment);
+  // Service-scoped rows are loaded separately below and must not leak into the
+  // project layer or another service.
+  const projectEnvMap = await repos.project.getEnvMap(project.id, dep.environment, null);
   const decryptedProjectEnv = decryptEnvMap(projectEnvMap, (key) => {
     logger.log(`Warning: failed to decrypt project env var "${key}", skipping.\n`, "warn");
   });
@@ -1201,14 +1205,17 @@ export async function deployComposeServices(
     composeRouteWarnings.push(message);
   };
 
-  // loopback-port routing (compose): host ports pinned this deploy, so two
-  // services in the same pass never collide on an allocation. Seed with every
-  // previous service's port so a fresh allocation never lands on one that a
-  // later service is about to reuse.
-  const usedHostPorts = new Set<number>();
-  for (const prev of previousByServiceId.values()) {
-    if (prev.hostPort) usedHostPorts.add(prev.hostPort);
-  }
+  // Durable claims cover stopped/crashed containers that a live socket scan
+  // cannot see. They are host-scoped: two different servers may safely use the
+  // same loopback port. Allocations from THIS pass are tracked separately so a
+  // carried claim can be released only for its owner without erasing a sibling.
+  const pinnedHostPortClaims =
+    resolveRouteStrategy(project.routeStrategy) === "loopback-port" &&
+    runtime.name !== "cloud" &&
+    opts?.executor
+      ? await listTargetPinnedHostPorts(project.organizationId, opts.serverId ?? null)
+      : [];
+  const allocatedHostPorts = new Set<number>();
 
   // #438: app-template config files (`advanced.files`) are host-side state living
   // under `/var/lib/openship`, the root-owned tree the edge's own vhosts sit in.
@@ -1505,10 +1512,41 @@ export async function deployComposeServices(
         project: decryptedProjectEnv,
         frozen: depEnv,
         inline: (svc.environment as Record<string, string>) ?? {},
+        templateKeys: svc.advanced?.environmentTemplateKeys,
         service: decryptedServiceEnv,
       },
       frozenEnvWins,
     );
+    if (layered.missingRequired.length > 0) {
+      const names = [...new Set(layered.missingRequired.map((item) => item.variable))];
+      const message =
+        `Required Compose environment ${names.length === 1 ? "variable is" : "variables are"} ` +
+        `not configured: ${names.join(", ")}`;
+      logger.log(`Service "${svc.name}" failed: ${message}\n`, "error", {
+        serviceName: svc.name,
+      });
+      sessionManager.broadcastServiceStatus(dep.id, {
+        serviceName: svc.name,
+        serviceId: svc.id,
+        status: "failed",
+        error: message,
+      });
+      await repos.service.markServiceDeploymentFailed({
+        deploymentId: dep.id,
+        serviceId: svc.id,
+        serviceName: svc.name,
+        imageRef: opts?.builtImages?.get(svc.id) ?? svc.image ?? null,
+        errorMessage: message,
+      });
+      results.push({
+        serviceId: svc.id,
+        serviceName: svc.name,
+        status: "failed",
+        error: message,
+      });
+      unavailableServiceNames.add(svc.name);
+      continue;
+    }
     // Say so when a variable is not what any UI shows. The service Env tab and
     // the wizard both keep rendering the empty value this merge ignored, so the
     // deploy log is the only surface that can explain the container — same
@@ -2079,9 +2117,16 @@ export async function deployComposeServices(
          * another if it isn't. Passing it there rather than branching around the allocator means
          * one rule for both cases and no second place that decides what a free port is.
          */
+        const avoid = pinnedHostPortsToAvoid(
+          pinnedHostPortClaims,
+          carried
+            ? { projectId: project.id, serviceId: svc.id, port: carried }
+            : undefined,
+        );
+        for (const port of allocatedHostPorts) avoid.add(port);
         const allocation = await allocateHostPort(opts.executor, {
           preferred: carried,
-          avoid: usedHostPorts,
+          avoid,
         });
         const hostPort = allocation.port;
         if (carried && hostPort !== carried) {
@@ -2095,13 +2140,14 @@ export async function deployComposeServices(
         if (!allocation.scanned) {
           logger.log(
             `Couldn't read live port occupancy on the target, so ${allocation.port} for ` +
-              `${svc.name} avoids only ports this deploy already took. If publishing it fails ` +
+              `${svc.name} avoids database-pinned ports and ports this deploy already took. ` +
+              `If publishing it fails ` +
               `as "already allocated", check that Openship can reach this host ` +
               `(Servers → this box).\n`,
             "warn",
           );
         }
-        usedHostPorts.add(hostPort);
+        allocatedHostPorts.add(hostPort);
         pinnedHostPortByContainerPort.set(containerPort, hostPort);
       }
       serviceRuntimeConfig.ports = withLoopbackPublishAll(

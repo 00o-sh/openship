@@ -3,7 +3,7 @@
  */
 
 import { normalizeRoutingFields, repos, composeSpecDiff, type Project, type Service, type ServicePublicEndpoint } from "@repo/db";
-import { aliasConflictsWithSiblings, getProjectType, mergeAdvanced, normalizeServiceLabel, normalizeAliasStrict, resolveCommandArgv, safeErrorMessage, withTimeout, type ComposeAdvanced, type ServiceContainerState, type StackId } from "@repo/core";
+import { aliasConflictsWithSiblings, getProjectType, isValidEnvKey, looksLikeSecretKey, mergeAdvanced, normalizeServiceLabel, normalizeAliasStrict, resolveCommandArgv, safeErrorMessage, withTimeout, type ComposeAdvanced, type ServiceContainerState, type StackId } from "@repo/core";
 import {
   BuildLogger,
   DockerRuntime,
@@ -209,8 +209,12 @@ export async function validateServiceName(
 export { aliasConflictsWithSiblings };
 
 function withDrift(svc: Service) {
+  // The baselines are internal merge state. Returning them would bypass the
+  // environment masker (and now may contain raw Compose expressions with
+  // literal defaults); clients consume the already-masked `drift.changes` only.
+  const { importedSpec: _importedSpec, driftSpec: _driftSpec, ...publicService } = svc;
   return {
-    ...maskServiceEnv(svc),
+    ...maskServiceEnv(publicService),
     drift: svc.driftSpec
       ? { changes: maskDriftChanges(composeSpecDiff(svc.importedSpec ?? {}, svc.driftSpec)) }
       : null,
@@ -269,6 +273,7 @@ export async function acceptServiceDrift(
     image: theirs.image ?? null,
     build: theirs.build ?? null,
     dockerfile: theirs.dockerfile ?? null,
+    buildArgs: theirs.buildArgs ?? {},
     ports: theirs.ports ?? [],
     dependsOn: theirs.dependsOn ?? [],
     environment: theirs.environment ?? {},
@@ -618,6 +623,14 @@ export async function createService(
   // strips the `null`-means-remove sentinels the update path accepts, so a
   // caller can send one payload shape to both.
   const advanced = mergeAdvanced(null, data.advanced);
+  if (
+    data.buildArgs !== undefined &&
+    !Object.hasOwn(data.advanced ?? {}, "buildArgTemplateKeys")
+  ) {
+    // Direct/manual values are literal. Raw Compose parsing supplies its own
+    // non-empty marker when interpolation is required.
+    advanced.buildArgTemplateKeys = [];
+  }
   // Same alias gate as updateService — normalize + reject invalid/colliding
   // custom aliases BEFORE the insert, so a create can't persist an alias the
   // update path would refuse. No serviceId yet, so pass "" — every existing
@@ -631,6 +644,7 @@ export async function createService(
     image: trimOrNull(data.image),
     build: trimOrNull(data.build),
     dockerfile: trimOrNull(data.dockerfile),
+    buildArgs: data.buildArgs ?? {},
     ports: data.ports ?? [],
     dependsOn: data.dependsOn ?? [],
     environment: data.environment ?? {},
@@ -725,6 +739,19 @@ export async function updateService(
   if ("advanced" in patch) {
     patch.advanced = mergeAdvanced(svc.advanced as ComposeAdvanced | null, patch.advanced);
     await validateServiceAlias(projectId, serviceId, patch.advanced as ComposeAdvanced, project.internalAlias);
+  }
+
+  if (
+    "buildArgs" in patch &&
+    !Object.hasOwn(data.advanced ?? {}, "buildArgTemplateKeys")
+  ) {
+    // A manual arg edit replaces the old value's provenance as well as its
+    // value. Otherwise a literal `$HOME` could inherit a repo-template marker
+    // and be expanded on the next deploy.
+    patch.advanced = mergeAdvanced(
+      ("advanced" in patch ? patch.advanced : svc.advanced) as ComposeAdvanced | null,
+      { buildArgTemplateKeys: [] },
+    );
   }
 
   if ("name" in patch && typeof patch.name === "string") {
@@ -1165,15 +1192,52 @@ export async function setServiceEnvVars(
 ) {
   await assertServiceAccess(ctx, projectId, serviceId);
 
-  // Encrypt values before storage
-  const encrypted = data.vars.map((v) => ({
-    key: v.key,
-    value: encrypt(v.value),
-    isSecret: v.isSecret,
-  }));
+  const seenKeys = new Set<string>();
+  for (const variable of data.vars) {
+    if (!isValidEnvKey(variable.key)) throw new Error(`invalid-env-key:${variable.key}`);
+    if (seenKeys.has(variable.key)) throw new Error(`duplicate-env-key:${variable.key}`);
+    seenKeys.add(variable.key);
+  }
+
+  // GET masks secrets. Preserve the existing ciphertext when that sentinel is
+  // submitted unchanged; never encrypt and persist the sentinel itself. The
+  // stable row id also lets a masked secret be renamed without revealing it.
+  const existing = await repos.project.listEnvVars(projectId, data.environment, serviceId);
+  const existingByKey = new Map(existing.map((row) => [row.key, row]));
+  const existingById = new Map(existing.map((row) => [row.id, row]));
+  const usedSourceIds = new Set<string>();
+  const encrypted = data.vars.map((v) => {
+    const prior = v.sourceId ? existingById.get(v.sourceId) : existingByKey.get(v.key);
+    if (v.sourceId && !prior) throw new Error(`invalid-env-source:${v.sourceId}`);
+    if (prior?.id) {
+      if (usedSourceIds.has(prior.id)) throw new Error(`duplicate-env-source:${prior.id}`);
+      usedSourceIds.add(prior.id);
+    }
+    if (v.value === ENV_MASK) {
+      if (!prior?.isSecret) throw new Error(`masked-env-without-source:${v.key}`);
+      return { key: v.key, value: prior.value, isSecret: v.isSecret ?? prior.isSecret };
+    }
+    return {
+      key: v.key,
+      value: encrypt(v.value),
+      isSecret: v.isSecret ?? prior?.isSecret ?? looksLikeSecretKey(v.key),
+    };
+  });
 
   await repos.project.bulkSetEnvVars(projectId, data.environment, encrypted, serviceId);
   return { count: encrypted.length };
+}
+
+/** Full internal map; the controller returns only explicitly requested keys. */
+export async function revealServiceEnvVars(
+  ctx: RequestContext,
+  projectId: string,
+  serviceId: string,
+  environment: string,
+): Promise<Record<string, string>> {
+  await assertServiceAccess(ctx, projectId, serviceId);
+  const rows = await repos.project.listEnvVars(projectId, environment, serviceId);
+  return Object.fromEntries(rows.map((row) => [row.key, decrypt(row.value)]));
 }
 
 // ─── Compose Sync ────────────────────────────────────────────────────────────
@@ -1186,6 +1250,7 @@ export async function syncComposeServices(
     image?: string;
     build?: string;
     dockerfile?: string;
+    buildArgs?: Record<string, string | null>;
     ports?: string[];
     dependsOn?: string[];
     environment?: Record<string, string>;
@@ -2080,4 +2145,3 @@ export async function streamServiceRuntimeLogs(
   };
   return { cleanup, serverId };
 }
-

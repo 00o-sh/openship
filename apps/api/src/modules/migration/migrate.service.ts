@@ -15,7 +15,7 @@
  */
 
 import { repos, restoreSubgraph, PkCollisionError, type Service } from "@repo/db";
-import { slugify, safeErrorMessage, mergeAdvanced, type ComposeAdvanced } from "@repo/core";
+import { slugify, safeErrorMessage, mergeAdvanced } from "@repo/core";
 import { buildNetworkAliases, type ContainerStatus } from "@repo/adapters";
 import { serviceAliasExtras } from "../../lib/deployable-service";
 import { COMPOSE_SENTINEL } from "../../lib/container-ref";
@@ -27,6 +27,7 @@ import {
   blockingComposeFields,
   describeBlockingComposeFields,
   parseComposeFile,
+  type ComposeService,
 } from "../../lib/compose-parser";
 import { unmaskEnv } from "../../lib/secret-env";
 import { createServerDockerRuntime } from "../../lib/deployment-runtime";
@@ -56,24 +57,12 @@ const REPO_COMPOSE_FILES = ["docker-compose.yml", "docker-compose.yaml", "compos
 /** Compose-service shape returned to the migrate wizard's mapping step. Carries
  *  enough to render a full native service card (env + deps), so a repo service
  *  with no running container (e.g. `redis`) is a first-class, editable unit. */
-export interface RepoComposeService {
-  name: string;
-  build?: string;
-  dockerfile?: string;
-  image?: string;
-  ports: string[];
-  environment: Record<string, string>;
-  dependsOn: string[];
-  volumes: string[];
-  command?: string;
-  commandArgv?: string[] | null; // #332
-  restart?: string;
-  /** Extended compose keys (healthcheck, resource caps, shared namespaces). Must be
-   *  declared here AND forwarded into the row below — carrying it only out of the
-   *  parser leaves it stranded on this shape, which is how the blob went missing
-   *  from every migrated stack in the first place. */
-  advanced?: ComposeAdvanced;
-}
+/** Parser service minus scan-only provenance. Deriving this shape prevents a
+ * new compose-owned field from being stranded in another handwritten map. */
+export type RepoComposeService = Omit<
+  ComposeService,
+  "environmentTemplates" | "environmentMeta"
+>;
 
 /**
  * Parse a LINKED repo's docker-compose into its services, so the migrate wizard
@@ -118,24 +107,7 @@ export async function parseRepoCompose(
             describeBlockingComposeFields(blocking),
         );
       }
-      return parsed.services.map((s) => ({
-        name: s.name,
-        build: s.build ?? undefined,
-        dockerfile: s.dockerfile ?? undefined,
-        image: s.image ?? undefined,
-        ports: s.ports ?? [],
-        environment: s.environment ?? {},
-        dependsOn: s.dependsOn ?? [],
-        volumes: s.volumes ?? [],
-        command: s.command ?? undefined,
-        commandArgv: s.commandArgv ?? null, // #332
-        restart: s.restart ?? undefined,
-        // Extended keys (healthcheck, resource caps, shared namespaces). This
-        // hand-written map dropped the whole blob, so a migrated stack lost its
-        // healthchecks and per-service caps along with them — the same
-        // field-by-field omission #533 is about.
-        advanced: s.advanced ?? undefined,
-      }));
+      return parsed.services.map(({ environmentTemplates: _templates, environmentMeta: _meta, ...service }) => service);
     } catch (err) {
       // RETHROWN, not swallowed. Returning [] showed the wizard's mapping step an empty
       // repo-service list with no reason why — issue #339's symptom, which the native path
@@ -379,8 +351,18 @@ export function buildAdoptedServiceRows(
     const repo = repoServices?.get(uniqueNames[i]) ?? repoServices?.get(perService(serviceRenames, s) ?? s.name);
     const native = repo && (repo.build || repo.image);
     const source = native
-      ? { image: repo.image, build: repo.build, dockerfile: repo.dockerfile }
-      : { image: s.image, build: s.image ? undefined : s.build, dockerfile: s.image ? undefined : s.dockerfile };
+      ? {
+          image: repo.image,
+          build: repo.build,
+          dockerfile: repo.dockerfile,
+          buildArgs: repo.buildArgs,
+        }
+      : {
+          image: s.image,
+          build: s.image ? undefined : s.build,
+          dockerfile: s.image ? undefined : s.dockerfile,
+          buildArgs: s.image ? undefined : s.buildArgs,
+        };
     // Hand the running image to the deploy for the one-time cutover: a native
     // `build:` row would otherwise rebuild on its very first deploy. Only when we
     // actually have a running image to reuse.
@@ -416,6 +398,7 @@ export function buildAdoptedServiceRows(
       image: source.image,
       build: source.build,
       dockerfile: source.dockerfile,
+      buildArgs: source.buildArgs,
       ports,
       ...(exposedPort ? { exposedPort } : {}),
       // Only keep dependencies on services we're also adopting.
@@ -601,6 +584,7 @@ export async function adoptServerStack(opts: {
         image: rs.image,
         build: rs.build,
         dockerfile: rs.dockerfile,
+        buildArgs: rs.buildArgs,
         ports,
         // Keep deps only on services this project actually has (adopted or new).
         dependsOn: (rs.dependsOn ?? []).filter((d) => repoServices.has(d) || adoptedNames.has(d)),

@@ -3,6 +3,133 @@
 All notable changes to Openship. Versions follow [semver](https://semver.org);
 the in-app updater surfaces critical advisories from `release-advisories.json`.
 
+## 0.6.8
+
+Compose projects now deploy as the services they declare, with their build
+arguments and dynamic environment intact from import through rollback. Instance
+moves can go directly from one self-hosted installation to another without
+copying an encryption key, and the file workflow shows and filters what it will
+carry. This release also hardens custom-domain ownership, host-port allocation,
+Git credential boundaries, and edge recovery across Linux and macOS.
+
+### Instance transfer
+
+- **Move an instance directly, credentials included** — the destination creates a
+  single-use, ten-minute receive code for Replace or Merge mode; the source
+  encrypts the selected database rows and plaintext credential bundle directly
+  to that destination, and the destination immediately re-encrypts every
+  transferred secret under its own instance key.
+  Server SSH passwords and keys, environment variables, tokens, registry and DNS
+  credentials, and backup credentials move without sharing either instance's
+  `BETTER_AUTH_SECRET` or managing a transfer passphrase (#656).
+- **See and filter the export before downloading it** — Settings now shows the
+  durable row count and a count beside each optional history group. Analytics,
+  audit/notification activity, backup history, incident history, and migration
+  history can be included independently; configuration, projects, services,
+  servers, users, and credential records always stay in the portable core.
+  Leaving the selection absent preserves the legacy full export (#656).
+- **Credential-bearing files cannot be imported half-unlocked** — the offline
+  export/import path remains available, but a file containing a sealed credential
+  bundle now requires its passphrase before any database write. Invalid bundles
+  are rejected before restore rather than importing rows whose secrets were
+  silently scrubbed.
+
+### Compose and environments
+
+- **Compose services drive their own builds** — a project with `composePath` is
+  materialized into the service pipeline instead of falling through to one
+  generic Dockerfile build. Map and list forms of `build.args`, bare arguments,
+  and `${...}` expressions are stored per service and survive CLI sync,
+  reconciliation, migration adoption, redeploy snapshots, and rollback. Docker
+  socket, SSH, batch, and cloud builds all use the same argument resolver, and
+  Openship's build-command logging does not print argument values (#689).
+- **Removing Compose build arguments removes the stored arguments** — an empty
+  `args` map or a deleted `args` key clears stale values and interpolation
+  provenance, while snapshots created before build arguments existed remain
+  non-destructive during rollback (#689).
+- **Unsupported Compose builds fail before deployment** — malformed arguments,
+  repository-escaping or remote contexts, and build features Openship cannot
+  reproduce no longer leave the old service shape running silently. A declared
+  Compose project with no materialized rows is scanned once to bootstrap its
+  topology, while an explicit single-app choice remains single-app.
+- **Dynamic Compose environment resolves at deploy time** — raw expressions such
+  as
+  `postgresql://user:${POSTGRES_PASSWORD:?set it}@postgres:5432/app` are evaluated
+  against the final project, frozen-release, inline, and service-scoped layers.
+  Embedded requirements, passthrough keys, defaults, nested expressions, and
+  escaped dollars retain Compose semantics; an unresolved required variable
+  fails that service with the missing key named (#673).
+- **Manual service variables are durable overrides** — the service Environment
+  tab now owns service-scoped environment rows rather than rewriting the
+  Compose-owned `service.environment` object. Values added in the UI therefore
+  survive a Compose reparse and project redeploy. Saving an unrevealed secret —
+  including renaming its key — preserves its existing ciphertext instead of
+  storing the mask or deleting the value.
+
+### Deployments and routing
+
+- **Apply really means restart without rebuild for a single app** — Docker and
+  host-mode projects reuse the active deployment's retained artifact even though
+  they have no service rows. Apply never fetches Git or silently turns into a
+  rebuild; if the artifact is gone, it says to Redeploy instead (#674).
+- **The DNS checkpoint covers Docker and every Compose route** — pressing Deploy
+  now shows records for single-app custom domains, service scalar routes, and
+  multi-route Compose endpoints. Multiple hostnames appear together, `www` is
+  grouped with its apex, and a remote deployment preview uses the selected
+  server's public address rather than this instance's address (#663).
+- **Redeploy cannot detach a custom domain** — deployment reconciliation preserves
+  both pending and verified custom-domain rows and their live targets when a
+  release omits them. A failed deployment rolls back only generated managed
+  routes, never user-owned custom configuration, and concurrent hostname claims
+  use database-authoritative ownership instead of letting the losing project
+  route another project's domain (#675).
+- **Stopped containers still reserve their host ports** — allocation now combines
+  live socket occupancy with durable, server-scoped claims from active
+  single-app and Compose releases. A service may reuse its own carried port, but
+  cannot take a port pinned to an offline container on the same host (#682).
+- **Retry routing repairs the edge first** — when `openship-edge` is stopped or
+  missing, Retry Routing reconciles and health-checks it before touching vhosts.
+  An unrecoverable edge returns an actionable warning immediately instead of
+  hanging until the route request times out (#693).
+
+### Hosts and edge
+
+- **Docker source acquisition follows the actual transport** — preflight and the
+  build pipeline now share one source-location plan. Local socket and TCP daemon
+  builds prepare source on the API host, remote SSH Docker builds may clone on
+  the target, and bare or cloud builds retain their own boundaries. A local
+  server row therefore no longer asks a nonexistent remote clone path to use
+  ambient Git credentials (#654).
+- **macOS edge mounts use physical host paths** — bind sources are canonicalized
+  on the machine that owns the Docker daemon, so `/var` and `/etc` resolve to
+  their `/private/...` targets before Docker Desktop or OrbStack sees them. A
+  healthy-looking edge with stale logical mounts is recreated onto the same
+  vhost, certificate, ACME, and static-data directories (#692).
+
+### Security
+
+- **An explicit GitHub CLI config directory is an isolation boundary** — fallback
+  token discovery reads exactly the `hosts.yml` selected by GitHub CLI precedence
+  on Linux, macOS, and Windows. If `GH_CONFIG_DIR` or `XDG_CONFIG_HOME` is set but
+  missing or tokenless, Openship no longer falls through to another user's home
+  directory and borrows that credential (#687).
+
+### Openship Mail
+
+- **Inbound SMTP has DNS inside Postfix's chroot** — every mail-engine boot now
+  refreshes `resolv.conf` and the supporting NSS files inside the persistent
+  Postfix spool before the supervisor starts. The engine fails closed if no
+  resolver can be installed, rather than starting an SMTP service that rejects
+  every legitimate sender with `450 Helo Host not found` (#686).
+
+### Dashboard
+
+- **Project environments update without a refresh** — creating an environment
+  commits it to shared state immediately and reconciles the canonical list;
+  deleting one removes it from every affected cache and navigates to the best
+  surviving sibling. A failed follow-up read no longer makes a successful create
+  look like it failed (#657).
+
 ## 0.6.6
 
 Mail learns to receive, and third-party secrets get one home. Openship Mail now

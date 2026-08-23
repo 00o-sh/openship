@@ -69,7 +69,8 @@ describe("no git source is fetched when the image is pinned", () => {
   );
 
   it("the clone decision reads the pin", () => {
-    expect(pinned).toContain("classNeedsGitSource(snapshotToClass(snapshot)) && !pinnedAppImage(snapshot)");
+    expect(pinned).toContain("classNeedsGitSource(snapshotToClass(snapshot))");
+    expect(pinned).toContain("!pinnedAppImage(snapshot)");
   });
 
   it("and the pipeline asks that one resolver rather than deciding again", () => {

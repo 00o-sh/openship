@@ -70,6 +70,7 @@ export interface PrepareComposeService {
   image?: string;
   build?: string;
   dockerfile?: string;
+  buildArgs?: Record<string, string | null>;
   ports: string[];
   dependsOn: string[];
   environment: Record<string, string>;
@@ -81,9 +82,11 @@ export interface PrepareComposeService {
       defaultValue?: string;
       resolvedValue: string;
       expression?: string;
-      /** The compose file marks this one mandatory (`${VAR:?…}`) and it has no
-       *  value yet — always alongside `source: "missing"`. */
+      /** The compose file marks this row mandatory (`${VAR:?…}`) and at least
+       *  one referenced variable is unresolved. */
       required?: boolean;
+      /** Names referenced by an embedded expression that still need a value. */
+      unresolvedVariables?: string[];
     }
   >;
   volumes: string[];
@@ -330,6 +333,8 @@ export const deployApi = {
       image?: string;
       build?: string;
       dockerfile?: string;
+      buildArgs?: Record<string, string | null>;
+      advanced?: ComposeAdvanced;
       ports?: string[];
       dependsOn?: string[];
       environment?: Record<string, string>;
