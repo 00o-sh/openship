@@ -26,6 +26,8 @@ import {
   getRuntimeImage,
   isFullCommitSha,
   isReleaseProvider,
+  releaseArtifactKind,
+  renderReleaseImage,
   looksLikeSecretKey,
   resolveProjectVolumes,
   type StackId,
@@ -37,10 +39,7 @@ import {
   type BuildKind,
   type WorkloadType,
 } from "@repo/core";
-import type {
-  LogEntry,
-  ResourceConfig,
-} from "@repo/adapters";
+import type { LogEntry, ResourceConfig } from "@repo/adapters";
 import { resolveCloudResourceConfig } from "./cloud-resources";
 import { resolveEnvDirtyServiceIds } from "./env-drift";
 import type { TBuildAccessBody } from "./deployment.schema";
@@ -84,7 +83,11 @@ import {
   syncProjectRouteState,
 } from "../domains/project-route.service";
 import { kickoffBuild, resolveServicePipelineMode } from "./build-pipeline";
-import { resolveReleaseDist, resolveLatestVersion, readApiVersion } from "../../lib/release-resolver";
+import {
+  resolveReleaseDist,
+  resolveReleaseVersion,
+  ReleaseVersionUnavailableError,
+} from "../../lib/release-resolver";
 import { env } from "../../config";
 
 function throwPreflightFailure(preflight: PreflightResult): never {
@@ -208,14 +211,19 @@ export interface DeploymentConfigSnapshot {
   /** Absolute path to a local project directory (alternative to repoUrl) */
   localPath?: string;
   /**
-   * Release/dist source (gitProvider === "release"). Resolved by
-   * `applyReleaseSourceToSnapshot` in the async entry points: the semver
-   * version deployed, the asset it came from, and the source repo — captured
-   * so history/rollback and the drift banner have a stable anchor. `localPath`
-   * above points at the resolved dist dir and `buildCommand` is emptied
-   * (deploy-only, no build).
+   * Release source (gitProvider === "release"). Resolved by
+   * `applyReleaseSourceToSnapshot` in the async entry points: the semver plus
+   * either an extracted archive (`localPath`) or a concrete registry image
+   * (`releaseImageRef`). Captured so history, rollback, and drift all share the
+   * same stable anchor; neither artifact runs a source build.
    */
   releaseVersion?: string;
+  /** Raw upstream tag (for example `v1.2.3`). Kept separately from the
+   * normalized releaseVersion so an image template using `{tag}` is stable. */
+  releaseTag?: string;
+  /** Concrete prebuilt image selected for this release. This is deliberately
+   * separate from buildImage, which is the builder used for source builds. */
+  releaseImageRef?: string;
   releaseAsset?: string;
   releaseRepo?: string;
   /** Build strategy: "server" (build in workspace) or "local" (build on host) */
@@ -378,10 +386,7 @@ function toRuntimeMode(value: string | null | undefined): "bare" | "docker" | un
 
 /** Build a config snapshot from the project - pure pass-through, no fallbacks.
  *  All values must be set by prepare / ensureProject before this is called. */
-export function buildConfigSnapshot(
-  project: Project,
-  branch?: string,
-): DeploymentConfigSnapshot {
+export function buildConfigSnapshot(project: Project, branch?: string): DeploymentConfigSnapshot {
   const runtimeImage = resolveRuntimeImage(project);
 
   return {
@@ -432,17 +437,14 @@ export function buildConfigSnapshot(
 }
 
 /**
- * Resolve a release/dist-source project (`gitProvider === "release"`) into a
- * deployable snapshot: pick the version, download/locate the prebuilt dist,
- * and point the snapshot's `localPath` at it with the build step emptied. The
- * rest of the pipeline then treats it exactly like a `localPath` no-build
- * deploy — no bespoke pipeline. `buildConfigSnapshot` is sync/pure, so this
- * async resolution runs in the deploy entry points (requestBuildAccess /
- * triggerDeployment) after the snapshot is built, mirroring `startWebmailDeploy`.
+ * Resolve a release-source project (`gitProvider === "release"`) into one
+ * explicit frozen artifact. Archive releases resolve to a local directory;
+ * image releases render a concrete registry reference. `buildImage` is never
+ * touched: it configures source-build sandboxes and is not a deploy artifact.
  *
- * Version precedence: explicit `opts.version` (webhook release tag / redeploy
- * pin) → `releaseSource.pinnedVersion` → newest advertised (github latest tag
- * or `versionUrl`) → the API's own version (mono-version fallback).
+ * Version precedence lives in resolveReleaseVersion: explicit webhook/redeploy
+ * tag → pinnedVersion → newest advertised. There is intentionally no fallback
+ * to OpenShip's own package version for arbitrary projects.
  *
  * Mutates `snapshot` in place and returns the resolved semver (no leading "v").
  */
@@ -451,14 +453,6 @@ export async function applyReleaseSourceToSnapshot(
   snapshot: DeploymentConfigSnapshot,
   opts?: { version?: string },
 ): Promise<string> {
-  // Backstop: release/dist resolution downloads + extracts a prebuilt dir onto
-  // THIS box (~/.openship) — a self-hosted runtime op that must never run on the
-  // multi-tenant SaaS control plane. Creation is already blocked in cloud mode
-  // (resolveProjectSource); this also covers redeploy/webhook paths for any
-  // project that predates the gate.
-  if (env.CLOUD_MODE) {
-    throw new ForbiddenError("Release/dist source deploys are not available in cloud mode");
-  }
   const source = (project.releaseSource as ReleaseSource | null) ?? null;
   if (!source) {
     throw new AppError(
@@ -468,15 +462,49 @@ export async function applyReleaseSourceToSnapshot(
     );
   }
 
-  const version =
-    stripV(opts?.version) ||
-    stripV(source.pinnedVersion) ||
-    (await resolveLatestVersion(source)) ||
-    readApiVersion();
+  let release: Awaited<ReturnType<typeof resolveReleaseVersion>>;
+  try {
+    release = await resolveReleaseVersion(source, { version: opts?.version });
+  } catch (err) {
+    if (err instanceof ReleaseVersionUnavailableError) {
+      throw new AppError(err.message, 424, "RELEASE_VERSION_UNAVAILABLE");
+    }
+    throw err;
+  }
+
+  if (releaseArtifactKind(source) === "image") {
+    if (snapshotToClass(snapshot).workload === "static") {
+      throw new AppError(
+        "A prebuilt container image must run as a web app or worker, not a static-file deployment.",
+        400,
+        "RELEASE_IMAGE_STATIC_UNSUPPORTED",
+      );
+    }
+    snapshot.releaseImageRef = renderReleaseImage(source.imageTemplate!, release);
+    snapshot.releaseVersion = release.version;
+    snapshot.releaseTag = release.tag;
+    snapshot.releaseRepo = source.mode === "github" ? source.repo : undefined;
+    snapshot.releaseAsset = undefined;
+    snapshot.repoUrl = "";
+    snapshot.localPath = undefined;
+    snapshot.installCommand = "";
+    snapshot.buildCommand = "";
+    snapshot.hasBuild = false;
+    snapshot.source = "image";
+    snapshot.build = "prebuilt";
+    if (!project.cloudWorkspaceId) snapshot.runtimeMode = "docker";
+    return release.version;
+  }
+
+  // Archive resolution downloads + extracts onto this control plane. Registry
+  // images do not, so only this legacy artifact kind is unavailable in SaaS.
+  if (env.CLOUD_MODE) {
+    throw new ForbiddenError("Release archive projects are not available in cloud mode");
+  }
 
   const result = await resolveReleaseDist({
     name: project.slug || project.id,
-    version,
+    version: release.version,
     source,
   });
 
@@ -487,14 +515,11 @@ export async function applyReleaseSourceToSnapshot(
   snapshot.repoUrl = "";
   snapshot.buildCommand = "";
   snapshot.releaseVersion = result.version;
+  snapshot.releaseTag = release.tag;
+  snapshot.releaseImageRef = undefined;
   snapshot.releaseAsset = result.asset;
   snapshot.releaseRepo = source.mode === "github" ? source.repo : undefined;
   return result.version;
-}
-
-function stripV(v: string | null | undefined): string | undefined {
-  const t = v?.trim();
-  return t ? t.replace(/^v/, "") : undefined;
 }
 
 async function resolveLatestCommitInfo(ctx: RequestContext, project: Project, branch: string) {
@@ -636,10 +661,7 @@ async function reconcileComposeDrift(
       }
       return;
     }
-    const { driftedNames } = await repos.service.reconcileFromCompose(
-      project.id,
-      services,
-    );
+    const { driftedNames } = await repos.service.reconcileFromCompose(project.id, services);
     if (driftedNames.length > 0) {
       console.log(
         `[compose-drift] ${project.id}: kept user edits on ${driftedNames.join(", ")} (pending review)`,
@@ -1009,10 +1031,7 @@ export async function createQueuedDeployment(opts: {
 export { subscribe as subscribeToBuildSession } from "./session-manager";
 
 /** Resolve a pending pipeline prompt (e.g. port conflict). */
-export async function respondToPrompt(
-  deploymentId: string,
-  action: string,
-): Promise<boolean> {
+export async function respondToPrompt(deploymentId: string, action: string): Promise<boolean> {
   await loadDeployment(deploymentId);
   return sessionManager.respondToPrompt(deploymentId, action);
 }
@@ -1023,11 +1042,12 @@ export async function respondToPrompt(
  * with neither is dropped downstream (see deriveEnvironmentPublicEndpoints), so
  * pick the one the project's shape needs.
  */
-function defaultFreeEndpoint(project: {
-  slug: string;
-  hasServer: boolean;
-  port: number | null;
-}): { domain: string; domainType: "free"; port?: string; targetPath?: string } {
+function defaultFreeEndpoint(project: { slug: string; hasServer: boolean; port: number | null }): {
+  domain: string;
+  domainType: "free";
+  port?: string;
+  targetPath?: string;
+} {
   return project.hasServer && project.port
     ? { domain: project.slug, domainType: "free", port: String(project.port) }
     : { domain: project.slug, domainType: "free", targetPath: "/" };
@@ -1084,9 +1104,7 @@ export async function requestBuildAccess(
   // Folder-upload: resolve the session UP FRONT — its scanned compose services
   // feed the service-mode decision below. The snapshot mutations it drives still
   // happen further down, after target resolution (which the upload mode overrides).
-  const uploadSession = input.uploadSessionId
-    ? getFolderSession(input.uploadSessionId)
-    : undefined;
+  const uploadSession = input.uploadSessionId ? getFolderSession(input.uploadSessionId) : undefined;
   if (input.uploadSessionId && (!uploadSession || uploadSession.orgId !== ctx.organizationId)) {
     throw new AppError("Upload session not found or expired — re-upload the folder.", 400);
   }
@@ -1271,7 +1289,11 @@ export async function requestBuildAccess(
   // the single source of truth shared with triggerDeployment — UI override >
   // cloudWorkspaceId > active-deployment meta. Keeps the two deploy entry points
   // from diverging on where a project deploys.
-  const resolvedTarget = await resolveSnapshotTarget(project, { deployTarget, serverId, runtimeMode });
+  const resolvedTarget = await resolveSnapshotTarget(project, {
+    deployTarget,
+    serverId,
+    runtimeMode,
+  });
   snapshot.deployTarget = resolvedTarget.deployTarget;
   snapshot.serverId = resolvedTarget.serverId;
   snapshot.runtimeMode = resolvedTarget.runtimeMode;
@@ -1298,14 +1320,13 @@ export async function requestBuildAccess(
   // default, and a redeploy then resolves to that default (bare) — silently
   // flipping a docker/sandbox project to direct-on-host. Best-effort: a failed
   // persist must not block the deploy. Only write when it actually changed.
-  if (
-    (runtimeMode === "bare" || runtimeMode === "docker") &&
-    runtimeMode !== project.runtimeMode
-  ) {
+  if ((runtimeMode === "bare" || runtimeMode === "docker") && runtimeMode !== project.runtimeMode) {
     await repos.project
       .update(project.id, { runtimeMode })
       .catch((err) =>
-        console.warn(`[requestBuildAccess] failed to persist runtimeMode: ${safeErrorMessage(err)}`),
+        console.warn(
+          `[requestBuildAccess] failed to persist runtimeMode: ${safeErrorMessage(err)}`,
+        ),
       );
   }
 
@@ -1374,11 +1395,7 @@ export async function requestBuildAccess(
   const env = environment || "production";
 
   // ── Resolve commit info from the branch HEAD ────
-  const { commitSha, commitMessage } = await resolveLatestCommitInfo(
-    ctx,
-    project,
-    snapshot.branch,
-  );
+  const { commitSha, commitMessage } = await resolveLatestCommitInfo(ctx, project, snapshot.branch);
 
   // ── Resolve rollback context (shared helper — single default) ─────────
   const { rollbackStrategy, commitShaBefore } = await resolveRollbackContext(
@@ -1462,7 +1479,6 @@ export async function requestBuildAccess(
     project_id: project.id,
   };
 }
-
 
 /**
  * Cancel an in-flight deployment.
@@ -1623,9 +1639,18 @@ export async function redeployBuildSession(
   // "redeploy latest commit" semantics below). Re-resolving also guards against
   // a frozen snapshot whose cached dist dir was since pruned.
   if (isReleaseProvider(project.gitProvider)) {
-    await applyReleaseSourceToSnapshot(project, meta, {
-      version: opts?.useExistingCommit ? frozenMeta?.releaseVersion : undefined,
-    });
+    // A same-version redeploy of an image release must replay the exact frozen
+    // reference, even if the project template has since changed. The runtime
+    // will re-pull it when the local artifact was pruned. Archive releases still
+    // re-resolve their frozen version because their cached directory may be gone.
+    const canReplayFrozenImage = opts?.useExistingCommit && Boolean(frozenMeta?.releaseImageRef);
+    if (!canReplayFrozenImage) {
+      await applyReleaseSourceToSnapshot(project, meta, {
+        version: opts?.useExistingCommit
+          ? (frozenMeta?.releaseTag ?? frozenMeta?.releaseVersion)
+          : undefined,
+      });
+    }
   }
 
   // Two redeploy modes:
@@ -1685,10 +1710,7 @@ export async function redeployBuildSession(
   };
 
   // ── Resolve rollback context (shared helper — single default) ─────────
-  const { rollbackStrategy, commitShaBefore } = await resolveRollbackContext(
-    project,
-    branch,
-  );
+  const { rollbackStrategy, commitShaBefore } = await resolveRollbackContext(project, branch);
 
   // Normal redeploy means current configuration + latest commit. The old
   // deployment's envVars is a release snapshot and belongs only to rollback.
@@ -1740,9 +1762,15 @@ export async function startBuild(deploymentId: string) {
   // be overwritten mid-flight. Resolving a blocker creates a NEW deployment
   // (redeploy), it never restarts this one.
   if (
-    ["building", "deploying", "ready", "failed", "cancelled", "action_required", "no_changes"].includes(
-      dep.status,
-    )
+    [
+      "building",
+      "deploying",
+      "ready",
+      "failed",
+      "cancelled",
+      "action_required",
+      "no_changes",
+    ].includes(dep.status)
   ) {
     return {
       success: true,
@@ -1886,11 +1914,19 @@ export async function triggerDeployment(
     }
   }
   // GitHub access gate (default-deny; webhook ctx is the org owner and
-  // passes). Covers manual trigger / redeploy paths routed through here.
-  await assertGitHubRepoAccess(ctx, {
-    owner: project.gitOwner,
-    repo: project.gitRepo,
-  });
+  // passes). A reused snapshot that needs no Git source is an exact artifact
+  // replay, so it must not be judged against a repository linked *after* the
+  // target deployment was created. That is particularly important for a
+  // release-image rollback after the project has since been relinked to Git.
+  // Any replay that still clones source remains gated as usual.
+  const needsGitRepositoryAccess =
+    !data.reuseSnapshot || snapshotNeedsGitSource(data.reuseSnapshot.meta);
+  if (needsGitRepositoryAccess) {
+    await assertGitHubRepoAccess(ctx, {
+      owner: project.gitOwner,
+      repo: project.gitRepo,
+    });
+  }
 
   const branch = await resolveProjectBranch(ctx, project, data.branch);
   const environment = data.environment ?? "production";

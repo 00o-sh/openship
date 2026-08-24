@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const {
   assertGitHubRepoAccess,
@@ -99,12 +102,14 @@ vi.mock("../../../src/modules/deployments/smart-route", () => ({
 }));
 
 import {
+  applyReleaseSourceToSnapshot,
   redeployBuildSession,
   requestBuildAccess,
   resolveSnapshotTarget,
   triggerDeployment,
   type DeploymentConfigSnapshot,
 } from "../../../src/modules/deployments/build.service";
+import type { ReleaseSource } from "@repo/core";
 import {
   newFolderSessionId,
   putFolderSession,
@@ -196,6 +201,146 @@ function baseSnapshot(): DeploymentConfigSnapshot {
   };
 }
 
+function releaseSnapshot(
+  overrides: Partial<DeploymentConfigSnapshot> = {},
+): DeploymentConfigSnapshot {
+  return {
+    ...baseSnapshot(),
+    repoUrl: "https://github.com/acme/app.git",
+    branch: "main",
+    framework: "node",
+    buildImage: "node:22-custom-builder",
+    runtimeImage: "node:22-alpine",
+    installCommand: "npm ci",
+    buildCommand: "npm run build",
+    outputDirectory: "dist",
+    productionPaths: ["dist", "node_modules"],
+    volumes: [],
+    startCommand: "npm start",
+    hasServer: true,
+    hasBuild: true,
+    source: "git",
+    build: "buildpack",
+    workload: "web",
+    localPath: "/srv/old-source",
+    composeServices: undefined,
+    ...overrides,
+  };
+}
+
+describe("applyReleaseSourceToSnapshot", () => {
+  it("freezes the normalized version, raw tag, and rendered image without repurposing buildImage", async () => {
+    const source: ReleaseSource = {
+      mode: "github",
+      artifactKind: "image",
+      repo: "acme/app",
+      imageTemplate: "ghcr.io/acme/app:{tag}",
+      pinnedVersion: "v1.2.3",
+    };
+    const project = baseProject({
+      gitProvider: "release",
+      releaseSource: source,
+      localPath: null,
+      framework: "node",
+    });
+    const snapshot = releaseSnapshot();
+
+    await expect(applyReleaseSourceToSnapshot(project as never, snapshot)).resolves.toBe("1.2.3");
+
+    expect(snapshot).toMatchObject({
+      releaseVersion: "1.2.3",
+      releaseTag: "v1.2.3",
+      releaseImageRef: "ghcr.io/acme/app:v1.2.3",
+      releaseRepo: "acme/app",
+      repoUrl: "",
+      installCommand: "",
+      buildCommand: "",
+      hasBuild: false,
+      source: "image",
+      build: "prebuilt",
+      runtimeMode: "docker",
+    });
+    expect(snapshot.localPath).toBeUndefined();
+    // buildImage is the source-build sandbox, never the application artifact.
+    expect(snapshot.buildImage).toBe("node:22-custom-builder");
+    expect(snapshot.runtimeImage).toBe("node:22-alpine");
+    // A caller-supplied image command remains an intentional override.
+    expect(snapshot.startCommand).toBe("npm start");
+  });
+
+  it("keeps legacy archive releases on the extracted-directory path", async () => {
+    const previousDataDir = process.env.OPENSHIP_DATA_DIR;
+    const dataDir = mkdtempSync(join(tmpdir(), "openship-release-archive-"));
+    const extracted = join(dataDir, "my-stack-dist", "v2.4.0");
+    mkdirSync(extracted, { recursive: true });
+    process.env.OPENSHIP_DATA_DIR = dataDir;
+
+    try {
+      const source: ReleaseSource = {
+        mode: "github",
+        // Deliberately omitted: legacy rows default to archive.
+        repo: "acme/archive-app",
+        pinnedVersion: "v2.4.0",
+      };
+      const project = baseProject({
+        gitProvider: "release",
+        releaseSource: source,
+        localPath: null,
+        framework: "node",
+      });
+      const snapshot = releaseSnapshot({ source: "image", build: "prebuilt" });
+
+      await expect(applyReleaseSourceToSnapshot(project as never, snapshot)).resolves.toBe("2.4.0");
+
+      expect(snapshot).toMatchObject({
+        releaseVersion: "2.4.0",
+        releaseTag: "v2.4.0",
+        releaseRepo: "acme/archive-app",
+        localPath: extracted,
+        repoUrl: "",
+        buildCommand: "",
+        installCommand: "npm ci",
+        hasBuild: true,
+      });
+      expect(snapshot.releaseImageRef).toBeUndefined();
+      expect(snapshot.buildImage).toBe("node:22-custom-builder");
+    } finally {
+      if (previousDataDir === undefined) delete process.env.OPENSHIP_DATA_DIR;
+      else process.env.OPENSHIP_DATA_DIR = previousDataDir;
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a container release configured as a static-file workload", async () => {
+    const source: ReleaseSource = {
+      mode: "github",
+      artifactKind: "image",
+      repo: "acme/app",
+      imageTemplate: "ghcr.io/acme/app:{version}",
+      pinnedVersion: "1.2.3",
+    };
+    const project = baseProject({
+      gitProvider: "release",
+      releaseSource: source,
+      localPath: null,
+      framework: "static",
+    });
+    const snapshot = releaseSnapshot({
+      framework: "static",
+      workload: "static",
+      build: "static",
+      hasServer: false,
+      startCommand: "",
+    });
+
+    await expect(applyReleaseSourceToSnapshot(project as never, snapshot)).rejects.toMatchObject({
+      statusCode: 400,
+      code: "RELEASE_IMAGE_STATIC_UNSUPPORTED",
+    });
+    expect(snapshot.releaseImageRef).toBeUndefined();
+  });
+});
+
 /**
  * The single place that decides a snapshot's target. The durable `project.serverId`
  * (Fix 2a) is what stops a server-hosted project from regressing to "local" on a
@@ -238,18 +383,16 @@ describe("resolveSnapshotTarget", () => {
   });
 
   it("lets cloud win over a stray serverId and drops the serverId", async () => {
-    const t = await resolveSnapshotTarget(
-      project({ cloudWorkspaceId: "ws_1", serverId: "srv_1" }),
-    );
+    const t = await resolveSnapshotTarget(project({ cloudWorkspaceId: "ws_1", serverId: "srv_1" }));
     expect(t.deployTarget).toBe("cloud");
     expect(t.serverId).toBeUndefined();
   });
 
   it("lets an explicit override win over the durable binding", async () => {
-    const t = await resolveSnapshotTarget(
-      project({ serverId: "srv_1" }),
-      { deployTarget: "server", serverId: "srv_override" },
-    );
+    const t = await resolveSnapshotTarget(project({ serverId: "srv_1" }), {
+      deployTarget: "server",
+      serverId: "srv_override",
+    });
     expect(t).toMatchObject({ deployTarget: "server", serverId: "srv_override" });
   });
 
@@ -382,10 +525,7 @@ describe("triggerDeployment", () => {
         composePath: "deploy/stack.yml",
       }),
     );
-    expect(repos.service.reconcileFromCompose).toHaveBeenCalledWith(
-      "project-1",
-      composeServices,
-    );
+    expect(repos.service.reconcileFromCompose).toHaveBeenCalledWith("project-1", composeServices);
     expect(runPreflightChecks).toHaveBeenCalledWith(
       expect.any(Object),
       expect.objectContaining({
@@ -441,10 +581,7 @@ describe("triggerDeployment", () => {
     });
 
     expect(resolveProjectInfo).toHaveBeenCalledOnce();
-    expect(repos.service.reconcileFromCompose).toHaveBeenCalledWith(
-      "project-1",
-      composeServices,
-    );
+    expect(repos.service.reconcileFromCompose).toHaveBeenCalledWith("project-1", composeServices);
   });
 
   it("keeps the code-only webhook fast path after the compose baseline is current", async () => {
@@ -601,6 +738,54 @@ describe("triggerDeployment", () => {
     );
   });
 
+  it("replays a frozen release image without authorizing a repository linked later", async () => {
+    repos.project.findById.mockResolvedValue(
+      baseProject({
+        gitProvider: "github",
+        gitUrl: "https://github.com/acme/current-source.git",
+        gitOwner: "acme",
+        gitRepo: "current-source",
+        localPath: null,
+        framework: "node",
+      }),
+    );
+    const frozenImage = `ghcr.io/acme/release-app@sha256:${"c".repeat(64)}`;
+    const frozenSnapshot = releaseSnapshot({
+      repoUrl: "",
+      localPath: undefined,
+      hasBuild: false,
+      source: "image",
+      build: "prebuilt",
+      workload: "web",
+      releaseImageRef: frozenImage,
+      composeServices: undefined,
+    });
+    resolveServicePipelineMode.mockResolvedValueOnce({
+      useServicePipeline: false,
+      servicePreflightServices: [],
+      useSingleAppPipeline: true,
+    });
+
+    await triggerDeployment(ctx, {
+      projectId: "project-1",
+      branch: "frozen-release-branch",
+      trigger: "rollback",
+      reuseSnapshot: {
+        meta: frozenSnapshot,
+        envVars: { API_KEY: "encrypted-frozen" },
+      },
+    });
+
+    expect(assertGitHubRepoAccess).not.toHaveBeenCalled();
+    expect(getCommitByRef).not.toHaveBeenCalled();
+    expect(repos.deployment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        commitSha: undefined,
+        meta: expect.objectContaining({ releaseImageRef: frozenImage }),
+      }),
+    );
+  });
+
   it("refreshes a single app from its active artifact with zero service rows (#674)", async () => {
     repos.project.findById.mockResolvedValue(
       baseProject({
@@ -737,10 +922,16 @@ describe("redeployBuildSession environment snapshot", () => {
     vi.clearAllMocks();
     const project = baseProject({ activeDeploymentId: "dep-old" });
     repos.deployment.findById.mockResolvedValue({
-      id: "dep-old", projectId: project.id, organizationId: project.organizationId,
-      branch: "main", environment: "production", framework: "docker-compose",
-      commitSha: "old-sha", commitMessage: "old commit",
-      envVars: { FROM_OLD_RELEASE: "stale" }, meta: baseSnapshot(),
+      id: "dep-old",
+      projectId: project.id,
+      organizationId: project.organizationId,
+      branch: "main",
+      environment: "production",
+      framework: "docker-compose",
+      commitSha: "old-sha",
+      commitMessage: "old commit",
+      envVars: { FROM_OLD_RELEASE: "stale" },
+      meta: baseSnapshot(),
     });
     repos.project.findById.mockResolvedValue(project);
     repos.project.getEnvMap.mockResolvedValue({ MANUAL_ENV: "keep-me" });
@@ -886,14 +1077,32 @@ describe("requestBuildAccess — folder-upload compose services", () => {
   it("#336: recovers the real env when the caller echoes the mask sentinel", async () => {
     const uploadSessionId = seedSession({
       services: [
-        { name: "api", image: "ghcr.io/acme/api:1", ports: [], dependsOn: [], environment: { API_TOKEN: "real-token" }, volumes: [] },
+        {
+          name: "api",
+          image: "ghcr.io/acme/api:1",
+          ports: [],
+          dependsOn: [],
+          environment: { API_TOKEN: "real-token" },
+          volumes: [],
+        },
       ],
     });
     const requested = [
-      { name: "api", image: "ghcr.io/acme/api:1", ports: [], dependsOn: [], environment: { API_TOKEN: "••••••••" }, volumes: [] },
+      {
+        name: "api",
+        image: "ghcr.io/acme/api:1",
+        ports: [],
+        dependsOn: [],
+        environment: { API_TOKEN: "••••••••" },
+        volumes: [],
+      },
     ];
 
-    await requestBuildAccess(ctx, { projectId: "project-1", uploadSessionId, services: requested as any });
+    await requestBuildAccess(ctx, {
+      projectId: "project-1",
+      uploadSessionId,
+      services: requested as any,
+    });
 
     expect(repos.service.syncFromCompose).toHaveBeenCalledWith(
       "project-1",
@@ -906,10 +1115,21 @@ describe("requestBuildAccess — folder-upload compose services", () => {
     const uploadSessionId = seedSession({ services: [] });
     repos.service.listByProject.mockResolvedValue([]);
     const requested = [
-      { name: "api", image: "x", ports: [], dependsOn: [], environment: { GHOST: "••••••••", REAL: "keep" }, volumes: [] },
+      {
+        name: "api",
+        image: "x",
+        ports: [],
+        dependsOn: [],
+        environment: { GHOST: "••••••••", REAL: "keep" },
+        volumes: [],
+      },
     ];
 
-    await requestBuildAccess(ctx, { projectId: "project-1", uploadSessionId, services: requested as any });
+    await requestBuildAccess(ctx, {
+      projectId: "project-1",
+      uploadSessionId,
+      services: requested as any,
+    });
 
     expect(repos.service.syncFromCompose).toHaveBeenCalledWith(
       "project-1",

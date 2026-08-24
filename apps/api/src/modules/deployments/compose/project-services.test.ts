@@ -11,10 +11,7 @@ vi.mock("@repo/db", async (importOriginal) => ({
   repos,
 }));
 
-import {
-  isMultiServiceProject,
-  shouldUseProjectServicePipeline,
-} from "./project-services";
+import { isMultiServiceProject, shouldUseProjectServicePipeline } from "./project-services";
 
 describe("composePath service-pipeline bootstrap (#689)", () => {
   beforeEach(() => {
@@ -42,5 +39,32 @@ describe("composePath service-pipeline bootstrap (#689)", () => {
 
     expect(isMultiServiceProject(project)).toBe(false);
     await expect(shouldUseProjectServicePipeline(project)).resolves.toBe(false);
+  });
+
+  it("does not let retained disabled service rows hijack a single-app deploy", async () => {
+    repos.service.listByProject.mockResolvedValue([
+      { id: "service-disabled", kind: "compose", enabled: false },
+    ]);
+    const project = {
+      id: "project-1",
+      framework: "docker",
+      composePath: null,
+    } as any;
+
+    await expect(shouldUseProjectServicePipeline(project)).resolves.toBe(false);
+  });
+
+  it("uses the service pipeline when at least one retained service is enabled", async () => {
+    repos.service.listByProject.mockResolvedValue([
+      { id: "service-disabled", kind: "compose", enabled: false },
+      { id: "service-enabled", kind: "monorepo", enabled: true },
+    ]);
+    const project = {
+      id: "project-1",
+      framework: "docker",
+      composePath: null,
+    } as any;
+
+    await expect(shouldUseProjectServicePipeline(project)).resolves.toBe(true);
   });
 });

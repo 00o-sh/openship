@@ -771,6 +771,20 @@
       "when": 1788387707325,
       "tag": "0109_service_build_args",
       "breakpoints": true
+    },
+    {
+      "idx": 110,
+      "version": "7",
+      "when": 1788474107325,
+      "tag": "0110_service_deployment_host_ports",
+      "breakpoints": true
+    },
+    {
+      "idx": 111,
+      "version": "7",
+      "when": 1788560507325,
+      "tag": "0111_host_port_claim",
+      "breakpoints": true
     }
   ]
 }

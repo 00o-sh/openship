@@ -9,7 +9,7 @@ import React, {
   useRef,
   useMemo,
 } from "react";
-import { isServicesFramework, type WorkloadType } from "@repo/core";
+import { isServicesFramework, type ReleaseSource, type WorkloadType } from "@repo/core";
 import { isSchemaAppTemplate } from "@/components/app-settings/AppSettingsForm";
 import { useRouter } from "next/navigation";
 import { useI18n } from "@/components/i18n-provider";
@@ -99,6 +99,8 @@ interface BasicProjectData {
   cloudWorkspaceId?: string | null;
   deletedAt?: string | null;
   packageManager?: string;
+  /** Source metadata for prebuilt release/image projects. */
+  releaseSource?: ReleaseSource | null;
   /**
    * Push auto-deploy, straight from the `auto_deploy` column — the same field
    * the push webhook handler gates on. Typed here (not left to the index
@@ -114,7 +116,6 @@ interface BasicProjectData {
   rollbackWindow?: number | null;
   [key: string]: any;
 }
-
 
 interface DomainsData {
   domains: any[];
@@ -297,7 +298,6 @@ interface ProjectSettingsContextType {
 }
 
 const ProjectSettingsContext = createContext<ProjectSettingsContextType | undefined>(undefined);
-
 
 interface ProviderProps {
   children: ReactNode;
@@ -513,8 +513,7 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
         ? "server"
         : (projectData.deployTarget ?? "local");
     if (target === "local") {
-      const port =
-        Number((projectData as any).port ?? projectData.options?.productionPort) || 3000;
+      const port = Number((projectData as any).port ?? projectData.options?.productionPort) || 3000;
       const host = `localhost:${port}`;
       return { url: `http://${host}`, host, kind: "local", isLocal: true, urls: [] };
     }
@@ -530,9 +529,7 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
     const available = (projectData.domains || [])
       .map((d: any) => d?.domain)
       .filter((d: unknown): d is string => typeof d === "string" && d.length > 0);
-    setSelectedDomain((current) =>
-      current && available.includes(current) ? current : domain,
-    );
+    setSelectedDomain((current) => (current && available.includes(current) ? current : domain));
   }, [domain, projectData.domains]);
 
   // Derived: do we have multi-service rendering paths to enable?

@@ -521,10 +521,7 @@ async function checkPublicEndpoints(
 
   // Collection-level rule: a cloud static deploy supports at most one
   // explicit path-targeted endpoint.
-  if (
-    isCloudStatic &&
-    endpoints.filter((e) => typeof e.targetPath === "string").length > 1
-  ) {
+  if (isCloudStatic && endpoints.filter((e) => typeof e.targetPath === "string").length > 1) {
     checks.push(
       fail(
         "endpoint-static-cloud-shape",
@@ -601,13 +598,21 @@ async function checkPublicEndpoints(
       const hostname = endpoint.customDomain ? normalizeCustomHostname(endpoint.customDomain) : "";
       if (!hostname) {
         checks.push(
-          fail(idOf("domain"), `Endpoint domain (${label})`, "Custom endpoint domains cannot be empty."),
+          fail(
+            idOf("domain"),
+            `Endpoint domain (${label})`,
+            "Custom endpoint domains cannot be empty.",
+          ),
         );
         return;
       }
       if (seenHostnames.has(hostname)) {
         checks.push(
-          fail(idOf("domain"), `Endpoint domain (${label})`, `Duplicate domain configured: ${hostname}`),
+          fail(
+            idOf("domain"),
+            `Endpoint domain (${label})`,
+            `Duplicate domain configured: ${hostname}`,
+          ),
         );
         return;
       }
@@ -619,7 +624,11 @@ async function checkPublicEndpoints(
     const slug = endpoint.domain?.trim().toLowerCase();
     if (!slug) {
       checks.push(
-        fail(idOf("slug"), `Endpoint subdomain (${label})`, "Free endpoint subdomains cannot be empty."),
+        fail(
+          idOf("slug"),
+          `Endpoint subdomain (${label})`,
+          "Free endpoint subdomains cannot be empty.",
+        ),
       );
       return;
     }
@@ -631,7 +640,11 @@ async function checkPublicEndpoints(
     const hostname = `${slug}.${baseDomain}`;
     if (seenHostnames.has(hostname)) {
       checks.push(
-        fail(idOf("domain"), `Endpoint domain (${label})`, `Duplicate domain configured: ${hostname}`),
+        fail(
+          idOf("domain"),
+          `Endpoint domain (${label})`,
+          `Duplicate domain configured: ${hostname}`,
+        ),
       );
       return;
     }
@@ -652,7 +665,11 @@ async function checkPublicEndpoints(
           ? await requestCloudPreflight(snapshot, { customDomain: lk.hostname })
           : cloud;
         const result = await checkCustomDomain(lk.hostname, endpointCloud, snapshot);
-        return { ...result, id: `endpoint-${lk.index}-domain`, label: `Endpoint domain (${lk.label})` };
+        return {
+          ...result,
+          id: `endpoint-${lk.index}-domain`,
+          label: `Endpoint domain (${lk.label})`,
+        };
       }
       // Redeploy reclaiming a subdomain this project already holds live is not
       // a conflict — skip the cloud availability probe entirely for it.
@@ -791,8 +808,7 @@ async function resolveCloudPreflight(
   // to ping cloud preflight. Cloud-target deploys obviously need it
   // too (cloud IS doing the deploy). Single authority shared with the pipeline.
   const usesManagedRouting = usesManagedRoutingFor(plat.target, effectiveTarget);
-  const hasManagedPublicEndpoints =
-    storedPublicEndpointsNeedCloud(opts?.publicEndpoints);
+  const hasManagedPublicEndpoints = storedPublicEndpointsNeedCloud(opts?.publicEndpoints);
   // The project-level free-domain slug is a routable web hostname only for a
   // single-app project. In services mode there is no project domain — each
   // service routes via its own endpoint (needsManagedComposeDomains), so an
@@ -802,8 +818,7 @@ async function resolveCloudPreflight(
   const needsManagedProjectDomain =
     (!opts?.multiService && !!opts?.slug && !opts?.customDomain && usesManagedRouting) ||
     (usesManagedRouting && hasManagedPublicEndpoints);
-  const needsManagedComposeDomains =
-    composeServicesNeedCloud(opts?.composeServices, opts?.slug);
+  const needsManagedComposeDomains = composeServicesNeedCloud(opts?.composeServices, opts?.slug);
   const needsCloudPreflight =
     effectiveTarget === "cloud" || needsManagedProjectDomain || needsManagedComposeDomains;
   const requestInput = opts?.publicEndpoints?.length
@@ -828,6 +843,17 @@ async function resolveCloudPreflight(
 
 function checkConfig(snapshot: DeploymentConfigSnapshot, opts?: PreflightOptions): PreflightCheck {
   const missing: string[] = [];
+  const releaseImageRef = snapshot.releaseImageRef?.trim();
+
+  if (releaseImageRef && opts?.multiService) {
+    return {
+      id: "config",
+      label: "Service configuration",
+      status: "fail",
+      message:
+        "A project-level release image deploys one app. Configure images on the individual services for a multi-service project.",
+    };
+  }
 
   // A FULLY PINNED deploy (a rollback restoring a retained artifact, a migration
   // cutover) builds nothing and clones nothing: it runs an artifact that was
@@ -850,10 +876,12 @@ function checkConfig(snapshot: DeploymentConfigSnapshot, opts?: PreflightOptions
   // A folder-upload deploy has no git and no host path — its source is the
   // pre-staged upload workspace (`sourceStaged`, set by requestBuildAccess).
   // That's a valid source, so it satisfies both the source and branch checks.
-  if (!snapshot.repoUrl && !snapshot.localPath && !snapshot.sourceStaged) {
+  if (!snapshot.repoUrl && !snapshot.localPath && !snapshot.sourceStaged && !releaseImageRef) {
     missing.push("repository URL or local path");
   }
-  if (!snapshot.branch && !snapshot.localPath && !snapshot.sourceStaged) missing.push("branch");
+  if (!snapshot.branch && !snapshot.localPath && !snapshot.sourceStaged && !releaseImageRef) {
+    missing.push("branch");
+  }
 
   if (opts?.multiService) {
     // A services/compose deploy needs a project repo/localPath ONLY when some
@@ -983,14 +1011,16 @@ function checkConfig(snapshot: DeploymentConfigSnapshot, opts?: PreflightOptions
   // image), so buildImage is never consumed — refusing the deploy for a missing
   // buildImage there is wrong (it blocked repo-Dockerfile + self-app deploys).
   // Mirrors the multi-service branch's dockerfile/build check. #231
-  if (snapshot.framework !== "docker" && !snapshot.buildImage) missing.push("build image");
+  if (!releaseImageRef && snapshot.framework !== "docker" && !snapshot.buildImage) {
+    missing.push("build image");
+  }
 
   // A single-project Dockerfile owns install, build, and process startup. Those
   // buildpack commands are deliberately empty after repository/folder detection
   // and are not consumed by the Docker pipeline. The workload-specific checks
   // below still enforce a port for web apps.
   const dockerOwnsBuild = snapshot.framework === "docker";
-  if (!dockerOwnsBuild && snapshot.hasBuild && !snapshot.installCommand) {
+  if (!releaseImageRef && !dockerOwnsBuild && snapshot.hasBuild && !snapshot.installCommand) {
     missing.push("install command");
   }
 
@@ -998,7 +1028,9 @@ function checkConfig(snapshot: DeploymentConfigSnapshot, opts?: PreflightOptions
   if (cls.workload === "web") {
     // A web app is reached on a port and must declare how it starts and listens.
     // Dockerfile apps inherit their process command from the image.
-    if (!dockerOwnsBuild && !snapshot.startCommand) missing.push("start command");
+    // A prebuilt image may intentionally inherit its Dockerfile CMD.
+    if (!releaseImageRef && !dockerOwnsBuild && !snapshot.startCommand)
+      missing.push("start command");
     if (!snapshot.port) missing.push("port");
   } else if (cls.workload === "worker") {
     // A worker is a portless long-running container (#538-B): it needs a command
@@ -1228,9 +1260,7 @@ async function checkCustomDomainSelfHosted(
  * at the cloud edge directly. Non-blocking; the .opsh.io free domain
  * stays attached so the deploy still ships.
  */
-async function checkCustomDomainCloudCname(
-  customDomain: string,
-): Promise<PreflightCheck> {
+async function checkCustomDomainCloudCname(customDomain: string): Promise<PreflightCheck> {
   const records = await resolveRecords(customDomain, "CNAME", {
     timeoutMs: DOMAIN_CHECK_TIMEOUT_MS,
   });
@@ -1419,11 +1449,12 @@ export async function runPreflightChecks(
   const hasEndpointRouting = !!opts?.publicEndpoints?.length;
   const hasManagedProjectDomain =
     !opts?.multiService &&
-    !hasEndpointRouting && !!opts?.slug && !opts?.customDomain && usesManagedRouting;
-  const hasManagedPublicEndpoints =
-    storedPublicEndpointsNeedCloud(opts?.publicEndpoints);
-  const hasManagedComposeDomains =
-    composeServicesNeedCloud(opts?.composeServices, opts?.slug);
+    !hasEndpointRouting &&
+    !!opts?.slug &&
+    !opts?.customDomain &&
+    usesManagedRouting;
+  const hasManagedPublicEndpoints = storedPublicEndpointsNeedCloud(opts?.publicEndpoints);
+  const hasManagedComposeDomains = composeServicesNeedCloud(opts?.composeServices, opts?.slug);
   const cloudRequirement =
     effectiveTarget === "cloud"
       ? "cloud-runtime"
@@ -1494,9 +1525,7 @@ export async function runPreflightChecks(
   const ghRepo = parseGithubOwnerRepo(snapshot.repoUrl, opts?.gitOwner, opts?.gitRepo);
   const repoIsPublic = ghRepo ? await isPublicRepo(ghRepo.owner, ghRepo.repo) : false;
   const needsGitCredentialPlan =
-    !repoIsPublic &&
-    !!opts?.gitOwner &&
-    snapshotNeedsGitSource(snapshot, opts?.composeServices);
+    !repoIsPublic && !!opts?.gitOwner && snapshotNeedsGitSource(snapshot, opts?.composeServices);
   const runtimeMode = snapshot.runtimeMode ?? "docker";
   const plannedTarget = needsGitCredentialPlan
     ? await resolvePlannedTargetTopology(
@@ -1514,8 +1543,7 @@ export async function runPreflightChecks(
     isDesktop: plat.target === "desktop",
     forwardGitCredentials: snapshot.forwardGitCredentials,
     repoIsGithub: !!opts?.gitOwner,
-    dockerTransport:
-      runtimeMode === "docker" ? plannedTarget?.dockerTransport : undefined,
+    dockerTransport: runtimeMode === "docker" ? plannedTarget?.dockerTransport : undefined,
   });
 
   // Installation auth is relevant only beyond the API-host credential boundary.
@@ -1526,9 +1554,7 @@ export async function runPreflightChecks(
     getGitHubAuthMode() === "app" &&
     clonePlan.cloneCredentialPurpose === "server"
   ) {
-    checks.push(
-      await checkGitHubAppInstallation(githubCtx, opts?.gitOwner),
-    );
+    checks.push(await checkGitHubAppInstallation(githubCtx, opts?.gitOwner));
   }
 
   // A remote clone credential is only needed when the repo is actually cloned
@@ -1604,12 +1630,25 @@ export async function runPreflightChecks(
 
   if (opts?.composeServices?.length) {
     checks.push(
-      ...(await checkComposeServiceDomains(opts.composeServices, opts.slug, cloudPreflight, snapshot)),
+      ...(await checkComposeServiceDomains(
+        opts.composeServices,
+        opts.slug,
+        cloudPreflight,
+        snapshot,
+      )),
     );
   }
 
   if (opts?.publicEndpoints?.length) {
-    checks.push(...(await checkPublicEndpoints(snapshot, opts.publicEndpoints, cloudPreflight, opts.ctx, opts.projectId)));
+    checks.push(
+      ...(await checkPublicEndpoints(
+        snapshot,
+        opts.publicEndpoints,
+        cloudPreflight,
+        opts.ctx,
+        opts.projectId,
+      )),
+    );
   }
 
   // Catch the "this deploy will have no public URL" foot-gun: self-hosted,
@@ -1623,9 +1662,7 @@ export async function runPreflightChecks(
   const hasAnyEndpointDomain = (opts?.publicEndpoints ?? []).some(
     (endpoint) => !!endpoint.domain || !!endpoint.customDomain,
   );
-  const hasAnyComposeExposed = (opts?.composeServices ?? []).some(
-    (service) => service.exposed,
-  );
+  const hasAnyComposeExposed = (opts?.composeServices ?? []).some((service) => service.exposed);
   const willHavePublicUrl =
     effectiveTarget === "cloud" ||
     cloudRequirement !== "none" ||
