@@ -68,7 +68,8 @@ export function createProjectRepo(db: Database) {
      */
     async listNamesByIds(ids: string[]): Promise<{ id: string; name: string }[]> {
       if (ids.length === 0) return [];
-      return db.select({ id: project.id, name: project.name })
+      return db
+        .select({ id: project.id, name: project.name })
         .from(project)
         .where(inArray(project.id, ids));
     },
@@ -242,9 +243,7 @@ export function createProjectRepo(db: Database) {
      * Project counts for the dashboard home — total and with-an-active-
      * deployment, in one aggregate query instead of listing every row.
      */
-    async countByOrganization(
-      organizationId: string,
-    ): Promise<{ total: number; active: number }> {
+    async countByOrganization(organizationId: string): Promise<{ total: number; active: number }> {
       const [row] = await db
         .select({
           total: sql<number>`count(*)::int`,
@@ -445,6 +444,28 @@ export function createProjectRepo(db: Database) {
         .update(project)
         .set({ ...data, updatedAt: new Date() })
         .where(and(eq(project.groupId, groupId), isNull(project.deletedAt)));
+    },
+
+    /** Update a source identity shared by every environment and its project_app
+     * row in one transaction. Source transitions span both tables; exposing one
+     * repository operation prevents a failed second write from leaving the
+     * group and its environments classified differently. */
+    async updateSourceByApp(
+      groupId: string,
+      projectData: Partial<NewProject>,
+      groupData: Partial<NewProjectGroup>,
+    ) {
+      const updatedAt = new Date();
+      await db.transaction(async (tx) => {
+        await tx
+          .update(project)
+          .set({ ...projectData, updatedAt })
+          .where(and(eq(project.groupId, groupId), isNull(project.deletedAt)));
+        await tx
+          .update(projectGroup)
+          .set({ ...groupData, updatedAt })
+          .where(and(eq(projectGroup.id, groupId), isNull(projectGroup.deletedAt)));
+      });
     },
 
     /** Update favicon cache metadata without touching the user-visible updatedAt field. */

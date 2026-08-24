@@ -38,6 +38,93 @@ describe("compose command drift stability (#332)", () => {
   });
 });
 
+describe("compose build args drift stability (#689)", () => {
+  it("round-trips null/empty values and ignores map key order", () => {
+    const first = toComposeSpec({
+      buildArgs: { APP_PACKAGE: "@myorg/api", FROM_ENV: null, EMPTY: "" },
+    });
+    const reordered = toComposeSpec({
+      buildArgs: { EMPTY: "", FROM_ENV: null, APP_PACKAGE: "@myorg/api" },
+    });
+    expect(first.buildArgs).toEqual({
+      APP_PACKAGE: "@myorg/api",
+      FROM_ENV: null,
+      EMPTY: "",
+    });
+    expect(composeSpecsEqual(first, reordered)).toBe(true);
+  });
+
+  it("reports changed and removed service build args", () => {
+    const before = toComposeSpec({ buildArgs: { APP_PACKAGE: "@myorg/api", OLD: "1" } });
+    const after = toComposeSpec({ buildArgs: { APP_PACKAGE: "@myorg/worker" } });
+    expect(composeSpecsEqual(before, after)).toBe(false);
+    expect(composeSpecDiff(before, after)).toContainEqual({
+      field: "buildArgs",
+      from: { APP_PACKAGE: "@myorg/api", OLD: "1" },
+      to: { APP_PACKAGE: "@myorg/worker" },
+    });
+  });
+
+  it("preserves args when an old non-authoritative snapshot omits the field", () => {
+    const patch = composeWritePatch(
+      { name: "api", image: "example/api:1" },
+      { buildArgs: { APP_PACKAGE: "@myorg/api" } },
+    );
+    expect(patch.buildArgs).toEqual({ APP_PACKAGE: "@myorg/api" });
+  });
+
+  it("clears args when a fresh authoritative compose parse removes them", () => {
+    const patch = composeWritePatch(
+      { name: "api", image: "example/api:1" },
+      { buildArgs: { APP_PACKAGE: "@myorg/api" } },
+      true,
+    );
+    expect(patch.buildArgs).toEqual({});
+  });
+
+  it("marks normalized/manual args literal instead of inheriting stale template provenance", () => {
+    const patch = composeWritePatch(
+      { name: "api", buildArgs: { HOME_REF: "$HOME" } },
+      { advanced: { buildArgTemplateKeys: ["HOME_REF"] } },
+    );
+    expect(patch.advanced.buildArgTemplateKeys).toEqual([]);
+
+    const raw = composeWritePatch({
+      name: "api",
+      buildArgs: { HOME_REF: "$$HOME" },
+      advanced: { buildArgTemplateKeys: ["HOME_REF"] },
+    });
+    expect(raw.advanced.buildArgTemplateKeys).toEqual(["HOME_REF"]);
+  });
+
+  it("clears stale provenance without adding metadata for an explicit empty arg map", () => {
+    const patch = composeWritePatch(
+      { name: "api", buildArgs: {} },
+      {
+        advanced: {
+          readiness: { enabled: true },
+          buildArgTemplateKeys: ["OLD_ARG"],
+        },
+      },
+    );
+
+    expect(patch.advanced).toEqual({ readiness: { enabled: true } });
+  });
+
+  it("uses an empty parser provenance marker to clear stale args in non-authoritative syncs", () => {
+    const patch = composeWritePatch(
+      { name: "api", advanced: { buildArgTemplateKeys: [] } },
+      {
+        buildArgs: { OLD_ARG: "stale" },
+        advanced: { buildArgTemplateKeys: ["OLD_ARG"] },
+      },
+    );
+
+    expect(patch.buildArgs).toEqual({});
+    expect(patch.advanced.buildArgTemplateKeys).toEqual([]);
+  });
+});
+
 /**
  * `composeWritePatch` is the ONE gate every compose-sync writer passes through —
  * the sync endpoint, the migration importer, and (the one that bit) the deploy
@@ -148,5 +235,41 @@ describe("composeWritePatch — entrypoint is compose-owned (#575)", () => {
     );
     expect(patch.advanced.entrypoint).toEqual([]);
     expect(patch.advanced.readiness).toEqual({ enabled: true });
+  });
+});
+
+describe("compose environment templates (#673)", () => {
+  it("persists the raw expression instead of its scan-time partial value", () => {
+    const spec = toComposeSpec({
+      environment: { DATABASE_URL: "postgresql://user:@db/app" },
+      environmentTemplates: {
+        DATABASE_URL: "postgresql://user:${POSTGRES_PASSWORD:?set it}@db/app",
+      },
+      advanced: { environmentTemplateKeys: ["DATABASE_URL"] },
+    });
+
+    expect(spec.environment?.DATABASE_URL).toBe(
+      "postgresql://user:${POSTGRES_PASSWORD:?set it}@db/app",
+    );
+    expect(spec.advanced?.environmentTemplateKeys).toEqual(["DATABASE_URL"]);
+  });
+
+  it("clears template provenance when an authoritative re-parse removes it", () => {
+    const patch = composeWritePatch(
+      { name: "api", environment: { DATABASE_URL: "literal" }, advanced: {} },
+      { advanced: { environmentTemplateKeys: ["DATABASE_URL"] } },
+      true,
+    );
+
+    expect(patch.advanced.environmentTemplateKeys).toBeUndefined();
+  });
+
+  it("preserves template provenance through a non-authoritative snapshot sync", () => {
+    const patch = composeWritePatch(
+      { name: "api", environment: { DATABASE_URL: "••••••••" } },
+      { advanced: { environmentTemplateKeys: ["DATABASE_URL"] } },
+    );
+
+    expect(patch.advanced.environmentTemplateKeys).toEqual(["DATABASE_URL"]);
   });
 });

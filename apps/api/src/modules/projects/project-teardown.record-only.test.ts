@@ -53,10 +53,12 @@ const h = vi.hoisted(() => ({
   clearDeletionInProgress: vi.fn(async () => {}),
   listByGroup: vi.fn(async () => [{ id: "p1" }]),
   softDeleteGroup: vi.fn(async () => {}),
-  orphanCreate: vi.fn(async () => {}),
+  orphanCreate: vi.fn(async (_row: Record<string, unknown>) => ({ id: "orphan-created" })),
+  orphanDelete: vi.fn(async () => {}),
 
   collectProjectManifest: vi.fn(async () => ({ projectId: "p1", resources: [] })),
   executeCleanup: vi.fn(async () => ({ total: 0, succeeded: 0, failed: [] })),
+  disposeManifestRuntimes: vi.fn(),
   removeProjectFromServerManifests: vi.fn(async () => {}),
   cancelBuildSession: vi.fn(async () => ({ success: true })),
   deleteGitHubWebhook: vi.fn(async () => {}),
@@ -80,7 +82,7 @@ vi.mock("@repo/db", () => ({
     },
     backupRun: { listInFlightByProject: vi.fn(async () => []) },
     backupRestore: { listInFlightByProject: vi.fn(async () => []) },
-    orphanedResource: { create: h.orphanCreate },
+    orphanedResource: { create: h.orphanCreate, delete: h.orphanDelete },
     projectConnection: { listBySource: vi.fn(async () => h.consumers) },
   },
 }));
@@ -92,6 +94,7 @@ vi.mock("./project-connection.service", () => ({
 vi.mock("./project-cleanup.service", () => ({
   collectProjectManifest: h.collectProjectManifest,
   executeCleanup: h.executeCleanup,
+  disposeManifestRuntimes: h.disposeManifestRuntimes,
 }));
 vi.mock("../../lib/openship-manifest-sync", () => ({
   removeProjectFromServerManifests: h.removeProjectFromServerManifests,
@@ -323,5 +326,168 @@ describe("teardownProject — record-only delete touches nothing on the server",
     expect(h.executeCleanup).toHaveBeenCalled();
     expect(h.removeProjectFromServerManifests).toHaveBeenCalled();
     expect(stepOf(res.steps, "runtime_cleanup")?.status).toBe("ok");
+  });
+});
+
+describe("teardownProject — deferred multi-target cleanup", () => {
+  it("records every known route on an unreachable historical target", async () => {
+    h.collectProjectManifest.mockResolvedValueOnce({
+      projectId: "p1",
+      organizationId: "org1",
+      resources: [
+        {
+          type: "unreachable",
+          ref: "container-remote",
+          label: "remote container",
+          runtime: null,
+          serverId: "server-old",
+          runtimeMode: "docker",
+        },
+        {
+          type: "route",
+          ref: "app.example.com",
+          label: "route app.example.com",
+          runtime: null,
+        },
+      ],
+      routeContexts: [],
+      unreachableRouteTargets: [{ serverId: "server-old", runtimeMode: "docker" }],
+    } as never);
+    h.executeCleanup.mockResolvedValueOnce({ total: 1, succeeded: 1, failed: [] });
+
+    const res = await teardownProject(ctx, "p1", { force: false });
+
+    expect(res.rowDeleted).toBe(true);
+    expect(h.orphanCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        serverId: "server-old",
+        resourceType: "container",
+        ref: "container-remote",
+        runtimeMode: "docker",
+      }),
+    );
+    expect(h.orphanCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        serverId: "server-old",
+        resourceType: "route",
+        ref: "app.example.com",
+        runtimeMode: "docker",
+      }),
+    );
+  });
+
+  it("force-orphans each resource on its own historical target", async () => {
+    h.collectProjectManifest.mockResolvedValueOnce({
+      projectId: "p1",
+      organizationId: "org1",
+      resources: [
+        {
+          type: "container",
+          ref: "container-a",
+          label: "container a",
+          runtime: { name: "docker" },
+          serverId: "server-a",
+          runtimeMode: "docker",
+        },
+        {
+          type: "artifact",
+          ref: "/srv/releases/b",
+          label: "artifact b",
+          runtime: { name: "bare" },
+          serverId: "server-b",
+          runtimeMode: "bare",
+        },
+        {
+          type: "route",
+          ref: "app.example.com",
+          label: "route app.example.com",
+          runtime: null,
+        },
+      ],
+      routeContexts: [
+        {
+          key: "host-c",
+          serverId: "server-c",
+          runtimeMode: "docker",
+          routing: {},
+          hostPortTarget: {},
+          edgeProxy: {},
+        },
+      ],
+      unreachableRouteTargets: [{ serverId: "server-d", runtimeMode: "bare" }],
+    } as never);
+
+    const res = await teardownProject(ctx, "p1", { force: false, forceOrphan: true });
+
+    expect(res.rowDeleted).toBe(true);
+    const created = h.orphanCreate.mock.calls.map(([row]) => row);
+    expect(created).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          ref: "container-a",
+          serverId: "server-a",
+          runtimeMode: "docker",
+        }),
+        expect.objectContaining({
+          ref: "/srv/releases/b",
+          serverId: "server-b",
+          runtimeMode: "bare",
+        }),
+        expect.objectContaining({
+          resourceType: "route",
+          ref: "app.example.com",
+          serverId: "server-c",
+        }),
+        expect.objectContaining({
+          resourceType: "route",
+          ref: "app.example.com",
+          serverId: "server-d",
+        }),
+      ]),
+    );
+    expect(h.disposeManifestRuntimes).toHaveBeenCalledOnce();
+    expect(h.executeCleanup).not.toHaveBeenCalled();
+  });
+
+  it("keeps the project row when durable orphan tracking fails", async () => {
+    h.collectProjectManifest.mockResolvedValueOnce({
+      projectId: "p1",
+      organizationId: "org1",
+      resources: [
+        {
+          type: "unreachable",
+          ref: "container-remote",
+          label: "remote container",
+          runtime: null,
+          serverId: "server-old",
+          runtimeMode: "docker",
+        },
+        {
+          type: "route",
+          ref: "app.example.com",
+          label: "route app.example.com",
+          runtime: null,
+        },
+      ],
+      routeContexts: [],
+      unreachableRouteTargets: [{ serverId: "server-old", runtimeMode: "docker" }],
+    } as never);
+    h.executeCleanup.mockResolvedValueOnce({ total: 1, succeeded: 1, failed: [] });
+    h.orphanCreate
+      .mockResolvedValueOnce({ id: "tracked-before-failure" })
+      .mockRejectedValueOnce(new Error("database unavailable"));
+
+    const res = await teardownProject(ctx, "p1", { force: false });
+
+    expect(res.rowDeleted).toBe(false);
+    expect(stepOf(res.steps, "persist_orphans")).toEqual(
+      expect.objectContaining({
+        status: "failed",
+        error: expect.stringContaining("database unavailable"),
+      }),
+    );
+    expect(h.deleteHard).not.toHaveBeenCalled();
+    expect(h.orphanDelete).toHaveBeenCalledWith("tracked-before-failure");
+    expect(h.clearDeletionInProgress).toHaveBeenCalledWith("p1");
   });
 });

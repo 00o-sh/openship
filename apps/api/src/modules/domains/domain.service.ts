@@ -27,7 +27,7 @@ import {
 } from "../../lib/domain-ssl";
 import { getRoutingBaseDomain } from "../../lib/routing-domains";
 import { resolveRecords } from "../../lib/dns-resolver";
-import { resolveProjectServerHost, resolveLocalServerHost, resolveInstancePublicIp, isLoopbackHost } from "../../lib/server-target";
+import { resolveProjectServerHost, resolveLocalServerHost, resolveInstancePublicIp, resolveServerHost, isLoopbackHost } from "../../lib/server-target";
 import { reconcileProjectRoutes } from "../../lib/route-apply.service";
 import { releaseManagedHostnames } from "../../lib/managed-edge-proxy";
 import { generateToken } from "../../lib/domain-token";
@@ -429,7 +429,7 @@ export async function ensurePendingServiceDomain(opts: {
   // findOrCreate (not create) so a concurrent insert of the same brand-new
   // hostname races safely to the existing row instead of throwing 23505 — the
   // caller path (createService) isn't wrapped in a try/catch.
-  const row = await repos.domain.findOrCreate({
+  const result = await repos.domain.findOrCreateWithStatus({
     projectId: opts.projectId,
     serviceId: opts.serviceId,
     hostname,
@@ -440,7 +440,12 @@ export async function ensurePendingServiceDomain(opts: {
     isPrimary: false,
     verificationToken: generateToken(hostname),
   });
-  return { created: true, domainId: row?.id ?? null };
+  if (result.domain.projectId !== opts.projectId) {
+    throw new ConflictError(
+      `The domain "${hostname}" is already connected to another project.`,
+    );
+  }
+  return { created: result.created, domainId: result.domain.id };
 }
 
 /**
@@ -465,15 +470,16 @@ export async function removeServiceDomain(opts: {
   }
 }
 
-// ─── Preview records (no auth, no DB write) ──────────────────────────────────
+// ─── Preview records (no DB write) ───────────────────────────────────────────
 
 export async function previewRecords(
   hostname: string,
   organizationId?: string,
   includeWww = false,
+  serverId?: string,
 ) {
   const token = generateToken(hostname);
-  return buildRecords(hostname, token, undefined, false, organizationId, includeWww);
+  return buildRecords(hostname, token, undefined, false, organizationId, includeWww, serverId);
 }
 
 // ─── Get DNS records (existing domain) ───────────────────────────────────────
@@ -1553,6 +1559,8 @@ async function buildRecords(
    *  the panel must show ITS record too. Without this the user turned www on and
    *  saw only the apex record, then wondered why www never resolved. */
   includeWww = false,
+  /** Explicit pre-deploy target. Existing domain rows resolve through project. */
+  previewServerId?: string,
 ): Promise<{ mode: "cloud" | "selfhosted" | "external"; records: DnsRecord[] }> {
   const wwwHostname = includeWww ? wwwSiblingHostname(hostname) : null;
   const { target, runtime } = platform();
@@ -1609,17 +1617,19 @@ async function buildRecords(
   // front would answer with its own IP — so it's a hint, not a gate. Read the
   // box's public address (resolved once at ensure-server): the deployed project's
   // server, else this org's "This Server" row for the pre-deploy preview.
-  let serverIp =
-    (await resolveProjectServerHost(project)) ??
-    (organizationId ? await resolveLocalServerHost(organizationId) : null);
+  let serverIp = previewServerId && organizationId
+    ? await resolveServerHost(organizationId, previewServerId).catch(() => null)
+    : (await resolveProjectServerHost(project)) ??
+      (organizationId ? await resolveLocalServerHost(organizationId) : null);
   // A loopback is the local row's display host when no public IP was known at
   // registration — useless as "point your domain here". Re-detect live for this
   // (user-initiated, off-hot-path) preview; leave EMPTY so the UI shows a
   // placeholder rather than a dead `127.0.0.1` the operator would copy verbatim.
-  if (!serverIp || isLoopbackHost(serverIp)) {
+  if ((!serverIp || isLoopbackHost(serverIp)) && !previewServerId) {
     const detected = await resolveInstancePublicIp().catch(() => null);
     serverIp = detected && !isLoopbackHost(detected) ? detected : null;
   }
+  if (isLoopbackHost(serverIp)) serverIp = null;
   const records: DnsRecord[] = [
     { type: "A", host: routeHost, name: routeName, value: serverIp ?? "" },
   ];

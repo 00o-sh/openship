@@ -2,12 +2,34 @@
  * Service business logic - CRUD and compose sync.
  */
 
-import { normalizeRoutingFields, repos, composeSpecDiff, type Project, type Service, type ServicePublicEndpoint } from "@repo/db";
-import { aliasConflictsWithSiblings, getProjectType, mergeAdvanced, normalizeServiceLabel, normalizeAliasStrict, resolveCommandArgv, safeErrorMessage, withTimeout, type ComposeAdvanced, type ServiceContainerState, type StackId } from "@repo/core";
+import {
+  normalizeRoutingFields,
+  repos,
+  composeSpecDiff,
+  type Project,
+  type Service,
+  type ServicePublicEndpoint,
+} from "@repo/db";
+import {
+  aliasConflictsWithSiblings,
+  getProjectType,
+  isValidEnvKey,
+  looksLikeSecretKey,
+  mergeAdvanced,
+  normalizeServiceLabel,
+  normalizeAliasStrict,
+  resolveCommandArgv,
+  safeErrorMessage,
+  withTimeout,
+  type ComposeAdvanced,
+  type ServiceContainerState,
+  type StackId,
+} from "@repo/core";
 import {
   BuildLogger,
   DockerRuntime,
   isMultiServiceRuntime,
+  ownsBuiltImage,
   type LogEntry,
   type ContainerStatus,
   type RuntimeAdapter,
@@ -16,7 +38,14 @@ import { scopedVolumeName, type CommandExecutor } from "@repo/adapters";
 import { isArtifactRef } from "../../lib/container-ref";
 import { execInContainer } from "../../lib/agent-exec";
 import { encrypt, decrypt } from "../../lib/encryption";
-import { ENV_MASK, hasMaskedValue, maskDriftChanges, maskServiceEnv, mergeServiceEnv, unmaskEnv } from "../../lib/secret-env";
+import {
+  ENV_MASK,
+  hasMaskedValue,
+  maskDriftChanges,
+  maskServiceEnv,
+  mergeServiceEnv,
+  unmaskEnv,
+} from "../../lib/secret-env";
 import {
   assertNotControlPlane,
   assertNotControlPlaneById,
@@ -59,7 +88,11 @@ import {
 import { resolveRuntimeResources } from "../../lib/resources";
 import { assertFreeEndpointsAllowed } from "../../lib/free-domain-guard";
 import { assertPlanAllowsServices, assertRunningServiceQuota } from "../../lib/plan-guard";
-import { ensurePendingServiceDomain, removeServiceDomain, reuseServerCertForDomain } from "../domains/domain.service";
+import {
+  ensurePendingServiceDomain,
+  removeServiceDomain,
+  reuseServerCertForDomain,
+} from "../domains/domain.service";
 import {
   buildUpstreamUrl,
   resolveLiveUpstreamUrl,
@@ -71,6 +104,8 @@ import {
   type RouteRegister,
   type RouteRemove,
 } from "../../lib/route-apply.service";
+import type { HostPortTargetIdentity } from "../../lib/host-port-target";
+import { observedLoopbackPublishFromUrl } from "../deployments/observed-host-port-claims";
 import { compileProjectRoutingFields } from "../../lib/project-routing-fields";
 import type {
   TCreateServiceBody,
@@ -88,11 +123,7 @@ const ROUTE_EDGE_APPLY_TIMEOUT_MS = 6000;
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /** Verify a service exists and belongs to a project in the given org */
-async function assertServiceAccess(
-  ctx: RequestContext,
-  projectId: string,
-  serviceId: string,
-) {
+async function assertServiceAccess(ctx: RequestContext, projectId: string, serviceId: string) {
   const project = await repos.project.findById(projectId);
   assertResourceInOrg(project, "Project", ctx.organizationId, projectId);
   const svc = await repos.service.findById(serviceId);
@@ -209,8 +240,12 @@ export async function validateServiceName(
 export { aliasConflictsWithSiblings };
 
 function withDrift(svc: Service) {
+  // The baselines are internal merge state. Returning them would bypass the
+  // environment masker (and now may contain raw Compose expressions with
+  // literal defaults); clients consume the already-masked `drift.changes` only.
+  const { importedSpec: _importedSpec, driftSpec: _driftSpec, ...publicService } = svc;
   return {
-    ...maskServiceEnv(svc),
+    ...maskServiceEnv(publicService),
     drift: svc.driftSpec
       ? { changes: maskDriftChanges(composeSpecDiff(svc.importedSpec ?? {}, svc.driftSpec)) }
       : null,
@@ -225,11 +260,7 @@ export async function listServices(ctx: RequestContext, projectId: string) {
   return (await repos.service.listByProject(projectId)).map(withDrift);
 }
 
-export async function getService(
-  ctx: RequestContext,
-  projectId: string,
-  serviceId: string,
-) {
+export async function getService(ctx: RequestContext, projectId: string, serviceId: string) {
   const { svc } = await assertServiceAccess(ctx, projectId, serviceId);
   return withDrift(svc);
 }
@@ -269,6 +300,7 @@ export async function acceptServiceDrift(
     image: theirs.image ?? null,
     build: theirs.build ?? null,
     dockerfile: theirs.dockerfile ?? null,
+    buildArgs: theirs.buildArgs ?? {},
     ports: theirs.ports ?? [],
     dependsOn: theirs.dependsOn ?? [],
     environment: theirs.environment ?? {},
@@ -293,11 +325,7 @@ export async function acceptServiceDrift(
  * Keep the user's edits: advance the baseline to the upstream spec (so it stops
  * re-flagging on every deploy) WITHOUT changing the row's current values.
  */
-export async function keepServiceDrift(
-  ctx: RequestContext,
-  projectId: string,
-  serviceId: string,
-) {
+export async function keepServiceDrift(ctx: RequestContext, projectId: string, serviceId: string) {
   const { svc } = await assertServiceAccess(ctx, projectId, serviceId);
   if (!svc.driftSpec) return withDrift(svc);
   await repos.service.update(serviceId, { importedSpec: svc.driftSpec, driftSpec: null });
@@ -550,9 +578,7 @@ export async function createService(
   // sentinel the client sent is dropped (never persist "••••••••"). Warn so a
   // real value accidentally lost this way is traceable.
   if (data.environment && hasMaskedValue(data.environment)) {
-    console.warn(
-      `[services] create "${name}": dropping masked env value(s) with no stored source`,
-    );
+    console.warn(`[services] create "${name}": dropping masked env value(s) with no stored source`);
     data = { ...data, environment: unmaskEnv(data.environment, null) };
   }
 
@@ -618,6 +644,11 @@ export async function createService(
   // strips the `null`-means-remove sentinels the update path accepts, so a
   // caller can send one payload shape to both.
   const advanced = mergeAdvanced(null, data.advanced);
+  if (data.buildArgs !== undefined && !Object.hasOwn(data.advanced ?? {}, "buildArgTemplateKeys")) {
+    // Direct/manual values are literal. Raw Compose parsing supplies its own
+    // non-empty marker when interpolation is required.
+    advanced.buildArgTemplateKeys = [];
+  }
   // Same alias gate as updateService — normalize + reject invalid/colliding
   // custom aliases BEFORE the insert, so a create can't persist an alias the
   // update path would refuse. No serviceId yet, so pass "" — every existing
@@ -631,6 +662,7 @@ export async function createService(
     image: trimOrNull(data.image),
     build: trimOrNull(data.build),
     dockerfile: trimOrNull(data.dockerfile),
+    buildArgs: data.buildArgs ?? {},
     ports: data.ports ?? [],
     dependsOn: data.dependsOn ?? [],
     environment: data.environment ?? {},
@@ -724,7 +756,22 @@ export async function updateService(
   // deep merge would make a partially-specified healthcheck inherit stale fields.
   if ("advanced" in patch) {
     patch.advanced = mergeAdvanced(svc.advanced as ComposeAdvanced | null, patch.advanced);
-    await validateServiceAlias(projectId, serviceId, patch.advanced as ComposeAdvanced, project.internalAlias);
+    await validateServiceAlias(
+      projectId,
+      serviceId,
+      patch.advanced as ComposeAdvanced,
+      project.internalAlias,
+    );
+  }
+
+  if ("buildArgs" in patch && !Object.hasOwn(data.advanced ?? {}, "buildArgTemplateKeys")) {
+    // A manual arg edit replaces the old value's provenance as well as its
+    // value. Otherwise a literal `$HOME` could inherit a repo-template marker
+    // and be expanded on the next deploy.
+    patch.advanced = mergeAdvanced(
+      ("advanced" in patch ? patch.advanced : svc.advanced) as ComposeAdvanced | null,
+      { buildArgTemplateKeys: [] },
+    );
   }
 
   if ("name" in patch && typeof patch.name === "string") {
@@ -791,9 +838,7 @@ export async function updateService(
     // mergeServiceRoutingPatch. Before this, an array on the row shadowed the
     // scalars outright: the user's chosen custom domain was dropped and the gate
     // below then judged the stored "free" primary instead.
-    const normalized = normalizeRoutingPatch(
-      mergeServiceRoutingPatch({ patch, stored: svc }),
-    );
+    const normalized = normalizeRoutingPatch(mergeServiceRoutingPatch({ patch, stored: svc }));
 
     // Write the merged routing through VERBATIM, nulls included. `normalized` is
     // the row's whole intended routing state (unexposing only closes the gate — it
@@ -853,6 +898,7 @@ export async function updateService(
     // Resolved below only when there's a container to inspect; disposed in the
     // `finally` because it may own an SSH bridge to the serving box.
     let runtime: RuntimeAdapter | undefined;
+    let hostPortTarget: HostPortTargetIdentity | null | undefined;
     try {
       const runtimeName = platform().runtime.name;
       // `enabled` / `exposed` are non-nullable DB columns - no need to
@@ -861,15 +907,28 @@ export async function updateService(
       // Diff the SET of routes (a service can publish several ports). A hostname
       // present before but gone now is removed; every current route is
       // (re-)registered (register is additive/idempotent upstream).
-      const oldRoutes = buildServiceRouteDomains({ project, service: svc, runtimeName, usesManagedRouting: true });
+      const oldRoutes = buildServiceRouteDomains({
+        project,
+        service: svc,
+        runtimeName,
+        usesManagedRouting: true,
+      });
       const nextRoutes = isRoutable
-        ? buildServiceRouteDomains({ project, service: updated, runtimeName, usesManagedRouting: true })
+        ? buildServiceRouteDomains({
+            project,
+            service: updated,
+            runtimeName,
+            usesManagedRouting: true,
+          })
         : [];
       const nextByHost = new Map(nextRoutes.map((route) => [route.hostname.toLowerCase(), route]));
 
       const removes: RouteRemove[] = oldRoutes
         .filter((route) => !nextByHost.has(route.hostname.toLowerCase()))
-        .map((route) => ({ hostname: route.hostname, isCustomDomain: route.domainType === "custom" }));
+        .map((route) => ({
+          hostname: route.hostname,
+          isCustomDomain: route.domainType === "custom",
+        }));
 
       // Single reused path: cloud → page/workspace primitives, self-hosted →
       // the deployment's own routing (local box or remote server/sandbox).
@@ -883,18 +942,19 @@ export async function updateService(
       // loopback port when there is one, else the container IP. Publishing a
       // domain is exactly when a migrated/adopted workload gets its first route,
       // and those containers were never published to 127.0.0.1 — so the stored
-      // row is only a cache here, used when the container can't be inspected.
-      // Cloud ignores targetUrl.
+      // row is only a hint for a successful live inspection. A cached host port
+      // or bridge IP is not ownership evidence: after a stop/remove, either can
+      // belong to another workload. Cloud ignores targetUrl.
       let stored: StoredUpstream | undefined;
       let containerId: string | undefined;
       if (isRoutable && nextRoutes.length > 0 && dep && project.activeDeploymentId) {
         const rows = await repos.service.listByDeployment(project.activeDeploymentId);
         const row = rows.find((r) => r.serviceId === serviceId);
-        stored = { ip: row?.ip, hostPort: row?.hostPort };
+        stored = { ip: row?.ip, hostPort: row?.hostPort, hostPorts: row?.hostPorts };
         containerId = row?.containerId ?? undefined;
         if (containerId) {
           try {
-            ({ runtime } = await resolveDeploymentRuntimeForRead(dep));
+            ({ runtime, hostPortTarget } = await resolveDeploymentRuntimeForRead(dep));
           } catch (err) {
             console.warn(
               `[SERVICE] ${svc.name}: could not resolve runtime for upstream, using stored row: ${safeErrorMessage(err)}`,
@@ -912,13 +972,28 @@ export async function updateService(
               containerId,
               containerPort,
               stored,
+              requireLiveObservation: true,
             })) ?? undefined
           );
         }
-        return buildUpstreamUrl({ strategy, ip: stored?.ip, hostPort: stored?.hostPort, containerPort }) ?? undefined;
+        // This is a live route write. If a self-hosted row names no container,
+        // or its runtime could not be resolved, leave the existing vhost alone
+        // instead of re-registering a targetless cache that may have been reused.
+        if (dep) return undefined;
+        return (
+          buildUpstreamUrl({
+            strategy,
+            ip: stored?.ip,
+            hostPort: stored?.hostPort,
+            hostPorts: stored?.hostPorts,
+            containerPort,
+          }) ?? undefined
+        );
       };
       const targetUrls = await Promise.all(
-        nextRoutes.map((route) => (route.targetPort ? resolveTargetUrl(route.targetPort) : undefined)),
+        nextRoutes.map((route) =>
+          route.targetPort ? resolveTargetUrl(route.targetPort) : undefined,
+        ),
       );
       // The project's compiled vercel.json rules. The DEPLOY path already puts them on
       // a service's own domain (via `serviceRouteOptions`), and `registerRoute`
@@ -931,6 +1006,16 @@ export async function updateService(
         targetUrl: targetUrls[i],
         port: route.targetPort,
         isCustomDomain: route.domainType === "custom",
+        ...(() => {
+          const observed = route.targetPort
+            ? observedLoopbackPublishFromUrl({
+                targetUrl: targetUrls[i],
+                serviceId,
+                containerPort: route.targetPort,
+              })
+            : null;
+          return observed ? { observedLoopbackPublishes: [observed] } : {};
+        })(),
       }));
 
       // Authoritative port: the upstream above is rebuilt from the LIVE
@@ -989,7 +1074,12 @@ export async function updateService(
       // the background. Otherwise the modal spins and times out on a change that
       // already applied (the reported "keeps loading, but it took effect").
       const applyEdge = (async () => {
-        await reconcileProjectRoutes(project, { deployment: dep, registers, removes });
+        await reconcileProjectRoutes(project, {
+          deployment: dep,
+          hostPortTarget,
+          registers,
+          removes,
+        });
         // AFTER reconcile so installDomainCert re-registers the vhost with TLS on
         // top of the live HTTP route — adopt an existing cert for a freshly
         // published custom domain (migration / takeover) instead of ACME.
@@ -1018,11 +1108,7 @@ export async function updateService(
  *  can't hang the delete request past the DB-row removal (the authoritative op). */
 const SERVICE_TEARDOWN_TIMEOUT_MS = 20_000;
 
-export async function deleteService(
-  ctx: RequestContext,
-  projectId: string,
-  serviceId: string,
-) {
+export async function deleteService(ctx: RequestContext, projectId: string, serviceId: string) {
   const { project, svc } = await assertServiceAccess(ctx, projectId, serviceId);
   // The self-app project's services ARE the Openship stack (api, dashboard, edge,
   // postgres, redis), linked so the dashboard can show their state, logs and shell.
@@ -1070,13 +1156,12 @@ export async function deleteService(
             // image (postgres:16-alpine, redis:7-alpine) is PULLED, shared, and must
             // never be removed.
             if (isArtifactRef(serviceDeployment.imageRef)) {
-              await platform.runtime
-                .destroy(serviceDeployment.imageRef!)
-                .catch((err: unknown) => {
-                  console.error(`[SERVICE] Failed to remove static output for ${svc.name}:`, err);
-                });
+              await platform.runtime.destroy(serviceDeployment.imageRef!).catch((err: unknown) => {
+                console.error(`[SERVICE] Failed to remove static output for ${svc.name}:`, err);
+              });
             } else if (
-              serviceDeployment.imageRef?.startsWith("openship/") &&
+              serviceDeployment.imageRef &&
+              ownsBuiltImage(serviceDeployment.imageRef) &&
               platform.runtime instanceof DockerRuntime
             ) {
               await platform.runtime
@@ -1165,15 +1250,52 @@ export async function setServiceEnvVars(
 ) {
   await assertServiceAccess(ctx, projectId, serviceId);
 
-  // Encrypt values before storage
-  const encrypted = data.vars.map((v) => ({
-    key: v.key,
-    value: encrypt(v.value),
-    isSecret: v.isSecret,
-  }));
+  const seenKeys = new Set<string>();
+  for (const variable of data.vars) {
+    if (!isValidEnvKey(variable.key)) throw new Error(`invalid-env-key:${variable.key}`);
+    if (seenKeys.has(variable.key)) throw new Error(`duplicate-env-key:${variable.key}`);
+    seenKeys.add(variable.key);
+  }
+
+  // GET masks secrets. Preserve the existing ciphertext when that sentinel is
+  // submitted unchanged; never encrypt and persist the sentinel itself. The
+  // stable row id also lets a masked secret be renamed without revealing it.
+  const existing = await repos.project.listEnvVars(projectId, data.environment, serviceId);
+  const existingByKey = new Map(existing.map((row) => [row.key, row]));
+  const existingById = new Map(existing.map((row) => [row.id, row]));
+  const usedSourceIds = new Set<string>();
+  const encrypted = data.vars.map((v) => {
+    const prior = v.sourceId ? existingById.get(v.sourceId) : existingByKey.get(v.key);
+    if (v.sourceId && !prior) throw new Error(`invalid-env-source:${v.sourceId}`);
+    if (prior?.id) {
+      if (usedSourceIds.has(prior.id)) throw new Error(`duplicate-env-source:${prior.id}`);
+      usedSourceIds.add(prior.id);
+    }
+    if (v.value === ENV_MASK) {
+      if (!prior?.isSecret) throw new Error(`masked-env-without-source:${v.key}`);
+      return { key: v.key, value: prior.value, isSecret: v.isSecret ?? prior.isSecret };
+    }
+    return {
+      key: v.key,
+      value: encrypt(v.value),
+      isSecret: v.isSecret ?? prior?.isSecret ?? looksLikeSecretKey(v.key),
+    };
+  });
 
   await repos.project.bulkSetEnvVars(projectId, data.environment, encrypted, serviceId);
   return { count: encrypted.length };
+}
+
+/** Full internal map; the controller returns only explicitly requested keys. */
+export async function revealServiceEnvVars(
+  ctx: RequestContext,
+  projectId: string,
+  serviceId: string,
+  environment: string,
+): Promise<Record<string, string>> {
+  await assertServiceAccess(ctx, projectId, serviceId);
+  const rows = await repos.project.listEnvVars(projectId, environment, serviceId);
+  return Object.fromEntries(rows.map((row) => [row.key, decrypt(row.value)]));
 }
 
 // ─── Compose Sync ────────────────────────────────────────────────────────────
@@ -1186,6 +1308,7 @@ export async function syncComposeServices(
     image?: string;
     build?: string;
     dockerfile?: string;
+    buildArgs?: Record<string, string | null>;
     ports?: string[];
     dependsOn?: string[];
     environment?: Record<string, string>;
@@ -1463,7 +1586,8 @@ export async function getActiveServiceContainers(
                   matchedBy: null,
                   duplicates: [],
                 };
-                if (!hint?.containerId) return { ...base, status: "stopped" as ServiceContainerState };
+                if (!hint?.containerId)
+                  return { ...base, status: "stopped" as ServiceContainerState };
                 const info = await runtime.getContainerInfo(hint.containerId).catch(() => null);
                 return {
                   ...base,
@@ -1595,7 +1719,8 @@ export async function getServiceVolumeSizes(
     partial: parsed.length > 0,
   });
 
-  if (parsed.length === 0) return { measurable: true, volumes: [], totalBytes: null, partial: false };
+  if (parsed.length === 0)
+    return { measurable: true, volumes: [], totalBytes: null, partial: false };
   if (!project.activeDeploymentId) return unmeasured(false);
 
   const dep = await repos.deployment.findById(project.activeDeploymentId);
@@ -1663,20 +1788,36 @@ export async function getServiceVolumeSizes(
     }
   }
 
-  const volumes = await bounded(parsed, VOL_SIZE_CONCURRENCY, async (p): Promise<ServiceVolumeSize> => {
-    const hostPath = p.target ? mountsByDest.get(p.target) : undefined;
-    let bytes: number | null;
-    if (hostPath) {
-      bytes = await duBytes(executor, hostPath);
-    } else if (p.kind === "bind" && p.source) {
-      bytes = await duBytes(executor, p.source);
-    } else if (p.kind === "named" && p.source) {
-      bytes = await namedVolumeBytesByName(executor, project.slug, p.source, !!svc.namespaceVolumes);
-    } else {
-      bytes = null; // anonymous volume with no running container → unknown
-    }
-    return { raw: p.raw, source: p.source, target: p.target, kind: p.kind, readOnly: p.readOnly, bytes };
-  });
+  const volumes = await bounded(
+    parsed,
+    VOL_SIZE_CONCURRENCY,
+    async (p): Promise<ServiceVolumeSize> => {
+      const hostPath = p.target ? mountsByDest.get(p.target) : undefined;
+      let bytes: number | null;
+      if (hostPath) {
+        bytes = await duBytes(executor, hostPath);
+      } else if (p.kind === "bind" && p.source) {
+        bytes = await duBytes(executor, p.source);
+      } else if (p.kind === "named" && p.source) {
+        bytes = await namedVolumeBytesByName(
+          executor,
+          project.slug,
+          p.source,
+          !!svc.namespaceVolumes,
+        );
+      } else {
+        bytes = null; // anonymous volume with no running container → unknown
+      }
+      return {
+        raw: p.raw,
+        source: p.source,
+        target: p.target,
+        kind: p.kind,
+        readOnly: p.readOnly,
+        bytes,
+      };
+    },
+  );
 
   let totalBytes: number | null = null;
   let partial = false;
@@ -1704,11 +1845,7 @@ export async function getServiceVolumeSizes(
  * (it's the only key an adopted container with a foreign name has) — see
  * live-state.ts for the resolution order.
  */
-async function resolveServiceContainer(
-  ctx: RequestContext,
-  projectId: string,
-  serviceId: string,
-) {
+async function resolveServiceContainer(ctx: RequestContext, projectId: string, serviceId: string) {
   const project = await repos.project.findById(projectId);
   assertResourceInOrg(project, "Project", ctx.organizationId, projectId);
   if (!project.activeDeploymentId) throw new Error("No active deployment");
@@ -1811,7 +1948,9 @@ async function provisionServiceContainer(
   const resolved = await resolveServicePlatform(project, dep);
   const runtime = resolved.platform.runtime;
   if (!isMultiServiceRuntime(runtime)) {
-    throw new Error(`The ${runtime.name} runtime cannot run services — enable Docker on this target.`);
+    throw new Error(
+      `The ${runtime.name} runtime cannot run services — enable Docker on this target.`,
+    );
   }
 
   // Surface the per-service provisioning trace (and any Oblien failure reason)
@@ -1843,6 +1982,7 @@ async function provisionServiceContainer(
       system: resolved.platform.system,
       executor: resolved.platform.executor,
       localHost: resolved.platform.localHost,
+      hostPortTarget: resolved.hostPortTarget,
       usesManagedRouting: resolved.usesManagedRouting,
       serverId: resolved.serverId ?? undefined,
     });
@@ -1898,11 +2038,7 @@ export async function stopServiceContainer(
   serviceId: string,
 ) {
   await assertNotControlPlaneById(projectId);
-  const { runtime, containerId, row } = await resolveServiceContainer(
-    ctx,
-    projectId,
-    serviceId,
-  );
+  const { runtime, containerId, row } = await resolveServiceContainer(ctx, projectId, serviceId);
   try {
     await runtime.stop(containerId);
     // Deploy-history bookkeeping only — the panel reads state from the host.
@@ -1954,11 +2090,7 @@ export async function restartServiceContainer(
       : null;
     const service = (await repos.service.listByProject(projectId)).find((s) => s.id === serviceId);
     if (dep && service) {
-      const staleEnvKeys = await resolveStaleEnvKeysForService(
-        project,
-        dep.environment,
-        serviceId,
-      );
+      const staleEnvKeys = await resolveStaleEnvKeysForService(project, dep.environment, serviceId);
       if (staleEnvKeys.length > 0) {
         // Channel-neutral on purpose: this message is rendered in a dashboard
         // toast, a CLI stderr line, and an MCP tool result. It names both routes
@@ -1977,11 +2109,7 @@ export async function restartServiceContainer(
     }
   }
 
-  const { runtime, containerId, row } = await resolveServiceContainer(
-    ctx,
-    projectId,
-    serviceId,
-  );
+  const { runtime, containerId, row } = await resolveServiceContainer(ctx, projectId, serviceId);
   try {
     await runtime.restart(containerId);
     if (row) {
@@ -1999,11 +2127,7 @@ export async function getServiceRuntimeLogs(
   serviceId: string,
   tail?: number,
 ) {
-  const { runtime, containerId } = await resolveServiceContainer(
-    ctx,
-    projectId,
-    serviceId,
-  );
+  const { runtime, containerId } = await resolveServiceContainer(ctx, projectId, serviceId);
   try {
     return await runtime.getRuntimeLogs(containerId, tail);
   } finally {
@@ -2080,4 +2204,3 @@ export async function streamServiceRuntimeLogs(
   };
   return { cleanup, serverId };
 }
-

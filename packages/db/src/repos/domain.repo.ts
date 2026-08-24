@@ -65,7 +65,7 @@ export function createDomainRepo(db: Database) {
     return created ?? ({ ...row, createdAt: new Date(), updatedAt: new Date() } as Domain);
   }
 
-  return {
+  const repository = {
     async findById(id: string) {
       return db.query.domain.findFirst({
         where: eq(domain.id, id),
@@ -313,10 +313,18 @@ export function createDomainRepo(db: Database) {
     },
 
     /**
-     * Return an existing domain by hostname, or create it if missing.
-     * Safe against unique-constraint races (concurrent deploys).
+     * Return an existing domain by hostname, or create it if missing, together
+     * with authoritative creation provenance.
+     *
+     * Callers that compensate/roll back a create must use this method instead
+     * of comparing against an earlier list query. That comparison has a TOCTOU
+     * window: another request can insert the hostname after the list and before
+     * this insert, causing the loser of the race to delete a row it did not
+     * create.
      */
-    async findOrCreate(data: Omit<NewDomain, "id"> & { verificationToken?: string }) {
+    async findOrCreateWithStatus(
+      data: Omit<NewDomain, "id"> & { verificationToken?: string },
+    ): Promise<{ domain: Domain; created: boolean }> {
       const hostname = data.hostname.toLowerCase();
       const existing = await db.query.domain.findFirst({
         where: eq(domain.hostname, hostname),
@@ -332,9 +340,9 @@ export function createDomainRepo(db: Database) {
               .set({ isPrimary: true, updatedAt: new Date() })
               .where(eq(domain.id, existing.id));
           }
-          return { ...existing, isPrimary: true };
+          return { domain: { ...existing, isPrimary: true }, created: false };
         }
-        return existing;
+        return { domain: existing, created: false };
       }
 
       const id = generateId("dom");
@@ -348,19 +356,37 @@ export function createDomainRepo(db: Database) {
         const created = await insertAndRead(row);
         if (row.isPrimary && row.projectId) {
           await promotePrimary(row.projectId, id);
-          return { ...created, isPrimary: true };
+          return { domain: { ...created, isPrimary: true }, created: true };
         }
-        return created;
+        return { domain: created, created: true };
       } catch (err: any) {
         // Handle race: another deploy inserted between our check and insert
         if (err?.message?.includes("unique") || err?.code === "23505") {
           const raced = await db.query.domain.findFirst({
             where: eq(domain.hostname, hostname),
           });
-          if (raced) return raced;
+          if (raced) {
+            if (data.isPrimary && !raced.isPrimary) {
+              if (raced.projectId) await promotePrimary(raced.projectId, raced.id);
+              else {
+                await db
+                  .update(domain)
+                  .set({ isPrimary: true, updatedAt: new Date() })
+                  .where(eq(domain.id, raced.id));
+              }
+              return { domain: { ...raced, isPrimary: true }, created: false };
+            }
+            return { domain: raced, created: false };
+          }
         }
         throw err;
       }
+    },
+
+    /** Return an existing domain by hostname, or create it if missing. */
+    async findOrCreate(data: Omit<NewDomain, "id"> & { verificationToken?: string }) {
+      const result = await repository.findOrCreateWithStatus(data);
+      return result.domain;
     },
 
     async markVerified(id: string) {
@@ -608,4 +634,6 @@ export function createDomainRepo(db: Database) {
       await promotePrimary(projectId, domainId);
     },
   };
+
+  return repository;
 }

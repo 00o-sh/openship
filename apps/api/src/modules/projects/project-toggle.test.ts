@@ -140,7 +140,12 @@ vi.mock("../../lib/deployment-runtime", () => ({
   },
   withDeploymentPlatform: async (
     _dep: unknown,
-    fn: (resolved: { routing: unknown; serverId: string | null }) => Promise<unknown>,
+    fn: (resolved: {
+      routing: unknown;
+      executor: { exec: (command: string) => Promise<{ stdout: string; stderr: string; code: number }> };
+      effectiveTarget: "server";
+      serverId: string | null;
+    }) => Promise<unknown>,
   ) => {
     try {
       return await fn({
@@ -150,6 +155,8 @@ vi.mock("../../lib/deployment-runtime", () => ({
             await h.removeRoute(hostname);
           },
         },
+        executor: { exec: async () => ({ stdout: "", stderr: "", code: 0 }) },
+        effectiveTarget: "server",
         serverId: "srv_1",
       });
     } finally {
@@ -175,6 +182,13 @@ vi.mock("@repo/adapters", () => ({
 vi.mock("../../lib/managed-edge-proxy", () => ({
   syncManagedEdgeRoutes: async () => ({ failures: [] }),
   edgeUnsyncedWarning: () => "",
+}));
+vi.mock("../../lib/edge-reconcile", () => ({
+  reconcileServerEdge: async () => ({
+    converted: false,
+    updated: false,
+    edgeDown: false,
+  }),
 }));
 vi.mock("../../lib/routing-domains", () => ({ resolveManagedHostname: () => ({ isManaged: false }) }));
 vi.mock("../../lib/ssh-manager", () => ({

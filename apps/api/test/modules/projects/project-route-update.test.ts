@@ -17,6 +17,8 @@ const routeState = vi.hoisted(() => ({
   syncProjectRouteState: vi.fn(),
 }));
 
+const applyProjectRouting = vi.hoisted(() => vi.fn());
+
 vi.mock("@repo/db", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@repo/db")>();
   return {
@@ -40,7 +42,7 @@ vi.mock("../../../src/modules/domains/project-route.service", () => ({
 }));
 
 vi.mock("../../../src/modules/domains/routing-apply.service", () => ({
-  applyProjectRouting: vi.fn(),
+  applyProjectRouting,
 }));
 
 import { updateProject } from "../../../src/modules/projects/project-crud.service";
@@ -68,6 +70,7 @@ describe("updateProject route persistence", () => {
     routeState.reapplyProjectLiveRoutes.mockReset();
     routeState.resolveProjectRouteState.mockReset();
     routeState.syncProjectRouteState.mockReset();
+    applyProjectRouting.mockReset().mockResolvedValue(undefined);
 
     projectRepo.findById.mockResolvedValue(project);
     routeState.listProjectRouteRows.mockResolvedValue([{ hostname: "old.example.com" }]);
@@ -109,6 +112,49 @@ describe("updateProject route persistence", () => {
     expect(routeState.reapplyProjectLiveRoutes).toHaveBeenCalledWith(project, ["old.example.com"], {
       managedEdgeSyncedByCaller: true,
     });
+  });
+
+  it("re-applies project routes before service and topology routes for a routing edit", async () => {
+    await updateProject(
+      project.id,
+      { routingConfig: { rewrites: [] } } as never,
+      project.organizationId,
+    );
+
+    expect(routeState.reapplyProjectLiveRoutes).toHaveBeenCalledWith(project, []);
+    expect(applyProjectRouting).toHaveBeenCalledWith(project.id);
+    expect(routeState.reapplyProjectLiveRoutes.mock.invocationCallOrder[0]).toBeLessThan(
+      applyProjectRouting.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("treats a route-strategy change as a complete ordered live route re-apply", async () => {
+    await updateProject(
+      project.id,
+      { routeStrategy: "container-ip" } as never,
+      project.organizationId,
+    );
+    await vi.waitFor(() => expect(applyProjectRouting).toHaveBeenCalledWith(project.id));
+
+    expect(routeState.reapplyProjectLiveRoutes).toHaveBeenCalledWith(project, ["old.example.com"], {
+      managedEdgeSyncedByCaller: true,
+    });
+    expect(routeState.reapplyProjectLiveRoutes.mock.invocationCallOrder[0]).toBeLessThan(
+      applyProjectRouting.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("does not rewrite live routes for a no-op route-strategy save", async () => {
+    projectRepo.findById.mockResolvedValue({ ...project, routeStrategy: "container-ip" });
+
+    await updateProject(
+      project.id,
+      { routeStrategy: "container-ip" } as never,
+      project.organizationId,
+    );
+
+    expect(routeState.reapplyProjectLiveRoutes).not.toHaveBeenCalled();
+    expect(applyProjectRouting).not.toHaveBeenCalled();
   });
 
   /**
@@ -189,7 +235,11 @@ describe("updateProject route persistence", () => {
   it("accepts a pasted https:// hostname", async () => {
     await updateProject(
       project.id,
-      { publicEndpoints: [{ customDomain: "https://app.example.com/", domainType: "custom", port: 4321 }] },
+      {
+        publicEndpoints: [
+          { customDomain: "https://app.example.com/", domainType: "custom", port: 4321 },
+        ],
+      },
       project.organizationId,
     );
 
