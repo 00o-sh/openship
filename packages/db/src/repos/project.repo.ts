@@ -1,7 +1,7 @@
 import { eq, and, isNull, isNotNull, inArray, desc, sql, type SQL } from "drizzle-orm";
 import { generateId } from "@repo/core";
 import type { Database } from "../client";
-import { project, projectGroup, envVar, deployment, service, serviceDeployment } from "../schema";
+import { project, projectGroup, envVar, deployment, service } from "../schema";
 import { member } from "../schema/organization";
 // Cloning a project writes its group and service rows in the same transaction, so this repo
 // needs both insert types. Imported from their own repos (where they are already declared)
@@ -15,14 +15,6 @@ export type Project = typeof project.$inferSelect;
 export type NewProject = typeof project.$inferInsert;
 export type EnvVar = typeof envVar.$inferSelect;
 export type NewEnvVar = typeof envVar.$inferInsert;
-
-/** A loopback host-port claim owned by an active project or compose service. */
-export interface PinnedHostPort {
-  projectId: string;
-  /** Null identifies a single-service project's `project.host_port`. */
-  serviceId: string | null;
-  port: number;
-}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -76,7 +68,8 @@ export function createProjectRepo(db: Database) {
      */
     async listNamesByIds(ids: string[]): Promise<{ id: string; name: string }[]> {
       if (ids.length === 0) return [];
-      return db.select({ id: project.id, name: project.name })
+      return db
+        .select({ id: project.id, name: project.name })
         .from(project)
         .where(inArray(project.id, ids));
     },
@@ -247,64 +240,10 @@ export function createProjectRepo(db: Database) {
     },
 
     /**
-     * Every active loopback host-port claim on one physical deploy target.
-     *
-     * Live socket scans cannot see a stopped/crashed container. This query is
-     * the durable half of allocation: it reads both single-project pins and
-     * compose service pins from ACTIVE releases, without paginating the org or
-     * reserving ports that belong to a different server. `null` means the local
-     * host; legacy projects fall back to their active deployment's meta.serverId
-     * through the same `boundServerId` expression used by the server inventory.
-     */
-    async listActivePinnedHostPorts(
-      organizationId: string,
-      serverId: string | null,
-    ): Promise<PinnedHostPort[]> {
-      const target = serverId ? eq(boundServerId, serverId) : isNull(boundServerId);
-      const activeProject = and(
-        eq(project.organizationId, organizationId),
-        isNull(project.deletedAt),
-        target,
-      );
-
-      const [projectPins, servicePins] = await Promise.all([
-        db
-          .select({
-            projectId: project.id,
-            port: project.hostPort,
-          })
-          .from(project)
-          .innerJoin(deployment, eq(project.activeDeploymentId, deployment.id))
-          .where(and(activeProject, isNotNull(project.hostPort))),
-        db
-          .select({
-            projectId: project.id,
-            serviceId: serviceDeployment.serviceId,
-            port: serviceDeployment.hostPort,
-          })
-          .from(project)
-          .innerJoin(deployment, eq(project.activeDeploymentId, deployment.id))
-          .innerJoin(serviceDeployment, eq(serviceDeployment.deploymentId, deployment.id))
-          .where(and(activeProject, isNotNull(serviceDeployment.hostPort))),
-      ]);
-
-      return [
-        ...projectPins.flatMap(({ projectId, port }) =>
-          typeof port === "number" && port > 0 ? [{ projectId, serviceId: null, port }] : [],
-        ),
-        ...servicePins.flatMap(({ projectId, serviceId, port }) =>
-          typeof port === "number" && port > 0 ? [{ projectId, serviceId, port }] : [],
-        ),
-      ];
-    },
-
-    /**
      * Project counts for the dashboard home — total and with-an-active-
      * deployment, in one aggregate query instead of listing every row.
      */
-    async countByOrganization(
-      organizationId: string,
-    ): Promise<{ total: number; active: number }> {
+    async countByOrganization(organizationId: string): Promise<{ total: number; active: number }> {
       const [row] = await db
         .select({
           total: sql<number>`count(*)::int`,
@@ -505,6 +444,28 @@ export function createProjectRepo(db: Database) {
         .update(project)
         .set({ ...data, updatedAt: new Date() })
         .where(and(eq(project.groupId, groupId), isNull(project.deletedAt)));
+    },
+
+    /** Update a source identity shared by every environment and its project_app
+     * row in one transaction. Source transitions span both tables; exposing one
+     * repository operation prevents a failed second write from leaving the
+     * group and its environments classified differently. */
+    async updateSourceByApp(
+      groupId: string,
+      projectData: Partial<NewProject>,
+      groupData: Partial<NewProjectGroup>,
+    ) {
+      const updatedAt = new Date();
+      await db.transaction(async (tx) => {
+        await tx
+          .update(project)
+          .set({ ...projectData, updatedAt })
+          .where(and(eq(project.groupId, groupId), isNull(project.deletedAt)));
+        await tx
+          .update(projectGroup)
+          .set({ ...groupData, updatedAt })
+          .where(and(eq(projectGroup.id, groupId), isNull(projectGroup.deletedAt)));
+      });
     },
 
     /** Update favicon cache metadata without touching the user-visible updatedAt field. */

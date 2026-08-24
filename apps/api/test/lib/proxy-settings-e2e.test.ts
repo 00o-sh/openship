@@ -65,7 +65,7 @@ async function applyAndRead(proxy?: unknown) {
   await reconcileProjectRoutes(project(proxy), {
     routing: routing as never,
     registers: [
-      { hostname: "app.example.com", targetUrl: "http://127.0.0.1:3000", isCustomDomain: false },
+      { hostname: "app.example.com", targetUrl: "http://172.18.0.2:3000", isCustomDomain: false },
     ],
   });
   return files.get(`${SITES}/app-example-com.conf`) ?? "";

@@ -199,9 +199,7 @@ export async function getActiveProjectState(projectId: string): Promise<Prefligh
     activeBackupRestoreIds: restores.map((r) => r.id),
     blocking: parts.length > 0,
     summary:
-      parts.length === 0
-        ? "No active work"
-        : `Cannot delete while in-flight: ${parts.join(", ")}`,
+      parts.length === 0 ? "No active work" : `Cannot delete while in-flight: ${parts.join(", ")}`,
   };
 }
 
@@ -412,7 +410,32 @@ export async function teardownProject(
       // sweep can still find + reclaim them after the project row (their only
       // record) is gone. Only happens on the row-dropping path: a kept row keeps
       // the resources tracked via the project itself, so no orphan record needed.
-      orphaned = await persistOrphans(ctx.organizationId, projectId, orphanCandidates);
+      try {
+        orphaned = await persistOrphans(ctx.organizationId, projectId, orphanCandidates);
+        if (orphanCandidates.length > 0) {
+          push({
+            step: "persist_orphans",
+            status: "ok",
+            details: `${orphaned.length} resource(s) queued for deferred cleanup`,
+          });
+        }
+      } catch (err) {
+        // Dropping the project without a durable retry record would turn a
+        // reachable-later vhost/workload into an untracked permanent orphan.
+        // Keep the row and deletion lock semantics intact so the whole operation
+        // can be retried safely.
+        push({
+          step: "persist_orphans",
+          status: "failed",
+          error: safeErrorMessage(err),
+        });
+        push({
+          step: "delete_db_row",
+          status: "skipped",
+          details: "kept: deferred cleanup resources could not be recorded",
+        });
+        return finalize(steps, false);
+      }
     }
 
     // ── Step 4b: unlink this app from every project it was wired into. ───
@@ -629,12 +652,7 @@ async function stepDeleteWebhook(
     return;
   }
   try {
-    await deleteGitHubWebhook(
-      ctx,
-      project.gitOwner,
-      project.gitRepo,
-      project.webhookId,
-    );
+    await deleteGitHubWebhook(ctx, project.gitOwner, project.gitRepo, project.webhookId);
     push({ step: "github_webhook", status: "ok", details: `hook ${project.webhookId}` });
   } catch (err) {
     // GitHub returns 404 when the hook is already gone — treat as a
@@ -677,6 +695,18 @@ async function stepRuntimeCleanup(
   push: (s: TeardownStep) => void,
 ): Promise<OrphanCandidate[]> {
   const orphans: OrphanCandidate[] = [];
+  const orphanKeys = new Set<string>();
+  const addOrphan = (candidate: OrphanCandidate) => {
+    const key = [
+      candidate.serverId ?? "",
+      candidate.runtimeMode ?? "",
+      candidate.resourceType,
+      candidate.ref,
+    ].join("\0");
+    if (orphanKeys.has(key)) return;
+    orphanKeys.add(key);
+    orphans.push(candidate);
+  };
   let manifest;
   try {
     manifest = await collectProjectManifest(project, { wipeVolumes });
@@ -689,7 +719,7 @@ async function stepRuntimeCleanup(
     return orphans;
   }
 
-  if (manifest.resources.length === 0) {
+  if (manifest.resources.length === 0 && (manifest.routeContexts?.length ?? 0) === 0) {
     push({ step: "runtime_cleanup", status: "skipped", details: "no resources" });
     return orphans;
   }
@@ -702,20 +732,37 @@ async function stepRuntimeCleanup(
   const destroyable = manifest.resources.filter((r) => r.type !== "unreachable");
 
   for (const r of unreachable) {
-    orphans.push({
+    addOrphan({
       serverId: r.serverId ?? null,
-      resourceType: "container",
+      resourceType: r.runtimeMode === "cloud" ? "cloud_workspace" : "container",
       ref: r.ref,
       label: r.label,
       runtimeMode: r.runtimeMode ?? null,
     });
   }
 
+  // An unreachable historical target has no live routing/edge adapter to put in
+  // `routeContexts`, but its vhost and detached claims still exist. Record the
+  // exact server now; GC will resolve that target, remove every known hostname,
+  // and only then run a fresh claim convergence when the host returns.
+  const routeResources = destroyable.filter((resource) => resource.type === "route");
+  for (const target of manifest.unreachableRouteTargets ?? []) {
+    for (const route of routeResources) {
+      addOrphan({
+        serverId: target.serverId,
+        resourceType: "route",
+        ref: route.ref,
+        label: `${route.label} (server:${target.serverId})`,
+        runtimeMode: target.runtimeMode,
+      });
+    }
+  }
+
   const orphanNote = unreachable.length
     ? `; ${unreachable.length} orphaned (server unreachable)`
     : "";
 
-  if (destroyable.length === 0) {
+  if (destroyable.length === 0 && (manifest.routeContexts?.length ?? 0) === 0) {
     // Nothing reachable to destroy — only unreachable orphans. The delete
     // proceeds (row drops); GC reclaims the orphans later.
     push({
@@ -729,18 +776,55 @@ async function stepRuntimeCleanup(
   // Force-orphan short-circuit: the operator chose "delete from storage anyway",
   // so DON'T attempt the inline SSH destroy at all (that's the call that can hang
   // ~80s on a slow/failing runtime and is why the escape felt stuck). Record
-  // every reachable resource as an orphan for the GC sweep and let the row drop
-  // now. Reachable manifest items don't carry their own serverId/runtimeMode, so
-  // stamp them with the project's primary target (same as the post-failure path).
+  // every reachable resource on its collected historical target for the GC sweep
+  // and let the row drop now. The latest-deployment fallback exists only for an
+  // older/test manifest that predates per-resource target identity.
   if (forceOrphan) {
-    const target = await resolvePrimaryTarget(project.id);
+    const hasRouteTargets =
+      (manifest.routeContexts?.length ?? 0) > 0 ||
+      (manifest.unreachableRouteTargets?.length ?? 0) > 0;
+    const needsLegacyTarget = destroyable.some(
+      (resource) => !resource.runtimeMode && (resource.type !== "route" || !hasRouteTargets),
+    );
+    const legacyTarget = needsLegacyTarget ? await resolvePrimaryTarget(project.id) : null;
     for (const r of destroyable) {
-      orphans.push({
-        serverId: r.serverId ?? target.serverId,
+      if (r.type === "route") {
+        // A migrated project can have the same vhost on several physical
+        // targets. Record one retry per target; collapsing them onto the latest
+        // server would let GC declare the other copies reclaimed without ever
+        // touching them.
+        for (const routeTarget of manifest.routeContexts ?? []) {
+          addOrphan({
+            serverId: routeTarget.serverId,
+            resourceType: "route",
+            ref: r.ref,
+            label: `${r.label} (${routeTarget.key})`,
+            runtimeMode: routeTarget.runtimeMode,
+          });
+        }
+        // Unreachable targets were fanned out above. Only a legacy manifest with
+        // neither target list needs the old latest-target fallback.
+        if (
+          (manifest.routeContexts?.length ?? 0) > 0 ||
+          (manifest.unreachableRouteTargets?.length ?? 0) > 0
+        ) {
+          continue;
+        }
+      }
+      addOrphan({
+        serverId: r.serverId ?? legacyTarget?.serverId ?? null,
         resourceType: r.type === "unreachable" ? "container" : r.type,
         ref: r.ref,
         label: r.label,
-        runtimeMode: r.runtimeMode ?? target.runtimeMode,
+        runtimeMode:
+          r.runtimeMode ??
+          (r.runtime?.name === "cloud"
+            ? "cloud"
+            : r.runtime?.name === "bare"
+              ? "bare"
+              : r.runtime?.name === "docker"
+                ? "docker"
+                : (legacyTarget?.runtimeMode ?? null)),
       });
     }
     push({
@@ -763,6 +847,9 @@ async function stepRuntimeCleanup(
     projectId: manifest.projectId,
     organizationId: manifest.organizationId,
     resources: destroyable,
+    runtimes: manifest.runtimes,
+    routeContexts: manifest.routeContexts,
+    unreachableRouteTargets: manifest.unreachableRouteTargets,
   });
   const realFailures = result.failed;
   const details =
@@ -798,17 +885,22 @@ async function resolvePrimaryTarget(
   return { serverId: meta.serverId ?? null, runtimeMode: meta.runtimeMode ?? null };
 }
 
-/** Persist orphan candidates so the GC sweep can reclaim them after the project
- *  row is gone. Best-effort per row — a failed insert is logged, not fatal. */
+/** Persist every orphan candidate before the project row may disappear.
+ *
+ * This is logically all-or-nothing: if one insert fails, best-effort roll back
+ * the rows created by this attempt and reject the teardown. The GC also refuses
+ * to touch any orphan whose project row still exists, so even an unsuccessful
+ * rollback cannot reclaim a live project's resources. */
 async function persistOrphans(
   organizationId: string,
   projectId: string,
   candidates: OrphanCandidate[],
 ): Promise<OrphanedResourceSummary[]> {
   const out: OrphanedResourceSummary[] = [];
+  const createdIds: string[] = [];
   for (const c of candidates) {
     try {
-      await repos.orphanedResource.create({
+      const created = await repos.orphanedResource.create({
         organizationId,
         serverId: c.serverId,
         resourceType: c.resourceType,
@@ -817,9 +909,11 @@ async function persistOrphans(
         label: c.label,
         runtimeMode: c.runtimeMode,
       });
+      if (created?.id) createdIds.push(created.id);
       out.push({ ref: c.ref, label: c.label, serverId: c.serverId });
     } catch (err) {
-      console.error(`[teardown] failed to record orphan ${c.ref}:`, safeErrorMessage(err));
+      await Promise.allSettled(createdIds.map((id) => repos.orphanedResource.delete(id)));
+      throw new Error(`Failed to record deferred cleanup for ${c.label}: ${safeErrorMessage(err)}`);
     }
   }
   return out;

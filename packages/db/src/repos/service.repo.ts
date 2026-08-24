@@ -942,6 +942,7 @@ export function createServiceRepo(db: Database) {
             imageRef: data.imageRef ?? null,
             imageDigest: data.imageDigest ?? null,
             hostPort: data.hostPort ?? null,
+            hostPorts: data.hostPorts ?? null,
             ip: data.ip ?? null,
             reason: data.reason ?? null,
             reasonSkipped: data.reasonSkipped ?? null,
@@ -957,7 +958,8 @@ export function createServiceRepo(db: Database) {
      * Why this exists next to `upsertServiceDeployment` rather than reusing it: a
      * smart/partial redeploy pre-creates a `skipped` row for every service it did not
      * target (service-checks.ts), and that row carries the LIVE runtime details of a
-     * container that is still running — `containerId`, `imageDigest`, `hostPort`, `ip`.
+     * container that is still running — `containerId`, `imageDigest`, `hostPort`,
+     * `hostPorts`, `ip`.
      * `upsertServiceDeployment` coalesces all of those to null, so using it here would
      * erase the record of a running container just because a *different* service
      * failed. Using a plain insert instead is what violated
@@ -1023,9 +1025,9 @@ export function createServiceRepo(db: Database) {
      * `skipped` row a smart/partial deploy pre-created (service-checks.ts), or one
      * carrying the LIVE runtime details of a container that is still running. The `set`
      * below therefore lists ONLY the skip facts, so `containerId` / `imageRef` /
-     * `imageDigest` / `hostPort` / `ip` survive by OMISSION. That is the load-bearing
-     * detail, and the reason this cannot be `upsertServiceDeployment` (a full-row writer
-     * that coalesces every one of those to null).
+     * `imageDigest` / `hostPort` / `hostPorts` / `ip` survive by OMISSION. That is the
+     * load-bearing detail, and the reason this cannot be `upsertServiceDeployment` (a
+     * full-row writer that coalesces every one of those to null).
      */
     async markServiceDeploymentSkipped(data: {
       deploymentId: string;

@@ -22,10 +22,7 @@ export type {
   IncomingWebhookAuthMode,
 } from "./schema/incoming-webhook";
 export { INCIDENT_KINDS, type IncidentKind } from "./schema/service-incident";
-export {
-  RESOURCE_BUCKET_MINUTES,
-  SINGLE_APP_SERVICE_KEY,
-} from "./schema/resource-usage";
+export { RESOURCE_BUCKET_MINUTES, SINGLE_APP_SERVICE_KEY } from "./schema/resource-usage";
 
 // ─── Dump / restore (team-mode migration + project transfer) ─────────────────
 export {
@@ -86,7 +83,6 @@ export {
   type NewProject,
   type EnvVar,
   type NewEnvVar,
-  type PinnedHostPort,
   type Deployment,
   type NewDeployment,
   type BuildSession,
@@ -154,6 +150,15 @@ export {
   type NewJob,
   type OrphanedResource,
   type NewOrphanedResource,
+  createHostPortClaimRepo,
+  HostPortClaimConflictError,
+  HOST_PORT_QUARANTINE_OWNER,
+  type HostPortClaim,
+  type NewHostPortClaim,
+  type HostPortTargetKey,
+  type HostPortClaimIdentity,
+  type HostPortClaimOwner,
+  type PruneHostPortClaimsInput,
   type ResourceGrant,
   type Permission,
   type ResourceType,

@@ -100,23 +100,13 @@ describe("shouldRefuseLoopbackRoute", () => {
 
 describe("deriveEnvironmentPublicEndpoints", () => {
   it("clones an explicit proxy target without inventing a fallback port", () => {
-    expect(
-      deriveEnvironmentPublicEndpoints(
-        [{ port: 4010 }],
-        "preview-app",
-      ),
-    ).toEqual([
+    expect(deriveEnvironmentPublicEndpoints([{ port: 4010 }], "preview-app")).toEqual([
       { port: 4010, domain: "preview-app", domainType: "free" },
     ]);
   });
 
   it("clones an explicit static path target without inventing a port", () => {
-    expect(
-      deriveEnvironmentPublicEndpoints(
-        [{ targetPath: "/docs" }],
-        "preview-docs",
-      ),
-    ).toEqual([
+    expect(deriveEnvironmentPublicEndpoints([{ targetPath: "/docs" }], "preview-docs")).toEqual([
       { targetPath: "/docs", domain: "preview-docs", domainType: "free" },
     ]);
   });
@@ -172,7 +162,7 @@ describe("reapplyProjectLiveRoutes self-app loopback route (issue #129)", () => 
     });
     resolveRuntime.mockResolvedValue({
       routing: { provider: "bare" },
-      runtime: { supports: () => false },
+      runtime: { name: "bare", supports: () => false },
       effectiveTarget: "local",
       serverId: null,
     });
@@ -183,7 +173,12 @@ describe("reapplyProjectLiveRoutes self-app loopback route (issue #129)", () => 
 
     expect(reconcile).toHaveBeenCalledTimes(1);
     expect(reconcile.mock.calls[0][1].registers).toEqual([
-      { hostname: "panel.example.com", targetUrl: "http://127.0.0.1:3001", isCustomDomain: false },
+      {
+        hostname: "panel.example.com",
+        targetUrl: "http://127.0.0.1:3001",
+        isCustomDomain: false,
+        observedLoopbackPublishes: [{ serviceId: null, containerPort: 3001, hostPort: 3001 }],
+      },
     ]);
   });
 
@@ -245,7 +240,7 @@ describe("reapplyProjectLiveRoutes static (path-targeted) routes", () => {
     deregisterManagedEdge.mockReset().mockResolvedValue({ failures: [] });
     resolveRuntime.mockResolvedValue({
       routing: { provider: "bare" },
-      runtime: { supports: () => false },
+      runtime: { name: "bare", supports: () => false },
       effectiveTarget: "local",
       serverId: null,
     });
@@ -278,7 +273,9 @@ describe("reapplyProjectLiveRoutes static (path-targeted) routes", () => {
         ...staticProject,
         routingConfig: {
           redirects: [{ source: "/blog/:path*", destination: "/news/:path*", permanent: true }],
-          headers: [{ source: "/api/(.*)", headers: [{ key: "Cache-Control", value: "no-store" }] }],
+          headers: [
+            { source: "/api/(.*)", headers: [{ key: "Cache-Control", value: "no-store" }] },
+          ],
           cleanUrls: true,
           trailingSlash: false,
         },
@@ -433,6 +430,7 @@ describe("reapplyProjectLiveRoutes static (path-targeted) routes", () => {
     expect(reconcile.mock.calls[0][1].registers[0]).toMatchObject({
       hostname: "sadsa.opsh.io",
       targetUrl: "http://127.0.0.1:3000",
+      observedLoopbackPublishes: [{ serviceId: null, containerPort: 3000, hostPort: 3000 }],
     });
   });
 });
@@ -464,7 +462,9 @@ describe("deriveNextProjectRouteState custom-hostname gate", () => {
 
   it("accepts a real hostname, scheme and all", () => {
     const state = deriveNextProjectRouteState(project, {
-      nextPublicEndpoints: [{ customDomain: "HTTPS://App.Example.com/", domainType: "custom", port: 3000 }],
+      nextPublicEndpoints: [
+        { customDomain: "HTTPS://App.Example.com/", domainType: "custom", port: 3000 },
+      ],
     });
 
     expect(state.publicEndpoints[0]).toMatchObject({ customDomain: "app.example.com" });
@@ -477,16 +477,18 @@ describe("deriveNextProjectRouteState custom-hostname gate", () => {
    * submission INTRODUCES are refused; the endpoint list is authoritative, so every
    * save echoes the stored set back.
    */
-  const legacyRow = [{
-    id: "dom-legacy",
-    hostname: "localhost",
-    isPrimary: true,
-    serviceId: null,
-    targetPort: 3000,
-    targetPath: null,
-    domainType: "custom",
-    verified: false,
-  }] as never;
+  const legacyRow = [
+    {
+      id: "dom-legacy",
+      hostname: "localhost",
+      isPrimary: true,
+      serviceId: null,
+      targetPort: 3000,
+      targetPath: null,
+      domainType: "custom",
+      verified: false,
+    },
+  ] as never;
 
   it("does not throw on a bad hostname that is already stored", () => {
     expect(() => deriveNextProjectRouteState(project, { projectDomains: legacyRow })).not.toThrow();
@@ -508,7 +510,9 @@ describe("deriveNextProjectRouteState custom-hostname gate", () => {
     expect(() =>
       deriveNextProjectRouteState(project, {
         projectDomains: legacyRow,
-        nextPublicEndpoints: [{ customDomain: "app.example.com", domainType: "custom", port: 3000 }],
+        nextPublicEndpoints: [
+          { customDomain: "app.example.com", domainType: "custom", port: 3000 },
+        ],
       }),
     ).not.toThrow();
   });
@@ -580,12 +584,32 @@ describe("reapplyProjectLiveRoutes multi-service project-level routes (issue #61
     verified: true,
   });
 
-  /** container-ip makes the resolved containerPort visible in the asserted URL. */
-  const containerIpRuntime = {
+  /** A route writer must observe the container as RUNNING before publishing. */
+  const liveDockerRuntime = {
     name: "docker",
-    supports: (feature: string) => feature === "containerIp",
-    getContainerIp: async (id: string) =>
-      ({ "c-web": "10.0.0.2", "c-postgres": "10.0.0.3", "c-worker": "10.0.0.4" })[id] ?? null,
+    supports: (feature: string) => feature === "containerInfo" || feature === "containerIp",
+    getContainerInfo: async (id: string) => {
+      const rows = await listServicesByDeployment();
+      const row = rows.find(
+        (candidate: { containerId?: string | null }) => candidate.containerId === id,
+      );
+      return row
+        ? {
+            containerId: id,
+            status: "running",
+            ip: row.ip ?? undefined,
+            hostPort: row.hostPort ?? undefined,
+            hostPortByContainerPort: row.hostPorts ?? undefined,
+          }
+        : { containerId: id, status: "missing" };
+    },
+    getContainerIp: async (id: string) => {
+      const rows = await listServicesByDeployment();
+      return (
+        rows.find((candidate: { containerId?: string | null }) => candidate.containerId === id)
+          ?.ip ?? null
+      );
+    },
   };
 
   beforeEach(() => {
@@ -605,11 +629,9 @@ describe("reapplyProjectLiveRoutes multi-service project-level routes (issue #61
     });
     listServicesByProject.mockResolvedValue(services);
     listServicesByDeployment.mockResolvedValue(liveRows);
-    // No containerInfo support → the live host-port read is "couldn't ask", so the
-    // stored row's port is used (the #506 rule) instead of being invented.
     resolveRuntime.mockResolvedValue({
       routing: { provider: "docker" },
-      runtime: { name: "docker", supports: () => false },
+      runtime: liveDockerRuntime,
       effectiveTarget: "server",
       serverId: "srv-1",
     });
@@ -622,7 +644,12 @@ describe("reapplyProjectLiveRoutes multi-service project-level routes (issue #61
 
     expect(reconcile).toHaveBeenCalledTimes(1);
     expect(reconcile.mock.calls[0][1].registers).toEqual([
-      { hostname: "app.example.com", isCustomDomain: true, targetUrl: "http://127.0.0.1:3000" },
+      {
+        hostname: "app.example.com",
+        isCustomDomain: true,
+        targetUrl: "http://127.0.0.1:3000",
+        observedLoopbackPublishes: [{ serviceId: "svc-web", containerPort: 3000, hostPort: 3000 }],
+      },
     ]);
   });
 
@@ -630,7 +657,7 @@ describe("reapplyProjectLiveRoutes multi-service project-level routes (issue #61
     listByProject.mockResolvedValue([projectDomain(3000)]);
     resolveRuntime.mockResolvedValue({
       routing: { provider: "docker" },
-      runtime: containerIpRuntime,
+      runtime: liveDockerRuntime,
       effectiveTarget: "server",
       serverId: "srv-1",
     });
@@ -652,7 +679,7 @@ describe("reapplyProjectLiveRoutes multi-service project-level routes (issue #61
     ]);
     resolveRuntime.mockResolvedValue({
       routing: { provider: "docker" },
-      runtime: containerIpRuntime,
+      runtime: liveDockerRuntime,
       effectiveTarget: "server",
       serverId: "srv-1",
     });
@@ -674,7 +701,7 @@ describe("reapplyProjectLiveRoutes multi-service project-level routes (issue #61
     listByProject.mockResolvedValue([projectDomain(9999)]);
     resolveRuntime.mockResolvedValue({
       routing: { provider: "docker" },
-      runtime: containerIpRuntime,
+      runtime: liveDockerRuntime,
       effectiveTarget: "server",
       serverId: "srv-1",
     });
@@ -697,7 +724,7 @@ describe("reapplyProjectLiveRoutes multi-service project-level routes (issue #61
     });
     resolveRuntime.mockResolvedValue({
       routing: { provider: "docker" },
-      runtime: containerIpRuntime,
+      runtime: liveDockerRuntime,
       effectiveTarget: "server",
       serverId: "srv-1",
     });
@@ -722,7 +749,12 @@ describe("reapplyProjectLiveRoutes multi-service project-level routes (issue #61
     await reapplyProjectLiveRoutes(project, []);
 
     expect(reconcile.mock.calls[0][1].registers).toEqual([
-      { hostname: "app.example.com", isCustomDomain: true, targetUrl: "http://127.0.0.1:32770" },
+      {
+        hostname: "app.example.com",
+        isCustomDomain: true,
+        targetUrl: "http://127.0.0.1:32770",
+        observedLoopbackPublishes: [{ serviceId: "svc-web", containerPort: 3000, hostPort: 32770 }],
+      },
     ]);
   });
 
@@ -739,7 +771,7 @@ describe("reapplyProjectLiveRoutes multi-service project-level routes (issue #61
     });
     resolveRuntime.mockResolvedValue({
       routing: { provider: "docker" },
-      runtime: containerIpRuntime,
+      runtime: liveDockerRuntime,
       effectiveTarget: "server",
       serverId: "srv-1",
     });
@@ -778,7 +810,12 @@ describe("reapplyProjectLiveRoutes multi-service project-level routes (issue #61
       routing: { provider: "docker" },
       runtime: {
         name: "docker",
-        supports: (feature: string) => feature === "containerIp",
+        supports: (feature: string) => feature === "containerInfo" || feature === "containerIp",
+        getContainerInfo: async (id: string) => ({
+          containerId: id,
+          status: "running",
+          ip: id === "c-single" ? "10.0.0.9" : undefined,
+        }),
         getContainerIp: async (id: string) => (id === "c-single" ? "10.0.0.9" : null),
       },
       effectiveTarget: "server",
