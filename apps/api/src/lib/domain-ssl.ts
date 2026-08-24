@@ -1,6 +1,21 @@
+import {
+  mkdir as fsMkdir,
+  writeFile as fsWriteFile,
+  rm as fsRm,
+  chmod as fsChmod,
+} from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { randomBytes } from "node:crypto";
 import type { Domain, Project } from "@repo/db";
-import type { ManualCert, SslProvider, SslResult } from "@repo/adapters";
-import { ForbiddenError, NotFoundError, SYSTEM, safeErrorMessage } from "@repo/core";
+import type { ManualCert, SslProvider, SslResult, ProvisionCertOptions } from "@repo/adapters";
+import {
+  ForbiddenError,
+  NotFoundError,
+  SYSTEM,
+  isWildcardHostname,
+  safeErrorMessage,
+} from "@repo/core";
 import { repos } from "@repo/db";
 import { env } from "../config/env";
 import { platform } from "./controller-helpers";
@@ -11,6 +26,7 @@ import {
   resolveDeploymentPlatform,
   type DeploymentMeta,
 } from "./deployment-runtime";
+import { resolveDnsManager, type MatchedDnsManager } from "../modules/dns/dns-credential.service";
 
 /**
  * The per-domain issuance lock key. EVERY path that can open an ACME order
@@ -107,7 +123,7 @@ export function describeTlsIssuedElsewhere(where: TlsIssuedElsewhere, hostname: 
   }
 }
 
-interface DomainSslOptions {
+export interface DomainSslOptions {
   action: DomainSslAction;
   /** Restrict to a specific project (defense-in-depth; route layer
    *  already verified access). */
@@ -116,6 +132,12 @@ interface DomainSslOptions {
    *  path (self-hosted verifyDomain) sets this — there, issuing the cert IS the
    *  verification, so it necessarily runs before `verified` is set. */
   allowUnverified?: boolean;
+  /** Force a specific challenge type: "http-01" | "dns-01" */
+  challenge?: "http-01" | "dns-01";
+  /** Optional custom DNS auth hook command/script */
+  dnsAuthHook?: string;
+  /** Optional custom DNS cleanup hook command/script */
+  dnsCleanupHook?: string;
 }
 
 /** The lock scope for the box the API itself runs on. */
@@ -486,18 +508,115 @@ async function resolveSslProvider(owner: SslOwner): Promise<ResolvedSslProvider>
   return { ssl: platform().ssl, lockScope: LOCAL_ACME_SCOPE };
 }
 
+export interface EphemeralDnsHooks {
+  dir: string;
+  authHookPath: string;
+  cleanupHookPath: string;
+  cleanup: () => Promise<void>;
+}
+
+export async function createEphemeralDnsHooks(
+  manager: MatchedDnsManager,
+): Promise<EphemeralDnsHooks> {
+  const nonce = randomBytes(12).toString("hex");
+  const dir = join(tmpdir(), `.openship-dns-${nonce}`);
+  await fsMkdir(dir, { recursive: true, mode: 0o700 });
+  await fsChmod(dir, 0o700).catch(() => {});
+
+  const recordFile = join(dir, "record-id.txt");
+  const authHookPath = join(dir, "auth.sh");
+  const cleanupHookPath = join(dir, "cleanup.sh");
+
+  const authScript = `#!/bin/sh
+set -e
+DOMAIN="\${CERTBOT_DOMAIN#\\*.}"
+RECORD_NAME="_acme-challenge.\${DOMAIN}"
+RES=$(curl -s -S -X POST "https://api.cloudflare.com/client/v4/zones/${manager.zone.id}/dns_records" \\
+  -H "Authorization: Bearer ${manager.credentials.apiToken}" \\
+  -H "Content-Type: application/json" \\
+  --data "{\\"type\\":\\"TXT\\",\\"name\\":\\"\${RECORD_NAME}\\",\\"content\\":\\"\${CERTBOT_VALIDATION}\\",\\"ttl\\":60,\\"comment\\":\\"Managed by Openship\\"}")
+RECORD_ID=$(echo "$RES" | grep -o '"id":"[^"]*' | head -n 1 | cut -d'"' -f4)
+if [ -n "$RECORD_ID" ]; then
+  echo "$RECORD_ID" > "${recordFile}"
+fi
+sleep 5
+`;
+
+  const cleanupScript = `#!/bin/sh
+if [ -f "${recordFile}" ]; then
+  RECORD_ID=$(cat "${recordFile}")
+  if [ -n "$RECORD_ID" ]; then
+    curl -s -S -X DELETE "https://api.cloudflare.com/client/v4/zones/${manager.zone.id}/dns_records/\${RECORD_ID}" \\
+      -H "Authorization: Bearer ${manager.credentials.apiToken}" \\
+      -H "Content-Type: application/json" || true
+  fi
+  rm -f "${recordFile}"
+fi
+`;
+
+  await fsWriteFile(authHookPath, authScript, { mode: 0o700 });
+  await fsWriteFile(cleanupHookPath, cleanupScript, { mode: 0o700 });
+  await fsChmod(authHookPath, 0o700).catch(() => {});
+  await fsChmod(cleanupHookPath, 0o700).catch(() => {});
+
+  return {
+    dir,
+    authHookPath,
+    cleanupHookPath,
+    cleanup: async () => {
+      await fsRm(dir, { recursive: true, force: true }).catch(() => {});
+    },
+  };
+}
+
+async function resolveDns01Hooks(
+  organizationId: string,
+  domainRecord: Domain,
+  opts?: { dnsAuthHook?: string; dnsCleanupHook?: string },
+): Promise<{ authHook?: string; cleanupHook?: string; cleanup: () => Promise<void> }> {
+  if (opts?.dnsAuthHook) {
+    return {
+      authHook: opts.dnsAuthHook,
+      cleanupHook: opts.dnsCleanupHook,
+      cleanup: async () => {},
+    };
+  }
+
+  const dnsLookup = await resolveDnsManager(organizationId, domainRecord.hostname);
+  if (dnsLookup.status === "matched") {
+    const hooks = await createEphemeralDnsHooks(dnsLookup.manager);
+    return {
+      authHook: hooks.authHookPath,
+      cleanupHook: hooks.cleanupHookPath,
+      cleanup: hooks.cleanup,
+    };
+  }
+
+  if (dnsLookup.status === "unauthorized") {
+    throw new Error(`DNS provider credential rejected: ${dnsLookup.reason}`);
+  }
+  if (dnsLookup.status === "unavailable") {
+    throw new Error(`DNS provider unavailable: ${dnsLookup.reason}`);
+  }
+  throw new Error(
+    `DNS-01 challenge for ${domainRecord.hostname} requires a connected DNS provider (e.g. Cloudflare) in Settings → DNS.`,
+  );
+}
+
 async function executeSslAction(
   ssl: SslProvider,
   hostname: string,
   action: DomainSslAction,
+  opts?: ProvisionCertOptions,
 ): Promise<SslResult> {
+  const hasOpts = opts && Object.keys(opts).length > 0;
   switch (action) {
     case "renew":
       return ssl.renewCert(hostname);
     case "verify":
       return ssl.verifyCert(hostname);
     default:
-      return ssl.provisionCert(hostname);
+      return hasOpts ? ssl.provisionCert(hostname, opts) : ssl.provisionCert(hostname);
   }
 }
 
@@ -554,10 +673,36 @@ async function manageAuthorizedDomainSsl(
     return result;
   }
 
+  const isDns =
+    opts.challenge === "dns-01" ||
+    domainRecord.sslChallenge === "dns-01" ||
+    isWildcardHostname(domainRecord.hostname);
+
+  let hooksCleanup: (() => Promise<void>) | null = null;
+  let dnsAuthHook = opts.dnsAuthHook;
+  let dnsCleanupHook = opts.dnsCleanupHook;
+  if (isDns) {
+    const orgId = owner.kind === "project" ? owner.project.organizationId : owner.organizationId;
+    const hooks = await resolveDns01Hooks(orgId, domainRecord, {
+      dnsAuthHook,
+      dnsCleanupHook,
+    });
+    dnsAuthHook = hooks.authHook;
+    dnsCleanupHook = hooks.cleanupHook;
+    hooksCleanup = hooks.cleanup;
+  }
+
+  const provOpts: ProvisionCertOptions = {
+    ...(opts.action === "renew" ? { force: true } : {}),
+    ...(isDns ? { challenge: "dns-01" } : opts.challenge ? { challenge: opts.challenge } : {}),
+    ...(dnsAuthHook ? { dnsAuthHook } : {}),
+    ...(dnsCleanupHook ? { dnsCleanupHook } : {}),
+  };
+
   try {
     const result = await createProvisionLock(sslIssueLockKey(domainRecord.hostname)).run(() =>
       createProvisionLock(acmeIssueLockKey(lockScope)).run(() =>
-        executeSslAction(ssl, domainRecord.hostname, opts.action),
+        executeSslAction(ssl, domainRecord.hostname, opts.action, provOpts),
       ),
     );
     await persistSslResult(domainRecord.id, domainRecord.sslStatus, result);
@@ -566,6 +711,8 @@ async function manageAuthorizedDomainSsl(
     // Issuance may have succeeded and a LATER step failed — never leave a valid
     // cert unrecorded. See {@link recoverIssuedCert}. Rethrows when it really failed.
     return recoverIssuedCert(ssl, domainRecord, err);
+  } finally {
+    if (hooksCleanup) await hooksCleanup().catch(() => {});
   }
 }
 
@@ -582,7 +729,14 @@ async function manageAuthorizedDomainSsl(
  */
 export async function provisionDomainCertForVerify(
   hostname: string,
-  opts: { projectId?: string; onLog?: (line: string) => void; force?: boolean } = {},
+  opts: {
+    projectId?: string;
+    onLog?: (line: string) => void;
+    force?: boolean;
+    challenge?: "http-01" | "dns-01";
+    dnsAuthHook?: string;
+    dnsCleanupHook?: string;
+  } = {},
 ): Promise<SslResult> {
   const authorization: DomainSslOptions = {
     action: "provision",
@@ -596,9 +750,35 @@ export async function provisionDomainCertForVerify(
 
 async function provisionAuthorizedDomainCert(
   { domainRecord, owner }: AuthorizedDomain,
-  opts: { projectId?: string; onLog?: (line: string) => void; force?: boolean },
+  opts: {
+    projectId?: string;
+    onLog?: (line: string) => void;
+    force?: boolean;
+    challenge?: "http-01" | "dns-01";
+    dnsAuthHook?: string;
+    dnsCleanupHook?: string;
+  },
 ): Promise<SslResult> {
   const { ssl, lockScope } = await resolveSslProvider(owner);
+
+  const isDns =
+    opts.challenge === "dns-01" ||
+    domainRecord.sslChallenge === "dns-01" ||
+    isWildcardHostname(domainRecord.hostname);
+
+  let hooksCleanup: (() => Promise<void>) | null = null;
+  let dnsAuthHook = opts.dnsAuthHook;
+  let dnsCleanupHook = opts.dnsCleanupHook;
+  if (isDns) {
+    const orgId = owner.kind === "project" ? owner.project.organizationId : owner.organizationId;
+    const hooks = await resolveDns01Hooks(orgId, domainRecord, {
+      dnsAuthHook,
+      dnsCleanupHook,
+    });
+    dnsAuthHook = hooks.authHook;
+    dnsCleanupHook = hooks.cleanupHook;
+    hooksCleanup = hooks.cleanup;
+  }
 
   // Serialize issuance per-hostname, and re-check the cert INSIDE the lock.
   // This closes the TOCTOU: two concurrent Verify hits (or Verify racing the
@@ -629,7 +809,13 @@ async function provisionAuthorizedDomainCert(
         // otherwise its file-exists short-circuit would return the old cert and a
         // near-expiry renewal would silently no-op.
         return createProvisionLock(acmeIssueLockKey(lockScope)).run(() =>
-          ssl.provisionCert(domainRecord.hostname, { onLog: opts.onLog, force: true }),
+          ssl.provisionCert(domainRecord.hostname, {
+            onLog: opts.onLog,
+            force: true,
+            challenge: isDns ? "dns-01" : "http-01",
+            dnsAuthHook,
+            dnsCleanupHook,
+          }),
         );
       },
     );
@@ -647,6 +833,8 @@ async function provisionAuthorizedDomainCert(
         `${recovered.expiresAt.slice(0, 10)}) — recorded it, renewal is scheduled.`,
     );
     return recovered;
+  } finally {
+    if (hooksCleanup) await hooksCleanup().catch(() => {});
   }
 }
 

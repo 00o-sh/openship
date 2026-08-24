@@ -7,7 +7,7 @@
 
 import { Oblien } from "oblien";
 import type { ManualCert, RouteConfig, SslResult } from "../types";
-import type { RoutingProvider, SslProvider } from "./types";
+import type { RoutingProvider, SslProvider, ProvisionCertOptions } from "./types";
 
 export class CloudInfraProvider implements RoutingProvider, SslProvider {
   private readonly client: Oblien;
@@ -30,7 +30,7 @@ export class CloudInfraProvider implements RoutingProvider, SslProvider {
 
   // ── SSL ──────────────────────────────────────────────────────────────
 
-  async provisionCert(domain: string): Promise<SslResult> {
+  async provisionCert(domain: string, _opts?: ProvisionCertOptions): Promise<SslResult> {
     // TODO: POST /ssl/provision - Oblien manages certs
     return { domain, expiresAt: "", issuer: "oblien", verified: false };
   }

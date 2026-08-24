@@ -123,7 +123,7 @@ function setup(opts: { certOnDisk?: boolean; certbotOutput?: string } = {}) {
   } as unknown as RootChecked;
 
   return {
-    nginx: new NginxProvider({ paths: PATHS, executor }),
+    nginx: new NginxProvider({ paths: PATHS, executor, containerEdge: true }),
     files,
     writes,
     conf: () => files.get(`${SITES}/app-example-com.conf`),

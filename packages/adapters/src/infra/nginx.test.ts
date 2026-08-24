@@ -769,6 +769,58 @@ describe("NginxProvider config generation", () => {
     expect(certbot).toContain("--cert-name");
     expect(certbot).not.toContain("--webroot");
   });
+  test("provisionCert issues via DNS-01 when challenge option is dns-01", async () => {
+    const { nginx, calls } = setup();
+    await nginx.registerRoute(PROXY);
+    await expect(
+      nginx.provisionCert("app.example.com", {
+        challenge: "dns-01",
+        dnsAuthHook: "/tmp/auth.sh",
+        dnsCleanupHook: "/tmp/cleanup.sh",
+      }),
+    ).rejects.toThrow();
+    const certbot = calls.find(
+      (c) => c.startsWith("certbot 'certonly'") || c.startsWith("certbot certonly"),
+    );
+    expect(certbot).toBeDefined();
+    expect(certbot).toContain("--manual");
+    expect(certbot).toContain("--preferred-challenges");
+    expect(certbot).toContain("dns");
+    expect(certbot).toContain("--manual-auth-hook");
+    expect(certbot).toContain("/tmp/auth.sh");
+    expect(certbot).toContain("--manual-cleanup-hook");
+    expect(certbot).toContain("/tmp/cleanup.sh");
+    expect(certbot).not.toContain("--standalone");
+    expect(certbot).not.toContain("--http-01-port");
+  });
+
+  test("provisionCert automatically uses DNS-01 for wildcard domains", async () => {
+    const { nginx, calls } = setup();
+    await nginx.registerRoute({ ...PROXY, domain: "*.example.com" });
+    await expect(nginx.provisionCert("*.example.com")).rejects.toThrow();
+    const certbot = calls.find(
+      (c) => c.startsWith("certbot 'certonly'") || c.startsWith("certbot certonly"),
+    );
+    expect(certbot).toBeDefined();
+    expect(certbot).toContain("--manual");
+    expect(certbot).toContain("--preferred-challenges");
+    expect(certbot).toContain("dns");
+    expect(certbot).toContain("-d");
+    expect(certbot).toContain("*.example.com");
+    expect(certbot).not.toContain("--standalone");
+  });
+
+  test("renewCert delegates to provisionCert with DNS-01 for wildcard domain with no lineage", async () => {
+    const { nginx, calls } = setup();
+    await expect(nginx.renewCert("*.example.com")).rejects.toThrow();
+    const certbot = calls.find(
+      (c) => c.startsWith("certbot 'certonly'") || c.startsWith("certbot certonly"),
+    );
+    expect(certbot).toBeDefined();
+    expect(certbot).toContain("--manual");
+    expect(certbot).toContain("--preferred-challenges");
+    expect(certbot).toContain("dns");
+  });
 
   test("alternate ACME directory, CA bundle, and key type reach certbot", async () => {
     const { nginx, calls } = setup({

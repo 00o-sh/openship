@@ -23,6 +23,7 @@ import {
   safeErrorMessage,
   normalizeCustomHostname,
   isValidCustomHostname,
+  isWildcardHostname,
   wwwSiblingHostname,
   SYSTEM,
 } from "@repo/core";
@@ -215,10 +216,12 @@ export async function addDomain(
     // still running), retrying must resume from the existing row instead of
     // trapping the user behind a same-project "already in use" conflict.
     const patch: Partial<Domain> = {};
+    if (data.sslChallenge !== undefined && existing.sslChallenge !== data.sslChallenge) {
+      patch.sslChallenge = data.sslChallenge;
+    }
     if (data.externalIngress !== undefined && existing.externalIngress !== data.externalIngress) {
       patch.externalIngress = data.externalIngress;
     }
-    // Only ever SET a redirect here; `redirectTo: undefined` (the common case —
     // a plain re-save) must not clear one the operator configured separately.
     if (redirect.redirectTo && existing.redirectTo !== redirect.redirectTo) {
       patch.redirectTo = redirect.redirectTo;
@@ -273,6 +276,9 @@ export async function addDomain(
 
   const token = generateToken(hostname);
 
+  const isWildcard = isWildcardHostname(hostname);
+  const sslChallenge = data.sslChallenge ?? (isWildcard ? "dns-01" : "http-01");
+
   const domain = await repos.domain.create({
     projectId: data.projectId,
     hostname,
@@ -285,6 +291,7 @@ export async function addDomain(
     status: "pending",
     isPrimary: data.isPrimary ?? false,
     externalIngress: data.externalIngress ?? false,
+    sslChallenge,
     verificationToken: token,
     redirectTo: redirect.redirectTo,
     redirectStatus: redirect.redirectStatus,
@@ -450,6 +457,7 @@ export async function ensurePendingServiceDomain(opts: {
     verified: false,
     status: "pending",
     isPrimary: false,
+    sslChallenge: isWildcardHostname(hostname) ? "dns-01" : "http-01",
     verificationToken: generateToken(hostname),
   });
   if (result.domain.projectId !== opts.projectId) {
@@ -949,11 +957,17 @@ export async function verifyDomain(
     }
 
     try {
-      log(`Requesting a certificate for ${domain.hostname} (standalone HTTP-01 via the edge)…`);
+      const isDns = domain.sslChallenge === "dns-01" || isWildcardHostname(domain.hostname);
+      log(
+        `Requesting a certificate for ${domain.hostname} (${
+          isDns ? "DNS-01 via connected DNS provider" : "standalone HTTP-01 via the edge"
+        })…`,
+      );
       const result = await provisionDomainCertForVerify(domain.hostname, {
         projectId: domain.projectId ?? undefined,
         onLog: opts.onLog,
         force: opts.force,
+        challenge: isDns ? "dns-01" : "http-01",
       });
       if (result.verified) {
         log("Certificate issued — marking the domain verified and SSL active.");
