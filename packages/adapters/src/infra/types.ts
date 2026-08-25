@@ -22,8 +22,9 @@ export interface RoutingProvider {
   /** Register a reverse-proxy route (domain → container/process) */
   registerRoute(route: RouteConfig): Promise<void>;
 
-  /** Remove a reverse-proxy route */
-  removeRoute(domain: string): Promise<void>;
+  /** Remove a reverse-proxy route. Providers that can roll back a failed
+   * removal must not recreate it after the caller has abandoned the attempt. */
+  removeRoute(domain: string, opts?: { signal?: AbortSignal }): Promise<void>;
 
   /**
    * Re-emit vhosts an older generator wrote, so a fix to the EMITTED config shape reaches

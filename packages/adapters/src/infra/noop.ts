@@ -13,7 +13,7 @@ export class NoopInfraProvider implements RoutingProvider, SslProvider {
     // Desktop/dev - no reverse proxy
   }
 
-  async removeRoute(_domain: string): Promise<void> {
+  async removeRoute(_domain: string, _opts?: { signal?: AbortSignal }): Promise<void> {
     // No-op
   }
 

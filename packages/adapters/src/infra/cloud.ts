@@ -23,7 +23,7 @@ export class CloudInfraProvider implements RoutingProvider, SslProvider {
     void route;
   }
 
-  async removeRoute(domain: string): Promise<void> {
+  async removeRoute(domain: string, _opts?: { signal?: AbortSignal }): Promise<void> {
     // TODO: DELETE /routes/:domain
     void domain;
   }
