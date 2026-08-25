@@ -85,9 +85,8 @@ vi.mock("../../src/modules/dns/dns-credential.service", () => ({
 import {
   manageDomainSsl,
   provisionDomainCertForVerify,
-  createEphemeralDnsHooks,
+  createDnsHookScripts,
 } from "../../src/lib/domain-ssl";
-import { readFile, stat } from "node:fs/promises";
 
 function domain(hostname: string, extra: Record<string, unknown> = {}) {
   h.domains.set(hostname, {
@@ -134,12 +133,12 @@ describe("DNS-01 ACME challenge support in domain-ssl", () => {
     expect(h.provisionCert).toHaveBeenCalledTimes(1);
     const [calledHost, calledOpts] = h.provisionCert.mock.calls[0] as [
       string,
-      { challenge?: string; dnsAuthHook?: string; dnsCleanupHook?: string },
+      { challenge?: string; dnsAuthHookScript?: string; dnsCleanupHookScript?: string },
     ];
     expect(calledHost).toBe("app.example.com");
     expect(calledOpts.challenge).toBe("dns-01");
-    expect(calledOpts.dnsAuthHook).toBeDefined();
-    expect(calledOpts.dnsCleanupHook).toBeDefined();
+    expect(calledOpts.dnsAuthHookScript).toContain("cloudflare.com/client/v4");
+    expect(calledOpts.dnsCleanupHookScript).toContain("DELETE");
   });
 
   it("automatically uses DNS-01 challenge for wildcard domains", async () => {
@@ -151,10 +150,10 @@ describe("DNS-01 ACME challenge support in domain-ssl", () => {
     expect(h.provisionCert).toHaveBeenCalledTimes(1);
     const [, calledOpts] = h.provisionCert.mock.calls[0] as [
       string,
-      { challenge?: string; dnsAuthHook?: string },
+      { challenge?: string; dnsAuthHookScript?: string },
     ];
     expect(calledOpts.challenge).toBe("dns-01");
-    expect(calledOpts.dnsAuthHook).toBeDefined();
+    expect(calledOpts.dnsAuthHookScript).toBeDefined();
   });
 
   it("provisionDomainCertForVerify generates DNS hooks and passes dns-01 for unverified wildcard domain", async () => {
@@ -166,10 +165,10 @@ describe("DNS-01 ACME challenge support in domain-ssl", () => {
     expect(h.provisionCert).toHaveBeenCalledTimes(1);
     const [, calledOpts] = h.provisionCert.mock.calls[0] as [
       string,
-      { challenge?: string; dnsAuthHook?: string },
+      { challenge?: string; dnsAuthHookScript?: string },
     ];
     expect(calledOpts.challenge).toBe("dns-01");
-    expect(calledOpts.dnsAuthHook).toBeDefined();
+    expect(calledOpts.dnsAuthHookScript).toBeDefined();
   });
 
   it("fails with an actionable message when DNS-01 is needed but no DNS provider is connected", async () => {
@@ -215,8 +214,8 @@ describe("DNS-01 ACME challenge support in domain-ssl", () => {
     expect(calledOpts.dnsCleanupHook).toBe("/custom/cleanup.sh");
   });
 
-  it("createEphemeralDnsHooks writes executable scripts and cleans up", async () => {
-    const hooks = await createEphemeralDnsHooks({
+  it("builds hooks that validate provider success and wait for public DNS", () => {
+    const hooks = createDnsHookScripts({
       credentialId: "cred_1",
       provider: {
         name: "cloudflare",
@@ -226,21 +225,24 @@ describe("DNS-01 ACME challenge support in domain-ssl", () => {
       credentials: { apiToken: "secret_cf_token" },
     });
 
-    expect(hooks.dir).toContain(".openship-dns-");
-    expect(hooks.authHookPath).toContain("auth.sh");
-    expect(hooks.cleanupHookPath).toContain("cleanup.sh");
+    expect(hooks.authHookScript).toContain("zone_cf_123");
+    expect(hooks.authHookScript).toContain("secret_cf_token");
+    expect(hooks.authHookScript).toContain('"success":true');
+    expect(hooks.authHookScript).toContain("cloudflare-dns.com/dns-query");
+    expect(hooks.authHookScript).toContain("OPENSHIP_DNS_RECORD_FILE");
+    expect(hooks.cleanupHookScript).toContain("zone_cf_123");
+    expect(hooks.cleanupHookScript).toContain("secret_cf_token");
+  });
 
-    const authContent = await readFile(hooks.authHookPath, "utf-8");
-    expect(authContent).toContain("zone_cf_123");
-    expect(authContent).toContain("secret_cf_token");
-    expect(authContent).toContain("_acme-challenge");
-
-    const cleanupContent = await readFile(hooks.cleanupHookPath, "utf-8");
-    expect(cleanupContent).toContain("zone_cf_123");
-    expect(cleanupContent).toContain("secret_cf_token");
-
-    await hooks.cleanup();
-
-    await expect(stat(hooks.dir)).rejects.toThrow();
+  it("passes fresh generated hooks to DNS-01 renewal", async () => {
+    domain("app.example.com", { sslChallenge: "dns-01" });
+    await manageDomainSsl("app.example.com", { action: "renew" });
+    const [, calledOpts] = h.renewCert.mock.calls[0] as [
+      string,
+      { challenge?: string; dnsAuthHookScript?: string; dnsCleanupHookScript?: string },
+    ];
+    expect(calledOpts.challenge).toBe("dns-01");
+    expect(calledOpts.dnsAuthHookScript).toContain("cloudflare.com/client/v4");
+    expect(calledOpts.dnsCleanupHookScript).toContain("DELETE");
   });
 });

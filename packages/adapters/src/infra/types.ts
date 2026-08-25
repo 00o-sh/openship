@@ -95,8 +95,12 @@ export interface ProvisionCertOptions {
   onLog?: (line: string) => void;
   force?: boolean;
   challenge?: "http-01" | "dns-01";
+  /** Existing hook commands already present in the Certbot execution environment. */
   dnsAuthHook?: string;
   dnsCleanupHook?: string;
+  /** Hook bodies that the provider must materialize beside Certbot on its target. */
+  dnsAuthHookScript?: string;
+  dnsCleanupHookScript?: string;
 }
 
 export interface SslProvider {
@@ -108,7 +112,7 @@ export interface SslProvider {
   provisionCert(domain: string, opts?: ProvisionCertOptions): Promise<SslResult>;
 
   /** Renew an existing TLS certificate */
-  renewCert(domain: string): Promise<SslResult>;
+  renewCert(domain: string, opts?: ProvisionCertOptions): Promise<SslResult>;
 
   /**
    * Install an operator-supplied certificate (bring-your-own / Cloudflare

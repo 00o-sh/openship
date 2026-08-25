@@ -1,12 +1,3 @@
-import {
-  mkdir as fsMkdir,
-  writeFile as fsWriteFile,
-  rm as fsRm,
-  chmod as fsChmod,
-} from "node:fs/promises";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
-import { randomBytes } from "node:crypto";
 import type { Domain, Project } from "@repo/db";
 import type { ManualCert, SslProvider, SslResult, ProvisionCertOptions } from "@repo/adapters";
 import {
@@ -508,25 +499,23 @@ async function resolveSslProvider(owner: SslOwner): Promise<ResolvedSslProvider>
   return { ssl: platform().ssl, lockScope: LOCAL_ACME_SCOPE };
 }
 
-export interface EphemeralDnsHooks {
-  dir: string;
-  authHookPath: string;
-  cleanupHookPath: string;
-  cleanup: () => Promise<void>;
+export interface DnsHookScripts {
+  authHookScript: string;
+  cleanupHookScript: string;
 }
 
-export async function createEphemeralDnsHooks(
-  manager: MatchedDnsManager,
-): Promise<EphemeralDnsHooks> {
-  const nonce = randomBytes(12).toString("hex");
-  const dir = join(tmpdir(), `.openship-dns-${nonce}`);
-  await fsMkdir(dir, { recursive: true, mode: 0o700 });
-  await fsChmod(dir, 0o700).catch(() => {});
-
-  const recordFile = join(dir, "record-id.txt");
-  const authHookPath = join(dir, "auth.sh");
-  const cleanupHookPath = join(dir, "cleanup.sh");
-
+/** Build hook bodies only. NginxProvider writes them through its executor, so
+ * they exist in the same local/SSH/container filesystem in which Certbot runs. */
+export function createDnsHookScripts(manager: MatchedDnsManager): DnsHookScripts {
+  // Both values are embedded in a POSIX script. Cloudflare issues identifiers
+  // and API tokens from this alphabet; reject anything else rather than allow a
+  // malformed credential to become shell syntax on the edge host.
+  if (!/^[A-Za-z0-9_-]+$/.test(manager.zone.id)) {
+    throw new Error("DNS provider returned an invalid zone identifier");
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(manager.credentials.apiToken)) {
+    throw new Error("DNS provider returned an invalid API token");
+  }
   const authScript = `#!/bin/sh
 set -e
 DOMAIN="\${CERTBOT_DOMAIN#\\*.}"
@@ -535,60 +524,72 @@ RES=$(curl -s -S -X POST "https://api.cloudflare.com/client/v4/zones/${manager.z
   -H "Authorization: Bearer ${manager.credentials.apiToken}" \\
   -H "Content-Type: application/json" \\
   --data "{\\"type\\":\\"TXT\\",\\"name\\":\\"\${RECORD_NAME}\\",\\"content\\":\\"\${CERTBOT_VALIDATION}\\",\\"ttl\\":60,\\"comment\\":\\"Managed by Openship\\"}")
-RECORD_ID=$(echo "$RES" | grep -o '"id":"[^"]*' | head -n 1 | cut -d'"' -f4)
-if [ -n "$RECORD_ID" ]; then
-  echo "$RECORD_ID" > "${recordFile}"
+if ! echo "$RES" | grep -q '"success":true'; then
+  echo "Cloudflare rejected the ACME TXT record request" >&2
+  echo "$RES" >&2
+  exit 1
 fi
-sleep 5
+RECORD_ID=$(echo "$RES" | grep -o '"id":"[^"]*' | head -n 1 | cut -d'"' -f4)
+if [ -z "$RECORD_ID" ]; then
+  echo "Cloudflare created no ACME TXT record id" >&2
+  exit 1
+fi
+echo "$RECORD_ID" > "$OPENSHIP_DNS_RECORD_FILE"
+
+# Wait for the public resolver to observe the exact value. A fixed sleep makes
+# issuance flaky when provider propagation is slower than usual.
+ATTEMPT=0
+while [ "$ATTEMPT" -lt 30 ]; do
+  ANSWER=$(curl -s -S --get "https://cloudflare-dns.com/dns-query" \\
+    -H "Accept: application/dns-json" \\
+    --data-urlencode "name=\${RECORD_NAME}" --data-urlencode "type=TXT" || true)
+  if echo "$ANSWER" | grep -Fq "$CERTBOT_VALIDATION"; then
+    exit 0
+  fi
+  ATTEMPT=$((ATTEMPT + 1))
+  sleep 2
+done
+echo "Timed out waiting for \${RECORD_NAME} TXT propagation" >&2
+exit 1
 `;
 
   const cleanupScript = `#!/bin/sh
-if [ -f "${recordFile}" ]; then
-  RECORD_ID=$(cat "${recordFile}")
+if [ -f "$OPENSHIP_DNS_RECORD_FILE" ]; then
+  RECORD_ID=$(cat "$OPENSHIP_DNS_RECORD_FILE")
   if [ -n "$RECORD_ID" ]; then
     curl -s -S -X DELETE "https://api.cloudflare.com/client/v4/zones/${manager.zone.id}/dns_records/\${RECORD_ID}" \\
       -H "Authorization: Bearer ${manager.credentials.apiToken}" \\
       -H "Content-Type: application/json" || true
   fi
-  rm -f "${recordFile}"
+  rm -f "$OPENSHIP_DNS_RECORD_FILE"
 fi
 `;
-
-  await fsWriteFile(authHookPath, authScript, { mode: 0o700 });
-  await fsWriteFile(cleanupHookPath, cleanupScript, { mode: 0o700 });
-  await fsChmod(authHookPath, 0o700).catch(() => {});
-  await fsChmod(cleanupHookPath, 0o700).catch(() => {});
-
-  return {
-    dir,
-    authHookPath,
-    cleanupHookPath,
-    cleanup: async () => {
-      await fsRm(dir, { recursive: true, force: true }).catch(() => {});
-    },
-  };
+  return { authHookScript: authScript, cleanupHookScript: cleanupScript };
 }
 
 async function resolveDns01Hooks(
   organizationId: string,
   domainRecord: Domain,
   opts?: { dnsAuthHook?: string; dnsCleanupHook?: string },
-): Promise<{ authHook?: string; cleanupHook?: string; cleanup: () => Promise<void> }> {
+): Promise<
+  Pick<
+    ProvisionCertOptions,
+    "dnsAuthHook" | "dnsCleanupHook" | "dnsAuthHookScript" | "dnsCleanupHookScript"
+  >
+> {
   if (opts?.dnsAuthHook) {
     return {
-      authHook: opts.dnsAuthHook,
-      cleanupHook: opts.dnsCleanupHook,
-      cleanup: async () => {},
+      dnsAuthHook: opts.dnsAuthHook,
+      dnsCleanupHook: opts.dnsCleanupHook,
     };
   }
 
   const dnsLookup = await resolveDnsManager(organizationId, domainRecord.hostname);
   if (dnsLookup.status === "matched") {
-    const hooks = await createEphemeralDnsHooks(dnsLookup.manager);
+    const hooks = createDnsHookScripts(dnsLookup.manager);
     return {
-      authHook: hooks.authHookPath,
-      cleanupHook: hooks.cleanupHookPath,
-      cleanup: hooks.cleanup,
+      dnsAuthHookScript: hooks.authHookScript,
+      dnsCleanupHookScript: hooks.cleanupHookScript,
     };
   }
 
@@ -612,7 +613,10 @@ async function executeSslAction(
   const hasOpts = opts && Object.keys(opts).length > 0;
   switch (action) {
     case "renew":
-      return ssl.renewCert(hostname);
+      // HTTP renewal keeps the historical one-argument contract. DNS renewal
+      // must receive the fresh generated hooks because its prior paths were
+      // intentionally removed after issuance.
+      return opts?.challenge === "dns-01" ? ssl.renewCert(hostname, opts) : ssl.renewCert(hostname);
     case "verify":
       return ssl.verifyCert(hostname);
     default:
@@ -678,25 +682,19 @@ async function manageAuthorizedDomainSsl(
     domainRecord.sslChallenge === "dns-01" ||
     isWildcardHostname(domainRecord.hostname);
 
-  let hooksCleanup: (() => Promise<void>) | null = null;
-  let dnsAuthHook = opts.dnsAuthHook;
-  let dnsCleanupHook = opts.dnsCleanupHook;
+  let dnsHooks: Awaited<ReturnType<typeof resolveDns01Hooks>> = {};
   if (isDns) {
     const orgId = owner.kind === "project" ? owner.project.organizationId : owner.organizationId;
-    const hooks = await resolveDns01Hooks(orgId, domainRecord, {
-      dnsAuthHook,
-      dnsCleanupHook,
+    dnsHooks = await resolveDns01Hooks(orgId, domainRecord, {
+      dnsAuthHook: opts.dnsAuthHook,
+      dnsCleanupHook: opts.dnsCleanupHook,
     });
-    dnsAuthHook = hooks.authHook;
-    dnsCleanupHook = hooks.cleanupHook;
-    hooksCleanup = hooks.cleanup;
   }
 
   const provOpts: ProvisionCertOptions = {
     ...(opts.action === "renew" ? { force: true } : {}),
     ...(isDns ? { challenge: "dns-01" } : opts.challenge ? { challenge: opts.challenge } : {}),
-    ...(dnsAuthHook ? { dnsAuthHook } : {}),
-    ...(dnsCleanupHook ? { dnsCleanupHook } : {}),
+    ...dnsHooks,
   };
 
   try {
@@ -711,8 +709,6 @@ async function manageAuthorizedDomainSsl(
     // Issuance may have succeeded and a LATER step failed — never leave a valid
     // cert unrecorded. See {@link recoverIssuedCert}. Rethrows when it really failed.
     return recoverIssuedCert(ssl, domainRecord, err);
-  } finally {
-    if (hooksCleanup) await hooksCleanup().catch(() => {});
   }
 }
 
@@ -766,18 +762,13 @@ async function provisionAuthorizedDomainCert(
     domainRecord.sslChallenge === "dns-01" ||
     isWildcardHostname(domainRecord.hostname);
 
-  let hooksCleanup: (() => Promise<void>) | null = null;
-  let dnsAuthHook = opts.dnsAuthHook;
-  let dnsCleanupHook = opts.dnsCleanupHook;
+  let dnsHooks: Awaited<ReturnType<typeof resolveDns01Hooks>> = {};
   if (isDns) {
     const orgId = owner.kind === "project" ? owner.project.organizationId : owner.organizationId;
-    const hooks = await resolveDns01Hooks(orgId, domainRecord, {
-      dnsAuthHook,
-      dnsCleanupHook,
+    dnsHooks = await resolveDns01Hooks(orgId, domainRecord, {
+      dnsAuthHook: opts.dnsAuthHook,
+      dnsCleanupHook: opts.dnsCleanupHook,
     });
-    dnsAuthHook = hooks.authHook;
-    dnsCleanupHook = hooks.cleanupHook;
-    hooksCleanup = hooks.cleanup;
   }
 
   // Serialize issuance per-hostname, and re-check the cert INSIDE the lock.
@@ -813,8 +804,7 @@ async function provisionAuthorizedDomainCert(
             onLog: opts.onLog,
             force: true,
             challenge: isDns ? "dns-01" : "http-01",
-            dnsAuthHook,
-            dnsCleanupHook,
+            ...dnsHooks,
           }),
         );
       },
@@ -833,8 +823,6 @@ async function provisionAuthorizedDomainCert(
         `${recovered.expiresAt.slice(0, 10)}) — recorded it, renewal is scheduled.`,
     );
     return recovered;
-  } finally {
-    if (hooksCleanup) await hooksCleanup().catch(() => {});
   }
 }
 
