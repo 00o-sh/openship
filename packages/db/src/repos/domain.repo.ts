@@ -39,9 +39,9 @@ export function createDomainRepo(db: Database) {
    * Insert a row and return it as the DB actually stored it.
    *
    * `{ ...values } as Domain` was a lie for every column the caller didn't pass:
-   * `sslStatus`, `status`, `verified`, `verifyAttempts`, `externalIngress`,
-   * `manualSsl` and `ownerType` are NOT-NULL columns with DB DEFAULTS, so the
-   * returned object satisfied the type while carrying `undefined` for each of
+   * `sslStatus`, `sslChallenge`, `status`, `verified`, `verifyAttempts`,
+   * `externalIngress`, `manualSsl` and `ownerType` are NOT-NULL columns with DB
+   * DEFAULTS, so the returned object satisfied the type while carrying `undefined`
    * them. Readers that compare against the default then quietly take the wrong
    * branch — the deploy's first-issuance gate asks `row.sslStatus === "none"`, got
    * `undefined === "none"` → false, and skipped the certificate for every

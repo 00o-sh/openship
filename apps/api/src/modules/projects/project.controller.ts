@@ -2415,6 +2415,7 @@ export async function connectDomain(c: Context) {
     domain: string;
     includeWww?: boolean;
     externalIngress?: boolean;
+    sslChallenge?: "http-01" | "dns-01";
   }>();
 
   if (!body.domain?.trim()) {
@@ -2427,6 +2428,7 @@ export async function connectDomain(c: Context) {
       hostname: body.domain.trim(),
       isPrimary: true,
       externalIngress: body.externalIngress ?? false,
+      sslChallenge: body.sslChallenge,
       includeWww: body.includeWww ?? false,
     });
 

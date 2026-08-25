@@ -38,7 +38,7 @@ import type {
   RouteRedirect,
   SslResult,
 } from "../types";
-import type { RoutingProvider, SslProvider } from "./types";
+import type { RoutingProvider, SslProvider, ProvisionCertOptions } from "./types";
 import { probeListeningPort } from "../runtime/port-conflict";
 import {
   LUA_LOGGER_PATH,
@@ -857,9 +857,8 @@ export function acmeKeyArgs(keyType?: AcmeKeyType): string[] {
   }
 }
 
-/** Only allow valid domain characters - prevents shell injection. */
-const DOMAIN_RE = /^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/;
-
+/** Only allow valid domain characters - prevents shell injection. Allows wildcards. */
+const DOMAIN_RE = /^(\*\.)?[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/;
 function assertValidDomain(domain: string): void {
   if (!DOMAIN_RE.test(domain) || domain.length > 253) {
     throw new Error(`Invalid domain: ${domain}`);
@@ -1708,6 +1707,34 @@ export class NginxProvider implements RoutingProvider, SslProvider {
     return path;
   }
 
+  /** Materialize generated DNS hooks on the same target where Certbot runs. */
+  private async createEphemeralDnsHooks(
+    opts?: ProvisionCertOptions,
+  ): Promise<{ dir: string; authCommand: string; cleanupCommand?: string } | null> {
+    if (!opts?.dnsAuthHookScript) return null;
+    const dir = join(dirname(this.certDir), `.openship-dns-${randomBytes(12).toString("hex")}`);
+    const authPath = join(dir, "auth.sh");
+    const cleanupPath = join(dir, "cleanup.sh");
+    const recordPath = join(dir, "record-id.txt");
+    await this._mkdir(dir);
+    try {
+      await this._chmod(dir, 0o700);
+      await this._writeFile(authPath, opts.dnsAuthHookScript, 0o700);
+      if (opts.dnsCleanupHookScript) {
+        await this._writeFile(cleanupPath, opts.dnsCleanupHookScript, 0o700);
+      }
+    } catch (err) {
+      await this._rm(dir).catch(() => undefined);
+      throw err;
+    }
+    const recordEnv = `OPENSHIP_DNS_RECORD_FILE=${sq(recordPath)}`;
+    return {
+      dir,
+      authCommand: `${recordEnv} ${sq(authPath)}`,
+      cleanupCommand: opts.dnsCleanupHookScript ? `${recordEnv} ${sq(cleanupPath)}` : undefined,
+    };
+  }
+
   private async _captureFile(path: string): Promise<FileSnapshot> {
     if (!(await this._exists(path))) {
       return { exists: false };
@@ -2266,10 +2293,7 @@ ${serveLocation}
    * are served; none is ever removed — Oblien re-probes the SAME token near its
    * 90-day expiry, so dropping one silently kills that route ~83 days later.
    */
-  async serveEdgeChallenge(input: {
-    host: string;
-    tokens?: readonly string[];
-  }): Promise<{
+  async serveEdgeChallenge(input: { host: string; tokens?: readonly string[] }): Promise<{
     served: boolean;
     via: "existing-vhost" | "challenge-vhost" | null;
     claimedBy?: string;
@@ -2378,10 +2402,7 @@ ${serveLocation}
    * The caller (route-registration.ts) wraps this in try/catch, so a failure becomes a "deploy
    * continues on HTTP, retry from the Domains tab" warning rather than a deploy abort.
    */
-  async provisionCert(
-    domain: string,
-    opts?: { onLog?: (line: string) => void; force?: boolean },
-  ): Promise<SslResult> {
+  async provisionCert(domain: string, opts?: ProvisionCertOptions): Promise<SslResult> {
     assertValidDomain(domain);
 
     // Reuse an existing cert unless the caller forces a reissue. `force` is set
@@ -2402,28 +2423,32 @@ ${serveLocation}
 
     let certonlyOut = "";
     const eabConfig = await this.createEphemeralEabConfig();
+    let generatedDnsHooks: { dir: string; authCommand: string; cleanupCommand?: string } | null =
+      null;
     try {
-      // ACME via certbot's STANDALONE authenticator on a loopback alt-port; the
-      // edge proxies /.well-known/acme-challenge/ → 127.0.0.1:<port> (see
-      // ACME_CHALLENGE_LOCATION). Zero downtime — no port-80 fight with the edge,
-      // no webroot dependency, no DNS-01. Works bare (host netns) and docker-edge
-      // (container netns) alike, since certbot runs on the same executor as the
-      // edge it's proxied through.
-      //
-      // `--cert-name <domain>` PINS the lineage to the bare domain name. Without
-      // it, certbot appends `-0001`/`-0002` when a stale renewal config for the
-      // domain lingers (a prior teardown/migration removed the live symlink but
-      // left /etc/letsencrypt/renewal), so the cert lands at `<domain>-0001` while
-      // certsExist/readCertInfo only ever look at `<domain>` → an eternal
-      // "missing", and a re-run just prints "not due for renewal" (exit 0). Pinning
-      // the name makes the on-disk path deterministic and self-heals that state.
+      generatedDnsHooks = await this.createEphemeralDnsHooks(opts);
+      const isDnsChallenge = opts?.challenge === "dns-01" || domain.startsWith("*.");
+      const challengeArgs = isDnsChallenge
+        ? [
+            "certonly",
+            "--manual",
+            "--preferred-challenges",
+            "dns",
+            ...(generatedDnsHooks?.authCommand || opts?.dnsAuthHook
+              ? ["--manual-auth-hook", generatedDnsHooks?.authCommand ?? opts!.dnsAuthHook!]
+              : []),
+            ...(generatedDnsHooks?.cleanupCommand || opts?.dnsCleanupHook
+              ? [
+                  "--manual-cleanup-hook",
+                  generatedDnsHooks?.cleanupCommand ?? opts!.dnsCleanupHook!,
+                ]
+              : []),
+          ]
+        : ["certonly", "--standalone", "--http-01-port", String(ACME_HTTP01_PORT)];
       certonlyOut = await this._execCertbot(
         [
           ...(eabConfig ? ["--config", eabConfig] : []),
-          "certonly",
-          "--standalone",
-          "--http-01-port",
-          String(ACME_HTTP01_PORT),
+          ...challengeArgs,
           "--cert-name",
           domain,
           "-d",
@@ -2473,6 +2498,7 @@ ${serveLocation}
       // Remove the whole 0700 directory, not just the ini — one unit, like
       // git-ssh-material's cleanup.
       if (eabConfig) await this._rm(dirname(eabConfig)).catch(() => undefined);
+      if (generatedDnsHooks) await this._rm(generatedDnsHooks.dir).catch(() => undefined);
     }
 
     // Rewrite the config with SSL now that certs exist
@@ -2561,9 +2587,13 @@ ${serveLocation}
   /**
    * Renew a TLS certificate using certbot.
    */
-  async renewCert(domain: string): Promise<SslResult> {
+  async renewCert(domain: string, opts?: ProvisionCertOptions): Promise<SslResult> {
     assertValidDomain(domain);
-
+    // Manual DNS lineages persist hook paths in renewal/*.conf. Generated hooks
+    // are ephemeral, so reissue with freshly materialized hooks instead.
+    if (opts?.challenge === "dns-01" || domain.startsWith("*.")) {
+      return this.provisionCert(domain, { ...opts, challenge: "dns-01", force: true });
+    }
     // `certbot renew` only acts on certs that ALREADY exist. A domain that
     // never got its first cert (initial provision failed, or was skipped)
     // has nothing to renew — certbot exits 0 doing nothing, so the caller
@@ -2573,7 +2603,7 @@ ${serveLocation}
     // 443/ssl block and reloads. This is what makes the Renew button able to
     // bootstrap a domain that has only an HTTP vhost.
     if (!(await this.certsExist(domain))) {
-      return this.provisionCert(domain);
+      return this.provisionCert(domain, opts);
     }
 
     // A cert can be on disk WITHOUT being a certbot lineage — an ACME cert adopted
@@ -2583,7 +2613,7 @@ ${serveLocation}
     // IS ours to reissue (public ACME CA, this box owns the domain), so renewing it
     // means obtaining a first lineage — `certonly` with force, not `renew`.
     if (!(await this.hasCertbotLineage(domain))) {
-      return this.provisionCert(domain, { force: true });
+      return this.provisionCert(domain, { ...opts, force: true });
     }
 
     // A lineage issued by a DIFFERENT directory than the one now configured can't
@@ -2591,18 +2621,15 @@ ${serveLocation}
     // server requires (or carry EAB). Reissue instead: certonly registers under
     // the configured CA and rewrites the lineage, so this heals itself once.
     if (!(await this.lineageServerMatches(domain))) {
-      return this.provisionCert(domain, { force: true });
+      return this.provisionCert(domain, { ...opts, force: true });
     }
 
     // No `--server` here: the matched lineage's conf already records it, and the
     // mismatch case above never reaches this call.
-    await this._execCertbot([
-      "renew",
-      "--cert-name",
-      domain,
-      ...acmeKeyArgs(this.acmeKeyType),
-      "--non-interactive",
-    ]);
+    await this._execCertbot(
+      ["renew", "--cert-name", domain, ...acmeKeyArgs(this.acmeKeyType), "--non-interactive"],
+      opts?.onLog,
+    );
     await this.reload();
 
     return this.readCertInfo(domain);

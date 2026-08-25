@@ -6,7 +6,7 @@
  */
 
 import type { ManualCert, RouteConfig, SslResult } from "../types";
-import type { RoutingProvider, SslProvider } from "./types";
+import type { RoutingProvider, SslProvider, ProvisionCertOptions } from "./types";
 
 export class NoopInfraProvider implements RoutingProvider, SslProvider {
   async registerRoute(_route: RouteConfig): Promise<void> {
@@ -17,7 +17,7 @@ export class NoopInfraProvider implements RoutingProvider, SslProvider {
     // No-op
   }
 
-  async provisionCert(domain: string): Promise<SslResult> {
+  async provisionCert(domain: string, _opts?: ProvisionCertOptions): Promise<SslResult> {
     return { domain, expiresAt: "", issuer: "none", verified: false };
   }
 

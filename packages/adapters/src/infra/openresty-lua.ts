@@ -366,8 +366,8 @@ export async function detectOpenRestyPaths(executor: CommandExecutor): Promise<O
  * gets a chance to verify it.
  */
 export function buildReloadCommand(paths: OpenRestyPaths): string {
-  const bin = sq(paths.bin);
-  const config = sq(paths.confPath);
+  const bin = sq(paths?.bin || "openresty");
+  const config = sq(paths?.confPath || "/etc/openresty/nginx.conf");
   return `${bin} -t -c ${config} 2>&1 || exit 1
 ${bin} -s reload -c ${config} 2>&1 || exit 1`;
 }
