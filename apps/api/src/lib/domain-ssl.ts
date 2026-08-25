@@ -5,7 +5,12 @@ import { repos } from "@repo/db";
 import { env } from "../config/env";
 import { platform } from "./controller-helpers";
 import { createProvisionLock } from "./provision-lock";
-import { disposePlatform, resolveDeploymentPlatform, type DeploymentMeta } from "./deployment-runtime";
+import { withLiveProjectRuntimeMutation } from "./project-runtime-lock";
+import {
+  disposePlatform,
+  resolveDeploymentPlatform,
+  type DeploymentMeta,
+} from "./deployment-runtime";
 
 /**
  * The per-domain issuance lock key. EVERY path that can open an ACME order
@@ -91,10 +96,7 @@ export function tlsIssuedElsewhere(domain: {
 }
 
 /** Operator-facing one-liner for {@link tlsIssuedElsewhere}. */
-export function describeTlsIssuedElsewhere(
-  where: TlsIssuedElsewhere,
-  hostname: string,
-): string {
+export function describeTlsIssuedElsewhere(where: TlsIssuedElsewhere, hostname: string): string {
   switch (where) {
     case "external_ingress":
       return `TLS for ${hostname} terminates at your own ingress — no certificate is issued here.`;
@@ -153,7 +155,10 @@ type SslOwner =
 export async function resolveMailOwner(
   hostname: string,
 ): Promise<Extract<SslOwner, { kind: "mail" }> | null> {
-  const base = hostname.trim().toLowerCase().replace(/^mail\./, "");
+  const base = hostname
+    .trim()
+    .toLowerCase()
+    .replace(/^mail\./, "");
   if (base === hostname.trim().toLowerCase()) return null; // not a mail.<base> host
   const mail = await repos.mailServer.findByDomain(base).catch(() => undefined);
   if (!mail) return null;
@@ -201,6 +206,31 @@ async function resolveAuthorizedDomain(hostname: string, opts: DomainSslOptions)
   assertVerified(domainRecord, opts);
 
   return { domainRecord, owner: { kind: "project", project } as SslOwner };
+}
+
+type AuthorizedDomain = Awaited<ReturnType<typeof resolveAuthorizedDomain>>;
+
+/**
+ * Run a remote domain mutation under the same project lock as teardown.
+ *
+ * The first resolution identifies and authorizes the owner. Project-owned rows
+ * are then resolved again under the lock so an operation queued behind DELETE
+ * cannot recreate a certificate or vhost after the project row was removed.
+ * Mail certificates have no project lifecycle and therefore run directly.
+ */
+async function withAuthorizedDomainRuntime<T>(
+  hostname: string,
+  opts: DomainSslOptions,
+  mutate: (authorized: AuthorizedDomain) => Promise<T>,
+): Promise<T> {
+  const authorized = await resolveAuthorizedDomain(hostname, opts);
+  if (authorized.owner.kind === "mail") return mutate(authorized);
+
+  const result = await withLiveProjectRuntimeMutation(authorized.owner.project.id, async () =>
+    mutate(await resolveAuthorizedDomain(hostname, opts)),
+  );
+  if (result === undefined) throw new NotFoundError("Domain", hostname);
+  return result;
 }
 
 /**
@@ -274,10 +304,7 @@ async function persistSslResult(
  * succeeded — the certificate is on disk either way, and a missed row is recoverable
  * by re-running the step, whereas a failed step is not.
  */
-export async function recordMailCertDomain(
-  hostname: string,
-  result: SslResult,
-): Promise<void> {
+export async function recordMailCertDomain(hostname: string, result: SslResult): Promise<void> {
   try {
     const row = await repos.domain.findOrCreate({
       hostname,
@@ -383,7 +410,10 @@ async function resolveSslProvider(owner: SslOwner): Promise<ResolvedSslProvider>
   // `lockScope` is the server id so mail issuance takes the same per-box ACME lock
   // as the apps sharing that edge (they contend for one standalone challenge port).
   if (owner.kind === "mail") {
-    const ssl = await resolveSslOnly({ serverId: owner.serverId } as DeploymentMeta, owner.organizationId);
+    const ssl = await resolveSslOnly(
+      { serverId: owner.serverId } as DeploymentMeta,
+      owner.organizationId,
+    );
     return { ssl, lockScope: owner.serverId };
   }
 
@@ -487,8 +517,15 @@ export async function manageDomainSsl(
   hostname: string,
   opts: DomainSslOptions,
 ): Promise<SslResult> {
-  const { domainRecord, owner } = await resolveAuthorizedDomain(hostname, opts);
+  return withAuthorizedDomainRuntime(hostname, opts, (authorized) =>
+    manageAuthorizedDomainSsl(authorized, opts),
+  );
+}
 
+async function manageAuthorizedDomainSsl(
+  { domainRecord, owner }: AuthorizedDomain,
+  opts: DomainSslOptions,
+): Promise<SslResult> {
   // THE gate, and it lives here rather than in each caller: this is the single
   // entrypoint that can open an ACME order (manual Provision/Verify, the ssl:renew
   // scheduler, the self-app edge provisioner, the boot reconcile), and it used to
@@ -547,11 +584,20 @@ export async function provisionDomainCertForVerify(
   hostname: string,
   opts: { projectId?: string; onLog?: (line: string) => void; force?: boolean } = {},
 ): Promise<SslResult> {
-  const { domainRecord, owner } = await resolveAuthorizedDomain(hostname, {
+  const authorization: DomainSslOptions = {
     action: "provision",
     projectId: opts.projectId,
     allowUnverified: true,
-  });
+  };
+  return withAuthorizedDomainRuntime(hostname, authorization, (authorized) =>
+    provisionAuthorizedDomainCert(authorized, opts),
+  );
+}
+
+async function provisionAuthorizedDomainCert(
+  { domainRecord, owner }: AuthorizedDomain,
+  opts: { projectId?: string; onLog?: (line: string) => void; force?: boolean },
+): Promise<SslResult> {
   const { ssl, lockScope } = await resolveSslProvider(owner);
 
   // Serialize issuance per-hostname, and re-check the cert INSIDE the lock.
@@ -565,26 +611,28 @@ export async function provisionDomainCertForVerify(
   // the same box (the www sibling, the pending-SSL sweep) running certbot at the
   // same time and losing the race for the shared standalone port.
   try {
-    const result = await createProvisionLock(sslIssueLockKey(domainRecord.hostname)).run(async () => {
-      if (!opts.force) {
-        const existing = await ssl.verifyCert(domainRecord.hostname).catch(() => null);
-        if (existing && certComfortablyValid(existing)) {
-          opts.onLog?.(
-            `A valid certificate is already present for ${domainRecord.hostname}` +
-              (existing.expiresAt ? ` (expires ${existing.expiresAt.slice(0, 10)})` : "") +
-              " — reusing it. No new certificate requested.",
-          );
-          return existing;
+    const result = await createProvisionLock(sslIssueLockKey(domainRecord.hostname)).run(
+      async () => {
+        if (!opts.force) {
+          const existing = await ssl.verifyCert(domainRecord.hostname).catch(() => null);
+          if (existing && certComfortablyValid(existing)) {
+            opts.onLog?.(
+              `A valid certificate is already present for ${domainRecord.hostname}` +
+                (existing.expiresAt ? ` (expires ${existing.expiresAt.slice(0, 10)})` : "") +
+                " — reusing it. No new certificate requested.",
+            );
+            return existing;
+          }
         }
-      }
-      // Decided to issue (missing / near-expiry / forced): pass `force` so the
-      // adapter runs certbot even when a stale cert file is present on disk —
-      // otherwise its file-exists short-circuit would return the old cert and a
-      // near-expiry renewal would silently no-op.
-      return createProvisionLock(acmeIssueLockKey(lockScope)).run(() =>
-        ssl.provisionCert(domainRecord.hostname, { onLog: opts.onLog, force: true }),
-      );
-    });
+        // Decided to issue (missing / near-expiry / forced): pass `force` so the
+        // adapter runs certbot even when a stale cert file is present on disk —
+        // otherwise its file-exists short-circuit would return the old cert and a
+        // near-expiry renewal would silently no-op.
+        return createProvisionLock(acmeIssueLockKey(lockScope)).run(() =>
+          ssl.provisionCert(domainRecord.hostname, { onLog: opts.onLog, force: true }),
+        );
+      },
+    );
 
     await persistSslResult(domainRecord.id, domainRecord.sslStatus, result);
     return result;
@@ -613,13 +661,15 @@ export async function installDomainCert(
   cert: ManualCert,
   opts: { projectId?: string; allowUnverified?: boolean } = {},
 ): Promise<SslResult> {
-  const { domainRecord, owner } = await resolveAuthorizedDomain(hostname, {
+  const authorization: DomainSslOptions = {
     action: "provision",
     projectId: opts.projectId,
     allowUnverified: opts.allowUnverified,
+  };
+  return withAuthorizedDomainRuntime(hostname, authorization, async ({ domainRecord, owner }) => {
+    const { ssl } = await resolveSslProvider(owner);
+    return ssl.installCert(domainRecord.hostname, cert);
   });
-  const { ssl } = await resolveSslProvider(owner);
-  return ssl.installCert(domainRecord.hostname, cert);
 }
 
 /**
