@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createServiceRepo, normalizeRoutingFields, toComposeSpec } from "./service.repo";
+import {
+  createServiceRepo,
+  isComposeProvenanceUpgrade,
+  normalizeRoutingFields,
+  toComposeSpec,
+} from "./service.repo";
 import type { Database } from "../client";
 
 const multiRoute = [
@@ -151,6 +156,68 @@ describe("reconcileFromCompose bootstraps dynamic env provenance (#673)", () => 
       readiness: { enabled: true },
       environmentTemplateKeys: ["POSTGRES_PASSWORD", "DATABASE_URL"],
     });
+  });
+});
+
+describe("legacy compose provenance baselines", () => {
+  const oldBaseline = {
+    name: "api",
+    image: "example/api:1",
+    environment: { PORT: "3000", NODE_ENV: "production" },
+    advanced: { healthcheck: { test: ["CMD", "true"] } },
+  };
+  const parsedNow = {
+    ...oldBaseline,
+    environment: { PORT: "${PORT:-3000}", NODE_ENV: "${NODE_ENV:-production}" },
+    advanced: {
+      ...oldBaseline.advanced,
+      environmentTemplateKeys: ["PORT", "NODE_ENV"],
+      buildArgTemplateKeys: [],
+    },
+  };
+
+  it("recognizes parser metadata as an upgrade instead of a repo edit", () => {
+    expect(isComposeProvenanceUpgrade(oldBaseline, parsedNow)).toBe(true);
+  });
+
+  it("does not hide a real compose change that arrived with the metadata", () => {
+    expect(isComposeProvenanceUpgrade(oldBaseline, { ...parsedNow, image: "example/api:2" })).toBe(
+      false,
+    );
+  });
+
+  it("advances only the baseline and preserves live operator values", async () => {
+    const writes: Array<Record<string, unknown>> = [];
+    const db = {
+      query: {
+        service: {
+          findMany: async () => [
+            {
+              id: "svc_1",
+              projectId: "proj_1",
+              kind: "compose",
+              ...oldBaseline,
+              environment: { PORT: "20011", NODE_ENV: "production" },
+              importedSpec: oldBaseline,
+              driftSpec: { image: "stale" },
+            },
+          ],
+        },
+      },
+      update: () => ({
+        set: (data: Record<string, unknown>) => {
+          writes.push(data);
+          return { where: async () => undefined };
+        },
+      }),
+    } as unknown as Database;
+
+    const result = await createServiceRepo(db).reconcileFromCompose("proj_1", [parsedNow]);
+
+    expect(result.driftedNames).toEqual([]);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatchObject({ importedSpec: toComposeSpec(parsedNow), driftSpec: null });
+    expect(writes[0]).not.toHaveProperty("environment");
   });
 });
 

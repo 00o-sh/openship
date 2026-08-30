@@ -277,6 +277,37 @@ interface WatchMemory {
  */
 const MEMORY = new Map<string, WatchMemory>();
 
+/** Latest authoritative observation exposed to the org-wide Monitoring → Health
+ * surface. This is deliberately fed by the existing grouped sweep/event hybrid:
+ * the dashboard never opens one watcher or one request per container. */
+export interface WorkloadHealthSnapshot {
+  organizationId: string;
+  projectId: string;
+  projectName: string;
+  projectSlug: string;
+  serviceId: string | null;
+  serviceKey: string;
+  serviceName: string;
+  serverId: string | null;
+  containerId: string;
+  state: "healthy" | "down" | "crash_loop" | "unhealthy" | "unknown";
+  observedAt: string;
+}
+
+const HEALTH_SNAPSHOTS = new Map<string, WorkloadHealthSnapshot>();
+/** Container ids owned by each watcher group. The Docker event accelerator uses
+ * this index to ignore CI/helper/unmanaged-container noise without duplicating
+ * workload resolution. It is rebuilt only by the authoritative full state read. */
+const TRACKED_CONTAINERS = new Map<string, Set<string>>();
+
+export function listWorkloadHealthSnapshots(organizationId: string): WorkloadHealthSnapshot[] {
+  return [...HEALTH_SNAPSHOTS.values()].filter((row) => row.organizationId === organizationId);
+}
+
+export function isTrackedHealthContainer(groupKey: string, containerId: string): boolean {
+  return TRACKED_CONTAINERS.get(groupKey)?.has(containerId) ?? false;
+}
+
 /** The fields of a `docker ps -a` row this module reads. */
 interface ListedContainer {
   id: string;
@@ -651,6 +682,13 @@ async function sweepOnce(opts?: HealthWatchOptions): Promise<HealthWatchSummary>
     MEMORY.delete(key);
   }
 
+  // Keep the dashboard snapshot aligned with the same retirement rule. Without
+  // this, deleting a compose service would leave a permanently "healthy" row in
+  // Monitoring even though the watcher correctly stopped tracking it.
+  for (const [key, row] of HEALTH_SNAPSHOTS) {
+    if (!visited.has(key) && settled(row.projectId)) HEALTH_SNAPSHOTS.delete(key);
+  }
+
   // ── Forget workloads nobody will ask about again ────────────────────────────
   // The reap above only reaches keys that had an OPEN incident. A HEALTHY workload
   // that stops being watched — a compose service dropped from the release, a
@@ -901,6 +939,13 @@ async function readServerGroup(
       }
     }
 
+    // Publish the ownership index in one atomic replacement after workload
+    // resolution. Event handling reads this; it never derives ownership itself.
+    TRACKED_CONTAINERS.set(
+      watchGroupKey(serverId, organizationId),
+      new Set(pending.map((entry) => entry.workload.containerId)),
+    );
+
     // Spend the inspect budget where it decides something. The container list already
     // proves a running container is running; what it cannot do is explain a container
     // that ISN'T — and an unexplained one gets `unknown`, which neither opens nor
@@ -1025,6 +1070,10 @@ async function resolveWorkloads(
 
   const workloads: Workload[] = [];
   for (const service of services) {
+    // Explicit per-service opt-out. This is applied before the workload enters
+    // the snapshot, inspect budget or event ownership index, so "don't watch"
+    // genuinely consumes no monitoring resources and can never alert.
+    if (service.advanced?.monitoringEnabled === false) continue;
     const hint = hints.get(service.id);
     // Not part of the active release (added but never deployed, or skipped).
     if (!hint) continue;
@@ -1160,6 +1209,20 @@ async function evaluate(args: {
           createdTicks: sameContainer ? (previous?.createdTicks ?? 0) : 0,
         })
       : missingContainerVerdict(workload);
+
+  HEALTH_SNAPSHOTS.set(key, {
+    organizationId: candidate.project.organizationId,
+    projectId: candidate.project.id,
+    projectName: candidate.project.name,
+    projectSlug: candidate.project.slug,
+    serviceId: workload.serviceId,
+    serviceKey: workload.serviceKey,
+    serviceName: workload.serviceName,
+    serverId: candidate.serverId,
+    containerId: workload.containerId,
+    state: verdict.clear === "unknown" ? "unknown" : (verdict.kind ?? "healthy"),
+    observedAt: new Date(nowMs).toISOString(),
+  });
 
   // An observation that could not answer is not an observation. Any open incident
   // stays exactly where it is — the same call the sweep makes for a box that didn't

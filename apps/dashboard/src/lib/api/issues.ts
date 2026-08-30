@@ -89,6 +89,35 @@ export interface RescanResult {
   failed: Array<{ key: string; error: string }>;
 }
 
+export interface MonitoringScanStage {
+  key: "services:health-watch" | "infra:scan" | "domains:verify-pending" | "updates:scan";
+  status: "pending" | "running" | "completed" | "failed" | "skipped";
+  summary?: Record<string, unknown>;
+  error?: string;
+}
+
+export interface MonitoringScanSession {
+  id: string;
+  status: "running" | "completed";
+  startedAt: string;
+  finishedAt?: string;
+  stages: MonitoringScanStage[];
+}
+
+export interface WorkloadHealthRow {
+  projectId: string;
+  projectName: string;
+  projectSlug: string;
+  serviceId: string | null;
+  serviceKey: string;
+  serviceName: string;
+  serverId: string | null;
+  serverName: string;
+  containerId: string;
+  state: "healthy" | "down" | "crash_loop" | "unhealthy" | "unknown";
+  observedAt: string;
+}
+
 /**
  * Run an item's carried fix.
  *
@@ -107,10 +136,19 @@ export const issuesApi = {
   list: (status: "open" | "resolved" = "open") =>
     api.get<IssueFeed>(status === "resolved" ? endpoints.issues.resolved : endpoints.issues.open),
 
+  /** Cached output of the grouped Docker watcher; does not probe containers. */
+  health: () =>
+    api.get<{
+      data: WorkloadHealthRow[];
+      watching: boolean;
+      watcher: { key: string; schedule: string | null; eventsEnabled: boolean };
+    }>(endpoints.issues.health),
+
   // `GET /issues/summary` (counts without rows) has no client wrapper on purpose: the
   // page reads its counts off the feed it already fetched, and the nav entry carries no
   // badge. It stays a server endpoint for MCP clients asking "is anything broken".
 
   /** Run the scheduled checkers behind the feed now. Self-hosted only (404s on cloud). */
-  rescan: () => api.post<{ data: RescanResult }>(endpoints.issues.rescan),
+  rescan: () => api.post<{ data: MonitoringScanSession }>(endpoints.issues.rescan),
+  rescanStatus: () => api.get<{ data: MonitoringScanSession | null }>(endpoints.issues.rescanStatus),
 };

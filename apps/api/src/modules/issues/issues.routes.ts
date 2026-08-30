@@ -43,6 +43,19 @@ r.get(
   ctrl.issuesSummary,
 );
 
+r.get(
+  "/health",
+  {
+    tag: "project:list",
+    localOnly: true,
+    mcp: {
+      description:
+        "Latest health-watch snapshot for every expected workload in the organization. Cached only: this read performs no Docker polling. Includes healthy, unhealthy, crash-looping, down and unknown states plus watcher enabled status.",
+    },
+  },
+  ctrl.healthSnapshot,
+);
+
 /**
  * Firing the scheduled checkers early. Tagged `job:write` — NOT `server:write` —
  * because that is literally what this does: it calls the jobs module's run-now, and
@@ -61,6 +74,12 @@ r.post(
     },
   },
   ctrl.rescanIssues,
+);
+
+r.get(
+  "/rescan/status",
+  { tag: "job:read", localOnly: true },
+  ctrl.rescanStatus,
 );
 
 export const issuesRoutes = r.hono;

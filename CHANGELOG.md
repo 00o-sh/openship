@@ -3,6 +3,45 @@
 All notable changes to Openship. Versions follow [semver](https://semver.org);
 the in-app updater surfaces critical advisories from `release-advisories.json`.
 
+## 0.6.9
+
+This critical deployment-safety hotfix makes legacy Docker Compose ownership and
+routing fail closed. Existing unmanaged stacks can no longer be mistaken for an
+Openship deployment or silently duplicated, and an ordinary same-server
+redeploy cannot move a routed service onto a different host port.
+
+### Deployments and routing
+
+- **Existing Compose stacks are never adopted implicitly** — before changing
+  containers or routes, a normal deployment checks the target for an untracked
+  Docker Compose stack with the same project slug and service names. A collision
+  now stops with `FOREIGN_COMPOSE_STACK` and tells the operator to import/adopt,
+  remove, or rename it. Explicitly adopted containers and containers already
+  tracked by Openship continue normally.
+- **Same-server host ports stay locked across redeploys** — a routed service
+  keeps its active host port on its current physical server. If that port cannot
+  be reclaimed safely, deployment stops before routing changes instead of
+  allocating a new port and leaving the public hostname pointed at the wrong
+  workload. A real server migration may still allocate a new host port.
+- **Duplicate-container warnings require ownership evidence** — normal projects
+  no longer claim same-slug containers through Docker Compose labels alone.
+  Native Openship labels, the canonical managed name, or the tracked container
+  id establish ownership; Compose-label recovery remains available only for an
+  explicit adoption.
+
+### Compose reconciliation
+
+- **Legacy parser metadata does not create false repository drift** — adding
+  environment/build-argument template provenance to an older service baseline
+  is treated as a one-time metadata upgrade, not as a Compose edit. Real changes
+  arriving with that metadata are still reported, and operator-edited live
+  values remain intact while the baseline advances.
+
+> **Upgrade priority: critical for legacy or externally created Compose
+> workloads.** Fully tracked Openship deployments are not expected to hit the
+> collision path, but installations that previously deployed a same-slug stack
+> outside the current control-plane records should upgrade before redeploying it.
+
 ## 0.6.8
 
 Compose projects now deploy as the services they declare, with their build

@@ -91,6 +91,9 @@ export type {
   IssueResolution,
   IssueInfraFix,
   RescanResult,
+  WorkloadHealthRow,
+  MonitoringScanSession,
+  MonitoringScanStage,
 } from "./issues";
 export { migrationApi } from "./migration";
 export { dockerMigrationApi, isScanStreamStalled } from "./server-migration";

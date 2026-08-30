@@ -24,6 +24,7 @@ import {
   composeNamespaceRef,
   ownsNetworkEndpoint,
   UNLIMITED_RESOURCES,
+  DeployError,
   safeErrorMessage,
   type ComposeAdvanced,
   type ProxySettings,
@@ -139,6 +140,8 @@ import {
   usesHostLoopbackUpstream,
 } from "../../../lib/upstream-url";
 import { withLoopbackPublishAll, upstreamHostPortFor } from "../../../lib/loopback-publish";
+import { assertStableRedeployHostPort } from "./host-port-stability";
+import { findForeignComposeCollisions } from "./foreign-compose-collision";
 
 export interface ComposeDeployResult {
   /** `reconciling` when at least one service's outcome is UNKNOWN because the
@@ -1065,8 +1068,51 @@ async function deployComposeServicesUnlocked(
   const previousServiceDeps = project.activeDeploymentId
     ? await repos.service.listByDeployment(project.activeDeploymentId)
     : [];
+  const activeDeployment = project.activeDeploymentId
+    ? await repos.deployment.findById(project.activeDeploymentId)
+    : null;
+  const activeServerId = ((activeDeployment?.meta ?? {}) as { serverId?: string }).serverId ?? null;
+  const targetServerId = opts?.serverId ?? null;
+  // A host port belongs to a physical host. On the same target it is immutable
+  // across an ordinary redeploy; on a migration the new host may legitimately
+  // allocate a different number.
+  const lockCarriedHostPorts = activeDeployment !== null && activeServerId === targetServerId;
   const previousByServiceId = new Map(previousServiceDeps.map((row) => [row.serviceId, row]));
   const enabledServiceIds = new Set(enabled.map((svc) => svc.id));
+
+  // A same-named Docker Compose stack is not implicitly ours. Before this gate,
+  // deploying a repo whose slug matched an existing CLI stack created a second
+  // complete workload beside it because the new loopback ports did not conflict.
+  // Explicit adopt deployments already recorded those container ids and retain
+  // the compose-label recovery path; normal deployments must stop here.
+  const activeMeta = (activeDeployment?.meta ?? {}) as { adopt?: boolean };
+  if (
+    activeMeta.adopt !== true &&
+    runtime.supports("hostContainerQuery") &&
+    runtime.listAllContainers
+  ) {
+    const collisions = findForeignComposeCollisions({
+      slug: project.slug,
+      serviceNames: enabled.map((service) => service.name),
+      containers: await runtime.listAllContainers(),
+      trackedContainerIds: previousServiceDeps
+        .map((row) => row.containerId)
+        .filter((id): id is string => !!id),
+    });
+    if (collisions.length > 0) {
+      throw new DeployError(
+        `Refusing to create a parallel stack: Docker Compose already runs ${collisions
+          .map((collision) => `${collision.serviceName} (${collision.containerName})`)
+          .join(", ")} under project name "${project.slug}". Import/adopt that stack, ` +
+          `remove it explicitly, or choose a different project slug before deploying.`,
+        "FOREIGN_COMPOSE_STACK",
+        {
+          projectSlug: project.slug,
+          collisions,
+        },
+      );
+    }
+  }
 
   // Images every retained release still needs (active + pinned + the newest
   // `rollbackWindow` deployments, per service). Loaded lazily and ONCE per
@@ -2239,19 +2285,11 @@ async function deployComposeServicesUnlocked(
                 ? previousRow?.hostPort
                 : undefined;
           /**
-           * A carried port is a PREFERENCE, never a given.
-           *
-           * It used to be taken verbatim whenever one existed, which is right for the case it was
-           * written for — a redeploy on the same host, where the port was ours and still is. It is
-           * wrong the moment the host changes: a MIGRATION carries the source's port to a target
-           * that knows nothing about it, and if anything there holds it Docker refuses the bind
-           * with "port is already allocated" and the service (plus everything depending on it)
-           * fails. A host port is a property of the HOST, not of the project, so it cannot travel
-           * with one.
-           *
-           * `preferred` is the allocator's own word for exactly this: keep it if it's free, pick
-           * another if it isn't. Passing it there rather than branching around the allocator means
-           * one rule for both cases and no second place that decides what a free port is.
+           * The allocator validates and reserves a carried port on every deploy. On the same
+           * physical target that port is an immutable routing contract: if validation produces a
+           * different number, abort and release the new reservation before touching Docker or the
+           * route. Only a real host migration may accept a different allocation because a host
+           * port belongs to the host and cannot safely travel with the project.
            */
           const allocation = await allocateAndReservePinnedHostPort({
             target: hostPortTarget!,
@@ -2268,10 +2306,13 @@ async function deployComposeServicesUnlocked(
           const carried = allocation.preferred;
           const hostPort = allocation.port;
           if (carried && hostPort !== carried) {
-            logger.log(
-              `Host port ${carried} for ${svc.name} is taken on this server — using ${hostPort}. ` +
-                `(Expected when a project moves to a different host.)\n`,
-            );
+            assertStableRedeployHostPort({
+              sameTarget: lockCarriedHostPorts,
+              serviceName: svc.name,
+              carried,
+              allocated: hostPort,
+            });
+            logger.log(`Project moved hosts: ${svc.name} uses ${hostPort} instead of ${carried}.\n`);
           }
           // "Couldn't read occupancy" is not "nothing is listening" — without this the
           // bind failure that follows blames Docker for an unreachable host (#490).

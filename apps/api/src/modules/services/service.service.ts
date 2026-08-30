@@ -64,7 +64,11 @@ import {
   resolveServicePlatform,
   resolveServiceRuntimeForRead,
 } from "./service-container";
-import { resolveLiveServiceState, type LiveMatchKind } from "./live-state";
+import {
+  liveMatchTiersForDeployment,
+  resolveLiveServiceState,
+  type LiveMatchKind,
+} from "./live-state";
 import { parseVolumeSpec, type VolumeKind } from "./volume-spec";
 import { sq } from "../migration/direct-transfer";
 import { bounded, duBytes, volumeBytes } from "../migration/migration-size";
@@ -1467,8 +1471,9 @@ export interface LiveServiceContainer {
  * migration attaches running containers in place and docker labels can't be
  * changed in place, so an attached container keeps the OLD deployment label and
  * reported "stopped" while serving traffic. Identity is now resolved by
- * label → canonical name → tracked id → compose label (see live-state.ts) and
- * the status comes off whatever that resolves to.
+ * label → canonical name → tracked id, plus compose labels only for an explicit
+ * adopt deployment (see live-state.ts), and the status comes off whatever that
+ * resolves to.
  */
 export async function getActiveServiceContainers(
   ctx: RequestContext,
@@ -1544,6 +1549,7 @@ export async function getActiveServiceContainers(
             projectId,
             slug: project.slug,
             trackedIds,
+            tiers: liveMatchTiersForDeployment(dep.meta as Record<string, unknown> | null),
           });
           return (
             services

@@ -518,7 +518,9 @@ export const endpoints = {
   issues: {
     open: "issues",
     resolved: "issues?status=resolved",
+    health: "issues/health",
     rescan: "issues/rescan",
+    rescanStatus: "issues/rescan/status",
   },
 
   /* ---------------------------------------------------------------- */

@@ -103,6 +103,46 @@ export const composeSpecsEqual = (a: ComposeServiceSpec, b: ComposeServiceSpec) 
   canonicalSpec(a) === canonicalSpec(b);
 
 /**
+ * A current parser adds provenance metadata that older imported baselines could
+ * not contain. That is a representation upgrade, not a repo edit. It used to
+ * raise a review banner where the masked environment showed the same keys on
+ * both sides and `advanced` differed only by *TemplateKeys.
+ *
+ * Narrow by design: this applies only when the OLD baseline lacks a provenance
+ * marker the new parse carries, every non-environment compose field is equal
+ * after stripping those internal markers, and the environment key set is
+ * unchanged. Values stay operator-owned; only the baseline advances.
+ */
+export function isComposeProvenanceUpgrade(
+  baseInput: ComposeServiceSpec,
+  nextInput: ComposeServiceSpec,
+): boolean {
+  const base = toComposeSpec(baseInput);
+  const next = toComposeSpec(nextInput);
+  const baseAdvanced = { ...(base.advanced ?? {}) } as Record<string, unknown>;
+  const nextAdvanced = { ...(next.advanced ?? {}) } as Record<string, unknown>;
+  const markerKeys = ["environmentTemplateKeys", "buildArgTemplateKeys"] as const;
+  const addsMarker = markerKeys.some(
+    (key) => !Object.hasOwn(baseAdvanced, key) && Object.hasOwn(nextAdvanced, key),
+  );
+  if (!addsMarker) return false;
+  for (const key of markerKeys) {
+    delete baseAdvanced[key];
+    delete nextAdvanced[key];
+  }
+  const envKeys = (value: Record<string, string>) => Object.keys(value).sort();
+  const comparable = (spec: ComposeServiceSpec, advanced: Record<string, unknown>) => ({
+    ...spec,
+    environment: envKeys(spec.environment ?? {}),
+    advanced,
+  });
+  return (
+    JSON.stringify(canonicalize(comparable(base, baseAdvanced))) ===
+    JSON.stringify(canonicalize(comparable(next, nextAdvanced)))
+  );
+}
+
+/**
  * The compose-owned fields as an UPDATE payload, with `advanced` MERGED onto the
  * stored blob rather than replacing it.
  *
@@ -820,6 +860,15 @@ export function createServiceRepo(db: Database) {
             importedSpec: theirs,
             driftSpec: null,
           });
+          continue;
+        }
+
+        // Parser provenance was introduced after many compose baselines were
+        // stored. Advance that legacy baseline silently while preserving the
+        // live row; treating metadata as a repo edit creates an unresolvable,
+        // false-positive drift banner on every redeploy.
+        if (isComposeProvenanceUpgrade(base, theirs)) {
+          await this.update(ex.id, { importedSpec: theirs, driftSpec: null });
           continue;
         }
 

@@ -68,6 +68,7 @@ const AdvancedSchema = Type.Object(
     // alone" so a partial caller can't wipe the rest of the blob, which makes an
     // explicit `null` the way to say "remove this one".
     healthcheck: Type.Optional(Type.Union([HealthcheckSchema, Type.Null()])),
+    monitoringEnabled: Type.Optional(Type.Union([Type.Boolean(), Type.Null()])),
     /**
      * Per-service DEPLOY-TIME readiness gate, overriding the project's for this
      * service (mirrors OpenshipReadiness in @repo/core). Absent ⇒ inherit the

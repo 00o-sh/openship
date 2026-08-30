@@ -250,6 +250,9 @@ export type ComposeAdvanced = {
    */
   buildArgTemplateKeys?: string[];
   healthcheck?: ComposeHealthcheck;
+  /** False opts this service out of steady-state outage monitoring and Docker
+   * event acceleration. Deployment readiness remains independent. */
+  monitoringEnabled?: boolean;
   /**
    * Per-service deploy-time readiness gate, overriding the project's for THIS
    * service. Absent ⇒ inherit the project's; neither ⇒ off.
