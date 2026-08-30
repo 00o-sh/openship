@@ -376,6 +376,35 @@ describe("pinnedHostPortsToAvoid", () => {
     );
   });
 
+  it("rejects a same-target legacy-cache renumber before reserving a new claim", async () => {
+    await expect(
+      allocateAndReservePinnedHostPort({
+        target: localTarget,
+        claims: [],
+        owner: { projectId: "legacy", serviceId: "api", containerPort: 3000 },
+        cachedPreferred: 20011,
+        lockPreferred: { ownerLabel: "api" },
+        allocate: async () => ({ port: 20012, scanned: true }),
+      }),
+    ).rejects.toThrow(/locked host port.*20011.*20012/);
+    expect(claimRepo.reserve).not.toHaveBeenCalled();
+  });
+
+  it("permits renumbering when the caller is migrating to another target", async () => {
+    const result = await allocateAndReservePinnedHostPort({
+      target: remoteTarget,
+      claims: [],
+      owner: { projectId: "moving", serviceId: "api", containerPort: 3000 },
+      cachedPreferred: 20011,
+      allocate: async () => ({ port: 20012, scanned: true }),
+    });
+
+    expect(result.port).toBe(20012);
+    expect(claimRepo.reserve).toHaveBeenCalledWith(
+      expect.objectContaining({ targetKey: remoteTarget.targetKey, port: 20012 }),
+    );
+  });
+
   it("preserves null as a legacy claim identity instead of treating it as missing", async () => {
     const legacy: PinnedHostPort = {
       projectId: "legacy",

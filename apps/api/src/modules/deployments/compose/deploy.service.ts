@@ -140,7 +140,6 @@ import {
   usesHostLoopbackUpstream,
 } from "../../../lib/upstream-url";
 import { withLoopbackPublishAll, upstreamHostPortFor } from "../../../lib/loopback-publish";
-import { assertStableRedeployHostPort } from "./host-port-stability";
 import { findForeignComposeCollisions } from "./foreign-compose-collision";
 
 export interface ComposeDeployResult {
@@ -2300,18 +2299,13 @@ async function deployComposeServicesUnlocked(
             // route historically, so never let it stand in for a secondary route.
             allowLegacyContainerPort: containerPort === primaryRoutedPort,
             additionalAvoid: allocatedHostPorts,
+            lockPreferred: lockCarriedHostPorts ? { ownerLabel: svc.name } : undefined,
             allocate: (allocationOptions) => allocateHostPort(opts.executor!, allocationOptions),
           });
           serviceHostPortAllocations.push(allocation);
           const carried = allocation.preferred;
           const hostPort = allocation.port;
           if (carried && hostPort !== carried) {
-            assertStableRedeployHostPort({
-              sameTarget: lockCarriedHostPorts,
-              serviceName: svc.name,
-              carried,
-              allocated: hostPort,
-            });
             logger.log(`Project moved hosts: ${svc.name} uses ${hostPort} instead of ${carried}.\n`);
           }
           // "Couldn't read occupancy" is not "nothing is listening" — without this the

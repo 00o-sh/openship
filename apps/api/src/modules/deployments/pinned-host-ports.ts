@@ -380,6 +380,13 @@ export interface AllocateAndReservePinnedHostPortInput {
   owner: PinnedHostPortOwner;
   /** Compatibility cache only; a reservation on this target always wins. */
   cachedPreferred?: number | null;
+  /**
+   * Keep the resolved preferred port immutable on this physical target. This
+   * closes the legacy-cache gap where no durable claim exists yet: the database
+   * owner constraint protects claimed ports, while this gate protects the
+   * carried route before its first canonical claim is written.
+   */
+  lockPreferred?: { ownerLabel: string };
   allowLegacyContainerPort?: boolean;
   additionalAvoid?: Iterable<number>;
   allocate: (options: AllocateHostPortOptions) => Promise<HostPortAllocation>;
@@ -454,6 +461,17 @@ export async function allocateAndReservePinnedHostPort(
       ? ownsReusablePinnedHostPort(input.claims, reusable) && !avoid.has(reusable.port)
       : false,
   });
+  if (
+    input.lockPreferred &&
+    preferred !== undefined &&
+    allocation.port !== preferred
+  ) {
+    throw new Error(
+      `Refusing to change the locked host port for ${input.lockPreferred.ownerLabel} from ` +
+        `${preferred} to ${allocation.port} during a same-server redeploy. ` +
+        `The existing workload and routes were left unchanged.`,
+    );
+  }
   const claim = await reserveTargetPinnedHostPort(input.target, {
     ...input.owner,
     // `null` is a real legacy identity, not a missing value. Preserve it until

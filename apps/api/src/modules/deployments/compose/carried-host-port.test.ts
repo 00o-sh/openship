@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 
 import { pickHostPort } from "@repo/adapters";
-import { assertStableRedeployHostPort } from "./host-port-stability";
 
 /**
  * A host port cannot travel with a project.
@@ -48,30 +47,6 @@ describe("pickHostPort's preferred-port contract", () => {
   });
 });
 
-describe("same-target host-port lock", () => {
-  it("fails closed before a same-server redeploy can renumber a routed service", () => {
-    expect(() =>
-      assertStableRedeployHostPort({
-        sameTarget: true,
-        serviceName: "api",
-        carried: 20011,
-        allocated: 20012,
-      }),
-    ).toThrow(/Refusing to change the locked host port.*20011.*20012/);
-  });
-
-  it("allows a different port only when the project moved to another host", () => {
-    expect(() =>
-      assertStableRedeployHostPort({
-        sameTarget: false,
-        serviceName: "api",
-        carried: 20011,
-        allocated: 20012,
-      }),
-    ).not.toThrow();
-  });
-});
-
 describe("the deploy routes the carried port through the allocator", () => {
   const src = readFileSync(new URL("./deploy.service.ts", import.meta.url), "utf8");
   /** The loopback-port allocation block, bounded by its own loop. */
@@ -100,7 +75,7 @@ describe("the deploy routes the carried port through the allocator", () => {
 
   it("fails closed on the same target and reports legitimate host migrations", () => {
     expect(block).toContain("hostPort !== carried");
-    expect(block).toContain("assertStableRedeployHostPort");
+    expect(block).toContain("lockPreferred: lockCarriedHostPorts");
     expect(block).toContain("Project moved hosts");
   });
 

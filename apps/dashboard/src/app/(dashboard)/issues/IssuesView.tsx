@@ -67,6 +67,18 @@ export function IssuesView() {
   const [queryDraft, setQueryDraft] = useState("");
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Container health is a self-hosted capability: the watcher reads Docker
+  // daemons owned by this installation. Cloud workloads are observed by the
+  // cloud platform, not by this local health endpoint, so do not expose a tab
+  // that can only answer with the route's intentional local-only 404.
+  const tabs = selfHosted
+    ? (["open", "health", "resolved"] as const)
+    : (["open", "resolved"] as const);
+
+  useEffect(() => {
+    if (!selfHosted && tab === "health") setTab("open");
+  }, [selfHosted, tab]);
+
   const load = useCallback(
     async (opts: { silent?: boolean } = {}) => {
       if (!opts.silent) setLoading(true);
@@ -249,7 +261,7 @@ export function IssuesView() {
 
       {/* Open / Resolved. Same geometry as the deployments status switch. */}
       <div className="mb-4 inline-flex items-center gap-1 rounded-xl bg-muted/35 p-1">
-        {(["open", "health", "resolved"] as const).map((key) => (
+        {tabs.map((key) => (
           <button
             key={key}
             type="button"

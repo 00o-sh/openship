@@ -37,6 +37,24 @@ redeploy cannot move a routed service onto a different host port.
   arriving with that metadata are still reported, and operator-edited live
   values remain intact while the baseline advances.
 
+### Monitoring
+
+- **Issues is now the Monitoring workspace** — the dashboard adds a Health view
+  for every tracked project service, with fleet counts and state charts for
+  healthy, unhealthy, crash-looping, down, and unknown workloads. Rows show the
+  serving server and last observation, and link back to the service that owns the
+  container.
+- **Health reads reuse the existing watcher** — the page reads an in-memory
+  snapshot produced by the grouped health sweep and Docker-event accelerator; it
+  does not create a poller per container or perform Docker I/O on page refresh.
+  Per-service monitoring can be disabled before the workload enters the watch,
+  inspection, event, or notification path.
+- **Fleet updates and rescans continue in the background** — bulk component
+  updates start together without holding a modal open, retain their durable
+  sessions across navigation and refresh, and allow an operator to reattach to a
+  specific log. The checker batch similarly exposes one shared progress session
+  so multiple tabs cannot multiply Git, DNS, Docker, or version scans.
+
 > **Upgrade priority: critical for legacy or externally created Compose
 > workloads.** Fully tracked Openship deployments are not expected to hit the
 > collision path, but installations that previously deployed a same-slug stack

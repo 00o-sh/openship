@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -61,7 +61,12 @@ describe("createHostExecutor has one owner", () => {
     const root = fileURLToPath(new URL("../../", import.meta.url));
     const files = execFileSync("git", ["ls-files", "--", "src"], { cwd: root, encoding: "utf8" })
       .split("\n")
-      .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
+      // `git ls-files` includes a tracked file deleted in the working tree until
+      // that deletion is staged. Local pre-commit runs must scan the tree being
+      // tested, not crash while reading a source that no longer exists.
+      .filter(
+        (f) => f.endsWith(".ts") && !f.endsWith(".test.ts") && existsSync(`${root}${f}`),
+      );
     expect(files.length, "no sources listed — the glob or cwd is wrong").toBeGreaterThan(100);
 
     const callers = files.filter((f) =>
